@@ -12,20 +12,13 @@ A lightweight HTTP server written in Zig that embeds [MicroQuickJS](https://gith
 
 ## Quick Start
 
-### 1. Clone mquickjs
-
-```bash
-cd zig-mquickjs
-git clone https://github.com/bellard/mquickjs.git
-```
-
-### 2. Build
+### 1. Build
 
 ```bash
 zig build -Doptimize=ReleaseFast
 ```
 
-### 3. Run
+### 2. Run
 
 ```bash
 # Inline handler
@@ -164,7 +157,7 @@ This is why the bindings use a Result type pattern - to make error handling expl
 ```
 zig-mquickjs/
 ├── build.zig              # Zig build configuration
-├── mquickjs/              # Clone of bellard/mquickjs (git clone)
+├── mquickjs/              # Vendored mquickjs sources (from bellard/mquickjs)
 ├── src/
 │   ├── main.zig           # CLI entry point
 │   ├── mquickjs.zig       # Low-level C bindings
@@ -179,7 +172,6 @@ zig-mquickjs/
 ### Prerequisites
 
 - Zig 0.15.0 or later
-- Git (to clone mquickjs)
 
 ### Build Commands
 

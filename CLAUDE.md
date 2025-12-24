@@ -11,9 +11,6 @@ mqjs-server is a lightweight HTTP server written in Zig that embeds MicroQuickJS
 ## Build Commands
 
 ```bash
-# Setup (clone mquickjs sources)
-./setup.sh
-
 # Build
 zig build                           # Debug build
 zig build -Doptimize=ReleaseFast   # Optimized build
