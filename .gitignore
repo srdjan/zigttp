@@ -1,4 +1,8 @@
 .zig-cache/
 zig-out/
-mquickjs
 .DS_Store
+
+# mquickjs build artifacts
+mquickjs/*.host.o
+mquickjs/*.host.d
+mquickjs/mqjs_stdlib

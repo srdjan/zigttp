@@ -1,6 +1,5 @@
 #!/bin/bash
 # Setup script for mqjs-server
-# Fetches the real MicroQuickJS sources from Bellard's repository
 
 set -e
 
@@ -20,21 +19,6 @@ fi
 echo "Zig version: $(zig version)"
 echo
 
-# Fetch mquickjs sources
-if [ -d "mquickjs/.git" ]; then
-    echo "mquickjs already cloned, updating..."
-    cd mquickjs
-    git pull
-    cd ..
-else
-    echo "Removing stub mquickjs directory..."
-    rm -rf mquickjs
-    
-    echo "Cloning mquickjs from GitHub..."
-    git clone https://github.com/bellard/mquickjs.git mquickjs
-fi
-
-echo
 echo "Building mqjs-server..."
 zig build -Doptimize=ReleaseFast
 
