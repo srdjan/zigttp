@@ -302,6 +302,7 @@ pub const Runtime = struct {
                     .status = 500,
                     .headers = std.StringHashMap([]const u8).init(self.allocator),
                     .body = "Internal Server Error",
+                    .allocator = null, // No allocated memory in error response
                 };
             },
         };
@@ -360,6 +361,7 @@ pub const Runtime = struct {
             .status = 200,
             .headers = std.StringHashMap([]const u8).init(self.allocator),
             .body = "",
+            .allocator = self.allocator,
         };
 
         // Check if it's a Response object
@@ -388,7 +390,10 @@ pub const Runtime = struct {
                     if (h == .ok and mq.isString(self.ctx, h.ok)) {
                         const v = mq.toCString(self.ctx, h.ok);
                         if (v == .ok) {
-                            try response.headers.put(header, v.ok);
+                            // Duplicate the string to own the memory (toCString returns temp pointer)
+                            const v_dup = try self.allocator.dupe(u8, v.ok);
+                            errdefer self.allocator.free(v_dup);
+                            try response.headers.put(header, v_dup);
                         }
                     }
                 }
@@ -445,8 +450,21 @@ pub const HttpResponse = struct {
     status: u16,
     headers: std.StringHashMap([]const u8),
     body: []const u8,
+    allocator: ?std.mem.Allocator = null,
 
     pub fn deinit(self: *HttpResponse) void {
+        // Free header values if we have an allocator
+        if (self.allocator) |alloc| {
+            var iter = self.headers.iterator();
+            while (iter.next()) |entry| {
+                // Only free dynamically allocated values (not compile-time strings)
+                alloc.free(@constCast(entry.value_ptr.*));
+            }
+            // Free body if allocated
+            if (self.body.len > 0) {
+                alloc.free(@constCast(self.body));
+            }
+        }
         self.headers.deinit();
     }
 };

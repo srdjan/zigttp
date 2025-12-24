@@ -208,6 +208,65 @@ fn stringifyAndPrint(ctx: *mq.JSContext, val: mq.JSValue, writer: anytype) void 
 // Fetch API
 // ============================================================================
 
+/// Validate URL is allowed (SSRF prevention)
+/// Blocks: file://, localhost, 127.0.0.1, private IP ranges
+fn isUrlAllowed(url: []const u8) bool {
+    // Must start with http:// or https://
+    const http_prefix = "http://";
+    const https_prefix = "https://";
+
+    var host_start: usize = 0;
+    if (std.mem.startsWith(u8, url, https_prefix)) {
+        host_start = https_prefix.len;
+    } else if (std.mem.startsWith(u8, url, http_prefix)) {
+        host_start = http_prefix.len;
+    } else {
+        return false; // Block non-http schemes (file://, ftp://, etc.)
+    }
+
+    if (host_start >= url.len) return false;
+
+    // Extract host portion (up to :, /, ?, or #)
+    const rest = url[host_start..];
+    var host_end: usize = rest.len;
+    for (rest, 0..) |char, i| {
+        if (char == ':' or char == '/' or char == '?' or char == '#') {
+            host_end = i;
+            break;
+        }
+    }
+    const host = rest[0..host_end];
+
+    if (host.len == 0) return false;
+
+    // Block localhost variants (case-insensitive)
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return false;
+
+    // Block IPv4 loopback
+    if (std.mem.eql(u8, host, "127.0.0.1")) return false;
+
+    // Block IPv6 loopback
+    if (std.mem.eql(u8, host, "::1")) return false;
+    if (std.mem.eql(u8, host, "[::1]")) return false;
+
+    // Block private IP ranges
+    if (std.mem.startsWith(u8, host, "10.")) return false; // 10.0.0.0/8
+    if (std.mem.startsWith(u8, host, "192.168.")) return false; // 192.168.0.0/16
+    if (std.mem.startsWith(u8, host, "169.254.")) return false; // Link-local
+    if (std.mem.startsWith(u8, host, "0.")) return false; // 0.0.0.0/8
+
+    // Block 172.16.0.0 - 172.31.255.255
+    if (std.mem.startsWith(u8, host, "172.")) {
+        if (host.len > 4) {
+            const dot_pos = std.mem.indexOf(u8, host[4..], ".") orelse return true;
+            const second_octet = std.fmt.parseInt(u8, host[4 .. 4 + dot_pos], 10) catch return true;
+            if (second_octet >= 16 and second_octet <= 31) return false;
+        }
+    }
+
+    return true;
+}
+
 fn installFetch(ctx: *mq.JSContext, global: mq.JSValue) !void {
     const fetch_fn = mq.newCFunction(ctx, nativeFetch, "fetch", 2);
     if (fetch_fn == .ok) {
@@ -228,6 +287,11 @@ fn nativeFetch(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]m
     const url_str = mq.toCString(ctx, argv[0]);
     if (url_str == .err) {
         return mq.throwTypeError(ctx, "URL must be a string");
+    }
+
+    // Security: validate URL (SSRF prevention)
+    if (!isUrlAllowed(url_str.ok)) {
+        return mq.throwError(ctx, "URL not allowed: blocked protocol or host");
     }
 
     // Copy URL to owned memory
@@ -289,6 +353,26 @@ fn parseHttpMethod(s: []const u8) std.http.Method {
 // ============================================================================
 // Deno Namespace
 // ============================================================================
+
+/// Validate file path is safe (no traversal attacks)
+fn isFilePathSafe(path: []const u8) bool {
+    // Reject empty paths
+    if (path.len == 0) return false;
+
+    // Reject absolute paths
+    if (path[0] == '/') return false;
+
+    // Reject Windows absolute paths
+    if (path.len >= 2 and path[1] == ':') return false;
+
+    // Check for directory traversal
+    var iter = std.mem.splitAny(u8, path, "/\\");
+    while (iter.next()) |component| {
+        if (std.mem.eql(u8, component, "..")) return false;
+    }
+
+    return true;
+}
 
 fn installDeno(ctx: *mq.JSContext, global: mq.JSValue) !void {
     const deno = switch (mq.newObject(ctx)) {
@@ -352,6 +436,11 @@ fn denoReadTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: 
         return mq.throwTypeError(ctx, "Path must be a string");
     }
 
+    // Security: validate path
+    if (!isFilePathSafe(path_str.ok)) {
+        return mq.throwError(ctx, "Invalid path: traversal not allowed");
+    }
+
     return createPromiseWithOp(ctx, loop, .{
         .kind = .read_file,
         .state = .pending,
@@ -376,6 +465,11 @@ fn denoWriteTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv:
 
     if (path_str == .err or content_str == .err) {
         return mq.throwTypeError(ctx, "Arguments must be strings");
+    }
+
+    // Security: validate path
+    if (!isFilePathSafe(path_str.ok)) {
+        return mq.throwError(ctx, "Invalid path: traversal not allowed");
     }
 
     return createPromiseWithOp(ctx, loop, .{
@@ -409,6 +503,12 @@ fn denoRemove(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]mq
     if (argc < 1) return mq.throwError(ctx, "remove requires a path");
 
     const path = mq.toCString(ctx, argv[0]).unwrapOr("");
+
+    // Security: validate path
+    if (!isFilePathSafe(path)) {
+        return mq.throwError(ctx, "Invalid path: traversal not allowed");
+    }
+
     std.fs.cwd().deleteFile(path) catch |err| {
         if (err == error.IsDir) {
             std.fs.cwd().deleteDir(path) catch {
@@ -426,6 +526,12 @@ fn denoMkdir(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]mq.
     if (argc < 1) return mq.throwError(ctx, "mkdir requires a path");
 
     const path = mq.toCString(ctx, argv[0]).unwrapOr("");
+
+    // Security: validate path
+    if (!isFilePathSafe(path)) {
+        return mq.throwError(ctx, "Invalid path: traversal not allowed");
+    }
+
     std.fs.cwd().makeDir(path) catch {
         return mq.throwError(ctx, "Failed to create directory");
     };
@@ -437,6 +543,12 @@ fn denoStat(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]mq.J
     if (argc < 1) return mq.throwError(ctx, "stat requires a path");
 
     const path = mq.toCString(ctx, argv[0]).unwrapOr("");
+
+    // Security: validate path
+    if (!isFilePathSafe(path)) {
+        return mq.throwError(ctx, "Invalid path: traversal not allowed");
+    }
+
     const stat = std.fs.cwd().statFile(path) catch {
         return mq.throwError(ctx, "Failed to stat");
     };
@@ -455,6 +567,12 @@ fn denoReadDir(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]m
     if (argc < 1) return mq.throwError(ctx, "readDir requires a path");
 
     const path = mq.toCString(ctx, argv[0]).unwrapOr(".");
+
+    // Security: validate path (allow "." for current directory)
+    if (path.len > 0 and !std.mem.eql(u8, path, ".") and !isFilePathSafe(path)) {
+        return mq.throwError(ctx, "Invalid path: traversal not allowed");
+    }
+
     var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch {
         return mq.throwError(ctx, "Failed to open directory");
     };

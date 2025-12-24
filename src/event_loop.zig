@@ -44,6 +44,11 @@ pub const EventLoop = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Clean up each pending operation's allocated resources
+        for (self.pending_ops.items) |*op| {
+            op.cleanup(self.allocator);
+        }
+
         if (self.http_client) |*client| {
             client.deinit();
         }
@@ -149,6 +154,19 @@ pub const PendingOp = struct {
 
     const Self = @This();
 
+    /// Clean up allocated resources when operation is cancelled or abandoned
+    pub fn cleanup(self: *Self, allocator: std.mem.Allocator) void {
+        switch (self.kind) {
+            .fetch => {
+                if (self.data.fetch.body) |body| {
+                    allocator.free(@constCast(body));
+                }
+                allocator.free(@constCast(self.data.fetch.url));
+            },
+            else => {},
+        }
+    }
+
     pub fn poll(self: *Self, loop: *EventLoop) !bool {
         return switch (self.kind) {
             .fetch => try self.pollFetch(loop),
@@ -248,8 +266,10 @@ pub const PendingOp = struct {
             return true;
         }
 
-        // Sleep a bit to avoid busy waiting
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        // Sleep efficiently based on remaining time
+        const remaining_ms = timeout_data.deadline_ms - now;
+        const sleep_ms: u64 = @intCast(@min(remaining_ms, 10)); // Cap at 10ms for responsiveness
+        std.Thread.sleep(sleep_ms * std.time.ns_per_ms);
         return false;
     }
 
@@ -268,7 +288,7 @@ pub const PendingOp = struct {
                     const args = [_]mq.JSValue{str_val.ok};
                     _ = mq.call(ctx, resolve_ptr.*, mq.undefined_(), &args);
                 }
-                mq.c.JS_PopGCRef(ctx, ref);
+                _ = mq.c.JS_PopGCRef(ctx, ref);
             }
         }
     }
@@ -296,7 +316,7 @@ pub const PendingOp = struct {
                     const args = [_]mq.JSValue{resp_obj.ok};
                     _ = mq.call(ctx, resolve_ptr.*, mq.undefined_(), &args);
                 }
-                mq.c.JS_PopGCRef(ctx, ref);
+                _ = mq.c.JS_PopGCRef(ctx, ref);
             }
         }
     }
@@ -307,7 +327,7 @@ pub const PendingOp = struct {
             if (resolve_ptr != null) {
                 const args = [_]mq.JSValue{mq.undefined_()};
                 _ = mq.call(ctx, resolve_ptr.*, mq.undefined_(), &args);
-                mq.c.JS_PopGCRef(ctx, ref);
+                _ = mq.c.JS_PopGCRef(ctx, ref);
             }
         }
     }
@@ -321,7 +341,7 @@ pub const PendingOp = struct {
                     const args = [_]mq.JSValue{err_str.ok};
                     _ = mq.call(ctx, reject_ptr.*, mq.undefined_(), &args);
                 }
-                mq.c.JS_PopGCRef(ctx, ref);
+                _ = mq.c.JS_PopGCRef(ctx, ref);
             }
         }
     }

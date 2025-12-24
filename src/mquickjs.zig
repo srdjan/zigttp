@@ -485,8 +485,10 @@ pub fn call(ctx: *JSContext, func: JSValue, this: JSValue, args: []const JSValue
 // ============================================================================
 
 fn extractException(ctx: *JSContext) Error {
+    // mquickjs doesn't expose JS_GetException, so we can only return a generic error
+    // The exception information is typically lost after the call returns
     _ = ctx;
-    return .{ .kind = .exception };
+    return .{ .kind = .exception, .message = "JavaScript exception occurred" };
 }
 
 /// Get the current exception value (if any)
