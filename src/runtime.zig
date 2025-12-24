@@ -41,6 +41,9 @@ pub const RuntimeConfig = struct {
 
     /// Max execution time per request in milliseconds (0 = no limit)
     max_execution_time_ms: u32 = 30_000,
+
+    /// Enable JSX runtime (h, renderToString, Fragment)
+    enable_jsx: bool = true,
 };
 
 // ============================================================================
@@ -115,6 +118,14 @@ pub const Runtime = struct {
 
         // Install Response helpers for HTTP handlers
         try self.installResponseHelpers();
+
+        // Install JSX runtime if enabled
+        if (self.config.enable_jsx) {
+            self.installJsxRuntime() catch |err| {
+                std.log.err("Failed to install JSX runtime: {}", .{err});
+                return err;
+            };
+        }
     }
 
     fn installResponseHelpers(self: *Self) !void {
@@ -199,6 +210,142 @@ pub const Runtime = struct {
         if (result == .err) {
             std.log.err("Failed to install Response helpers", .{});
             return error.HelperInstallFailed;
+        }
+    }
+
+    fn installJsxRuntime(self: *Self) !void {
+        const jsx_runtime_code =
+            \\// JSX Runtime for Server-Side Rendering
+            \\// Provides h(), renderToString(), and Fragment
+            \\
+            \\var Fragment = '__fragment__';
+            \\
+            \\function h(tag, props) {
+            \\    var children = [];
+            \\    for (var i = 2; i < arguments.length; i++) {
+            \\        var child = arguments[i];
+            \\        if (child === null || child === undefined) continue;
+            \\        if (Array.isArray(child)) {
+            \\            for (var j = 0; j < child.length; j++) {
+            \\                if (child[j] !== null && child[j] !== undefined) {
+            \\                    children.push(child[j]);
+            \\                }
+            \\            }
+            \\        } else {
+            \\            children.push(child);
+            \\        }
+            \\    }
+            \\    return { tag: tag, props: props || {}, children: children };
+            \\}
+            \\
+            \\function renderToString(node) {
+            \\    if (node === null || node === undefined) return '';
+            \\    if (typeof node === 'string') return escapeHtml(node);
+            \\    if (typeof node === 'number') return String(node);
+            \\    if (typeof node === 'boolean') return '';
+            \\
+            \\    if (Array.isArray(node)) {
+            \\        var result = '';
+            \\        for (var i = 0; i < node.length; i++) {
+            \\            result += renderToString(node[i]);
+            \\        }
+            \\        return result;
+            \\    }
+            \\
+            \\    if (typeof node === 'object' && node.tag !== undefined) {
+            \\        var tag = node.tag;
+            \\        var props = node.props;
+            \\        var children = node.children;
+            \\
+            \\        // Fragment: just render children
+            \\        if (tag === Fragment) {
+            \\            return renderToString(children);
+            \\        }
+            \\
+            \\        // Component function
+            \\        if (typeof tag === 'function') {
+            \\            var componentProps = {};
+            \\            for (var key in props) {
+            \\                componentProps[key] = props[key];
+            \\            }
+            \\            if (children.length > 0) {
+            \\                componentProps.children = children.length === 1 ? children[0] : children;
+            \\            }
+            \\            return renderToString(tag(componentProps));
+            \\        }
+            \\
+            \\        // HTML element
+            \\        var html = '<' + tag;
+            \\
+            \\        // Render attributes
+            \\        for (var name in props) {
+            \\            var value = props[name];
+            \\            if (value === false || value === null || value === undefined) continue;
+            \\            if (value === true) {
+            \\                html += ' ' + name;
+            \\            } else if (name === 'style' && typeof value === 'object') {
+            \\                html += ' style="' + renderStyle(value) + '"';
+            \\            } else if (name === 'className') {
+            \\                html += ' class="' + escapeAttr(String(value)) + '"';
+            \\            } else if (name.indexOf('on') !== 0) {
+            \\                // Skip event handlers for SSR
+            \\                html += ' ' + name + '="' + escapeAttr(String(value)) + '"';
+            \\            }
+            \\        }
+            \\
+            \\        // Void elements
+            \\        var voidElements = ['area', 'base', 'br', 'col', 'embed', 'hr', 'img',
+            \\                           'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'];
+            \\        var isVoid = false;
+            \\        for (var i = 0; i < voidElements.length; i++) {
+            \\            if (voidElements[i] === tag) { isVoid = true; break; }
+            \\        }
+            \\
+            \\        if (isVoid) return html + ' />';
+            \\
+            \\        html += '>';
+            \\
+            \\        // Handle dangerouslySetInnerHTML
+            \\        if (props.dangerouslySetInnerHTML && props.dangerouslySetInnerHTML.__html) {
+            \\            html += props.dangerouslySetInnerHTML.__html;
+            \\        } else {
+            \\            html += renderToString(children);
+            \\        }
+            \\
+            \\        return html + '</' + tag + '>';
+            \\    }
+            \\
+            \\    return '';
+            \\}
+            \\
+            \\function escapeHtml(str) {
+            \\    return String(str)
+            \\        .replace(/&/g, '&amp;')
+            \\        .replace(/</g, '&lt;')
+            \\        .replace(/>/g, '&gt;');
+            \\}
+            \\
+            \\function escapeAttr(str) {
+            \\    return String(str)
+            \\        .replace(/&/g, '&amp;')
+            \\        .replace(/"/g, '&quot;');
+            \\}
+            \\
+            \\function renderStyle(obj) {
+            \\    var parts = [];
+            \\    for (var key in obj) {
+            \\        var cssKey = key.replace(/([A-Z])/g, '-$1').toLowerCase();
+            \\        parts.push(cssKey + ': ' + obj[key]);
+            \\    }
+            \\    return parts.join('; ');
+            \\}
+            \\
+        ;
+
+        const result = mq.eval(self.ctx, jsx_runtime_code, "<jsx-runtime>", .{});
+        if (result == .err) {
+            std.log.err("Failed to install JSX runtime", .{});
+            return error.JsxRuntimeInstallFailed;
         }
     }
 

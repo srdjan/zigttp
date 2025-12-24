@@ -28,11 +28,12 @@ zig build test
 ### Core Components
 
 - **main.zig** - CLI argument parsing, creates ServerConfig, starts server
-- **server.zig** - HTTP listener, request parsing, connection handling, static file serving
-- **runtime.zig** - JS runtime wrapper, RuntimePool for request isolation, Request/Response conversion
+- **server.zig** - HTTP listener, request parsing, connection handling, static file serving, JSX detection
+- **runtime.zig** - JS runtime wrapper, RuntimePool for request isolation, Request/Response conversion, JSX runtime
 - **mquickjs.zig** - Low-level C bindings with type-safe Zig wrapper around mquickjs API
 - **bindings.zig** - Native API implementations (console, fetch, Deno namespace, timers)
 - **event_loop.zig** - Async operation management, microtask queue, Promise resolution
+- **jsx.zig** - JSX-to-JavaScript transformer for SSR
 
 ### Request Flow
 
@@ -84,6 +85,37 @@ Fixed buffer architecture - user specifies memory limit (default 512KB), Zig all
 --cors                 Enable CORS headers
 --static <DIR>         Serve static files
 ```
+
+## JSX Transformer
+
+**jsx.zig** provides a native JSX-to-JavaScript transformer for SSR (Server-Side Rendering).
+
+### Architecture
+
+- Single-pass tokenizer/transformer (no AST)
+- Outputs `h(tag, props, ...children)` calls (hyperscript pattern)
+- ES5-compatible output (var, no arrow functions)
+
+### Transform Flow
+
+1. Server.init() detects `.jsx` extension
+2. jsx.transform() processes source code
+3. JSX elements → h() calls, JS code → pass-through
+4. Transformed code loaded into RuntimePool
+
+### JSX Runtime (in runtime.zig)
+
+- `h(tag, props, ...children)` - Creates virtual DOM nodes
+- `renderToString(node)` - Renders to HTML string
+- `Fragment` - For grouping without wrapper element
+- Void elements (br, img, input, etc.) rendered as self-closing
+
+### Key Implementation Details
+
+- Lowercase tags = string literals (`'div'`)
+- Uppercase tags = component references (`Card`)
+- Null terminator appended to transformed code for C API compatibility
+- Brace depth tracking for expressions like `{items.map(...)}`
 
 ## Security Features
 

@@ -8,6 +8,7 @@
 const std = @import("std");
 const net = std.net;
 const mq = @import("mquickjs.zig");
+const jsx = @import("jsx.zig");
 const Runtime = @import("runtime.zig").Runtime;
 const RuntimePool = @import("runtime.zig").RuntimePool;
 const RuntimeConfig = @import("runtime.zig").RuntimeConfig;
@@ -80,7 +81,20 @@ pub const Server = struct {
             .file_path => |path| blk: {
                 const file = try std.fs.cwd().openFile(path, .{});
                 defer file.close();
-                break :blk try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+                const source = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+
+                // Transform JSX if .jsx extension
+                if (std.mem.endsWith(u8, path, ".jsx")) {
+                    const result = jsx.transform(allocator, source) catch |err| {
+                        std.log.err("JSX transform error: {}", .{err});
+                        allocator.free(source);
+                        return error.JsxTransformFailed;
+                    };
+                    allocator.free(source);
+                    break :blk result.code;
+                }
+
+                break :blk source;
             },
         };
 
