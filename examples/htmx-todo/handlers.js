@@ -2,25 +2,60 @@
 // Demonstrates ES5-compatible HTMX patterns with partial HTML updates
 //
 // Run: zig build run -- examples/htmx-todo/handlers.js
-// Open: http://localhost:3000
+// Open: http://localhost:8080
 
 // In-memory store (per-runtime instance)
 var todos = [];
 var nextId = 1;
 
 // ============================================================================
-// Routes
+// Main Handler (required by mqjs-server)
 // ============================================================================
 
-var routes = {
-    'GET /': index,
-    'POST /todos': addTodo,
-    'POST /todos/:id/toggle': toggleTodo,
-    'DELETE /todos/:id': deleteTodo
-};
+function handler(request) {
+    var method = request.method;
+    var url = request.url;
+
+    // Route: GET /
+    if (method === 'GET' && url === '/') {
+        return index(request);
+    }
+
+    // Route: POST /todos
+    if (method === 'POST' && url === '/todos') {
+        return addTodo(request);
+    }
+
+    // Route: POST /todos/:id/toggle
+    if (method === 'POST' && url.indexOf('/todos/') === 0 && url.indexOf('/toggle') > 0) {
+        var id = extractId(url, '/todos/', '/toggle');
+        request.params = { id: id };
+        return toggleTodo(request);
+    }
+
+    // Route: DELETE /todos/:id
+    if (method === 'DELETE' && url.indexOf('/todos/') === 0) {
+        var id = url.substring('/todos/'.length);
+        request.params = { id: id };
+        return deleteTodo(request);
+    }
+
+    // 404 Not Found
+    return {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'Not Found'
+    };
+}
+
+function extractId(url, prefix, suffix) {
+    var start = prefix.length;
+    var end = url.indexOf(suffix);
+    return url.substring(start, end);
+}
 
 // ============================================================================
-// Handlers
+// Route Handlers
 // ============================================================================
 
 // GET / - Full page (initial load)
@@ -84,22 +119,24 @@ function index(request) {
 function addTodo(request) {
     var text = '';
 
-    // Handle both JSON and form-encoded bodies
-    if (request.body && typeof request.body === 'object') {
-        text = request.body.text || '';
-    } else if (typeof request.body === 'string') {
-        // Parse form-encoded: text=hello%20world
+    // Parse form-encoded body: text=hello+world
+    if (typeof request.body === 'string' && request.body.length > 0) {
         var parts = request.body.split('&');
         for (var i = 0; i < parts.length; i++) {
-            var kv = parts[i].split('=');
-            if (kv[0] === 'text') {
-                text = decodeURIComponent(kv[1].replace(/\+/g, ' '));
-                break;
+            var eqIdx = parts[i].indexOf('=');
+            if (eqIdx > 0) {
+                var key = parts[i].substring(0, eqIdx);
+                var val = parts[i].substring(eqIdx + 1);
+                if (key === 'text' && val.length > 0) {
+                    // Replace + with space (simple URL decode)
+                    text = val.split('+').join(' ');
+                    break;
+                }
             }
         }
     }
 
-    if (text.trim() === '') {
+    if (text.length === 0) {
         return Response.html('<div class="error">Text is required</div>');
     }
 
@@ -198,3 +235,4 @@ function escapeHtml(text) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
+

@@ -222,8 +222,15 @@ pub const Server = struct {
         const request_line = try reader.readLine(&buf);
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
-        const method = parts.next() orelse return error.InvalidRequest;
-        const url = parts.next() orelse return error.InvalidRequest;
+        // Duplicate method and url immediately before reading headers
+        // (reading headers will overwrite buf, corrupting the slices)
+        const method_slice = parts.next() orelse return error.InvalidRequest;
+        const method = try self.allocator.dupe(u8, method_slice);
+        errdefer self.allocator.free(method);
+
+        const url_slice = parts.next() orelse return error.InvalidRequest;
+        const url = try self.allocator.dupe(u8, url_slice);
+        errdefer self.allocator.free(url);
 
         // Read headers
         while (true) {
@@ -258,8 +265,8 @@ pub const Server = struct {
         }
 
         return ParsedRequest{
-            .method = try self.allocator.dupe(u8, method),
-            .url = try self.allocator.dupe(u8, url),
+            .method = method,
+            .url = url,
             .headers = headers,
             .body = body,
         };
