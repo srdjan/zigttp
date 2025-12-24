@@ -1,6 +1,9 @@
 # mqjs-server
 
+> **Note**: This project is experimental and under active development.
+
 A lightweight HTTP server written in Zig that embeds [MicroQuickJS](https://github.com/bellard/mquickjs) (mquickjs) for JavaScript request handlers.
+
 
 ## Features
 
