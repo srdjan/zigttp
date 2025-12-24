@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
 
     // Main server executable
     const exe = b.addExecutable(.{
-        .name = "mqjs-server",
+        .name = "zigttp-server",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,

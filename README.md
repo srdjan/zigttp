@@ -1,4 +1,4 @@
-# mqjs-server
+# zigttp HTTP Server
 
 > **Note**: This project is experimental and under active development.
 
@@ -25,10 +25,10 @@ zig build -Doptimize=ReleaseFast
 
 ```bash
 # Inline handler
-./zig-out/bin/mqjs-server -e "function handler(r) { return Response.json({hello:'world'}) }"
+./zig-out/bin/zigttp-server -e "function handler(r) { return Response.json({hello:'world'}) }"
 
 # Or with a handler file
-./zig-out/bin/mqjs-server examples/handler.js
+./zig-out/bin/zigttp-server examples/handler.js
 
 # Test it
 curl http://localhost:8080/
@@ -37,8 +37,8 @@ curl http://localhost:8080/
 ## Usage
 
 ```
-mqjs-server [options] <handler.js>
-mqjs-server -e "<inline-code>"
+zigttp-server [options] <handler.js>
+zigttp-server -e "<inline-code>"
 
 Options:
   -p, --port <PORT>     Port to listen on (default: 8080)
@@ -109,7 +109,7 @@ function handler(request) {
 
 ## JSX Support
 
-mqjs-server includes a native JSX transformer for server-side rendering. Use `.jsx` files to write handlers with JSX syntax.
+zigttp-server includes a native JSX transformer for server-side rendering. Use `.jsx` files to write handlers with JSX syntax.
 
 ### Basic JSX
 
@@ -206,7 +206,7 @@ Supported ES6+ features:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     mqjs-server (Zig)                       │
+│                     zigttp-server (Zig)                       │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ HTTP Server │──│   Runtime   │──│  Native Bindings    │  │
@@ -234,7 +234,7 @@ This is why the bindings use a Result type pattern - to make error handling expl
 ## Project Structure
 
 ```
-mqjs-server/
+zigttp-server/
 ├── build.zig              # Zig build configuration
 ├── mquickjs/              # Vendored mquickjs sources (from bellard/mquickjs)
 ├── src/

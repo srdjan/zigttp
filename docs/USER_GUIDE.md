@@ -1,4 +1,4 @@
-# mqjs-server User Guide
+# zigttp-server User Guide
 
 A lightweight HTTP server powered by Zig and MicroQuickJS for running JavaScript request handlers with minimal resource usage.
 
@@ -40,7 +40,7 @@ cd zig-mquickjs
 ./setup.sh
 
 # Verify installation
-./zig-out/bin/mqjs-server --help
+./zig-out/bin/zigttp-server --help
 ```
 
 ### Manual Build
@@ -64,7 +64,7 @@ zig build
 ### Hello World (Inline)
 
 ```bash
-./zig-out/bin/mqjs-server -e "function handler(req) { return Response.text('Hello World!') }"
+./zig-out/bin/zigttp-server -e "function handler(req) { return Response.text('Hello World!') }"
 ```
 
 Test it:
@@ -84,13 +84,13 @@ function handler(request) {
 
 Run:
 ```bash
-./zig-out/bin/mqjs-server hello.js
+./zig-out/bin/zigttp-server hello.js
 ```
 
 ### JSON API
 
 ```bash
-./zig-out/bin/mqjs-server -e "function handler(req) { return Response.json({message: 'Hello', path: req.path}) }"
+./zig-out/bin/zigttp-server -e "function handler(req) { return Response.json({message: 'Hello', path: req.path}) }"
 ```
 
 Test:
@@ -104,8 +104,8 @@ curl http://localhost:8080/api/test
 ## Command Line Reference
 
 ```
-mqjs-server [OPTIONS] <handler.js>
-mqjs-server -e "<inline-code>"
+zigttp-server [OPTIONS] <handler.js>
+zigttp-server -e "<inline-code>"
 
 OPTIONS:
   -p, --port <PORT>     Port to listen on
@@ -134,19 +134,19 @@ OPTIONS:
 
 ```bash
 # Custom port
-./zig-out/bin/mqjs-server -p 3000 handler.js
+./zig-out/bin/zigttp-server -p 3000 handler.js
 
 # Bind to all interfaces (accessible from network)
-./zig-out/bin/mqjs-server -h 0.0.0.0 handler.js
+./zig-out/bin/zigttp-server -h 0.0.0.0 handler.js
 
 # Increased memory for complex handlers
-./zig-out/bin/mqjs-server -m 1m handler.js
+./zig-out/bin/zigttp-server -m 1m handler.js
 
 # Quiet mode with custom port
-./zig-out/bin/mqjs-server -q -p 8000 handler.js
+./zig-out/bin/zigttp-server -q -p 8000 handler.js
 
 # Inline with all options
-./zig-out/bin/mqjs-server -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
+./zig-out/bin/zigttp-server -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
 ```
 
 ---
@@ -884,7 +884,7 @@ function layout(title, content) {
 function renderHomePage() {
     return layout('Home', [
         '<h1>Welcome to My Site</h1>',
-        '<p>This is a simple web application powered by mqjs-server.</p>',
+        '<p>This is a simple web application powered by zigttp-server.</p>',
         '<p>Built with Zig and MicroQuickJS for minimal resource usage.</p>'
     ].join('\n'));
 }
@@ -892,7 +892,7 @@ function renderHomePage() {
 function renderAboutPage() {
     return layout('About', [
         '<h1>About</h1>',
-        '<p>mqjs-server is a lightweight HTTP server that embeds the MicroQuickJS JavaScript engine.</p>',
+        '<p>zigttp-server is a lightweight HTTP server that embeds the MicroQuickJS JavaScript engine.</p>',
         '<h2>Features</h2>',
         '<ul>',
         '  <li>Minimal memory footprint (as low as 10KB RAM)</li>',
@@ -988,13 +988,13 @@ function handler(request) {
 
 ```bash
 # Minimal (10KB) - simple handlers only
-./zig-out/bin/mqjs-server -m 10k handler.js
+./zig-out/bin/zigttp-server -m 10k handler.js
 
 # Default (256KB) - typical API handlers
-./zig-out/bin/mqjs-server handler.js
+./zig-out/bin/zigttp-server handler.js
 
 # Larger (1MB) - complex processing, large JSON
-./zig-out/bin/mqjs-server -m 1m handler.js
+./zig-out/bin/zigttp-server -m 1m handler.js
 ```
 
 ### Optimize Handler Code
@@ -1023,16 +1023,16 @@ function handler(request) {
 
 ```bash
 # Quiet mode, bind to all interfaces
-./zig-out/bin/mqjs-server -q -h 0.0.0.0 -p 8080 handler.js
+./zig-out/bin/zigttp-server -q -h 0.0.0.0 -p 8080 handler.js
 
 # With systemd (example unit file)
 # /etc/systemd/system/mqjs.service
 # [Unit]
-# Description=mqjs-server
+# Description=zigttp-server
 # After=network.target
 # 
 # [Service]
-# ExecStart=/opt/mqjs/mqjs-server -q -h 0.0.0.0 -p 8080 /opt/mqjs/handler.js
+# ExecStart=/opt/mqjs/zigttp-server -q -h 0.0.0.0 -p 8080 /opt/mqjs/handler.js
 # Restart=always
 # User=www-data
 # 
@@ -1049,12 +1049,12 @@ function handler(request) {
 **"No handler specified"**
 ```bash
 # Wrong:
-./zig-out/bin/mqjs-server
+./zig-out/bin/zigttp-server
 
 # Right:
-./zig-out/bin/mqjs-server handler.js
+./zig-out/bin/zigttp-server handler.js
 # or
-./zig-out/bin/mqjs-server -e "function handler(r) { return Response.text('OK') }"
+./zig-out/bin/zigttp-server -e "function handler(r) { return Response.text('OK') }"
 ```
 
 **"No 'handler' function defined"**
@@ -1121,11 +1121,11 @@ If you see out-of-memory errors:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    mqjs-server Quick Reference                  │
+│                    zigttp-server Quick Reference                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ START SERVER                                                    │
-│   mqjs-server handler.js                                        │
-│   mqjs-server -p 3000 -e "function handler(r) {...}"           │
+│   zigttp-server handler.js                                        │
+│   zigttp-server -p 3000 -e "function handler(r) {...}"           │
 ├─────────────────────────────────────────────────────────────────┤
 │ REQUEST OBJECT                                                  │
 │   request.method   → "GET", "POST", "PUT", "DELETE"            │

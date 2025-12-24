@@ -1,11 +1,11 @@
-// Example handler for mqjs-server (JSX version)
+// Example handler for zigttp-server (JSX version)
 // Demonstrates routing, JSON responses, and JSX templating
 
 // Home page component
 function HomePage() {
     return (
         <html>
-            <head><title>mqjs-server</title></head>
+            <head><title>zigttp-server</title></head>
             <body>
                 <h1>MicroQuickJS Server</h1>
                 <p>A tiny JavaScript runtime for HTTP handlers.</p>

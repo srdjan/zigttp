@@ -1,8 +1,8 @@
-//! mqjs-server - HTTP Server hosting MicroQuickJS JavaScript handlers
+//! zigttp-server - HTTP Server hosting MicroQuickJS JavaScript handlers
 //!
 //! Usage:
-//!   mqjs-server [options] <handler.js>
-//!   mqjs-server -e "function handler(req) { return Response.json({hello: 'world'}) }"
+//!   zigttp-server [options] <handler.js>
+//!   zigttp-server -e "function handler(req) { return Response.json({hello: 'world'}) }"
 //!
 //! Options:
 //!   -p, --port <PORT>     Port to listen on (default: 8080)
@@ -150,11 +150,11 @@ fn parseSize(str: []const u8) !usize {
 
 fn printHelp() void {
     const help =
-        \\mqjs-server - HTTP Server hosting MicroQuickJS JavaScript handlers
+        \\zigttp-server - HTTP Server hosting MicroQuickJS JavaScript handlers
         \\
         \\Usage:
-        \\  mqjs-server [options] <handler.js>
-        \\  mqjs-server -e "handler = (req) => Response.json({hello: 'world'})"
+        \\  zigttp-server [options] <handler.js>
+        \\  zigttp-server -e "handler = (req) => Response.json({hello: 'world'})"
         \\
         \\Options:
         \\  -p, --port <PORT>     Port to listen on (default: 8080)
@@ -195,7 +195,7 @@ fn printHelp() void {
         \\  }
         \\
         \\Quick start:
-        \\  mqjs-server -e "function handler(r) { return Response.json({ok:true}) }"
+        \\  zigttp-server -e "function handler(r) { return Response.json({ok:true}) }"
         \\  curl http://localhost:8080/
         \\
     ;

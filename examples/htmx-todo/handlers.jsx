@@ -1,4 +1,4 @@
-// HTMX Todo App Example for mqjs-server (JSX version)
+// HTMX Todo App Example for zigttp-server (JSX version)
 // Demonstrates JSX templating with HTMX partial updates
 //
 // Run: zig build run -- examples/htmx-todo/handlers.jsx

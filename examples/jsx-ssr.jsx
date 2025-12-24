@@ -1,4 +1,4 @@
-// JSX SSR Example for mqjs-server
+// JSX SSR Example for zigttp-server
 // Demonstrates server-side rendering with JSX components
 
 // Simple Card component
@@ -57,7 +57,7 @@ var todos = [
 // Main handler function
 function handler(request) {
     var page = (
-        <Layout title="mqjs-server JSX Demo">
+        <Layout title="zigttp-server JSX Demo">
             <Card title="Welcome">
                 <p>This page was rendered on the server using JSX!</p>
             </Card>
