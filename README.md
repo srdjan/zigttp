@@ -58,7 +58,7 @@ Your handler must define a `handler` function that receives a request object and
 ```javascript
 {
     method: string,     // "GET", "POST", etc.
-    path: string,       // URL path (e.g., "/api/users")
+    url: string,        // URL path (e.g., "/api/users")
     headers: object,    // HTTP headers
     body: string|null   // Request body (for POST/PUT)
 }
@@ -85,19 +85,19 @@ Response.html(html, init?)
 ```javascript
 function handler(request) {
     // Simple routing
-    if (request.path === '/') {
+    if (request.url === '/') {
         return Response.html('<h1>Hello World</h1>');
     }
 
-    if (request.path === '/api/echo') {
+    if (request.url === '/api/echo') {
         return Response.json({
             method: request.method,
-            path: request.path,
+            url: request.url,
             body: request.body
         });
     }
 
-    if (request.method === 'POST' && request.path === '/api/data') {
+    if (request.method === 'POST' && request.url === '/api/data') {
         var data = JSON.parse(request.body);
         return Response.json({ received: data, ok: true });
     }
@@ -245,6 +245,8 @@ mqjs-server/
 │   └── jsx.zig            # JSX transformer
 └── examples/
     ├── handler.js         # Example JavaScript handler
+    ├── handler.jsx        # Same example using JSX
+    ├── htmx-todo/         # HTMX Todo app example
     ├── jsx-simple.jsx     # Simple JSX example
     ├── jsx-component.jsx  # Component JSX example
     └── jsx-ssr.jsx        # Full SSR example

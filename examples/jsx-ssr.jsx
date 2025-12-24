@@ -66,7 +66,7 @@ function handler(request) {
             </Card>
             <Card title="Request Info">
                 <p>Method: {request.method}</p>
-                <p>Path: {request.path}</p>
+                <p>URL: {request.url}</p>
             </Card>
         </Layout>
     );
