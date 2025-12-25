@@ -84,33 +84,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // Benchmark executable (optional if src/bench.zig exists)
-    const bench_exists = blk: {
-        std.fs.cwd().access("src/bench.zig", .{}) catch |err| {
-            if (err == error.FileNotFound) break :blk false;
-            @panic("failed to stat src/bench.zig");
-        };
-        break :blk true;
-    };
+    // Benchmark executable
+    const bench = b.addExecutable(.{
+        .name = "zigttp-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
 
-    if (bench_exists) {
-        const bench = b.addExecutable(.{
-            .name = "mqjs-bench",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/bench.zig"),
-                .target = target,
-                .optimize = .ReleaseFast,
-            }),
-        });
+    bench.linkLibrary(mquickjs);
+    bench.addIncludePath(b.path("mquickjs"));
+    bench.linkLibC();
 
-        bench.linkLibrary(mquickjs);
-        bench.addIncludePath(b.path("mquickjs"));
-        bench.linkLibC();
+    b.installArtifact(bench);
 
-        b.installArtifact(bench);
-
-        const bench_cmd = b.addRunArtifact(bench);
-        const bench_step = b.step("bench", "Run benchmarks");
-        bench_step.dependOn(&bench_cmd.step);
+    const bench_cmd = b.addRunArtifact(bench);
+    if (b.args) |args| {
+        bench_cmd.addArgs(args);
     }
+    const bench_step = b.step("bench", "Run performance benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
 }
