@@ -102,6 +102,154 @@ pub const JSValue = packed struct {
     pub inline fn isNullish(self: JSValue) bool {
         return self.isNull() or self.isUndefined();
     }
+
+    // ========================================================================
+    // Float64 Support (heap-boxed)
+    // ========================================================================
+
+    /// Float64 box header (heap-allocated)
+    pub const Float64Box = extern struct {
+        header: u32, // MemTag.float64 + gc_mark
+        _pad: u32,
+        value: f64,
+
+        pub fn getValue(self: *const Float64Box) f64 {
+            return self.value;
+        }
+    };
+
+    /// Check if value is a boxed float64
+    pub inline fn isFloat64(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const box = self.toPtr(Float64Box);
+        return (box.header & 0xF) == 2; // MemTag.float64
+    }
+
+    /// Check if value is any number (int or float)
+    pub inline fn isNumber(self: JSValue) bool {
+        return self.isInt() or self.isFloat64();
+    }
+
+    /// Get float64 value (unsafe - caller must verify isFloat64)
+    pub inline fn getFloat64(self: JSValue) f64 {
+        std.debug.assert(self.isFloat64());
+        const box = self.toPtr(Float64Box);
+        return box.value;
+    }
+
+    /// Convert value to f64 (works for int and float)
+    pub inline fn toNumber(self: JSValue) ?f64 {
+        if (self.isInt()) {
+            return @floatFromInt(self.getInt());
+        }
+        if (self.isFloat64()) {
+            return self.getFloat64();
+        }
+        return null;
+    }
+
+    // ========================================================================
+    // Type Checking Utilities
+    // ========================================================================
+
+    /// Check if value is a string (heap object with string tag)
+    pub inline fn isString(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        return (header.* & 0xF) == 3; // MemTag.string
+    }
+
+    /// Check if value is an object (heap object with object tag)
+    pub inline fn isObject(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        return (header.* & 0xF) == 1; // MemTag.object
+    }
+
+    /// Check if value is a function
+    pub inline fn isFunction(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        return (header.* & 0xF) == 4; // MemTag.function_bytecode
+    }
+
+    /// Check if value is an array
+    pub inline fn isArray(self: JSValue) bool {
+        // Arrays are objects with array class - need full object check
+        return self.isObject(); // TODO: Check class_id
+    }
+
+    // ========================================================================
+    // Comparison and Conversion
+    // ========================================================================
+
+    /// Strict equality (===)
+    pub inline fn strictEquals(self: JSValue, other: JSValue) bool {
+        // Fast path: same raw value
+        if (self.raw == other.raw) return true;
+
+        // Float comparison (handle NaN)
+        if (self.isFloat64() and other.isFloat64()) {
+            const a = self.getFloat64();
+            const b = other.getFloat64();
+            // NaN !== NaN
+            if (std.math.isNan(a) or std.math.isNan(b)) return false;
+            return a == b;
+        }
+
+        return false;
+    }
+
+    /// Type coercion to boolean (ToBoolean)
+    pub inline fn toBoolean(self: JSValue) bool {
+        if (self.isNull() or self.isUndefined() or self.isFalse()) return false;
+        if (self.isTrue()) return true;
+        if (self.isInt()) return self.getInt() != 0;
+        if (self.isFloat64()) {
+            const f = self.getFloat64();
+            return f != 0.0 and !std.math.isNan(f);
+        }
+        // Objects are truthy
+        return true;
+    }
+
+    /// Get the JS typeof result
+    pub fn typeOf(self: JSValue) []const u8 {
+        if (self.isUndefined()) return "undefined";
+        if (self.isNull()) return "object"; // Historical quirk
+        if (self.isBool()) return "boolean";
+        if (self.isNumber()) return "number";
+        if (self.isString()) return "string";
+        if (self.isFunction()) return "function";
+        return "object";
+    }
+
+    // ========================================================================
+    // Debug Helpers
+    // ========================================================================
+
+    /// Format value for debug output
+    pub fn format(self: JSValue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        if (self.isNull()) {
+            try writer.writeAll("null");
+        } else if (self.isUndefined()) {
+            try writer.writeAll("undefined");
+        } else if (self.isTrue()) {
+            try writer.writeAll("true");
+        } else if (self.isFalse()) {
+            try writer.writeAll("false");
+        } else if (self.isException()) {
+            try writer.writeAll("<exception>");
+        } else if (self.isInt()) {
+            try writer.print("{d}", .{self.getInt()});
+        } else if (self.isFloat64()) {
+            try writer.print("{d}", .{self.getFloat64()});
+        } else if (self.isPtr()) {
+            try writer.print("<ptr:0x{x}>", .{self.raw & ~@as(u64, 0x7)});
+        } else {
+            try writer.print("<unknown:0x{x}>", .{self.raw});
+        }
+    }
 };
 
 // Tests
@@ -143,4 +291,72 @@ test "JSValue boolean conversion" {
     try std.testing.expectEqual(JSValue.false_val, JSValue.fromBool(false));
     try std.testing.expect(JSValue.true_val.getBool());
     try std.testing.expect(!JSValue.false_val.getBool());
+}
+
+test "JSValue toBoolean coercion" {
+    // Falsy values
+    try std.testing.expect(!JSValue.null_val.toBoolean());
+    try std.testing.expect(!JSValue.undefined_val.toBoolean());
+    try std.testing.expect(!JSValue.false_val.toBoolean());
+    try std.testing.expect(!JSValue.fromInt(0).toBoolean());
+
+    // Truthy values
+    try std.testing.expect(JSValue.true_val.toBoolean());
+    try std.testing.expect(JSValue.fromInt(1).toBoolean());
+    try std.testing.expect(JSValue.fromInt(-1).toBoolean());
+    try std.testing.expect(JSValue.fromInt(42).toBoolean());
+}
+
+test "JSValue typeof" {
+    try std.testing.expectEqualStrings("undefined", JSValue.undefined_val.typeOf());
+    try std.testing.expectEqualStrings("object", JSValue.null_val.typeOf()); // JS quirk
+    try std.testing.expectEqualStrings("boolean", JSValue.true_val.typeOf());
+    try std.testing.expectEqualStrings("boolean", JSValue.false_val.typeOf());
+    try std.testing.expectEqualStrings("number", JSValue.fromInt(42).typeOf());
+}
+
+test "JSValue strict equality" {
+    // Same values
+    try std.testing.expect(JSValue.null_val.strictEquals(JSValue.null_val));
+    try std.testing.expect(JSValue.undefined_val.strictEquals(JSValue.undefined_val));
+    try std.testing.expect(JSValue.true_val.strictEquals(JSValue.true_val));
+    try std.testing.expect(JSValue.fromInt(42).strictEquals(JSValue.fromInt(42)));
+
+    // Different values
+    try std.testing.expect(!JSValue.null_val.strictEquals(JSValue.undefined_val));
+    try std.testing.expect(!JSValue.true_val.strictEquals(JSValue.false_val));
+    try std.testing.expect(!JSValue.fromInt(42).strictEquals(JSValue.fromInt(43)));
+}
+
+test "JSValue toNumber" {
+    try std.testing.expectEqual(@as(?f64, 42.0), JSValue.fromInt(42).toNumber());
+    try std.testing.expectEqual(@as(?f64, -123.0), JSValue.fromInt(-123).toNumber());
+    try std.testing.expectEqual(@as(?f64, 0.0), JSValue.fromInt(0).toNumber());
+    try std.testing.expectEqual(@as(?f64, null), JSValue.null_val.toNumber());
+    try std.testing.expectEqual(@as(?f64, null), JSValue.undefined_val.toNumber());
+}
+
+test "JSValue pointer encoding" {
+    var dummy: u64 = 0x12345678;
+    const ptr_val = JSValue.fromPtr(&dummy);
+
+    try std.testing.expect(ptr_val.isPtr());
+    try std.testing.expect(!ptr_val.isInt());
+    try std.testing.expect(!ptr_val.isSpecial());
+
+    const recovered = ptr_val.toPtr(u64);
+    try std.testing.expectEqual(&dummy, recovered);
+}
+
+test "JSValue format" {
+    var buf: [64]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    const writer = fbs.writer();
+
+    JSValue.null_val.format("", .{}, writer) catch unreachable;
+    try std.testing.expectEqualStrings("null", fbs.getWritten());
+
+    fbs.reset();
+    JSValue.fromInt(42).format("", .{}, writer) catch unreachable;
+    try std.testing.expectEqualStrings("42", fbs.getWritten());
 }

@@ -20,12 +20,229 @@ pub const JSString = struct {
         _reserved: u5 = 0,
     };
 
-    /// Get string data
-    pub fn data(self: *JSString) []const u8 {
-        const ptr: [*]const u8 = @ptrCast(@as([*]u8, @ptrCast(self)) + @sizeOf(JSString));
-        return ptr[0..self.len];
+    /// Get string data (const version)
+    pub fn data(self: *const JSString) []const u8 {
+        const base: [*]const u8 = @ptrCast(self);
+        return (base + @sizeOf(JSString))[0..self.len];
+    }
+
+    /// Get mutable string data
+    pub fn dataMut(self: *JSString) []u8 {
+        const base: [*]u8 = @ptrCast(self);
+        return (base + @sizeOf(JSString))[0..self.len];
+    }
+
+    /// Get string length in bytes
+    pub fn length(self: *const JSString) u32 {
+        return self.len;
+    }
+
+    /// Get string length in UTF-8 codepoints
+    pub fn codepointLength(self: *const JSString) u32 {
+        if (self.flags.is_ascii) {
+            return self.len;
+        }
+        return countCodepoints(self.data());
+    }
+
+    /// Check if string is empty
+    pub fn isEmpty(self: *const JSString) bool {
+        return self.len == 0;
+    }
+
+    /// Compare with another string
+    pub fn compare(self: *const JSString, other: *const JSString) std.math.Order {
+        // Fast path: same hash means likely equal
+        if (self.hash == other.hash and self.len == other.len) {
+            if (self == other) return .eq; // Same pointer
+            if (eqlStrings(self.data(), other.data())) return .eq;
+        }
+        return compareStrings(self.data(), other.data());
+    }
+
+    /// Check equality with another string
+    pub fn eql(self: *const JSString, other: *const JSString) bool {
+        if (self == other) return true; // Same pointer (interned)
+        if (self.hash != other.hash) return false;
+        if (self.len != other.len) return false;
+        return eqlStrings(self.data(), other.data());
+    }
+
+    /// Check equality with raw bytes
+    pub fn eqlBytes(self: *const JSString, bytes: []const u8) bool {
+        if (self.len != bytes.len) return false;
+        return eqlStrings(self.data(), bytes);
+    }
+
+    /// Get character at byte index (for ASCII strings)
+    pub fn charAt(self: *const JSString, index: u32) ?u8 {
+        if (index >= self.len) return null;
+        return self.data()[index];
+    }
+
+    /// Check if string starts with prefix
+    pub fn startsWith(self: *const JSString, prefix: []const u8) bool {
+        if (prefix.len > self.len) return false;
+        return eqlStrings(self.data()[0..prefix.len], prefix);
+    }
+
+    /// Check if string ends with suffix
+    pub fn endsWith(self: *const JSString, suffix: []const u8) bool {
+        if (suffix.len > self.len) return false;
+        const start = self.len - @as(u32, @intCast(suffix.len));
+        return eqlStrings(self.data()[start..], suffix);
+    }
+
+    /// Find first occurrence of substring
+    pub fn indexOf(self: *const JSString, needle: []const u8) ?u32 {
+        if (needle.len == 0) return 0;
+        if (needle.len > self.len) return null;
+
+        const haystack = self.data();
+        // Use SIMD for longer searches
+        if (needle.len >= 4 and haystack.len >= 32) {
+            return simdIndexOf(haystack, needle);
+        }
+
+        // Scalar fallback
+        return scalarIndexOf(haystack, needle);
+    }
+
+    /// Find last occurrence of substring
+    pub fn lastIndexOf(self: *const JSString, needle: []const u8) ?u32 {
+        if (needle.len == 0) return self.len;
+        if (needle.len > self.len) return null;
+
+        const haystack = self.data();
+        var i: usize = haystack.len - needle.len + 1;
+        while (i > 0) {
+            i -= 1;
+            if (eqlStrings(haystack[i..][0..needle.len], needle)) {
+                return @intCast(i);
+            }
+        }
+        return null;
     }
 };
+
+// ============================================================================
+// UTF-8 Utilities
+// ============================================================================
+
+/// Count UTF-8 codepoints in a string
+pub fn countCodepoints(s: []const u8) u32 {
+    var count: u32 = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        // Count non-continuation bytes (those not starting with 10xxxxxx)
+        if ((s[i] & 0xC0) != 0x80) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+/// Get byte length of UTF-8 codepoint starting at given byte
+pub fn codepointByteLength(first_byte: u8) u3 {
+    if (first_byte < 0x80) return 1; // ASCII
+    if (first_byte < 0xC0) return 1; // Invalid, treat as 1
+    if (first_byte < 0xE0) return 2; // 2-byte
+    if (first_byte < 0xF0) return 3; // 3-byte
+    return 4; // 4-byte
+}
+
+/// Decode a UTF-8 codepoint at the given position
+pub fn decodeCodepoint(s: []const u8) ?struct { codepoint: u21, len: u3 } {
+    if (s.len == 0) return null;
+
+    const first = s[0];
+    if (first < 0x80) {
+        return .{ .codepoint = first, .len = 1 };
+    }
+
+    const len = codepointByteLength(first);
+    if (s.len < len) return null;
+
+    var cp: u21 = switch (len) {
+        2 => @as(u21, first & 0x1F) << 6,
+        3 => @as(u21, first & 0x0F) << 12,
+        4 => @as(u21, first & 0x07) << 18,
+        else => return null,
+    };
+
+    for (1..len) |i| {
+        if ((s[i] & 0xC0) != 0x80) return null;
+        const shift: u5 = @intCast((len - 1 - i) * 6);
+        cp |= @as(u21, s[i] & 0x3F) << shift;
+    }
+
+    return .{ .codepoint = cp, .len = len };
+}
+
+// ============================================================================
+// SIMD String Search
+// ============================================================================
+
+/// SIMD-accelerated substring search
+fn simdIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+
+    const Vec = @Vector(32, u8);
+    const first_char: Vec = @splat(needle[0]);
+
+    var i: usize = 0;
+    const search_end = haystack.len - needle.len + 1;
+
+    // SIMD search for first character
+    while (i + 32 <= search_end) : (i += 32) {
+        const chunk: Vec = haystack[i..][0..32].*;
+        const matches = chunk == first_char;
+
+        // Check if any matches
+        if (@reduce(.Or, matches)) {
+            // Found potential match, verify full needle
+            var j: usize = 0;
+            while (j < 32) : (j += 1) {
+                if (matches[j]) {
+                    const pos = i + j;
+                    if (pos + needle.len <= haystack.len) {
+                        if (eqlStrings(haystack[pos..][0..needle.len], needle)) {
+                            return @intCast(pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Scalar fallback for remainder
+    return scalarIndexOf(haystack[i..], needle);
+}
+
+/// Scalar substring search
+fn scalarIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
+    if (needle.len == 0) return 0;
+    if (needle.len > haystack.len) return null;
+
+    const first = needle[0];
+    var i: usize = 0;
+    const search_end = haystack.len - needle.len + 1;
+
+    while (i < search_end) : (i += 1) {
+        if (haystack[i] == first) {
+            if (eqlStrings(haystack[i..][0..needle.len], needle)) {
+                return @intCast(i);
+            }
+        }
+    }
+    return null;
+}
+
+// ============================================================================
+// SIMD String Comparison
+// ============================================================================
 
 /// SIMD string comparison (256-bit AVX2 when available)
 pub fn compareStrings(a: []const u8, b: []const u8) std.math.Order {
@@ -103,26 +320,167 @@ pub fn isAscii(s: []const u8) bool {
     return true;
 }
 
-/// String intern table (placeholder)
+// ============================================================================
+// String Interning
+// ============================================================================
+
+/// String intern table for unique strings
 pub const StringTable = struct {
+    /// Hash map from hash -> list of strings with that hash
+    buckets: std.AutoHashMap(u64, StringList),
+    /// All allocated strings (for cleanup)
+    strings: std.ArrayList(*JSString),
     allocator: std.mem.Allocator,
-    // TODO: Implement hash table for interned strings
+    /// Statistics
+    intern_count: usize = 0,
+    hit_count: usize = 0,
+
+    const StringList = std.ArrayList(*JSString);
 
     pub fn init(allocator: std.mem.Allocator) StringTable {
-        return .{ .allocator = allocator };
+        return .{
+            .buckets = std.AutoHashMap(u64, StringList).init(allocator),
+            .strings = .empty,
+            .allocator = allocator,
+        };
     }
 
     pub fn deinit(self: *StringTable) void {
-        _ = self;
+        // Free all bucket lists
+        var it = self.buckets.valueIterator();
+        while (it.next()) |list| {
+            list.deinit(self.allocator);
+        }
+        self.buckets.deinit();
+
+        // Free all strings
+        for (self.strings.items) |str| {
+            const total_size = @sizeOf(JSString) + str.len;
+            const ptr: [*]u8 = @ptrCast(str);
+            self.allocator.free(ptr[0..total_size]);
+        }
+        self.strings.deinit(self.allocator);
     }
 
+    /// Intern a string (get or create unique instance)
     pub fn intern(self: *StringTable, s: []const u8) !*JSString {
-        _ = self;
-        _ = s;
-        // TODO: Implement interning
-        return error.NotImplemented;
+        const hash = hashString(s);
+
+        // Check if already interned
+        if (self.buckets.getPtr(hash)) |list| {
+            for (list.items) |str| {
+                if (str.len == s.len and eqlStrings(str.data(), s)) {
+                    self.hit_count += 1;
+                    return str;
+                }
+            }
+            // Hash collision - add to existing bucket
+            const new_str = try self.createString(s, hash);
+            try list.append(self.allocator, new_str);
+            return new_str;
+        }
+
+        // Create new bucket
+        const new_str = try self.createString(s, hash);
+        var list = StringList.empty;
+        try list.append(self.allocator, new_str);
+        try self.buckets.put(hash, list);
+        return new_str;
+    }
+
+    /// Create a new JSString
+    fn createString(self: *StringTable, s: []const u8, hash: u64) !*JSString {
+        const total_size = @sizeOf(JSString) + s.len;
+        const mem = try self.allocator.alloc(u8, total_size);
+
+        const str: *JSString = @ptrCast(@alignCast(mem.ptr));
+        str.* = .{
+            .header = heap.MemBlockHeader.init(.string, total_size),
+            .flags = .{
+                .is_unique = true,
+                .is_ascii = isAscii(s),
+                .is_numeric = isArrayIndex(s) != null,
+            },
+            .len = @intCast(s.len),
+            .hash = hash,
+        };
+
+        // Copy string data after header
+        @memcpy(str.dataMut(), s);
+
+        try self.strings.append(self.allocator, str);
+        self.intern_count += 1;
+        return str;
+    }
+
+    /// Get interning statistics
+    pub fn getStats(self: *const StringTable) struct { interned: usize, hits: usize } {
+        return .{ .interned = self.intern_count, .hits = self.hit_count };
     }
 };
+
+/// Create a non-interned string (caller owns memory)
+pub fn createString(allocator: std.mem.Allocator, s: []const u8) !*JSString {
+    const total_size = @sizeOf(JSString) + s.len;
+    const mem = try allocator.alloc(u8, total_size);
+
+    const str: *JSString = @ptrCast(@alignCast(mem.ptr));
+    str.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = isAscii(s),
+            .is_numeric = isArrayIndex(s) != null,
+        },
+        .len = @intCast(s.len),
+        .hash = hashString(s),
+    };
+
+    @memcpy(str.dataMut(), s);
+    return str;
+}
+
+/// Free a non-interned string
+pub fn freeString(allocator: std.mem.Allocator, str: *JSString) void {
+    const total_size = @sizeOf(JSString) + str.len;
+    const ptr: [*]u8 = @ptrCast(str);
+    allocator.free(ptr[0..total_size]);
+}
+
+/// Concatenate two strings
+pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
+    const total_len = a.len + b.len;
+    const total_size = @sizeOf(JSString) + total_len;
+    const mem = try allocator.alloc(u8, total_size);
+
+    const str: *JSString = @ptrCast(@alignCast(mem.ptr));
+    const data_a = a.data();
+    const data_b = b.data();
+
+    str.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = a.flags.is_ascii and b.flags.is_ascii,
+            .is_numeric = false, // Concatenation rarely produces valid index
+        },
+        .len = total_len,
+        .hash = 0, // Will be computed lazily
+    };
+
+    const data_mut = str.dataMut();
+    @memcpy(data_mut[0..a.len], data_a);
+    @memcpy(data_mut[a.len..], data_b);
+
+    // Compute hash
+    str.hash = hashString(str.data());
+
+    return str;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
 
 test "SIMD string comparison" {
     try std.testing.expectEqual(std.math.Order.eq, compareStrings("hello", "hello"));
@@ -152,4 +510,133 @@ test "ASCII detection" {
     try std.testing.expect(isAscii("Hello, World!"));
     try std.testing.expect(!isAscii("Hello, 世界!"));
     try std.testing.expect(isAscii(""));
+}
+
+test "UTF-8 codepoint counting" {
+    try std.testing.expectEqual(@as(u32, 5), countCodepoints("hello"));
+    try std.testing.expectEqual(@as(u32, 2), countCodepoints("世界")); // 2 CJK chars
+    try std.testing.expectEqual(@as(u32, 0), countCodepoints(""));
+    try std.testing.expectEqual(@as(u32, 9), countCodepoints("hello, 世界")); // 7 ASCII + 2 CJK
+}
+
+test "UTF-8 codepoint byte length" {
+    try std.testing.expectEqual(@as(u3, 1), codepointByteLength('a'));
+    try std.testing.expectEqual(@as(u3, 2), codepointByteLength(0xC2)); // Start of 2-byte
+    try std.testing.expectEqual(@as(u3, 3), codepointByteLength(0xE4)); // Start of 3-byte (CJK)
+    try std.testing.expectEqual(@as(u3, 4), codepointByteLength(0xF0)); // Start of 4-byte (emoji)
+}
+
+test "UTF-8 codepoint decoding" {
+    // ASCII
+    const ascii = decodeCodepoint("A");
+    try std.testing.expect(ascii != null);
+    try std.testing.expectEqual(@as(u21, 'A'), ascii.?.codepoint);
+    try std.testing.expectEqual(@as(u3, 1), ascii.?.len);
+
+    // 3-byte CJK character (世 = U+4E16)
+    const cjk = decodeCodepoint("世界");
+    try std.testing.expect(cjk != null);
+    try std.testing.expectEqual(@as(u21, 0x4E16), cjk.?.codepoint);
+    try std.testing.expectEqual(@as(u3, 3), cjk.?.len);
+}
+
+test "string creation and data access" {
+    const allocator = std.testing.allocator;
+
+    const str = try createString(allocator, "hello");
+    defer freeString(allocator, str);
+
+    try std.testing.expectEqualStrings("hello", str.data());
+    try std.testing.expectEqual(@as(u32, 5), str.len);
+    try std.testing.expect(str.flags.is_ascii);
+    try std.testing.expect(!str.flags.is_unique);
+}
+
+test "string interning" {
+    const allocator = std.testing.allocator;
+
+    var table = StringTable.init(allocator);
+    defer table.deinit();
+
+    const str1 = try table.intern("hello");
+    const str2 = try table.intern("hello");
+    const str3 = try table.intern("world");
+
+    // Same string returns same pointer
+    try std.testing.expectEqual(str1, str2);
+    // Different strings return different pointers
+    try std.testing.expect(str1 != str3);
+
+    // Check flags
+    try std.testing.expect(str1.flags.is_unique);
+
+    // Check stats
+    const stats = table.getStats();
+    try std.testing.expectEqual(@as(usize, 2), stats.interned); // "hello" and "world"
+    try std.testing.expectEqual(@as(usize, 1), stats.hits); // Second "hello" was a hit
+}
+
+test "string concatenation" {
+    const allocator = std.testing.allocator;
+
+    const str1 = try createString(allocator, "hello");
+    defer freeString(allocator, str1);
+
+    const str2 = try createString(allocator, " world");
+    defer freeString(allocator, str2);
+
+    const concat = try concatStrings(allocator, str1, str2);
+    defer freeString(allocator, concat);
+
+    try std.testing.expectEqualStrings("hello world", concat.data());
+    try std.testing.expectEqual(@as(u32, 11), concat.len);
+}
+
+test "JSString methods" {
+    const allocator = std.testing.allocator;
+
+    const str = try createString(allocator, "hello world");
+    defer freeString(allocator, str);
+
+    // startsWith
+    try std.testing.expect(str.startsWith("hello"));
+    try std.testing.expect(!str.startsWith("world"));
+
+    // endsWith
+    try std.testing.expect(str.endsWith("world"));
+    try std.testing.expect(!str.endsWith("hello"));
+
+    // indexOf
+    try std.testing.expectEqual(@as(?u32, 0), str.indexOf("hello"));
+    try std.testing.expectEqual(@as(?u32, 6), str.indexOf("world"));
+    try std.testing.expectEqual(@as(?u32, null), str.indexOf("xyz"));
+
+    // lastIndexOf
+    try std.testing.expectEqual(@as(?u32, 6), str.lastIndexOf("world"));
+
+    // charAt
+    try std.testing.expectEqual(@as(?u8, 'h'), str.charAt(0));
+    try std.testing.expectEqual(@as(?u8, 'd'), str.charAt(10));
+    try std.testing.expectEqual(@as(?u8, null), str.charAt(100));
+
+    // isEmpty
+    try std.testing.expect(!str.isEmpty());
+}
+
+test "JSString equality" {
+    const allocator = std.testing.allocator;
+
+    const str1 = try createString(allocator, "test");
+    defer freeString(allocator, str1);
+
+    const str2 = try createString(allocator, "test");
+    defer freeString(allocator, str2);
+
+    const str3 = try createString(allocator, "other");
+    defer freeString(allocator, str3);
+
+    try std.testing.expect(str1.eql(str2));
+    try std.testing.expect(!str1.eql(str3));
+    try std.testing.expect(str1.eqlBytes("test"));
+    try std.testing.expect(!str1.eqlBytes("other"));
 }
