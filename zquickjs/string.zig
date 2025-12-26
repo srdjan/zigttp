@@ -6,7 +6,8 @@ const std = @import("std");
 const heap = @import("heap.zig");
 
 /// JavaScript string representation
-pub const JSString = struct {
+/// Uses extern struct for predictable C-compatible memory layout
+pub const JSString = extern struct {
     header: heap.MemBlockHeader,
     flags: Flags,
     len: u32,

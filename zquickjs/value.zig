@@ -153,24 +153,26 @@ pub const JSValue = packed struct {
     // ========================================================================
 
     /// Check if value is a string (heap object with string tag)
+    /// MemBlockHeader layout: [size_words:27][tag:4][gc_mark:1]
+    /// So tag is at bits 1-4, need to shift right by 1 first
     pub inline fn isString(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
-        return (header.* & 0xF) == 3; // MemTag.string
+        return ((header.* >> 1) & 0xF) == 3; // MemTag.string
     }
 
     /// Check if value is an object (heap object with object tag)
     pub inline fn isObject(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
-        return (header.* & 0xF) == 1; // MemTag.object
+        return ((header.* >> 1) & 0xF) == 1; // MemTag.object
     }
 
     /// Check if value is a function
     pub inline fn isFunction(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
-        return (header.* & 0xF) == 4; // MemTag.function_bytecode
+        return ((header.* >> 1) & 0xF) == 4; // MemTag.function_bytecode
     }
 
     /// Check if value is an array

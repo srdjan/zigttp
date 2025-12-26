@@ -306,7 +306,8 @@ pub const ClassId = enum(u8) {
 };
 
 /// JavaScript object
-pub const JSObject = struct {
+/// Uses extern struct for predictable C-compatible memory layout
+pub const JSObject = extern struct {
     header: heap.MemBlockHeader,
     hidden_class: *HiddenClass,
     prototype: ?*JSObject,
