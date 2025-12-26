@@ -4,6 +4,28 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Build option: use Zig QuickJS implementation
+    const use_zquickjs = b.option(bool, "use-zquickjs", "Use ZQuickJS (Zig) implementation instead of C mquickjs") orelse false;
+
+    // ZQuickJS module (Zig implementation)
+    const zquickjs_mod = b.addModule("zquickjs", .{
+        .root_source_file = b.path("zquickjs/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ZQuickJS tests
+    const zquickjs_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zquickjs/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_zquickjs_tests = b.addRunArtifact(zquickjs_tests);
+    const zquickjs_test_step = b.step("test-zquickjs", "Run ZQuickJS unit tests");
+    zquickjs_test_step.dependOn(&run_zquickjs_tests.step);
+
     // MQuickJS C library
     const mquickjs = b.addLibrary(.{
         .name = "mquickjs",
@@ -53,6 +75,11 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(mquickjs);
     exe.addIncludePath(b.path("mquickjs"));
     exe.linkLibC();
+
+    // Optionally add ZQuickJS module
+    if (use_zquickjs) {
+        exe.root_module.addImport("zquickjs", zquickjs_mod);
+    }
 
     b.installArtifact(exe);
 
