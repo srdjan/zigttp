@@ -395,6 +395,19 @@ pub const GC = struct {
         self.root_set.removeRoot(val);
     }
 
+    /// Allocate a Float64Box for boxed float values
+    pub fn allocFloat(self: *GC, v: f64) !*value.JSValue.Float64Box {
+        const size = @sizeOf(value.JSValue.Float64Box);
+        const ptr = try self.allocWithGC(size);
+        const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(ptr));
+        box.* = .{
+            .header = 2, // MemTag.float64
+            ._pad = 0,
+            .value = v,
+        };
+        return box;
+    }
+
     /// Minor GC: evacuate live nursery objects to tenured
     pub fn minorGC(self: *GC) void {
         self.minor_gc_count += 1;

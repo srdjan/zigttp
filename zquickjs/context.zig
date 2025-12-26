@@ -149,6 +149,52 @@ pub const Context = struct {
         return self.exception.isException() or
             (!self.exception.isUndefined() and !self.exception.isNull());
     }
+
+    // ========================================================================
+    // Local Variable Access
+    // ========================================================================
+
+    /// Get local variable by index (relative to frame pointer)
+    pub inline fn getLocal(self: *Context, idx: usize) value.JSValue {
+        return self.stack[self.fp + idx];
+    }
+
+    /// Set local variable by index
+    pub inline fn setLocal(self: *Context, idx: usize, val: value.JSValue) void {
+        self.stack[self.fp + idx] = val;
+    }
+
+    /// Get argument by index (before frame pointer)
+    pub inline fn getArg(self: *Context, idx: usize, arg_count: usize) value.JSValue {
+        // Arguments are pushed before the frame, in reverse order
+        if (idx >= arg_count) return value.JSValue.undefined_val;
+        const frame_base = if (self.call_depth > 0) self.call_stack[self.call_depth - 1].return_sp else 0;
+        return self.stack[frame_base + idx];
+    }
+
+    /// Get 'this' value for current frame
+    pub inline fn getThis(self: *Context) value.JSValue {
+        if (self.call_depth == 0) return self.global;
+        return self.call_stack[self.call_depth - 1].this;
+    }
+
+    /// Ensure stack has at least n slots
+    pub inline fn ensureStack(self: *Context, n: usize) !void {
+        if (self.sp + n > self.stack.len) {
+            return error.StackOverflow;
+        }
+    }
+
+    /// Get current stack depth from frame pointer
+    pub inline fn stackDepth(self: *Context) usize {
+        return self.sp - self.fp;
+    }
+
+    /// Drop n values from stack
+    pub inline fn dropN(self: *Context, n: usize) void {
+        std.debug.assert(self.sp >= n);
+        self.sp -= n;
+    }
 };
 
 /// Dynamic atom table
