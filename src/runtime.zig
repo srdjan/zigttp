@@ -102,6 +102,62 @@ pub const Runtime = struct {
         self.allocator.free(self.mem_buffer);
     }
 
+    /// Reset runtime state for per-request isolation (CRITICAL for FaaS security)
+    /// Clears all user-defined globals while preserving built-in APIs
+    pub fn resetForNextRequest(self: *Self) !void {
+        // Clear any pending async operations from previous request
+        self.event_loop.clear();
+
+        // Clear user-defined global variables while preserving built-ins
+        try self.clearUserGlobals();
+    }
+
+    /// Clear user-defined global variables, keeping only protected built-ins
+    /// Uses JavaScript evaluation for portability across JS engine implementations
+    fn clearUserGlobals(self: *Self) !void {
+        // JavaScript code to clear all user-defined globals while preserving built-ins
+        // This runs in the JS context and uses Object.keys + delete
+        const clear_globals_code =
+            \\(function() {
+            \\    var protected = {
+            \\        'handler': true, 'Response': true, 'Request': true, 'console': true,
+            \\        'Deno': true, 'h': true, 'renderToString': true, 'Fragment': true,
+            \\        'globalThis': true, 'Object': true, 'Array': true, 'String': true,
+            \\        'Number': true, 'Boolean': true, 'Function': true, 'Math': true,
+            \\        'JSON': true, 'Promise': true, 'Date': true, 'Error': true,
+            \\        'TypeError': true, 'RangeError': true, 'SyntaxError': true,
+            \\        'ReferenceError': true, 'parseInt': true, 'parseFloat': true,
+            \\        'isNaN': true, 'isFinite': true, 'encodeURI': true, 'decodeURI': true,
+            \\        'encodeURIComponent': true, 'decodeURIComponent': true,
+            \\        'undefined': true, 'NaN': true, 'Infinity': true, 'escape': true,
+            \\        'unescape': true, 'fetch': true, 'setTimeout': true, 'setInterval': true,
+            \\        'clearTimeout': true, 'clearInterval': true, 'escapeHtml': true,
+            \\        'escapeAttr': true, 'renderStyle': true, 'eval': true, 'print': true,
+            \\        'gc': true, 'Symbol': true, 'Map': true, 'Set': true, 'WeakMap': true,
+            \\        'WeakSet': true, 'Proxy': true, 'Reflect': true, 'ArrayBuffer': true,
+            \\        'DataView': true, 'Int8Array': true, 'Uint8Array': true,
+            \\        'Int16Array': true, 'Uint16Array': true, 'Int32Array': true,
+            \\        'Uint32Array': true, 'Float32Array': true, 'Float64Array': true,
+            \\        'RegExp': true, 'URIError': true, 'EvalError': true
+            \\    };
+            \\    var keys = Object.keys(globalThis);
+            \\    for (var i = 0; i < keys.length; i++) {
+            \\        var key = keys[i];
+            \\        if (!protected[key]) {
+            \\            try { delete globalThis[key]; } catch(e) {}
+            \\        }
+            \\    }
+            \\})();
+        ;
+
+        // Execute the cleanup code
+        const result = mq.eval(self.ctx, clear_globals_code, "<runtime-cleanup>", .{});
+        if (result == .err) {
+            std.log.warn("Failed to clear user globals: {s}", .{result.err.message orelse "unknown"});
+            return error.GlobalCleanupFailed;
+        }
+    }
+
     // ------------------------------------------------------------------------
     // Binding Installation
     // ------------------------------------------------------------------------
@@ -719,8 +775,16 @@ pub const RuntimePool = struct {
             }
         }
 
-        // For per-request isolation, we should reset or destroy the runtime
-        // For now, just return to pool (reuse context)
+        // CRITICAL: Reset runtime state for per-request isolation (FaaS security)
+        // This prevents multi-tenant data leakage between requests
+        rt.resetForNextRequest() catch {
+            // If reset fails, destroy the runtime and don't return to pool
+            std.log.warn("Runtime reset failed, destroying instance", .{});
+            rt.deinit();
+            self.allocator.destroy(rt);
+            return;
+        };
+
         self.available.append(self.allocator, rt) catch {
             rt.deinit();
             self.allocator.destroy(rt);

@@ -56,6 +56,17 @@ pub const EventLoop = struct {
         self.microtasks.deinit(self.allocator);
     }
 
+    /// Clear all pending operations and microtasks (for request isolation)
+    pub fn clear(self: *Self) void {
+        // Clean up each pending operation's allocated resources
+        for (self.pending_ops.items) |*op| {
+            op.cleanup(self.allocator);
+        }
+        self.pending_ops.clearRetainingCapacity();
+        self.microtasks.clearRetainingCapacity();
+        self.running = false;
+    }
+
     /// Get or create HTTP client (lazy init)
     pub fn getHttpClient(self: *Self) *std.http.Client {
         if (self.http_client == null) {

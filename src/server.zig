@@ -194,8 +194,15 @@ pub const Server = struct {
             .headers = request.headers,
             .body = request.body,
         }) catch |err| {
-            std.log.err("Handler error: {}", .{err});
-            try self.sendErrorResponse(conn.stream, 500, "Internal Server Error");
+            // Return 503 Service Unavailable for pool exhaustion (allows load balancer retry)
+            // Return 500 for other errors
+            const status: u16 = if (err == error.PoolExhausted) 503 else 500;
+            const message = if (err == error.PoolExhausted)
+                "Service Unavailable: Server at capacity, please retry"
+            else
+                "Internal Server Error";
+            std.log.err("Handler error: {} (responding with {})", .{ err, status });
+            try self.sendErrorResponse(conn.stream, status, message);
             return;
         };
         defer response.deinit();
@@ -228,6 +235,18 @@ pub const Server = struct {
         var buf: [8192]u8 = undefined;
         var headers = std.StringHashMap([]const u8).init(self.allocator);
         errdefer headers.deinit();
+
+        // Set read timeout to prevent DoS via slow clients
+        // Use SO_RCVTIMEO socket option for timeout enforcement
+        const timeout_secs: u32 = @intCast(self.config.timeout_ms / 1000);
+        const timeout_usecs: u32 = @intCast((self.config.timeout_ms % 1000) * 1000);
+        const timeout = std.posix.timeval{
+            .sec = @intCast(timeout_secs),
+            .usec = @intCast(timeout_usecs),
+        };
+        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+            std.log.warn("Could not set read timeout: {}", .{err});
+        };
 
         // Use buffered reader for efficient parsing (~90% fewer syscalls)
         var reader = BufferedReader.init(stream);

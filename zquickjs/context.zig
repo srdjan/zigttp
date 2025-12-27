@@ -340,6 +340,48 @@ pub const AtomTable = struct {
 
         return atom;
     }
+
+    /// Prune unused atoms during major GC
+    /// Takes a set of atoms that are still in use (referenced by live objects)
+    pub fn pruneUnused(self: *AtomTable, used_atoms: *const std.AutoHashMap(object.Atom, void)) void {
+        // Build list of keys to remove (can't remove during iteration)
+        var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        defer to_remove.deinit();
+
+        var it = self.strings.iterator();
+        while (it.next()) |entry| {
+            const atom = entry.value_ptr.*;
+            // Keep predefined atoms (they're always in use)
+            if (atom.isPredefined()) continue;
+
+            // Check if this dynamic atom is still referenced
+            if (!used_atoms.contains(atom)) {
+                to_remove.append(entry.key_ptr.*) catch continue;
+            }
+        }
+
+        // Remove unreferenced atoms
+        for (to_remove.items) |key| {
+            _ = self.strings.remove(key);
+            self.allocator.free(key);
+        }
+    }
+
+    /// Reset atom table to initial state (for request isolation)
+    pub fn reset(self: *AtomTable) void {
+        // Free all interned string keys
+        var it = self.strings.keyIterator();
+        while (it.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.strings.clearRetainingCapacity();
+        self.next_id = object.Atom.FIRST_DYNAMIC;
+    }
+
+    /// Get current atom count (for monitoring)
+    pub fn count(self: *AtomTable) usize {
+        return self.strings.count();
+    }
 };
 
 test "Context stack operations" {

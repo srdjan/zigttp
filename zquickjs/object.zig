@@ -269,6 +269,38 @@ pub const HiddenClass = struct {
         allocator.destroy(self);
     }
 
+    /// Clear all cached transitions to free memory
+    /// Call during GC or context reset to prevent memory leaks
+    pub fn clearTransitions(self: *HiddenClass, allocator: std.mem.Allocator) void {
+        // Free all transitioned hidden classes recursively
+        var it = self.transitions.valueIterator();
+        while (it.next()) |child_class| {
+            // Recursively clear children's transitions first
+            child_class.*.clearTransitions(allocator);
+            // Free child's properties array if allocated
+            if (child_class.*.properties.len > 0) {
+                allocator.free(child_class.*.properties);
+            }
+            // Free the child class itself
+            allocator.destroy(child_class.*);
+        }
+        // Clear our transitions map (releases hash map memory)
+        self.transitions.clearAndFree();
+    }
+
+    /// Full cleanup including self - use when destroying entire class hierarchy
+    pub fn deinitRecursive(self: *HiddenClass, allocator: std.mem.Allocator) void {
+        // Clear all child transitions first
+        self.clearTransitions(allocator);
+        // Free our own properties if allocated
+        if (self.properties.len > 0) {
+            allocator.free(self.properties);
+        }
+        // Free self
+        self.transitions.deinit();
+        allocator.destroy(self);
+    }
+
     /// Get or create transition to new shape with added property
     pub fn addProperty(self: *HiddenClass, allocator: std.mem.Allocator, name: Atom) !*HiddenClass {
         // Check for existing transition

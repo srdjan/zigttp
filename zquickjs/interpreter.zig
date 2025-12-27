@@ -51,6 +51,7 @@ pub const Interpreter = struct {
         StackOverflow,
         CallStackOverflow,
         TypeError,
+        TooManyArguments,
         InvalidConstant,
         NotCallable,
         NativeFunctionError,
@@ -959,13 +960,21 @@ pub const Interpreter = struct {
         return self.constants[idx];
     }
 
+    /// Maximum arguments for stack-based allocation (security limit)
+    const MAX_STACK_ARGS = 256;
+
     /// Perform function call
     fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!void {
         // Stack layout for regular call: [func, arg0, arg1, ..., argN-1]
         // Stack layout for method call: [obj, func, arg0, arg1, ..., argN-1]
 
+        // CRITICAL: Bounds check to prevent buffer overflow (security fix)
+        if (argc > MAX_STACK_ARGS) {
+            return error.TooManyArguments;
+        }
+
         // Collect arguments (in reverse order from stack)
-        var args: [256]value.JSValue = undefined;
+        var args: [MAX_STACK_ARGS]value.JSValue = undefined;
         var i: usize = argc;
         while (i > 0) {
             i -= 1;
