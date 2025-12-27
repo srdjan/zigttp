@@ -2834,38 +2834,41 @@ pub const math_constants = struct {
 pub fn consoleLog(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
-    const stdout = std.io.getStdOut().writer();
+    const stdout = std.fs.File.stdout();
+    const writer = stdout.deprecatedWriter();
     for (args, 0..) |arg, i| {
-        if (i > 0) stdout.writeAll(" ") catch {};
-        printValue(stdout, arg) catch {};
+        if (i > 0) writer.writeAll(" ") catch {};
+        printValue(writer, arg) catch {};
     }
-    stdout.writeAll("\n") catch {};
+    writer.writeAll("\n") catch {};
     return value.JSValue.undefined_val;
 }
 
 pub fn consoleWarn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
-    const stderr = std.io.getStdErr().writer();
-    stderr.writeAll("[WARN] ") catch {};
+    const stderr = std.fs.File.stderr();
+    const writer = stderr.deprecatedWriter();
+    writer.writeAll("[WARN] ") catch {};
     for (args, 0..) |arg, i| {
-        if (i > 0) stderr.writeAll(" ") catch {};
-        printValue(stderr, arg) catch {};
+        if (i > 0) writer.writeAll(" ") catch {};
+        printValue(writer, arg) catch {};
     }
-    stderr.writeAll("\n") catch {};
+    writer.writeAll("\n") catch {};
     return value.JSValue.undefined_val;
 }
 
 pub fn consoleError(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
-    const stderr = std.io.getStdErr().writer();
-    stderr.writeAll("[ERROR] ") catch {};
+    const stderr = std.fs.File.stderr();
+    const writer = stderr.deprecatedWriter();
+    writer.writeAll("[ERROR] ") catch {};
     for (args, 0..) |arg, i| {
-        if (i > 0) stderr.writeAll(" ") catch {};
-        printValue(stderr, arg) catch {};
+        if (i > 0) writer.writeAll(" ") catch {};
+        printValue(writer, arg) catch {};
     }
-    stderr.writeAll("\n") catch {};
+    writer.writeAll("\n") catch {};
     return value.JSValue.undefined_val;
 }
 

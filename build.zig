@@ -4,10 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Build option: use Zig QuickJS implementation
-    const use_zquickjs = b.option(bool, "use-zquickjs", "Use ZQuickJS (Zig) implementation instead of C mquickjs") orelse false;
-
-    // ZQuickJS module (Zig implementation)
+    // ZQuickJS module (Zig implementation - now the primary JS engine)
     const zquickjs_mod = b.addModule("zquickjs", .{
         .root_source_file = b.path("zquickjs/root.zig"),
         .target = target,
@@ -26,42 +23,6 @@ pub fn build(b: *std.Build) void {
     const zquickjs_test_step = b.step("test-zquickjs", "Run ZQuickJS unit tests");
     zquickjs_test_step.dependOn(&run_zquickjs_tests.step);
 
-    // MQuickJS C library
-    const mquickjs = b.addLibrary(.{
-        .name = "mquickjs",
-        .linkage = .static,
-        .root_module = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    // C source files from bellard/mquickjs
-    const c_sources = &[_][]const u8{
-        "mquickjs/mquickjs.c",
-        "mquickjs/cutils.c",
-        "mquickjs/dtoa.c",
-        "mquickjs/libm.c",
-        "src/mqjs_stdlib_data.c",
-    };
-
-    const c_flags = &[_][]const u8{
-        "-std=gnu11",
-        "-Wall",
-        "-Wextra",
-        "-Wno-unused-parameter",
-        "-Wno-sign-compare",
-        "-fno-sanitize=undefined", // mquickjs uses some UB-ish patterns
-    };
-
-    mquickjs.addCSourceFiles(.{
-        .files = c_sources,
-        .flags = c_flags,
-    });
-
-    mquickjs.addIncludePath(b.path("mquickjs"));
-    mquickjs.linkLibC();
-
     // Main server executable
     const exe = b.addExecutable(.{
         .name = "zigttp-server",
@@ -72,14 +33,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.linkLibrary(mquickjs);
-    exe.addIncludePath(b.path("mquickjs"));
-    exe.linkLibC();
-
-    // Optionally add ZQuickJS module
-    if (use_zquickjs) {
-        exe.root_module.addImport("zquickjs", zquickjs_mod);
-    }
+    // Add ZQuickJS module to main executable
+    exe.root_module.addImport("zquickjs", zquickjs_mod);
 
     b.installArtifact(exe);
 
@@ -103,34 +58,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    unit_tests.linkLibrary(mquickjs);
-    unit_tests.addIncludePath(b.path("mquickjs"));
-    unit_tests.linkLibC();
+    // Add ZQuickJS module to tests
+    unit_tests.root_module.addImport("zquickjs", zquickjs_mod);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
 
-    // Benchmark executable
-    const bench = b.addExecutable(.{
-        .name = "zigttp-bench",
+    // ZRuntime tests (native Zig runtime)
+    const zruntime_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/benchmark.zig"),
+            .root_source_file = b.path("src/zruntime.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = optimize,
         }),
     });
-
-    bench.linkLibrary(mquickjs);
-    bench.addIncludePath(b.path("mquickjs"));
-    bench.linkLibC();
-
-    b.installArtifact(bench);
-
-    const bench_cmd = b.addRunArtifact(bench);
-    if (b.args) |args| {
-        bench_cmd.addArgs(args);
-    }
-    const bench_step = b.step("bench", "Run performance benchmarks");
-    bench_step.dependOn(&bench_cmd.step);
+    zruntime_tests.root_module.addImport("zquickjs", zquickjs_mod);
+    const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
+    const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
+    zruntime_test_step.dependOn(&run_zruntime_tests.step);
 }

@@ -610,7 +610,7 @@ pub const Interpreter = struct {
                     // Module loading requires a module registry/loader which would be
                     // set up in the context. For now, push an empty namespace object.
                     const root_class = self.ctx.root_class orelse return error.NoRootClass;
-                    const namespace = try object.JSObject.create(self.ctx.allocator, root_class);
+                    const namespace = try object.JSObject.create(self.ctx.allocator, root_class, null);
                     try self.ctx.push(namespace.toValue());
                 },
 
@@ -627,12 +627,12 @@ pub const Interpreter = struct {
                         // Try to get the property by name
                         // For now, just push undefined as we don't have real module loading
                         if (namespace.getSlot(0).isUndefined()) {
-                            try self.ctx.push(value.JSValue.undefined);
+                            try self.ctx.push(value.JSValue.undefined_val);
                         } else {
                             try self.ctx.push(namespace.getSlot(0));
                         }
                     } else {
-                        try self.ctx.push(value.JSValue.undefined);
+                        try self.ctx.push(value.JSValue.undefined_val);
                     }
                 },
 
@@ -644,9 +644,9 @@ pub const Interpreter = struct {
                         // Default export is typically stored with "default" key
                         // For now, just return undefined
                         _ = namespace;
-                        try self.ctx.push(value.JSValue.undefined);
+                        try self.ctx.push(value.JSValue.undefined_val);
                     } else {
-                        try self.ctx.push(value.JSValue.undefined);
+                        try self.ctx.push(value.JSValue.undefined_val);
                     }
                 },
 
@@ -682,8 +682,8 @@ pub const Interpreter = struct {
                                 const src_len: usize = @intCast(len_val.getInt());
                                 // Copy each element from source to target
                                 for (0..src_len) |i| {
-                                    const elem = source.getSlot(i);
-                                    target.setSlot(idx, elem);
+                                    const elem = source.getSlot(@intCast(i));
+                                    target.setSlot(@intCast(idx), elem);
                                     idx += 1;
                                 }
                                 // Push new index for subsequent elements

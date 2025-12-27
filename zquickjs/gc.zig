@@ -492,7 +492,7 @@ pub const GC = struct {
         const size = header.sizeBytes();
 
         // Allocate in tenured space
-        const new_ptr = self.allocator.alignedAlloc(u8, 8, size) catch return error.OutOfMemory;
+        const new_ptr = self.allocator.alignedAlloc(u8, .@"8", size) catch return error.OutOfMemory;
 
         // Copy object data
         const src_bytes: [*]u8 = @ptrCast(ptr);

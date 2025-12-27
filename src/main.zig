@@ -32,7 +32,7 @@ const std = @import("std");
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
 const HandlerSource = @import("server.zig").HandlerSource;
-const RuntimeConfig = @import("runtime.zig").RuntimeConfig;
+const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -200,7 +200,7 @@ fn printHelp() void {
         \\
     ;
 
-    std.fs.File.stdout().deprecatedWriter().writeAll(help) catch {};
+    std.fs.File.stdout().writeAll(help) catch {};
 }
 
 // ============================================================================
@@ -219,7 +219,6 @@ test "parse size" {
 
 test {
     // Run tests from imported modules
-    _ = @import("mquickjs.zig");
-    _ = @import("runtime.zig");
+    _ = @import("zruntime.zig");
     _ = @import("server.zig");
 }

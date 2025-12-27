@@ -1,19 +1,20 @@
 //! HTTP Server with JavaScript Request Handlers
 //!
 //! Architecture:
-//! - Async I/O using Zig's std.net
+//! - Blocking I/O using Zig's std.Io with Threaded backend
 //! - Per-request JS context isolation via RuntimePool
 //! - Deno-compatible handler API
 
 const std = @import("std");
-const net = std.net;
-const mq = @import("mquickjs.zig");
+const Io = std.Io;
+const net = std.Io.net;
 const jsx = @import("jsx.zig");
-const Runtime = @import("runtime.zig").Runtime;
-const RuntimePool = @import("runtime.zig").RuntimePool;
-const RuntimeConfig = @import("runtime.zig").RuntimeConfig;
-const HttpRequest = @import("runtime.zig").HttpRequest;
-const HttpResponse = @import("runtime.zig").HttpResponse;
+const zruntime = @import("zruntime.zig");
+const Runtime = zruntime.Runtime;
+const RuntimePool = zruntime.RuntimePool;
+const RuntimeConfig = zruntime.RuntimeConfig;
+const HttpRequest = zruntime.HttpRequest;
+const HttpResponse = zruntime.HttpResponse;
 
 // ============================================================================
 // Server Configuration
@@ -66,6 +67,7 @@ pub const HandlerSource = union(enum) {
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
+    threaded_io: Io.Threaded,
     listener: ?net.Server,
     pool: ?RuntimePool,
     handler_code: []const u8,
@@ -79,9 +81,7 @@ pub const Server = struct {
         const handler_code = switch (config.handler) {
             .inline_code => |code| code,
             .file_path => |path| blk: {
-                const file = try std.fs.cwd().openFile(path, .{});
-                defer file.close();
-                const source = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+                const source = try std.fs.cwd().readFileAlloc(path, allocator, Io.Limit.limited(10 * 1024 * 1024));
 
                 // Transform JSX if .jsx extension
                 if (std.mem.endsWith(u8, path, ".jsx")) {
@@ -101,6 +101,7 @@ pub const Server = struct {
         return Self{
             .config = config,
             .allocator = allocator,
+            .threaded_io = Io.Threaded.init(allocator),
             .listener = null,
             .pool = null,
             .handler_code = handler_code,
@@ -110,8 +111,10 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        const io = self.threaded_io.io();
         if (self.pool) |*p| p.deinit();
-        if (self.listener) |*l| l.deinit();
+        if (self.listener) |*l| l.deinit(io);
+        self.threaded_io.deinit();
 
         // Free handler code if loaded from file
         if (self.config.handler == .file_path) {
@@ -120,6 +123,8 @@ pub const Server = struct {
     }
 
     pub fn start(self: *Self) !void {
+        const io = self.threaded_io.io();
+
         // Initialize runtime pool
         self.pool = try RuntimePool.init(
             self.allocator,
@@ -128,17 +133,16 @@ pub const Server = struct {
             self.config.pool_size,
         );
 
-        // Parse address
-        const address = try net.Address.parseIp4(self.config.host, self.config.port);
+        // Parse address and create listener
+        const address = try net.IpAddress.parseIp4(self.config.host, self.config.port);
 
-        // Create listener
-        self.listener = try address.listen(.{
+        self.listener = try address.listen(io, .{
             .reuse_address = true,
         });
 
         self.running = true;
 
-        std.log.info("🚀 Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
+        std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
         std.log.info("   Pool size: {d} runtimes", .{self.config.pool_size});
     }
 
@@ -148,27 +152,27 @@ pub const Server = struct {
     }
 
     fn acceptLoop(self: *Self) !void {
+        const io = self.threaded_io.io();
         var listener = self.listener orelse return error.NotStarted;
 
         while (self.running) {
-            const conn = listener.accept() catch |err| {
+            var stream = listener.accept(io) catch |err| {
                 if (err == error.ConnectionAborted) continue;
                 return err;
             };
 
-            self.handleConnection(conn) catch |err| {
+            self.handleConnection(&stream, io) catch |err| {
                 std.log.err("Connection error: {}", .{err});
             };
+            stream.close(io);
         }
     }
 
-    fn handleConnection(self: *Self, conn: net.Server.Connection) !void {
-        defer conn.stream.close();
-
-        const start_time = std.time.milliTimestamp();
+    fn handleConnection(self: *Self, stream: *net.Stream, io: Io) !void {
+        const start_instant = std.time.Instant.now() catch null;
 
         // Parse HTTP request
-        var request = try self.parseRequest(conn.stream);
+        var request = try self.parseRequest(stream, io);
         defer {
             request.headers.deinit();
             if (request.body) |b| self.allocator.free(b);
@@ -177,14 +181,14 @@ pub const Server = struct {
         // Handle static files if configured
         if (self.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.url, "/static/")) {
-                try self.serveStaticFile(conn.stream, static_dir, request.url[7..]);
+                try self.serveStaticFile(stream, io, static_dir, request.url[7..]);
                 return;
             }
         }
 
         // Invoke JS handler via pool
         var pool = self.pool orelse {
-            try self.sendErrorResponse(conn.stream, 503, "Service Unavailable: runtime pool not initialized");
+            try self.sendErrorResponse(stream, io, 503, "Service Unavailable: runtime pool not initialized");
             return;
         };
 
@@ -202,7 +206,7 @@ pub const Server = struct {
             else
                 "Internal Server Error";
             std.log.err("Handler error: {} (responding with {})", .{ err, status });
-            try self.sendErrorResponse(conn.stream, status, message);
+            try self.sendErrorResponse(stream, io, status, message);
             return;
         };
         defer response.deinit();
@@ -215,48 +219,39 @@ pub const Server = struct {
         }
 
         // Send response
-        try self.sendResponse(conn.stream, &response);
+        try self.sendResponse(stream, io, &response);
 
         // Log request
         if (self.config.log_requests) {
-            const elapsed = std.time.milliTimestamp() - start_time;
+            const elapsed_ms: i64 = if (start_instant) |start_time| blk: {
+                const now = std.time.Instant.now() catch break :blk 0;
+                break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
+            } else 0;
             const count = self.request_count.fetchAdd(1, .monotonic) + 1;
-            std.log.info("[{d}] {s} {s} → {d} ({d}ms)", .{
+            std.log.info("[{d}] {s} {s} -> {d} ({d}ms)", .{
                 count,
                 request.method,
                 request.url,
                 response.status,
-                elapsed,
+                elapsed_ms,
             });
         }
     }
 
-    fn parseRequest(self: *Self, stream: net.Stream) !ParsedRequest {
+    fn parseRequest(self: *Self, stream: *net.Stream, io: Io) !ParsedRequest {
         var buf: [8192]u8 = undefined;
+        var reader_buf: [4096]u8 = undefined;
         var headers = std.StringHashMap([]const u8).init(self.allocator);
         errdefer headers.deinit();
 
-        // Set read timeout to prevent DoS via slow clients
-        // Use SO_RCVTIMEO socket option for timeout enforcement
-        const timeout_secs: u32 = @intCast(self.config.timeout_ms / 1000);
-        const timeout_usecs: u32 = @intCast((self.config.timeout_ms % 1000) * 1000);
-        const timeout = std.posix.timeval{
-            .sec = @intCast(timeout_secs),
-            .usec = @intCast(timeout_usecs),
-        };
-        std.posix.setsockopt(stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            std.log.warn("Could not set read timeout: {}", .{err});
-        };
-
-        // Use buffered reader for efficient parsing (~90% fewer syscalls)
-        var reader = BufferedReader.init(stream);
+        // Use buffered reader for efficient parsing
+        var reader = BufferedReader.init(stream, io, &reader_buf);
 
         // Read request line
         const request_line = try reader.readLine(&buf);
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
         // Duplicate method and url immediately before reading headers
-        // (reading headers will overwrite buf, corrupting the slices)
         const method_slice = parts.next() orelse return error.InvalidRequest;
         const method = try self.allocator.dupe(u8, method_slice);
         errdefer self.allocator.free(method);
@@ -292,7 +287,6 @@ pub const Server = struct {
                 body = try self.allocator.alloc(u8, content_length);
                 errdefer if (body) |b| self.allocator.free(b);
 
-                // Use buffered reader for body too
                 try reader.readExact(body.?);
             }
         }
@@ -305,11 +299,10 @@ pub const Server = struct {
         };
     }
 
-    fn sendResponse(self: *Self, stream: net.Stream, response: *HttpResponse) !void {
+    fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse) !void {
         _ = self;
-        var writer_buf: [4096]u8 = undefined;
-        var writer = stream.writer(&writer_buf);
-        defer writer.interface.flush() catch {};
+        var out_buf: [4096]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
 
         // Status line
@@ -331,13 +324,14 @@ pub const Server = struct {
         if (response.body.len > 0) {
             try out.writeAll(response.body);
         }
+
+        try writer.interface.flush();
     }
 
-    fn sendErrorResponse(self: *Self, stream: net.Stream, status: u16, message: []const u8) !void {
+    fn sendErrorResponse(self: *Self, stream: *net.Stream, io: Io, status: u16, message: []const u8) !void {
         _ = self;
-        var writer_buf: [1024]u8 = undefined;
-        var writer = stream.writer(&writer_buf);
-        defer writer.interface.flush() catch {};
+        var out_buf: [1024]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
 
         const status_text = getStatusText(status);
@@ -346,17 +340,18 @@ pub const Server = struct {
         try out.writeAll("Content-Type: text/plain\r\n");
         try out.writeAll("Connection: close\r\n\r\n");
         try out.writeAll(message);
+        try writer.interface.flush();
     }
 
-    fn serveStaticFile(self: *Self, stream: net.Stream, static_dir: []const u8, path: []const u8) !void {
+    fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8) !void {
         _ = self;
 
         // Security: comprehensive path validation
         if (!isPathSafe(path)) {
-            var writer_buf: [256]u8 = undefined;
-            var writer = stream.writer(&writer_buf);
-            defer writer.interface.flush() catch {};
+            var out_buf: [256]u8 = undefined;
+            var writer = stream.writer(io, &out_buf);
             try writer.interface.writeAll("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nForbidden");
+            try writer.interface.flush();
             return;
         }
 
@@ -366,10 +361,10 @@ pub const Server = struct {
         };
 
         const file = std.fs.cwd().openFile(full_path, .{}) catch {
-            var writer_buf: [256]u8 = undefined;
-            var writer = stream.writer(&writer_buf);
-            defer writer.interface.flush() catch {};
+            var out_buf: [256]u8 = undefined;
+            var writer = stream.writer(io, &out_buf);
             try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found");
+            try writer.interface.flush();
             return;
         };
         defer file.close();
@@ -377,9 +372,8 @@ pub const Server = struct {
         const stat = try file.stat();
         const content_type = getContentType(path);
 
-        var writer_buf: [4096]u8 = undefined;
-        var writer = stream.writer(&writer_buf);
-        defer writer.interface.flush() catch {};
+        var out_buf: [4096]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
         try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\n\r\n", .{
             stat.size,
@@ -393,6 +387,7 @@ pub const Server = struct {
             if (bytes_read == 0) break;
             try out.writeAll(buf[0..bytes_read]);
         }
+        try writer.interface.flush();
     }
 };
 
@@ -408,19 +403,13 @@ const ParsedRequest = struct {
 // ============================================================================
 
 /// Buffered reader for efficient HTTP parsing
-/// Reduces syscalls by reading in chunks instead of byte-by-byte
+/// Uses the std.Io.Reader interface for reading from Stream
 const BufferedReader = struct {
-    stream: net.Stream,
-    buffer: [4096]u8,
-    start: usize,
-    end: usize,
+    reader: net.Stream.Reader,
 
-    pub fn init(stream: net.Stream) BufferedReader {
+    pub fn init(stream: *net.Stream, io: Io, buffer: []u8) BufferedReader {
         return .{
-            .stream = stream,
-            .buffer = undefined,
-            .start = 0,
-            .end = 0,
+            .reader = stream.reader(io, buffer),
         };
     }
 
@@ -429,39 +418,20 @@ const BufferedReader = struct {
         var i: usize = 0;
 
         while (i < out_buf.len - 1) {
-            // Refill buffer if empty
-            if (self.start >= self.end) {
-                self.end = self.stream.read(&self.buffer) catch |err| {
-                    if (err == error.EndOfStream or err == error.ConnectionResetByPeer) {
-                        if (i > 0) return out_buf[0..i];
-                        return err;
-                    }
-                    return err;
-                };
-                self.start = 0;
-                if (self.end == 0) {
-                    if (i > 0) return out_buf[0..i];
-                    return error.EndOfStream;
-                }
+            const byte = self.reader.interface.takeByte() catch |err| {
+                if (i > 0) return out_buf[0..i];
+                return err;
+            };
+
+            if (byte == '\r') {
+                // Consume \n if present
+                _ = self.reader.interface.takeByte() catch {};
+                return out_buf[0..i];
             }
+            if (byte == '\n') return out_buf[0..i];
 
-            // Process buffered data
-            while (self.start < self.end and i < out_buf.len - 1) {
-                const byte = self.buffer[self.start];
-                self.start += 1;
-
-                if (byte == '\r') {
-                    // Consume \n if present
-                    if (self.start < self.end and self.buffer[self.start] == '\n') {
-                        self.start += 1;
-                    }
-                    return out_buf[0..i];
-                }
-                if (byte == '\n') return out_buf[0..i];
-
-                out_buf[i] = byte;
-                i += 1;
-            }
+            out_buf[i] = byte;
+            i += 1;
         }
 
         return out_buf[0..i];
@@ -469,49 +439,9 @@ const BufferedReader = struct {
 
     /// Read exact number of bytes
     pub fn readExact(self: *BufferedReader, out: []u8) !void {
-        var offset: usize = 0;
-
-        // First, use buffered data
-        const buffered = self.end - self.start;
-        if (buffered > 0) {
-            const to_copy = @min(buffered, out.len);
-            @memcpy(out[0..to_copy], self.buffer[self.start .. self.start + to_copy]);
-            self.start += to_copy;
-            offset = to_copy;
-        }
-
-        // Read remaining directly from stream
-        while (offset < out.len) {
-            const n = self.stream.read(out[offset..]) catch |err| {
-                if (err == error.EndOfStream) return error.EndOfStream;
-                return err;
-            };
-            if (n == 0) return error.EndOfStream;
-            offset += n;
-        }
+        try self.reader.interface.readSliceAll(out);
     }
 };
-
-fn readLine(stream: net.Stream, buf: []u8) ![]const u8 {
-    var i: usize = 0;
-    var byte_buf: [1]u8 = undefined;
-    while (i < buf.len - 1) {
-        const bytes_read = stream.read(&byte_buf) catch |err| {
-            if (err == error.EndOfStream) break;
-            return err;
-        };
-        if (bytes_read == 0) break;
-        const byte = byte_buf[0];
-        if (byte == '\r') {
-            _ = stream.read(&byte_buf) catch {}; // consume \n
-            break;
-        }
-        if (byte == '\n') break;
-        buf[i] = byte;
-        i += 1;
-    }
-    return buf[0..i];
-}
 
 fn getStatusText(status: u16) []const u8 {
     return switch (status) {

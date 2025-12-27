@@ -36,6 +36,7 @@ pub const context = @import("context.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const builtins = @import("builtins.zig");
+pub const parser = @import("parser.zig");
 pub const pool = @import("pool.zig");
 pub const c_abi = @import("c_abi.zig");
 
@@ -48,10 +49,16 @@ pub const LockFreePool = pool.LockFreePool;
 pub const Runtime = pool.LockFreePool.Runtime;
 pub const Interpreter = interpreter.Interpreter;
 pub const Opcode = bytecode.Opcode;
+pub const FunctionBytecode = bytecode.FunctionBytecode;
 pub const Atom = object.Atom;
 pub const HiddenClass = object.HiddenClass;
 pub const JSObject = object.JSObject;
+pub const NativeFn = object.NativeFn;
 pub const InlineCache = object.InlineCache;
+pub const JSString = string.JSString;
+pub const StringTable = string.StringTable;
+pub const createString = string.createString;
+pub const Parser = parser.Parser;
 
 /// Version information
 pub const version = struct {

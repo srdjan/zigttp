@@ -204,8 +204,8 @@ pub const Tokenizer = struct {
                 if (self.match('.')) {
                     // Check if next char is a digit - if so, this is ? followed by a number like ?.5
                     // Don't consume the dot in that case
-                    if (self.current < self.source.len and self.source[self.current] >= '0' and self.source[self.current] <= '9') {
-                        self.current -= 1; // Put back the dot
+                    if (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '9') {
+                        self.pos -= 1; // Put back the dot
                         return self.makeToken(.question, 1);
                     }
                     return self.makeToken(.question_dot, 2);
@@ -759,8 +759,8 @@ pub const Parser = struct {
             .in_generator = false,
             .in_async = false,
             .is_module = false,
-            .exports = std.ArrayList(ExportEntry).init(allocator),
-            .imports = std.ArrayList(ImportEntry).init(allocator),
+            .exports = .empty,
+            .imports = .empty,
             .had_error = false,
             .panic_mode = false,
         };
@@ -776,8 +776,8 @@ pub const Parser = struct {
     pub fn deinit(self: *Parser) void {
         self.code.deinit();
         self.constants.deinit();
-        self.exports.deinit();
-        self.imports.deinit();
+        self.exports.deinit(self.allocator);
+        self.imports.deinit(self.allocator);
     }
 
     /// Parse a complete script
@@ -880,7 +880,7 @@ pub const Parser = struct {
             }
             const key_atom = try self.internAtom(binding.key);
             try self.emitOp(.get_field);
-            try self.emitU16(key_atom);
+            try self.emitU16(@truncate(key_atom));
             try self.defineVariable(binding.alias, is_const);
         }
 
@@ -946,11 +946,11 @@ pub const Parser = struct {
         _ = self.match(.semicolon);
     }
 
-    fn internAtom(self: *Parser, name: []const u8) !u16 {
+    fn internAtom(self: *Parser, name: []const u8) !u32 {
         if (lookupPredefinedAtom(name)) |atom| {
             return @intFromEnum(atom);
         }
-        return try self.addStringConstant(name);
+        return @as(u32, try self.addStringConstant(name));
     }
 
     fn functionDeclaration(self: *Parser) Error!void {
@@ -975,7 +975,7 @@ pub const Parser = struct {
         self.is_module = true;
 
         // Side-effect import: import "module";
-        if (self.check(.string)) {
+        if (self.check(.string_literal)) {
             const module_name = self.current.text(self.tokenizer.source);
             self.advance();
             try self.consume(.semicolon, "Expected ';' after import.");
@@ -995,12 +995,12 @@ pub const Parser = struct {
             const local_name = self.previous.text(self.tokenizer.source);
 
             try self.consume(.kw_from, "Expected 'from' after namespace.");
-            try self.consume(.string, "Expected module specifier.");
+            try self.consume(.string_literal, "Expected module specifier.");
             const module_name = self.previous.text(self.tokenizer.source);
             try self.consume(.semicolon, "Expected ';' after import.");
 
             // Record import
-            try self.imports.append(.{
+            try self.imports.append(self.allocator, .{
                 .module_name = module_name[1 .. module_name.len - 1],
                 .local_name = local_name,
                 .imported_name = "*",
@@ -1013,7 +1013,8 @@ pub const Parser = struct {
             try self.emitU16(module_idx);
 
             // Define the local variable
-            const slot = try self.declareVariable(local_name, true);
+            try self.declareLocal(local_name, true);
+            const slot = self.local_count - 1;
             try self.emitOp(.put_loc);
             try self.emitByte(slot);
             return;
@@ -1033,11 +1034,11 @@ pub const Parser = struct {
             if (!self.match(.comma)) {
                 // Just default import
                 try self.consume(.kw_from, "Expected 'from' after default import.");
-                try self.consume(.string, "Expected module specifier.");
+                try self.consume(.string_literal, "Expected module specifier.");
                 const module_name = self.previous.text(self.tokenizer.source);
                 try self.consume(.semicolon, "Expected ';' after import.");
 
-                try self.imports.append(.{
+                try self.imports.append(self.allocator, .{
                     .module_name = module_name[1 .. module_name.len - 1],
                     .local_name = default_name,
                     .imported_name = "default",
@@ -1050,7 +1051,8 @@ pub const Parser = struct {
                 try self.emitU16(module_idx);
                 try self.emitOp(.import_default);
 
-                const slot = try self.declareVariable(default_name, true);
+                try self.declareLocal(default_name, true);
+                const slot = self.local_count - 1;
                 try self.emitOp(.put_loc);
                 try self.emitByte(slot);
                 return;
@@ -1061,8 +1063,8 @@ pub const Parser = struct {
         try self.consume(.lbrace, "Expected '{' for named imports.");
 
         var module_name: []const u8 = "";
-        var named_imports = std.ArrayList(struct { imported: []const u8, local: []const u8 }).init(self.allocator);
-        defer named_imports.deinit();
+        var named_imports: std.ArrayList(struct { imported: []const u8, local: []const u8 }) = .empty;
+        defer named_imports.deinit(self.allocator);
 
         while (!self.check(.rbrace) and !self.check(.eof)) {
             try self.consume(.identifier, "Expected import name.");
@@ -1074,14 +1076,14 @@ pub const Parser = struct {
                 local_name = self.previous.text(self.tokenizer.source);
             }
 
-            try named_imports.append(.{ .imported = imported_name, .local = local_name });
+            try named_imports.append(self.allocator, .{ .imported = imported_name, .local = local_name });
 
             if (!self.match(.comma)) break;
         }
 
         try self.consume(.rbrace, "Expected '}' after named imports.");
         try self.consume(.kw_from, "Expected 'from' after import specifiers.");
-        try self.consume(.string, "Expected module specifier.");
+        try self.consume(.string_literal, "Expected module specifier.");
         module_name = self.previous.text(self.tokenizer.source);
         try self.consume(.semicolon, "Expected ';' after import.");
 
@@ -1094,11 +1096,12 @@ pub const Parser = struct {
         if (has_default) {
             try self.emitOp(.dup); // Keep module namespace on stack
             try self.emitOp(.import_default);
-            const slot = try self.declareVariable(default_name, true);
+            try self.declareLocal(default_name, true);
+            const slot = self.local_count - 1;
             try self.emitOp(.put_loc);
             try self.emitByte(slot);
 
-            try self.imports.append(.{
+            try self.imports.append(self.allocator, .{
                 .module_name = module_name[1 .. module_name.len - 1],
                 .local_name = default_name,
                 .imported_name = "default",
@@ -1113,11 +1116,12 @@ pub const Parser = struct {
             try self.emitOp(.import_name);
             try self.emitU16(name_idx);
 
-            const slot = try self.declareVariable(import_item.local, true);
+            try self.declareLocal(import_item.local, true);
+            const slot = self.local_count - 1;
             try self.emitOp(.put_loc);
             try self.emitByte(slot);
 
-            try self.imports.append(.{
+            try self.imports.append(self.allocator, .{
                 .module_name = module_name[1 .. module_name.len - 1],
                 .local_name = import_item.local,
                 .imported_name = import_item.imported,
@@ -1163,7 +1167,7 @@ pub const Parser = struct {
 
             try self.emitOp(.export_default);
 
-            try self.exports.append(.{
+            try self.exports.append(self.allocator, .{
                 .local_name = "default",
                 .export_name = "default",
                 .is_reexport = false,
@@ -1183,11 +1187,11 @@ pub const Parser = struct {
             // Export the function
             const name_idx = try self.addStringConstant(name);
             try self.emitOp(.get_loc);
-            try self.emitByte(try self.resolveLocal(name) orelse 0);
+            try self.emitByte(self.resolveLocal(name) orelse 0);
             try self.emitOp(.export_name);
             try self.emitU16(name_idx);
 
-            try self.exports.append(.{
+            try self.exports.append(self.allocator, .{
                 .local_name = name,
                 .export_name = name,
                 .is_reexport = false,
@@ -1206,11 +1210,11 @@ pub const Parser = struct {
 
             const name_idx = try self.addStringConstant(name);
             try self.emitOp(.get_loc);
-            try self.emitByte(try self.resolveLocal(name) orelse 0);
+            try self.emitByte(self.resolveLocal(name) orelse 0);
             try self.emitOp(.export_name);
             try self.emitU16(name_idx);
 
-            try self.exports.append(.{
+            try self.exports.append(self.allocator, .{
                 .local_name = name,
                 .export_name = name,
                 .is_reexport = false,
@@ -1236,11 +1240,11 @@ pub const Parser = struct {
 
             const name_idx = try self.addStringConstant(name);
             try self.emitOp(.get_loc);
-            try self.emitByte(try self.resolveLocal(name) orelse 0);
+            try self.emitByte(self.resolveLocal(name) orelse 0);
             try self.emitOp(.export_name);
             try self.emitU16(name_idx);
 
-            try self.exports.append(.{
+            try self.exports.append(self.allocator, .{
                 .local_name = name,
                 .export_name = name,
                 .is_reexport = false,
@@ -1264,11 +1268,11 @@ pub const Parser = struct {
 
             const name_idx = try self.addStringConstant(export_name);
             try self.emitOp(.get_loc);
-            try self.emitByte(try self.resolveLocal(local_name) orelse 0);
+            try self.emitByte(self.resolveLocal(local_name) orelse 0);
             try self.emitOp(.export_name);
             try self.emitU16(name_idx);
 
-            try self.exports.append(.{
+            try self.exports.append(self.allocator, .{
                 .local_name = local_name,
                 .export_name = export_name,
                 .is_reexport = false,
@@ -1295,8 +1299,9 @@ pub const Parser = struct {
         try self.consume(.lparen, "Expected '(' after function name.");
 
         // Parse parameters with default values and rest parameter support
+        const ParamDefault = struct { start: u32, end: u32 };
         var params: [255][]const u8 = undefined;
-        var param_defaults: [255]?struct { start: u32, end: u32 } = [_]?struct { start: u32, end: u32 }{null} ** 255;
+        var param_defaults: [255]?ParamDefault = [_]?ParamDefault{null} ** 255;
         var param_count: u8 = 0;
         var rest_param_idx: ?u8 = null;
 
@@ -1312,7 +1317,7 @@ pub const Parser = struct {
                 if (is_rest) {
                     if (rest_param_idx != null) {
                         self.errorAtCurrent("Only one rest parameter allowed.");
-                        return error.ParseError;
+                        return error.UnexpectedToken;
                     }
                     rest_param_idx = param_count;
                 }
@@ -1321,10 +1326,10 @@ pub const Parser = struct {
                 params[param_count] = self.previous.text(self.tokenizer.source);
 
                 // Check for default value: = expression
-                if (self.match(.equal)) {
+                if (self.match(.assign)) {
                     if (is_rest) {
                         self.errorAtCurrent("Rest parameter cannot have default value.");
-                        return error.ParseError;
+                        return error.UnexpectedToken;
                     }
                     // Record start position of default expression
                     const start = self.current.start;
@@ -1344,7 +1349,7 @@ pub const Parser = struct {
                             self.advance();
                         }
                     }
-                    const end = self.previous.start + self.previous.length;
+                    const end = self.previous.start + self.previous.len;
                     param_defaults[param_count] = .{ .start = start, .end = end };
                 }
 
@@ -1354,7 +1359,7 @@ pub const Parser = struct {
                     // Rest param must be last
                     if (!self.check(.rparen)) {
                         self.errorAtCurrent("Rest parameter must be last.");
-                        return error.ParseError;
+                        return error.UnexpectedToken;
                     }
                     break;
                 }
@@ -1420,8 +1425,8 @@ pub const Parser = struct {
 
                 // Parse and compile the default expression
                 const default_source = outer_tokenizer.source[default_range.start..default_range.end];
-                var default_tokenizer = Tokenizer.init(default_source);
-                self.tokenizer = &default_tokenizer;
+                const default_tokenizer = Tokenizer.init(default_source);
+                self.tokenizer = default_tokenizer;
                 self.advance(); // Prime the tokenizer
                 try self.expression();
 
@@ -1533,6 +1538,30 @@ pub const Parser = struct {
         }
     }
 
+    /// Declare a local variable without emitting store bytecode.
+    /// Used when you need to reserve a slot but emit put_loc separately.
+    fn declareLocal(self: *Parser, name: []const u8, is_const: bool) Error!void {
+        if (self.local_count >= 255) return error.TooManyLocals;
+        self.locals[self.local_count] = .{
+            .name = name,
+            .depth = self.scope_depth,
+            .is_const = is_const,
+        };
+        self.local_count += 1;
+    }
+
+    /// Resolve a local variable by name, returning its slot index.
+    fn resolveLocal(self: *Parser, name: []const u8) ?u8 {
+        var i: usize = self.local_count;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.locals[i].name, name)) {
+                return @intCast(i);
+            }
+        }
+        return null;
+    }
+
     // ========================================================================
     // Statements
     // ========================================================================
@@ -1622,7 +1651,7 @@ pub const Parser = struct {
 
             // Not for...of or for...in, treat as regular for with var declaration
             // Rewind and parse normally
-            self.tokenizer.current = self.previous.start;
+            self.tokenizer.pos = self.previous.start;
             self.tokenizer.pos = self.previous.start;
             self.advance();
             if (is_const) {
@@ -1783,7 +1812,7 @@ pub const Parser = struct {
         try self.consume(.lbrace, "Expected '{' before switch body.");
 
         // Track breaks that need patching at the end
-        var break_jumps: [64]usize = undefined;
+        var break_jumps: [64]u32 = undefined;
         var break_count: usize = 0;
 
         // First pass: emit jumps to case labels, collecting case values
@@ -2162,7 +2191,7 @@ pub const Parser = struct {
         // We need to check if this is a parameter list followed by =>
 
         // Save position to potentially backtrack
-        const saved_pos = self.tokenizer.current;
+        const saved_pos = self.tokenizer.pos;
         const saved_current = self.current;
         const saved_previous = self.previous;
 
@@ -2205,7 +2234,7 @@ pub const Parser = struct {
         }
 
         // Not an arrow function - restore and parse as grouping
-        self.tokenizer.current = saved_pos;
+        self.tokenizer.pos = saved_pos;
         self.current = saved_current;
         self.previous = saved_previous;
 
@@ -2222,8 +2251,8 @@ pub const Parser = struct {
         const outer_scope_depth = self.scope_depth;
 
         // Initialize new function scope
-        self.code = std.ArrayList(u8).init(self.allocator);
-        self.constants = std.ArrayList(value.JSValue).init(self.allocator);
+        self.code = std.array_list.Managed(u8).init(self.allocator);
+        self.constants = std.array_list.Managed(value.JSValue).init(self.allocator);
         self.local_count = 0;
         self.scope_depth = 1;
 
@@ -2635,7 +2664,7 @@ pub const Parser = struct {
     fn yieldExpr(self: *Parser, _: bool) !void {
         if (!self.in_generator) {
             self.errorAtPrevious("'yield' is only valid inside a generator function");
-            return error.ParseError;
+            return error.UnexpectedToken;
         }
 
         // Check for yield* (delegation)
@@ -2665,7 +2694,7 @@ pub const Parser = struct {
     fn awaitExpr(self: *Parser, _: bool) !void {
         if (!self.in_async) {
             self.errorAtPrevious("'await' is only valid inside an async function");
-            return error.ParseError;
+            return error.UnexpectedToken;
         }
 
         // Parse the expression to await

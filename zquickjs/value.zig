@@ -23,6 +23,7 @@ pub const JSValue = packed struct {
     pub const true_val: JSValue = .{ .raw = (2 << 3) | 3 };
     pub const false_val: JSValue = .{ .raw = (3 << 3) | 3 };
     pub const exception_val: JSValue = .{ .raw = (4 << 3) | 3 };
+    pub const nan_val: JSValue = .{ .raw = (5 << 3) | 3 }; // NaN special value
 
     /// Check if value is a 31-bit integer (fast path)
     pub inline fn isInt(self: JSValue) bool {
@@ -123,6 +124,11 @@ pub const JSValue = packed struct {
         if (!self.isPtr()) return false;
         const box = self.toPtr(Float64Box);
         return (box.header & 0xF) == 2; // MemTag.float64
+    }
+
+    /// Alias for isFloat64 for API compatibility
+    pub inline fn isFloat(self: JSValue) bool {
+        return self.isFloat64();
     }
 
     /// Check if value is any number (int or float)
