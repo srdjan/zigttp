@@ -895,7 +895,6 @@ function renderAboutPage() {
         '<p>zigttp-server is a lightweight HTTP server that embeds the MicroQuickJS JavaScript engine.</p>',
         '<h2>Features</h2>',
         '<ul>',
-        '  <li>Minimal memory footprint (as low as 10KB RAM)</li>',
         '  <li>Fast startup times</li>',
         '  <li>Zero dependencies</li>',
         '  <li>ES5 JavaScript with select ES6+ features</li>',

@@ -7,7 +7,6 @@ A lightweight HTTP server written in Zig that embeds [MicroQuickJS](https://gith
 
 ## Features
 
-- **Minimal footprint**: mquickjs runs JavaScript in as low as 10KB RAM
 - **Fast startup**: No JIT compilation, instant cold starts
 - **Zero dependencies**: Just Zig and the mquickjs C sources
 - **Functional API**: Response helpers similar to Deno/Fetch API

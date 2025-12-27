@@ -259,8 +259,7 @@ typedef int JSInterruptHandler(JSContext *ctx, void *opaque);
 
 JSContext *JS_NewContext(void *mem_start, size_t mem_size, const JSSTDLibraryDef *stdlib_def);
 /* if prepare_compilation is true, the context will be used to compile
-   to a binary file. JS_NewContext2() is not expected to be used in
-   the embedded version */
+   to a binary file. */
 JSContext *JS_NewContext2(void *mem_start, size_t mem_size, const JSSTDLibraryDef *stdlib_def, JS_BOOL prepare_compilation);
 void JS_FreeContext(JSContext *ctx);
 void JS_SetContextOpaque(JSContext *ctx, void *opaque);

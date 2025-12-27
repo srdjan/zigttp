@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-zigttp-server is a lightweight HTTP server written in Zig that embeds MicroQuickJS (a minimal JavaScript engine) to execute JavaScript request handlers. Design goals: ~10KB RAM footprint, instant cold starts, zero external dependencies.
+zigttp-server is a lightweight HTTP server written in Zig that embeds MicroQuickJS or zQuickJS (a minimal JavaScript engine) to execute JavaScript request handlers. Design goals: ~10KB RAM footprint, instant cold starts, zero external dependencies.
 
 **Trade-offs for simplicity**: Single-threaded sequential processing, compile-time configuration, ES5 JavaScript subset (with some ES6).
 

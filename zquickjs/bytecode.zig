@@ -49,6 +49,10 @@ pub const Opcode = enum(u8) {
     swap = 0x0E,
     rot3 = 0x0F,
 
+    // Extended stack operations
+    halt = 0x1A,
+    loop = 0x1B, // +i16 offset (loop back)
+
     // Local variables
     get_loc = 0x10, // +u8 local_idx
     put_loc = 0x11, // +u8 local_idx
@@ -122,6 +126,7 @@ pub const Opcode = enum(u8) {
     push_this = 0x82,
     get_global = 0x83, // +u16 atom_idx
     put_global = 0x84, // +u16 atom_idx
+    define_global = 0x85, // +u16 atom_idx (declare global var)
 
     // Type checks
     typeof = 0x90,

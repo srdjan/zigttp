@@ -3527,8 +3527,7 @@ static void dummy_write_func(void *opaque, const void *buf, size_t buf_len)
 }
 
 /* if prepare_compilation is true, the context will be used to compile
-   to a binary file. It is not expected to be used in the embedded
-   version */
+   to a binary file. */
 JSContext *JS_NewContext2(void *mem_start, size_t mem_size, const JSSTDLibraryDef *stdlib_def, BOOL prepare_compilation)
 {
     JSContext *ctx;
