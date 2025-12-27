@@ -8,13 +8,15 @@ const value = @import("value.zig");
 const bytecode = @import("bytecode.zig");
 const context = @import("context.zig");
 const heap = @import("heap.zig");
+const object = @import("object.zig");
+const string = @import("string.zig");
 
 /// Interpreter state
 pub const Interpreter = struct {
     ctx: *context.Context,
     pc: [*]const u8, // Program counter
     code_end: [*]const u8,
-    constants: []const u8, // Constant pool
+    constants: []const value.JSValue, // Constant pool (direct JSValue array)
     current_func: ?*const bytecode.FunctionBytecode,
 
     pub fn init(ctx: *context.Context) Interpreter {
@@ -28,7 +30,7 @@ pub const Interpreter = struct {
     }
 
     /// Run bytecode function
-    pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) !value.JSValue {
+    pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
         self.pc = func.code.ptr;
         self.code_end = func.code.ptr + func.code.len;
         self.constants = func.constants;
@@ -44,8 +46,24 @@ pub const Interpreter = struct {
         return self.dispatch();
     }
 
+    /// Error set for interpreter operations
+    pub const InterpreterError = error{
+        StackOverflow,
+        CallStackOverflow,
+        TypeError,
+        InvalidConstant,
+        NotCallable,
+        NativeFunctionError,
+        UnimplementedOpcode,
+        IntegerOverflow,
+        DivisionByZero,
+        OutOfMemory,
+        NoTransition,
+        NoRootClass,
+    };
+
     /// Main dispatch loop
-    fn dispatch(self: *Interpreter) !value.JSValue {
+    fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
         while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
             const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
             self.pc += 1;
@@ -55,6 +73,14 @@ pub const Interpreter = struct {
                 // Stack Operations
                 // ========================================
                 .nop => {},
+
+                .halt => {
+                    // End of script - return last value on stack or undefined
+                    if (self.ctx.sp > 0) {
+                        return self.ctx.pop();
+                    }
+                    return value.JSValue.undefined_val;
+                },
 
                 .push_0 => try self.ctx.push(value.JSValue.fromInt(0)),
                 .push_1 => try self.ctx.push(value.JSValue.fromInt(1)),
@@ -357,27 +383,172 @@ pub const Interpreter = struct {
                 // ========================================
                 .push_this => try self.ctx.push(self.ctx.getThis()),
 
+                .new_object => {
+                    const obj = try self.createObject();
+                    try self.ctx.push(obj.toValue());
+                },
+
+                .new_array => {
+                    const length = readU16(self.pc);
+                    self.pc += 2;
+                    // Create array object (simplified - just an object with length)
+                    const obj = try self.createObject();
+                    try obj.setProperty(self.ctx.allocator, .length, value.JSValue.fromInt(@intCast(length)));
+                    obj.class_id = .array;
+                    try self.ctx.push(obj.toValue());
+                },
+
+                .get_field => {
+                    const atom_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        if (obj.getProperty(atom)) |prop_val| {
+                            try self.ctx.push(prop_val);
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else {
+                        // TODO: Handle primitive property access (e.g., string.length)
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                },
+
+                .put_field => {
+                    const atom_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const val = self.ctx.pop();
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        try obj.setProperty(self.ctx.allocator, atom, val);
+                    }
+                    // Non-object assignment silently fails in non-strict mode
+                },
+
+                .get_elem => {
+                    const index_val = self.ctx.pop();
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject() and index_val.isInt()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        // Convert integer index to atom (simplified)
+                        const idx = index_val.getInt();
+                        if (idx >= 0) {
+                            // For arrays, access element by index
+                            // For now, treat index as a slot offset (simplified)
+                            try self.ctx.push(obj.getSlot(@intCast(idx)));
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                },
+
+                .put_elem => {
+                    const val = self.ctx.pop();
+                    const index_val = self.ctx.pop();
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject() and index_val.isInt()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        const idx = index_val.getInt();
+                        if (idx >= 0) {
+                            obj.setSlot(@intCast(idx), val);
+                        }
+                    }
+                },
+
                 .get_global => {
                     const atom_idx = readU16(self.pc);
                     self.pc += 2;
-                    _ = atom_idx;
-                    // TODO: Lookup in global object
-                    try self.ctx.push(value.JSValue.undefined_val);
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    if (self.ctx.getGlobal(atom)) |val| {
+                        try self.ctx.push(val);
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
                 },
 
                 .put_global => {
                     const atom_idx = readU16(self.pc);
                     self.pc += 2;
-                    _ = atom_idx;
-                    _ = self.ctx.pop();
-                    // TODO: Set in global object
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const val = self.ctx.pop();
+                    try self.ctx.setGlobal(atom, val);
+                },
+
+                .define_global => {
+                    const atom_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const val = self.ctx.pop();
+                    try self.ctx.defineGlobal(atom, val);
+                },
+
+                .make_function => {
+                    const const_idx = readU16(self.pc);
+                    self.pc += 2;
+                    // Get bytecode pointer from constant pool
+                    const bc_val = try self.getConstant(const_idx);
+                    if (!bc_val.isPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+                    // Create function object
+                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const func_obj = try object.JSObject.createBytecodeFunction(
+                        self.ctx.allocator,
+                        root_class,
+                        bc_ptr,
+                        @enumFromInt(bc_ptr.name_atom),
+                    );
+                    try self.ctx.push(func_obj.toValue());
                 },
 
                 .typeof => {
                     const a = self.ctx.pop();
-                    _ = a.typeOf(); // Returns string, but we need to create a JS string
-                    // TODO: Create interned string for typeof result
-                    try self.ctx.push(value.JSValue.undefined_val);
+                    const type_str = a.typeOf();
+                    // Create JS string for typeof result
+                    const js_str = string.createString(self.ctx.allocator, type_str) catch {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                        continue;
+                    };
+                    try self.ctx.push(value.JSValue.fromPtr(js_str));
+                },
+
+                // ========================================
+                // Function Calls
+                // ========================================
+                .call => {
+                    const argc: u8 = self.pc[0];
+                    self.pc += 1;
+                    try self.doCall(argc, false);
+                },
+
+                .call_method => {
+                    const argc: u8 = self.pc[0];
+                    self.pc += 1;
+                    try self.doCall(argc, true);
+                },
+
+                .call_constructor => {
+                    const argc: u8 = self.pc[0];
+                    self.pc += 1;
+                    // TODO: Implement constructor call (creates new object, sets 'this')
+                    // For now, just do regular call
+                    try self.doCall(argc, false);
+                },
+
+                .tail_call => {
+                    const argc: u8 = self.pc[0];
+                    self.pc += 1;
+                    // TODO: Implement proper tail call optimization
+                    try self.doCall(argc, false);
                 },
 
                 // ========================================
@@ -424,6 +595,10 @@ pub const Interpreter = struct {
     // ========================================================================
 
     fn addValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        // String concatenation - if either operand is a string
+        if (a.isString() or b.isString()) {
+            return try self.concatToString(a, b);
+        }
         // Integer fast path
         if (a.isInt() and b.isInt()) {
             const result = @addWithOverflow(a.getInt(), b.getInt());
@@ -437,6 +612,55 @@ pub const Interpreter = struct {
         const an = a.toNumber() orelse return error.TypeError;
         const bn = b.toNumber() orelse return error.TypeError;
         return try self.allocFloat(an + bn);
+    }
+
+    /// Convert value to string and concatenate
+    fn concatToString(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        // Convert a to string
+        const str_a = try self.valueToString(a);
+        defer if (!a.isString()) string.freeString(self.ctx.allocator, str_a);
+
+        // Convert b to string
+        const str_b = try self.valueToString(b);
+        defer if (!b.isString()) string.freeString(self.ctx.allocator, str_b);
+
+        // Concatenate
+        const result = try string.concatStrings(self.ctx.allocator, str_a, str_b);
+        return value.JSValue.fromPtr(result);
+    }
+
+    /// Convert a JSValue to a JSString
+    fn valueToString(self: *Interpreter, val: value.JSValue) !*string.JSString {
+        if (val.isString()) {
+            return val.toPtr(string.JSString);
+        }
+        if (val.isInt()) {
+            var buf: [32]u8 = undefined;
+            const len = std.fmt.formatIntBuf(&buf, val.getInt(), 10, .lower, .{});
+            return try string.createString(self.ctx.allocator, buf[0..len]);
+        }
+        if (val.isNull()) {
+            return try string.createString(self.ctx.allocator, "null");
+        }
+        if (val.isUndefined()) {
+            return try string.createString(self.ctx.allocator, "undefined");
+        }
+        if (val.isTrue()) {
+            return try string.createString(self.ctx.allocator, "true");
+        }
+        if (val.isFalse()) {
+            return try string.createString(self.ctx.allocator, "false");
+        }
+        if (val.isObject()) {
+            return try string.createString(self.ctx.allocator, "[object Object]");
+        }
+        // Float
+        if (val.toNumber()) |n| {
+            var buf: [64]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try string.createString(self.ctx.allocator, "NaN");
+            return try string.createString(self.ctx.allocator, slice);
+        }
+        return try string.createString(self.ctx.allocator, "undefined");
     }
 
     fn divValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
@@ -472,32 +696,116 @@ pub const Interpreter = struct {
         return value.JSValue.fromPtr(box);
     }
 
+    fn createObject(self: *Interpreter) !*object.JSObject {
+        // Get or create root hidden class (simplified - should be cached)
+        const root_class = try object.HiddenClass.init(self.ctx.allocator);
+        return try object.JSObject.create(self.ctx.allocator, root_class, null);
+    }
+
     fn getConstant(self: *Interpreter, idx: u16) !value.JSValue {
-        // Simple constant pool format: type byte + data
         if (idx >= self.constants.len) return error.InvalidConstant;
-        const const_type: bytecode.ConstType = @enumFromInt(self.constants[idx]);
-        switch (const_type) {
-            .int32 => {
-                if (idx + 5 > self.constants.len) return error.InvalidConstant;
-                const bytes = self.constants[idx + 1 .. idx + 5];
-                const v: i32 = @bitCast(@as(u32, bytes[0]) |
-                    (@as(u32, bytes[1]) << 8) |
-                    (@as(u32, bytes[2]) << 16) |
-                    (@as(u32, bytes[3]) << 24));
-                return value.JSValue.fromInt(v);
-            },
-            .float64 => {
-                if (idx + 9 > self.constants.len) return error.InvalidConstant;
-                const bytes = self.constants[idx + 1 .. idx + 9];
-                var u: u64 = 0;
-                for (bytes, 0..) |b, i| {
-                    u |= @as(u64, b) << @intCast(i * 8);
-                }
-                const f: f64 = @bitCast(u);
-                return try self.allocFloat(f);
-            },
-            else => return error.InvalidConstant,
+        return self.constants[idx];
+    }
+
+    /// Perform function call
+    fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!void {
+        // Stack layout for regular call: [func, arg0, arg1, ..., argN-1]
+        // Stack layout for method call: [obj, func, arg0, arg1, ..., argN-1]
+
+        // Collect arguments (in reverse order from stack)
+        var args: [256]value.JSValue = undefined;
+        var i: usize = argc;
+        while (i > 0) {
+            i -= 1;
+            args[i] = self.ctx.pop();
         }
+
+        // Pop function
+        const func_val = self.ctx.pop();
+
+        // Pop 'this' for method calls
+        const this_val = if (is_method) self.ctx.pop() else value.JSValue.undefined_val;
+
+        // Check if callable
+        if (!func_val.isCallable()) {
+            return error.NotCallable;
+        }
+
+        // Get the function object
+        const func_obj = object.JSObject.fromValue(func_val);
+
+        // Check for native function
+        if (func_obj.getNativeFunctionData()) |native_data| {
+            // Call native function
+            const result = native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
+                std.log.err("Native function error: {}", .{err});
+                return error.NativeFunctionError;
+            };
+            try self.ctx.push(result);
+            return;
+        }
+
+        // Check for bytecode function
+        if (func_obj.getBytecodeFunctionData()) |bc_data| {
+            const func_bc = bc_data.bytecode;
+
+            // Save current interpreter state
+            const saved_pc = self.pc;
+            const saved_code_end = self.code_end;
+            const saved_constants = self.constants;
+            const saved_func = self.current_func;
+            const saved_fp = self.ctx.fp;
+
+            // Push call frame
+            try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
+
+            // Set up new function's locals with arguments
+            const local_count = func_bc.local_count;
+            try self.ctx.ensureStack(local_count);
+
+            // Initialize locals: first N are arguments, rest are undefined
+            var local_idx: usize = 0;
+            while (local_idx < local_count) : (local_idx += 1) {
+                if (local_idx < argc) {
+                    try self.ctx.push(args[local_idx]);
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+            }
+
+            // Execute the function bytecode
+            self.pc = func_bc.code.ptr;
+            self.code_end = func_bc.code.ptr + func_bc.code.len;
+            self.constants = func_bc.constants;
+            self.current_func = func_bc;
+
+            const result = self.dispatch() catch |err| {
+                // Restore state on error
+                self.pc = saved_pc;
+                self.code_end = saved_code_end;
+                self.constants = saved_constants;
+                self.current_func = saved_func;
+                _ = self.ctx.popFrame();
+                return err;
+            };
+
+            // Restore interpreter state
+            self.pc = saved_pc;
+            self.code_end = saved_code_end;
+            self.constants = saved_constants;
+            self.current_func = saved_func;
+
+            // Pop call frame and restore stack
+            _ = self.ctx.popFrame();
+            self.ctx.fp = saved_fp;
+
+            // Push result
+            try self.ctx.push(result);
+            return;
+        }
+
+        // Unknown function type
+        try self.ctx.push(value.JSValue.undefined_val);
     }
 };
 
@@ -939,4 +1247,474 @@ test "Interpreter modulo" {
     const result = try interp.run(&func);
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 2), result.getInt());
+}
+
+test "End-to-end: parse and execute JS" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Test: 1 + 2
+    {
+        var strings = string_mod.StringTable.init(allocator);
+        defer strings.deinit();
+
+        var p = parser_mod.Parser.init(allocator, "1 + 2", &strings);
+        defer p.deinit();
+
+        const code = try p.parse();
+
+        const func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = p.local_count,
+            .stack_size = 256,
+            .flags = .{},
+            .code = code,
+            .constants = p.constants.items,
+            .source_map = null,
+        };
+
+        var interp = Interpreter.init(ctx);
+        const result = try interp.run(&func);
+        try std.testing.expect(result.isInt());
+        try std.testing.expectEqual(@as(i32, 3), result.getInt());
+    }
+
+    // Reset stack for next test
+    ctx.sp = 0;
+
+    // Test: var x = 10; x * 2
+    {
+        var strings = string_mod.StringTable.init(allocator);
+        defer strings.deinit();
+
+        var p = parser_mod.Parser.init(allocator, "var x = 10; x * 2", &strings);
+        defer p.deinit();
+
+        const code = try p.parse();
+
+        const func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = p.local_count,
+            .stack_size = 256,
+            .flags = .{},
+            .code = code,
+            .constants = p.constants.items,
+            .source_map = null,
+        };
+
+        var interp = Interpreter.init(ctx);
+        const result = try interp.run(&func);
+        try std.testing.expect(result.isInt());
+        try std.testing.expectEqual(@as(i32, 20), result.getInt());
+    }
+}
+
+test "Interpreter property access" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Test: new_object, put_field (length = 42), get_field, ret
+    // Atom.length = 4
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.new_object),
+        @intFromEnum(bytecode.Opcode.dup), // Duplicate obj for get_field
+        @intFromEnum(bytecode.Opcode.push_i8),
+        42,
+        @intFromEnum(bytecode.Opcode.put_field),
+        4,
+        0, // Atom.length = 4 (little-endian u16)
+        @intFromEnum(bytecode.Opcode.get_field),
+        4,
+        0, // Atom.length = 4 (little-endian u16)
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 42), result.getInt());
+}
+
+test "Interpreter global access" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Set a global value
+    try ctx.setGlobal(.length, value.JSValue.fromInt(100));
+
+    var interp = Interpreter.init(ctx);
+
+    // Test: get_global(length), ret
+    // Atom.length = 4
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        4,
+        0, // Atom.length = 4 (little-endian u16)
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 100), result.getInt());
+}
+
+test "Interpreter native function call" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Define a native function that returns 42
+    const testFn = struct {
+        fn call(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.fromInt(42);
+        }
+    }.call;
+
+    // Register as global "abs" (Atom.abs = 95)
+    try ctx.registerGlobalFunction(.abs, testFn, 0);
+
+    var interp = Interpreter.init(ctx);
+
+    // Test: get_global(abs), call(0), ret
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        95,
+        0, // Atom.abs = 95 (little-endian u16)
+        @intFromEnum(bytecode.Opcode.call),
+        0, // 0 arguments
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 42), result.getInt());
+}
+
+test "Interpreter native function with arguments" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Define a native function that adds two numbers
+    const addFn = struct {
+        fn call(_: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            if (args.len < 2) return value.JSValue.undefined_val;
+            const a = args[0].getInt();
+            const b = args[1].getInt();
+            return value.JSValue.fromInt(a + b);
+        }
+    }.call;
+
+    // Register as global "max" (Atom.max = 100)
+    try ctx.registerGlobalFunction(.max, addFn, 2);
+
+    var interp = Interpreter.init(ctx);
+
+    // Test: get_global(max), push 10, push 20, call(2), ret
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        100,
+        0, // Atom.max = 100 (little-endian u16)
+        @intFromEnum(bytecode.Opcode.push_i8),
+        10,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        20,
+        @intFromEnum(bytecode.Opcode.call),
+        2, // 2 arguments
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 30), result.getInt());
+}
+
+test "Interpreter bytecode function call" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Create a simple function: function add(a, b) { return a + b; }
+    // Bytecode: get_loc_0, get_loc_1, add, ret
+    const inner_code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_loc_0), // a
+        @intFromEnum(bytecode.Opcode.get_loc_1), // b
+        @intFromEnum(bytecode.Opcode.add),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const inner_func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2, // a, b
+        .stack_size = 16,
+        .flags = .{},
+        .code = &inner_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    // Create function object
+    const root_class = ctx.root_class.?;
+    const func_obj = try object.JSObject.createBytecodeFunction(allocator, root_class, &inner_func, .length);
+
+    // Register as global "add" (Atom.abs = 95)
+    try ctx.setGlobal(.abs, func_obj.toValue());
+
+    var interp = Interpreter.init(ctx);
+
+    // Test: get_global(abs), push 7, push 8, call(2), ret
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        95,
+        0, // Atom.abs = 95 (little-endian u16)
+        @intFromEnum(bytecode.Opcode.push_i8),
+        7,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        8,
+        @intFromEnum(bytecode.Opcode.call),
+        2, // 2 arguments
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 15), result.getInt()); // 7 + 8 = 15
+}
+
+test "End-to-end: function declaration" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Test: function add(a, b) { return a + b; } add(3, 4)
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = parser_mod.Parser.init(allocator, "function add(a, b) { return a + b; } add(3, 4)", &strings);
+    defer p.deinit();
+
+    const code = try p.parse();
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 7), result.getInt()); // 3 + 4 = 7
+}
+
+test "Interpreter string concatenation" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Create two string constants
+    const str1 = try string.createString(allocator, "hello");
+    const str2 = try string.createString(allocator, " world");
+
+    // Test: push "hello", push " world", add (concat), ret
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0, // constant 0
+        @intFromEnum(bytecode.Opcode.push_const),
+        1,
+        0, // constant 1
+        @intFromEnum(bytecode.Opcode.add),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const constants = [_]value.JSValue{
+        value.JSValue.fromPtr(str1),
+        value.JSValue.fromPtr(str2),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &constants,
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isString());
+    const result_str = result.toPtr(string.JSString);
+    try std.testing.expectEqualStrings("hello world", result_str.data());
+
+    // Cleanup
+    string.freeString(allocator, result_str);
+    string.freeString(allocator, str1);
+    string.freeString(allocator, str2);
+}
+
+test "Interpreter typeof" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Test: typeof 42 = "number"
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8),
+        42,
+        @intFromEnum(bytecode.Opcode.typeof),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isString());
+    const result_str = result.toPtr(string.JSString);
+    try std.testing.expectEqualStrings("number", result_str.data());
+
+    // Cleanup
+    string.freeString(allocator, result_str);
 }

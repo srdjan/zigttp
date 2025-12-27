@@ -585,7 +585,7 @@ pub const Parser = struct {
             .constants = std.array_list.Managed(value.JSValue).init(allocator),
             .locals = undefined,
             .local_count = 0,
-            .scope_depth = 0,
+            .scope_depth = 1, // Start in local scope for eval/REPL mode
             .strings = strings,
             .had_error = false,
             .panic_mode = false,
@@ -645,9 +645,100 @@ pub const Parser = struct {
 
     fn functionDeclaration(self: *Parser) Error!void {
         const name = try self.parseVariable("Expected function name.");
-        // TODO: Parse function body
-        try self.emitOp(.push_undefined);
+        try self.compileFunction(name);
         try self.defineVariable(name, false);
+    }
+
+    /// Parse and compile a function, pushing its value onto the stack
+    fn compileFunction(self: *Parser, name: []const u8) Error!void {
+        try self.consume(.lparen, "Expected '(' after function name.");
+
+        // Parse parameters
+        var params: [255][]const u8 = undefined;
+        var param_count: u8 = 0;
+        if (!self.check(.rparen)) {
+            while (true) {
+                if (param_count >= 255) {
+                    self.errorAtCurrent("Cannot have more than 255 parameters.");
+                    return error.TooManyLocals;
+                }
+                try self.consume(.identifier, "Expected parameter name.");
+                params[param_count] = self.previous.text(self.tokenizer.source);
+                param_count += 1;
+                if (!self.match(.comma)) break;
+            }
+        }
+        try self.consume(.rparen, "Expected ')' after parameters.");
+        try self.consume(.lbrace, "Expected '{' before function body.");
+
+        // Save outer parser state
+        const outer_code = self.code;
+        const outer_constants = self.constants;
+        const outer_locals = self.locals;
+        const outer_local_count = self.local_count;
+        const outer_scope_depth = self.scope_depth;
+
+        // Initialize new function scope
+        self.code = std.array_list.Managed(u8).init(self.allocator);
+        self.constants = std.array_list.Managed(value.JSValue).init(self.allocator);
+        self.local_count = 0;
+        self.scope_depth = 1;
+
+        // Add parameters as locals
+        for (0..param_count) |i| {
+            self.locals[self.local_count] = .{
+                .name = params[i],
+                .depth = 1,
+                .is_const = false,
+            };
+            self.local_count += 1;
+        }
+
+        // Parse function body
+        try self.block();
+
+        // Add implicit return undefined
+        try self.emitOp(.push_undefined);
+        try self.emitOp(.ret);
+
+        // Create FunctionBytecode on heap
+        const func_bc = self.allocator.create(bytecode.FunctionBytecode) catch return error.OutOfMemory;
+        const code_copy = self.allocator.dupe(u8, self.code.items) catch return error.OutOfMemory;
+        const consts_copy = self.allocator.dupe(value.JSValue, self.constants.items) catch return error.OutOfMemory;
+
+        // Get name atom
+        const name_atom: u32 = if (lookupPredefinedAtom(name)) |atom|
+            @intFromEnum(atom)
+        else
+            0;
+
+        func_bc.* = .{
+            .header = .{},
+            .name_atom = name_atom,
+            .arg_count = param_count,
+            .local_count = self.local_count,
+            .stack_size = 256,
+            .flags = .{},
+            .code = code_copy,
+            .constants = consts_copy,
+            .source_map = null,
+        };
+
+        // Clean up inner buffers
+        self.code.deinit();
+        self.constants.deinit();
+
+        // Restore outer parser state
+        self.code = outer_code;
+        self.constants = outer_constants;
+        self.locals = outer_locals;
+        self.local_count = outer_local_count;
+        self.scope_depth = outer_scope_depth;
+
+        // Store function bytecode in constant pool and emit make_function
+        const const_idx = try self.addConstant(value.JSValue.fromPtr(func_bc));
+        try self.emitOp(.make_function);
+        try self.emitU16(const_idx);
     }
 
     fn parseVariable(self: *Parser, error_msg: []const u8) Error![]const u8 {
@@ -657,14 +748,18 @@ pub const Parser = struct {
 
     fn defineVariable(self: *Parser, name: []const u8, is_const: bool) Error!void {
         if (self.scope_depth > 0) {
-            // Local variable
+            // Local variable - register it and emit put_loc
             if (self.local_count >= 255) return error.TooManyLocals;
+            const idx = self.local_count;
             self.locals[self.local_count] = .{
                 .name = name,
                 .depth = self.scope_depth,
                 .is_const = is_const,
             };
             self.local_count += 1;
+            // Store the value in the local slot
+            try self.emitOp(.put_loc);
+            try self.emitByte(idx);
         } else {
             // Global variable
             const name_const = try self.addStringConstant(name);
@@ -799,7 +894,10 @@ pub const Parser = struct {
     fn expressionStatement(self: *Parser) !void {
         try self.expression();
         _ = self.match(.semicolon);
-        try self.emitOp(.drop);
+        // Don't drop the result if this is the last statement (for REPL/eval mode)
+        if (!self.check(.eof)) {
+            try self.emitOp(.drop);
+        }
     }
 
     // ========================================================================
@@ -813,6 +911,7 @@ pub const Parser = struct {
     const Precedence = enum(u8) {
         none,
         assignment, // =
+        ternary, // ?:
         or_prec, // ||
         and_prec, // &&
         equality, // == !=
@@ -910,7 +1009,7 @@ pub const Parser = struct {
         const content = text[1 .. text.len - 1];
         const const_idx = try self.addStringConstant(content);
         try self.emitOp(.push_const);
-        try self.emitByte(const_idx);
+        try self.emitU16(const_idx);
     }
 
     fn identifier(self: *Parser, can_assign: bool) !void {
@@ -952,6 +1051,132 @@ pub const Parser = struct {
     fn grouping(self: *Parser, _: bool) !void {
         try self.expression();
         try self.consume(.rparen, "Expected ')' after expression.");
+    }
+
+    /// Parse array literal: [elem1, elem2, ...]
+    fn arrayLiteral(self: *Parser, _: bool) !void {
+        // Create empty array first
+        try self.emitOp(.new_array);
+        try self.emitU16(0);
+
+        var index: u16 = 0;
+        if (!self.check(.rbracket)) {
+            while (true) {
+                // Stack: [array]
+                try self.emitOp(.dup); // [array, array]
+
+                // Push index
+                if (index <= 127) {
+                    try self.emitOp(.push_i8);
+                    try self.emitByte(@truncate(index));
+                } else {
+                    try self.emitOp(.push_i16);
+                    try self.emitU16(index);
+                }
+                // Stack: [array, array, index]
+
+                // Handle sparse arrays: [1, , 3]
+                if (self.check(.comma)) {
+                    try self.emitOp(.push_undefined);
+                } else {
+                    try self.expression();
+                }
+                // Stack: [array, array, index, value]
+
+                try self.emitOp(.put_elem);
+                // Stack: [array]
+
+                index += 1;
+                if (!self.match(.comma)) break;
+                if (self.check(.rbracket)) break; // Trailing comma
+            }
+        }
+        try self.consume(.rbracket, "Expected ']' after array elements.");
+
+        // Set length property
+        try self.emitOp(.dup);
+        const length_atom = @intFromEnum(@import("object.zig").Atom.length);
+        if (index <= 127) {
+            try self.emitOp(.push_i8);
+            try self.emitByte(@truncate(index));
+        } else {
+            try self.emitOp(.push_i16);
+            try self.emitU16(index);
+        }
+        try self.emitOp(.put_field);
+        try self.emitU16(length_atom);
+        // Array remains on stack
+    }
+
+    /// Parse object literal: {key: value, ...}
+    fn objectLiteral(self: *Parser, _: bool) !void {
+        try self.emitOp(.new_object);
+
+        if (!self.check(.rbrace)) {
+            while (true) {
+                // Parse key: identifier, string, or number
+                var key_atom: u16 = undefined;
+                if (self.match(.identifier)) {
+                    const name = self.previous.text(self.tokenizer.source);
+                    key_atom = try self.getOrCreateAtom(name);
+                } else if (self.match(.string_literal)) {
+                    const text = self.previous.text(self.tokenizer.source);
+                    const content = text[1 .. text.len - 1];
+                    key_atom = try self.getOrCreateAtom(content);
+                } else if (self.match(.number)) {
+                    // Numeric key - use as-is for now
+                    const text = self.previous.text(self.tokenizer.source);
+                    key_atom = try self.getOrCreateAtom(text);
+                } else {
+                    self.errorAtCurrent("Expected property name.");
+                    return error.UnexpectedToken;
+                }
+
+                try self.consume(.colon, "Expected ':' after property name.");
+                try self.emitOp(.dup); // Duplicate object for put_field
+                try self.expression();
+                try self.emitOp(.put_field);
+                try self.emitU16(key_atom);
+
+                if (!self.match(.comma)) break;
+                if (self.check(.rbrace)) break; // Trailing comma
+            }
+        }
+        try self.consume(.rbrace, "Expected '}' after object literal.");
+    }
+
+    /// Parse 'this' keyword
+    fn thisExpr(self: *Parser, _: bool) !void {
+        try self.emitOp(.push_this);
+    }
+
+    /// Parse function expression: function() {} or function name() {}
+    fn functionExpr(self: *Parser, _: bool) !void {
+        // Optional name for named function expressions
+        var name: []const u8 = "";
+        if (self.match(.identifier)) {
+            name = self.previous.text(self.tokenizer.source);
+        }
+        try self.compileFunction(name);
+    }
+
+    /// Parse ternary conditional: a ? b : c
+    fn ternary(self: *Parser, _: bool) !void {
+        // Condition is already on stack
+        const else_jump = try self.emitJump(.if_false);
+        try self.emitOp(.drop); // Drop condition value
+
+        // Parse 'then' branch
+        try self.expression();
+        const end_jump = try self.emitJump(.goto);
+
+        // Parse 'else' branch
+        self.patchJump(else_jump);
+        try self.emitOp(.drop); // Drop condition value
+        try self.consume(.colon, "Expected ':' in ternary expression.");
+        try self.parsePrecedence(.ternary);
+
+        self.patchJump(end_jump);
     }
 
     fn unary(self: *Parser, _: bool) !void {
@@ -1030,15 +1255,23 @@ pub const Parser = struct {
     fn dot(self: *Parser, can_assign: bool) !void {
         try self.consume(.identifier, "Expected property name after '.'.");
         const name = self.previous.text(self.tokenizer.source);
-        const name_const = try self.addStringConstant(name);
 
-        if (can_assign and self.match(.assign)) {
-            try self.expression();
-            try self.emitOp(.put_field);
-            try self.emitByte(name_const);
-        } else {
+        // Check if this is a method call: obj.method(...)
+        if (self.check(.lparen)) {
+            // Method call - emit call_method instead of get_field + call
+            const name_atom = try self.getOrCreateAtom(name);
             try self.emitOp(.get_field);
-            try self.emitByte(name_const);
+            try self.emitU16(name_atom);
+            // The call will be handled by the call infix parser
+        } else if (can_assign and self.match(.assign)) {
+            try self.expression();
+            const name_atom = try self.getOrCreateAtom(name);
+            try self.emitOp(.put_field);
+            try self.emitU16(name_atom);
+        } else {
+            const name_atom = try self.getOrCreateAtom(name);
+            try self.emitOp(.get_field);
+            try self.emitU16(name_atom);
         }
     }
 
@@ -1067,8 +1300,10 @@ pub const Parser = struct {
     fn getRule(token_type: TokenType) ParseRule {
         return switch (token_type) {
             .lparen => .{ .prefix = grouping, .infix = call, .precedence = .call },
-            .lbracket => .{ .prefix = null, .infix = subscript, .precedence = .call },
+            .lbracket => .{ .prefix = arrayLiteral, .infix = subscript, .precedence = .call },
+            .lbrace => .{ .prefix = objectLiteral, .infix = null, .precedence = .none },
             .dot => .{ .prefix = null, .infix = dot, .precedence = .call },
+            .question => .{ .prefix = null, .infix = ternary, .precedence = .ternary },
             .minus => .{ .prefix = unary, .infix = binary, .precedence = .term },
             .plus => .{ .prefix = null, .infix = binary, .precedence = .term },
             .slash, .star, .percent => .{ .prefix = null, .infix = binary, .precedence = .factor },
@@ -1083,6 +1318,8 @@ pub const Parser = struct {
             .number => .{ .prefix = number, .infix = null, .precedence = .none },
             .string_literal => .{ .prefix = stringLiteral, .infix = null, .precedence = .none },
             .identifier => .{ .prefix = identifier, .infix = null, .precedence = .none },
+            .kw_this => .{ .prefix = thisExpr, .infix = null, .precedence = .none },
+            .kw_function => .{ .prefix = functionExpr, .infix = null, .precedence = .none },
             .@"true", .@"false", .@"null", .undefined => .{ .prefix = literal, .infix = null, .precedence = .none },
             else => .{ .prefix = null, .infix = null, .precedence = .none },
         };
@@ -1142,6 +1379,81 @@ pub const Parser = struct {
     fn addStringConstant(self: *Parser, text: []const u8) !u8 {
         const js_str = self.strings.intern(text) catch return error.OutOfMemory;
         return self.addConstant(value.JSValue.fromPtr(js_str));
+    }
+
+    /// Get atom index for a property name
+    /// Uses predefined atoms for common names, otherwise uses string constant index + offset
+    fn getOrCreateAtom(self: *Parser, name: []const u8) !u16 {
+        const object_mod = @import("object.zig");
+        // Check predefined atoms first (all < 256)
+        if (lookupPredefinedAtom(name)) |atom| {
+            return @truncate(@intFromEnum(atom));
+        }
+        // Use constant pool index + offset for dynamic atoms
+        const const_idx = try self.addStringConstant(name);
+        return @truncate(@as(u32, object_mod.Atom.FIRST_DYNAMIC) + @as(u32, const_idx));
+    }
+
+    /// Lookup predefined atom by name
+    fn lookupPredefinedAtom(name: []const u8) ?@import("object.zig").Atom {
+        const object_mod = @import("object.zig");
+        // Common property names
+        if (std.mem.eql(u8, name, "length")) return object_mod.Atom.length;
+        if (std.mem.eql(u8, name, "prototype")) return object_mod.Atom.prototype;
+        if (std.mem.eql(u8, name, "constructor")) return object_mod.Atom.constructor;
+        if (std.mem.eql(u8, name, "toString")) return object_mod.Atom.toString;
+        if (std.mem.eql(u8, name, "valueOf")) return object_mod.Atom.valueOf;
+        if (std.mem.eql(u8, name, "name")) return object_mod.Atom.name;
+        if (std.mem.eql(u8, name, "message")) return object_mod.Atom.message;
+        // Array methods
+        if (std.mem.eql(u8, name, "push")) return object_mod.Atom.push;
+        if (std.mem.eql(u8, name, "pop")) return object_mod.Atom.pop;
+        if (std.mem.eql(u8, name, "map")) return object_mod.Atom.map;
+        if (std.mem.eql(u8, name, "filter")) return object_mod.Atom.filter;
+        if (std.mem.eql(u8, name, "forEach")) return object_mod.Atom.forEach;
+        if (std.mem.eql(u8, name, "indexOf")) return object_mod.Atom.indexOf;
+        if (std.mem.eql(u8, name, "slice")) return object_mod.Atom.slice;
+        if (std.mem.eql(u8, name, "concat")) return object_mod.Atom.concat;
+        if (std.mem.eql(u8, name, "join")) return object_mod.Atom.join;
+        // String methods
+        if (std.mem.eql(u8, name, "split")) return object_mod.Atom.split;
+        if (std.mem.eql(u8, name, "substring")) return object_mod.Atom.substring;
+        if (std.mem.eql(u8, name, "toLowerCase")) return object_mod.Atom.toLowerCase;
+        if (std.mem.eql(u8, name, "toUpperCase")) return object_mod.Atom.toUpperCase;
+        if (std.mem.eql(u8, name, "trim")) return object_mod.Atom.trim;
+        if (std.mem.eql(u8, name, "replace")) return object_mod.Atom.replace;
+        if (std.mem.eql(u8, name, "startsWith")) return object_mod.Atom.startsWith;
+        if (std.mem.eql(u8, name, "endsWith")) return object_mod.Atom.endsWith;
+        if (std.mem.eql(u8, name, "includes")) return object_mod.Atom.includes;
+        // Math methods
+        if (std.mem.eql(u8, name, "abs")) return object_mod.Atom.abs;
+        if (std.mem.eql(u8, name, "floor")) return object_mod.Atom.floor;
+        if (std.mem.eql(u8, name, "ceil")) return object_mod.Atom.ceil;
+        if (std.mem.eql(u8, name, "round")) return object_mod.Atom.round;
+        if (std.mem.eql(u8, name, "min")) return object_mod.Atom.min;
+        if (std.mem.eql(u8, name, "max")) return object_mod.Atom.max;
+        if (std.mem.eql(u8, name, "random")) return object_mod.Atom.random;
+        if (std.mem.eql(u8, name, "pow")) return object_mod.Atom.pow;
+        if (std.mem.eql(u8, name, "sqrt")) return object_mod.Atom.sqrt;
+        if (std.mem.eql(u8, name, "log")) return object_mod.Atom.log;
+        // JSON
+        if (std.mem.eql(u8, name, "parse")) return object_mod.Atom.parse;
+        if (std.mem.eql(u8, name, "stringify")) return object_mod.Atom.stringify;
+        // Promise
+        if (std.mem.eql(u8, name, "then")) return object_mod.Atom.then;
+        if (std.mem.eql(u8, name, "resolve")) return object_mod.Atom.resolve;
+        if (std.mem.eql(u8, name, "reject")) return object_mod.Atom.reject;
+        // Globals
+        if (std.mem.eql(u8, name, "console")) return object_mod.Atom.console;
+        if (std.mem.eql(u8, name, "Math")) return object_mod.Atom.Math;
+        if (std.mem.eql(u8, name, "JSON")) return object_mod.Atom.JSON;
+        if (std.mem.eql(u8, name, "Object")) return object_mod.Atom.Object;
+        if (std.mem.eql(u8, name, "Array")) return object_mod.Atom.Array;
+        if (std.mem.eql(u8, name, "String")) return object_mod.Atom.String;
+        if (std.mem.eql(u8, name, "Number")) return object_mod.Atom.Number;
+        if (std.mem.eql(u8, name, "Boolean")) return object_mod.Atom.Boolean;
+        if (std.mem.eql(u8, name, "Function")) return object_mod.Atom.Function;
+        return null;
     }
 
     // ========================================================================

@@ -181,6 +181,17 @@ pub const JSValue = packed struct {
         return self.isObject(); // TODO: Check class_id
     }
 
+    /// Check if value is callable (function)
+    pub inline fn isCallable(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        // Check if it's an object with is_callable flag
+        if (self.isObject()) {
+            const obj_ptr = self.toPtr(@import("object.zig").JSObject);
+            return obj_ptr.flags.is_callable;
+        }
+        return self.isFunction();
+    }
+
     // ========================================================================
     // Comparison and Conversion
     // ========================================================================

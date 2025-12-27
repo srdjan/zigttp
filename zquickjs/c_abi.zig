@@ -9,6 +9,9 @@ const gc = @import("gc.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
 const heap = @import("heap.zig");
+const parser = @import("parser.zig");
+const interpreter = @import("interpreter.zig");
+const bytecode = @import("bytecode.zig");
 
 // Re-export types as C-compatible
 pub const JSValue = value.JSValue;
@@ -558,13 +561,50 @@ export fn JS_GetErrorStr(ctx: ?*JSContext, buf: ?[*]u8, buf_size: usize) ?[*]u8 
 
 /// Evaluate JavaScript code
 export fn JS_Eval(ctx: ?*JSContext, input: ?[*]const u8, input_len: usize, filename: ?[*:0]const u8, eval_flags: c_int) JSValue {
-    _ = ctx;
-    _ = input;
-    _ = input_len;
     _ = filename;
     _ = eval_flags;
-    // TODO: Implement evaluation (requires parser)
-    return JSValue.undefined_val;
+
+    const c = ctx orelse return JSValue.exception_val;
+    const src = input orelse return JSValue.exception_val;
+    if (input_len == 0) return JSValue.undefined_val;
+
+    const source = src[0..input_len];
+    const allocator = global_allocator orelse c.allocator;
+
+    // Create string table for interning
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Parse the source code
+    var p = parser.Parser.init(allocator, source, &strings);
+    defer p.deinit();
+
+    const code = p.parse() catch |err| {
+        std.log.err("Parse error: {}", .{err});
+        return JSValue.exception_val;
+    };
+
+    // Create function bytecode from parser output
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    // Run the bytecode
+    var interp = interpreter.Interpreter.init(c);
+    const result = interp.run(&func) catch |err| {
+        std.log.err("Runtime error: {}", .{err});
+        return JSValue.exception_val;
+    };
+
+    return result;
 }
 
 /// Parse JavaScript code

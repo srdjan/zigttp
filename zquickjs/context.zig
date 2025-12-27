@@ -11,6 +11,7 @@ const object = @import("object.zig");
 pub const ContextConfig = struct {
     stack_size: usize = 1024 * 1024, // 1MB value stack
     call_stack_size: usize = 1024, // Max call depth
+    init_globals: bool = true, // Initialize global object
 };
 
 /// Call frame on the call stack
@@ -40,6 +41,10 @@ pub const Context = struct {
     call_depth: usize,
     /// Global object
     global: value.JSValue,
+    /// Global object (as JSObject pointer for fast access)
+    global_obj: ?*object.JSObject,
+    /// Root hidden class for new objects
+    root_class: ?*object.HiddenClass,
     /// Atom table for dynamic atoms
     atoms: AtomTable,
     /// Exception value (if any)
@@ -57,6 +62,14 @@ pub const Context = struct {
         const call_stack = try allocator.alloc(CallFrame, config.call_stack_size);
         errdefer allocator.free(call_stack);
 
+        // Create root hidden class for all objects
+        const root_class = try object.HiddenClass.init(allocator);
+        errdefer root_class.deinit(allocator);
+
+        // Create global object
+        const global_obj = try object.JSObject.create(allocator, root_class, null);
+        errdefer global_obj.destroy(allocator);
+
         ctx.* = .{
             .allocator = allocator,
             .gc_state = gc_state,
@@ -65,7 +78,9 @@ pub const Context = struct {
             .fp = 0,
             .call_stack = call_stack,
             .call_depth = 0,
-            .global = value.JSValue.undefined_val,
+            .global = global_obj.toValue(),
+            .global_obj = global_obj,
+            .root_class = root_class,
             .atoms = AtomTable.init(allocator),
             .exception = value.JSValue.undefined_val,
             .config = config,
@@ -75,11 +90,48 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
+        // Note: global_obj and root_class are managed by GC in a full implementation
+        // For now, we don't free them to avoid double-free with hidden class transitions
         self.atoms.deinit();
         self.allocator.free(self.call_stack);
         self.allocator.free(self.stack);
         self.allocator.destroy(self);
     }
+
+    // ========================================================================
+    // Global Object Access
+    // ========================================================================
+
+    /// Get global property by atom
+    pub fn getGlobal(self: *Context, atom: object.Atom) ?value.JSValue {
+        if (self.global_obj) |g| {
+            return g.getProperty(atom);
+        }
+        return null;
+    }
+
+    /// Set global property by atom
+    pub fn setGlobal(self: *Context, atom: object.Atom, val: value.JSValue) !void {
+        if (self.global_obj) |g| {
+            try g.setProperty(self.allocator, atom, val);
+        }
+    }
+
+    /// Define global variable (same as set for now)
+    pub fn defineGlobal(self: *Context, atom: object.Atom, val: value.JSValue) !void {
+        try self.setGlobal(atom, val);
+    }
+
+    /// Register a native function on the global object
+    pub fn registerGlobalFunction(self: *Context, name: object.Atom, func: object.NativeFn, arg_count: u8) !void {
+        const root_class = self.root_class orelse return error.NoRootClass;
+        const func_obj = try object.JSObject.createNativeFunction(self.allocator, root_class, func, name, arg_count);
+        try self.setGlobal(name, func_obj.toValue());
+    }
+
+    // ========================================================================
+    // Stack Operations
+    // ========================================================================
 
     /// Push value onto stack
     pub inline fn push(self: *Context, val: value.JSValue) !void {

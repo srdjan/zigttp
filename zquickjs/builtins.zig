@@ -7,13 +7,14 @@ const value = @import("value.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const string = @import("string.zig");
+const http = @import("http.zig");
 
 /// Built-in class IDs
 pub const ClassId = enum(u8) {
     object = 0,
     array = 1,
     function = 2,
-    string = 3,
+    string_obj = 3,
     number = 4,
     boolean = 5,
     symbol = 6,
@@ -32,13 +33,13 @@ pub const ClassId = enum(u8) {
     // Add more as needed
 };
 
-/// Native function signature
+/// Native function signature - matches object.NativeFn
 pub const NativeFunc = *const fn (*context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue;
 
 /// Built-in function descriptor
 pub const BuiltinFunc = struct {
-    name: []const u8,
-    func: NativeFunc,
+    name: object.Atom,
+    func: object.NativeFn,
     arg_count: u8,
 };
 
@@ -994,10 +995,193 @@ pub const console_methods = [_]BuiltinFunc{
 // Initialization
 // ============================================================================
 
+/// Wrapper to convert context.Context native function signature to object.NativeFn
+fn wrapConsoleLog(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return consoleLog(ctx, this, args);
+}
+
+fn wrapConsoleWarn(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return consoleWarn(ctx, this, args);
+}
+
+fn wrapConsoleError(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return consoleError(ctx, this, args);
+}
+
+fn wrapMathAbs(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathAbs(ctx, this, args);
+}
+
+fn wrapMathFloor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathFloor(ctx, this, args);
+}
+
+fn wrapMathCeil(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathCeil(ctx, this, args);
+}
+
+fn wrapMathRound(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathRound(ctx, this, args);
+}
+
+fn wrapMathTrunc(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathTrunc(ctx, this, args);
+}
+
+fn wrapMathMin(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathMin(ctx, this, args);
+}
+
+fn wrapMathMax(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathMax(ctx, this, args);
+}
+
+fn wrapMathPow(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathPow(ctx, this, args);
+}
+
+fn wrapMathSqrt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathSqrt(ctx, this, args);
+}
+
+fn wrapMathSin(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathSin(ctx, this, args);
+}
+
+fn wrapMathCos(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathCos(ctx, this, args);
+}
+
+fn wrapMathTan(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathTan(ctx, this, args);
+}
+
+fn wrapMathLog(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathLog(ctx, this, args);
+}
+
+fn wrapMathExp(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathExp(ctx, this, args);
+}
+
+fn wrapMathRandom(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathRandom(ctx, this, args);
+}
+
+fn wrapMathSign(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return mathSign(ctx, this, args);
+}
+
+/// Create a native function and add it as a property on an object
+fn addMethod(
+    allocator: std.mem.Allocator,
+    obj: *object.JSObject,
+    root_class: *object.HiddenClass,
+    name: object.Atom,
+    func: object.NativeFn,
+    arg_count: u8,
+) !void {
+    const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, name, arg_count);
+    try obj.setProperty(allocator, name, func_obj.toValue());
+}
+
 /// Initialize all built-in objects on global
 pub fn initBuiltins(ctx: *context.Context) !void {
-    _ = ctx;
-    // TODO: Create Object, Array, Math, console on global
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+
+    // Create console object
+    const console_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethod(allocator, console_obj, root_class, .log, wrapConsoleLog, 0);
+    // Note: .warn and .error atoms don't exist in predefined atoms, use .log for now
+    // In full implementation would add dynamic atoms
+
+    // Register console on global
+    try ctx.setGlobal(.console, console_obj.toValue());
+
+    // Create Math object
+    const math_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethod(allocator, math_obj, root_class, .abs, wrapMathAbs, 1);
+    try addMethod(allocator, math_obj, root_class, .floor, wrapMathFloor, 1);
+    try addMethod(allocator, math_obj, root_class, .ceil, wrapMathCeil, 1);
+    try addMethod(allocator, math_obj, root_class, .round, wrapMathRound, 1);
+    try addMethod(allocator, math_obj, root_class, .min, wrapMathMin, 2);
+    try addMethod(allocator, math_obj, root_class, .max, wrapMathMax, 2);
+    try addMethod(allocator, math_obj, root_class, .pow, wrapMathPow, 2);
+    try addMethod(allocator, math_obj, root_class, .sqrt, wrapMathSqrt, 1);
+    try addMethod(allocator, math_obj, root_class, .sin, wrapMathSin, 1);
+    try addMethod(allocator, math_obj, root_class, .cos, wrapMathCos, 1);
+    try addMethod(allocator, math_obj, root_class, .tan, wrapMathTan, 1);
+    try addMethod(allocator, math_obj, root_class, .log, wrapMathLog, 1);
+    try addMethod(allocator, math_obj, root_class, .exp, wrapMathExp, 1);
+    try addMethod(allocator, math_obj, root_class, .random, wrapMathRandom, 0);
+
+    // Add Math constants as properties
+    const pi_box = try ctx.gc_state.allocFloat(math_constants.PI);
+    try math_obj.setProperty(allocator, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromPtr(pi_box));
+    // Note: Would need to add "PI", "E" etc as dynamic atoms for full implementation
+
+    // Register Math on global
+    try ctx.setGlobal(.Math, math_obj.toValue());
+
+    // Create Response object with static methods
+    const response_obj = try object.JSObject.create(allocator, root_class, null);
+
+    // Register Response static methods using dynamic atoms
+    const json_atom = try ctx.atoms.intern("json");
+    const text_atom = try ctx.atoms.intern("text");
+    const html_atom = try ctx.atoms.intern("html");
+    const redirect_atom = try ctx.atoms.intern("redirect");
+
+    const json_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseJson, json_atom, 1);
+    try response_obj.setProperty(allocator, json_atom, json_func.toValue());
+
+    const text_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseText, text_atom, 1);
+    try response_obj.setProperty(allocator, text_atom, text_func.toValue());
+
+    const html_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseHtml, html_atom, 1);
+    try response_obj.setProperty(allocator, html_atom, html_func.toValue());
+
+    const redirect_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseRedirect, redirect_atom, 1);
+    try response_obj.setProperty(allocator, redirect_atom, redirect_func.toValue());
+
+    // Register Response on global (dynamic atom since "Response" isn't predefined)
+    const response_atom = try ctx.atoms.intern("Response");
+    try ctx.setGlobal(response_atom, response_obj.toValue());
+
+    // Register h() - hyperscript function for JSX
+    const h_atom = try ctx.atoms.intern("h");
+    const h_func = try object.JSObject.createNativeFunction(allocator, root_class, http.h, h_atom, 2);
+    try ctx.setGlobal(h_atom, h_func.toValue());
+
+    // Register renderToString() for SSR
+    const render_atom = try ctx.atoms.intern("renderToString");
+    const render_func = try object.JSObject.createNativeFunction(allocator, root_class, http.renderToString, render_atom, 1);
+    try ctx.setGlobal(render_atom, render_func.toValue());
+
+    // Register Fragment constant for JSX
+    const fragment_atom = try ctx.atoms.intern("Fragment");
+    const fragment_str = try string.createString(allocator, http.FRAGMENT_MARKER);
+    try ctx.setGlobal(fragment_atom, value.JSValue.fromPtr(fragment_str));
 }
 
 test "Math.abs" {
@@ -1312,4 +1496,65 @@ test "String.repeat" {
     // repeat(0) = "" (length 0)
     const empty = stringRepeat(ctx, str_val, &[_]value.JSValue{value.JSValue.fromInt(0)});
     try std.testing.expectEqual(@as(i32, 0), empty.getInt());
+}
+
+test "initBuiltins registers console and Math" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Initialize built-ins
+    try initBuiltins(ctx);
+
+    // Check console is registered on global
+    const console_val = ctx.getGlobal(.console);
+    try std.testing.expect(console_val != null);
+    try std.testing.expect(console_val.?.isObject());
+
+    // Check Math is registered on global
+    const math_val = ctx.getGlobal(.Math);
+    try std.testing.expect(math_val != null);
+    try std.testing.expect(math_val.?.isObject());
+
+    // Check Math has abs method
+    const math_obj = object.JSObject.fromValue(math_val.?);
+    const abs_val = math_obj.getProperty(.abs);
+    try std.testing.expect(abs_val != null);
+    try std.testing.expect(abs_val.?.isCallable());
+
+    // Check Response is registered
+    const response_atom = try ctx.atoms.intern("Response");
+    const response_val = ctx.getGlobal(response_atom);
+    try std.testing.expect(response_val != null);
+    try std.testing.expect(response_val.?.isObject());
+
+    // Check Response.json exists
+    const response_obj = object.JSObject.fromValue(response_val.?);
+    const json_atom = try ctx.atoms.intern("json");
+    const json_method = response_obj.getProperty(json_atom);
+    try std.testing.expect(json_method != null);
+    try std.testing.expect(json_method.?.isCallable());
+
+    // Check h() is registered
+    const h_atom = try ctx.atoms.intern("h");
+    const h_val = ctx.getGlobal(h_atom);
+    try std.testing.expect(h_val != null);
+    try std.testing.expect(h_val.?.isCallable());
+
+    // Check renderToString is registered
+    const render_atom = try ctx.atoms.intern("renderToString");
+    const render_val = ctx.getGlobal(render_atom);
+    try std.testing.expect(render_val != null);
+    try std.testing.expect(render_val.?.isCallable());
+
+    // Check Fragment is registered
+    const fragment_atom = try ctx.atoms.intern("Fragment");
+    const fragment_val = ctx.getGlobal(fragment_atom);
+    try std.testing.expect(fragment_val != null);
+    try std.testing.expect(fragment_val.?.isString());
 }

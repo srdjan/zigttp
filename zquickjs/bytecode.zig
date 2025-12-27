@@ -3,6 +3,7 @@
 //! Variable-size instruction encoding with versioned format.
 
 const std = @import("std");
+const value = @import("value.zig");
 
 /// Bytecode file magic number ("ZQJS")
 pub const MAGIC: u32 = 0x5A514A53;
@@ -127,6 +128,7 @@ pub const Opcode = enum(u8) {
     get_global = 0x83, // +u16 atom_idx
     put_global = 0x84, // +u16 atom_idx
     define_global = 0x85, // +u16 atom_idx (declare global var)
+    make_function = 0x86, // +u16 const_idx (creates function from bytecode in constant pool)
 
     // Type checks
     typeof = 0x90,
@@ -200,7 +202,7 @@ pub const FunctionBytecode = struct {
     stack_size: u16,
     flags: FunctionFlags,
     code: []const u8,
-    constants: []const u8,
+    constants: []const value.JSValue,
     source_map: ?[]const u8,
 };
 

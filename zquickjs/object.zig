@@ -192,6 +192,24 @@ pub const Atom = enum(u32) {
     }
 };
 
+/// Native function signature
+/// ctx: execution context, this: this value, args: argument slice
+/// Returns: result value or error
+pub const NativeFn = *const fn (ctx: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue;
+
+/// Native function data stored in function objects
+pub const NativeFunctionData = struct {
+    func: NativeFn,
+    name: Atom,
+    arg_count: u8, // Expected argument count (0 = variadic)
+};
+
+/// JS bytecode function data stored in function objects
+pub const BytecodeFunctionData = struct {
+    bytecode: *const @import("bytecode.zig").FunctionBytecode,
+    name: Atom,
+};
+
 /// Property descriptor flags
 pub const PropertyFlags = packed struct {
     writable: bool = true,
@@ -350,6 +368,84 @@ pub const JSObject = extern struct {
             allocator.free(slots[0..self.overflow_capacity]);
         }
         allocator.destroy(self);
+    }
+
+    /// Create a native function object
+    pub fn createNativeFunction(allocator: std.mem.Allocator, class: *HiddenClass, func: NativeFn, name: Atom, arg_count: u8) !*JSObject {
+        // Allocate native function data
+        const data = try allocator.create(NativeFunctionData);
+        errdefer allocator.destroy(data);
+        data.* = .{
+            .func = func,
+            .name = name,
+            .arg_count = arg_count,
+        };
+
+        // Create function object
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .function,
+            .flags = .{ .is_callable = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+        };
+        // Store native function data pointer in first slot
+        obj.inline_slots[0] = value.JSValue.fromPtr(data);
+        return obj;
+    }
+
+    /// Get native function data (if this is a native function)
+    pub fn getNativeFunctionData(self: *const JSObject) ?*NativeFunctionData {
+        if (self.class_id != .function or !self.flags.is_callable) return null;
+        const slot = self.inline_slots[0];
+        if (!slot.isPtr()) return null;
+        // Check if it's a native function by checking inline_slots[1]
+        // Native functions have undefined in slot 1, bytecode functions have the data pointer
+        if (!self.inline_slots[1].isUndefined()) return null;
+        return slot.toPtr(NativeFunctionData);
+    }
+
+    /// Create a JS bytecode function object
+    pub fn createBytecodeFunction(allocator: std.mem.Allocator, class: *HiddenClass, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, name: Atom) !*JSObject {
+        // Allocate bytecode function data
+        const data = try allocator.create(BytecodeFunctionData);
+        errdefer allocator.destroy(data);
+        data.* = .{
+            .bytecode = bytecode_ptr,
+            .name = name,
+        };
+
+        // Create function object
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .function,
+            .flags = .{ .is_callable = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+        };
+        // Store bytecode function data pointer in first slot
+        // Use slot 1 to mark this as a bytecode function (non-undefined)
+        obj.inline_slots[0] = value.JSValue.fromPtr(data);
+        obj.inline_slots[1] = value.JSValue.true_val; // Marker for bytecode function
+        return obj;
+    }
+
+    /// Get bytecode function data (if this is a bytecode function)
+    pub fn getBytecodeFunctionData(self: *const JSObject) ?*BytecodeFunctionData {
+        if (self.class_id != .function or !self.flags.is_callable) return null;
+        const slot = self.inline_slots[0];
+        if (!slot.isPtr()) return null;
+        // Bytecode functions have non-undefined in slot 1
+        if (self.inline_slots[1].isUndefined()) return null;
+        return slot.toPtr(BytecodeFunctionData);
     }
 
     /// Fast property access by slot offset
