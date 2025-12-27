@@ -23,6 +23,13 @@ pub const CallFrame = struct {
     this: value.JSValue,
 };
 
+/// Exception handler entry
+pub const CatchHandler = struct {
+    catch_pc: usize, // PC to jump to on exception
+    sp: usize, // Stack pointer to restore
+    fp: usize, // Frame pointer at entry
+};
+
 /// JavaScript execution context
 pub const Context = struct {
     /// Allocator for context-owned memory
@@ -45,10 +52,18 @@ pub const Context = struct {
     global_obj: ?*object.JSObject,
     /// Root hidden class for new objects
     root_class: ?*object.HiddenClass,
+    /// Built-in prototypes
+    array_prototype: ?*object.JSObject,
+    string_prototype: ?*object.JSObject,
+    object_prototype: ?*object.JSObject,
+    function_prototype: ?*object.JSObject,
     /// Atom table for dynamic atoms
     atoms: AtomTable,
     /// Exception value (if any)
     exception: value.JSValue,
+    /// Catch handler stack
+    catch_stack: [32]CatchHandler,
+    catch_depth: usize,
     /// Configuration
     config: ContextConfig,
 
@@ -81,8 +96,14 @@ pub const Context = struct {
             .global = global_obj.toValue(),
             .global_obj = global_obj,
             .root_class = root_class,
+            .array_prototype = null,
+            .string_prototype = null,
+            .object_prototype = null,
+            .function_prototype = null,
             .atoms = AtomTable.init(allocator),
             .exception = value.JSValue.undefined_val,
+            .catch_stack = undefined,
+            .catch_depth = 0,
             .config = config,
         };
 
@@ -200,6 +221,36 @@ pub const Context = struct {
     pub fn hasException(self: *Context) bool {
         return self.exception.isException() or
             (!self.exception.isUndefined() and !self.exception.isNull());
+    }
+
+    // ========================================================================
+    // Exception Handler Stack
+    // ========================================================================
+
+    /// Push a catch handler
+    pub fn pushCatch(self: *Context, catch_pc: usize) !void {
+        if (self.catch_depth >= self.catch_stack.len) {
+            return error.CallStackOverflow;
+        }
+        self.catch_stack[self.catch_depth] = .{
+            .catch_pc = catch_pc,
+            .sp = self.sp,
+            .fp = self.fp,
+        };
+        self.catch_depth += 1;
+    }
+
+    /// Pop a catch handler (normal exit from try block)
+    pub fn popCatch(self: *Context) void {
+        if (self.catch_depth > 0) {
+            self.catch_depth -= 1;
+        }
+    }
+
+    /// Get current catch handler (for exception dispatch)
+    pub fn getCatchHandler(self: *Context) ?CatchHandler {
+        if (self.catch_depth == 0) return null;
+        return self.catch_stack[self.catch_depth - 1];
     }
 
     // ========================================================================

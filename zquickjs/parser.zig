@@ -83,6 +83,10 @@ pub const TokenType = enum(u8) {
     question, // ?
     arrow, // =>
     spread, // ...
+    template_literal, // `string`
+    template_head, // `string${
+    template_middle, // }string${
+    template_tail, // }string`
 
     // Keywords
     kw_var,
@@ -256,6 +260,9 @@ pub const Tokenizer = struct {
             // String literals
             '"', '\'' => return self.scanString(c),
 
+            // Template literals
+            '`' => return self.scanTemplateLiteral(),
+
             // Numbers
             '0'...'9' => return self.scanNumber(start),
 
@@ -363,6 +370,46 @@ pub const Tokenizer = struct {
         }
         return .{
             .type = .string_literal,
+            .start = start,
+            .len = @intCast(self.pos - start),
+            .line = self.line,
+        };
+    }
+
+    fn scanTemplateLiteral(self: *Tokenizer) Token {
+        const start = self.pos - 1; // Include opening backtick
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            if (c == '`') {
+                self.pos += 1; // Consume closing backtick
+                return .{
+                    .type = .template_literal,
+                    .start = start,
+                    .len = @intCast(self.pos - start),
+                    .line = self.line,
+                };
+            } else if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
+                // Template expression start: ${
+                self.pos += 2;
+                return .{
+                    .type = .template_head,
+                    .start = start,
+                    .len = @intCast(self.pos - start),
+                    .line = self.line,
+                };
+            } else if (c == '\\' and self.pos + 1 < self.source.len) {
+                self.pos += 2; // Skip escape sequence
+            } else {
+                if (c == '\n') {
+                    self.line += 1;
+                    self.line_start = self.pos + 1;
+                }
+                self.pos += 1;
+            }
+        }
+        // Unterminated template literal
+        return .{
+            .type = .template_literal,
             .start = start,
             .len = @intCast(self.pos - start),
             .line = self.line,
@@ -779,8 +826,14 @@ pub const Parser = struct {
             try self.whileStatement();
         } else if (self.match(.kw_for)) {
             try self.forStatement();
+        } else if (self.match(.kw_switch)) {
+            try self.switchStatement();
         } else if (self.match(.kw_return)) {
             try self.returnStatement();
+        } else if (self.match(.kw_throw)) {
+            try self.throwStatement();
+        } else if (self.match(.kw_try)) {
+            try self.tryStatement();
         } else if (self.match(.lbrace)) {
             self.beginScope();
             try self.block();
@@ -874,6 +927,84 @@ pub const Parser = struct {
         try self.endScope();
     }
 
+    fn switchStatement(self: *Parser) Error!void {
+        try self.consume(.lparen, "Expected '(' after 'switch'.");
+        try self.expression(); // Switch value stays on stack
+        try self.consume(.rparen, "Expected ')' after switch expression.");
+        try self.consume(.lbrace, "Expected '{' before switch body.");
+
+        // Track breaks that need patching at the end
+        var break_jumps: [64]usize = undefined;
+        var break_count: usize = 0;
+
+        // First pass: emit jumps to case labels, collecting case values
+        // We'll use a simpler approach: for each case, dup switch value, compare, jump
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            if (self.match(.kw_case)) {
+                // Duplicate switch value for comparison
+                try self.emitOp(.dup);
+                try self.expression(); // Case value
+                try self.consume(.colon, "Expected ':' after case value.");
+
+                // Compare: switch_value === case_value
+                try self.emitOp(.strict_eq);
+                const skip_case = try self.emitJump(.if_false);
+
+                // Drop the switch value copy (comparison consumed it, but we need to drop for fall-through)
+                // Actually, strict_eq pops both operands and pushes result, if_false pops result
+                // So we don't need extra drops here
+
+                // Parse case body (statements until next case/default/rbrace)
+                while (!self.check(.kw_case) and !self.check(.kw_default) and
+                    !self.check(.rbrace) and !self.check(.eof))
+                {
+                    if (self.match(.kw_break)) {
+                        _ = self.match(.semicolon);
+                        // Jump to end of switch
+                        if (break_count < break_jumps.len) {
+                            break_jumps[break_count] = try self.emitJump(.goto);
+                            break_count += 1;
+                        }
+                    } else {
+                        try self.statement();
+                    }
+                }
+
+                self.patchJump(skip_case);
+            } else if (self.match(.kw_default)) {
+                try self.consume(.colon, "Expected ':' after 'default'.");
+
+                // Parse default body
+                while (!self.check(.kw_case) and !self.check(.kw_default) and
+                    !self.check(.rbrace) and !self.check(.eof))
+                {
+                    if (self.match(.kw_break)) {
+                        _ = self.match(.semicolon);
+                        if (break_count < break_jumps.len) {
+                            break_jumps[break_count] = try self.emitJump(.goto);
+                            break_count += 1;
+                        }
+                    } else {
+                        try self.statement();
+                    }
+                }
+            } else {
+                self.errorAtCurrent("Expected 'case' or 'default' in switch.");
+                return error.UnexpectedToken;
+            }
+        }
+
+        try self.consume(.rbrace, "Expected '}' after switch body.");
+
+        // Patch all break jumps to here
+        for (break_jumps[0..break_count]) |jump| {
+            self.patchJump(jump);
+        }
+
+        // Drop the switch value
+        try self.emitOp(.drop);
+    }
+
     fn returnStatement(self: *Parser) !void {
         if (self.check(.semicolon) or self.check(.rbrace) or self.check(.eof)) {
             try self.emitOp(.push_undefined);
@@ -882,6 +1013,74 @@ pub const Parser = struct {
         }
         _ = self.match(.semicolon);
         try self.emitOp(.ret);
+    }
+
+    fn throwStatement(self: *Parser) !void {
+        // throw requires an expression
+        try self.expression();
+        _ = self.match(.semicolon);
+        try self.emitOp(.@"throw");
+    }
+
+    fn tryStatement(self: *Parser) !void {
+        // Emit push_catch with placeholder offset
+        try self.emitOp(.push_catch);
+        const catch_jump = self.code.items.len;
+        try self.emitByte(0); // Placeholder for offset
+        try self.emitByte(0);
+
+        // Parse try block
+        try self.consume(.lbrace, "Expected '{' after 'try'.");
+        self.beginScope();
+        try self.block();
+        try self.endScope();
+
+        // Normal exit from try - pop catch handler and jump past catch
+        try self.emitOp(.pop_catch);
+        const exit_jump = try self.emitJump(.goto);
+
+        // Patch catch jump to here
+        const catch_offset: i16 = @intCast(@as(i32, @intCast(self.code.items.len)) - @as(i32, @intCast(catch_jump)) - 2);
+        self.code.items[catch_jump] = @intCast(@as(u16, @bitCast(catch_offset)) & 0xFF);
+        self.code.items[catch_jump + 1] = @intCast((@as(u16, @bitCast(catch_offset)) >> 8) & 0xFF);
+
+        // Parse catch clause
+        if (self.match(.kw_catch)) {
+            // Optional catch parameter: catch (e) or just catch
+            if (self.match(.lparen)) {
+                try self.consume(.identifier, "Expected exception variable name.");
+                const name = self.previous.text(self.tokenizer.source);
+
+                // Create local for exception variable
+                try self.declareLocal(name, false);
+                try self.consume(.rparen, "Expected ')' after catch parameter.");
+
+                // Get exception value and store in local
+                try self.emitOp(.get_exception);
+                const local_idx = self.resolveLocal(name) orelse return error.UnexpectedToken;
+                try self.emitOp(.put_loc);
+                try self.emitByte(local_idx);
+            }
+
+            // Parse catch block
+            try self.consume(.lbrace, "Expected '{' after 'catch'.");
+            self.beginScope();
+            try self.block();
+            try self.endScope();
+        }
+
+        // Parse finally clause (optional)
+        if (self.match(.kw_finally)) {
+            // Finally blocks are complex - for now, just parse the block
+            // A full implementation would need to execute finally on all paths
+            try self.consume(.lbrace, "Expected '{' after 'finally'.");
+            self.beginScope();
+            try self.block();
+            try self.endScope();
+        }
+
+        // Patch exit jump to here
+        self.patchJump(exit_jump);
     }
 
     fn block(self: *Parser) !void {
@@ -1015,6 +1214,12 @@ pub const Parser = struct {
     fn identifier(self: *Parser, can_assign: bool) !void {
         const name = self.previous.text(self.tokenizer.source);
 
+        // Check for arrow function: x => expr
+        if (self.match(.arrow)) {
+            try self.arrowFunctionBody(&[_][]const u8{name});
+            return;
+        }
+
         // Check for local
         var local_idx: ?u8 = null;
         var i: i32 = @as(i32, self.local_count) - 1;
@@ -1049,8 +1254,101 @@ pub const Parser = struct {
     }
 
     fn grouping(self: *Parser, _: bool) !void {
+        // Check for arrow function: () => or (x) => or (x, y) =>
+        // We need to check if this is a parameter list followed by =>
+
+        // Save position to potentially backtrack
+        const saved_pos = self.tokenizer.current;
+        const saved_current = self.current;
+        const saved_previous = self.previous;
+
+        // Try to parse as arrow function parameters
+        var params: [16][]const u8 = undefined;
+        var param_count: usize = 0;
+        var is_arrow = false;
+
+        if (self.check(.rparen)) {
+            // () => case
+            self.advance(); // consume )
+            if (self.check(.arrow)) {
+                is_arrow = true;
+            }
+        } else if (self.check(.identifier)) {
+            // Try to parse parameter list
+            while (true) {
+                if (!self.check(.identifier)) break;
+                if (param_count >= params.len) break;
+
+                self.advance();
+                params[param_count] = self.previous.text(self.tokenizer.source);
+                param_count += 1;
+
+                if (!self.match(.comma)) break;
+            }
+
+            if (self.check(.rparen)) {
+                self.advance(); // consume )
+                if (self.check(.arrow)) {
+                    is_arrow = true;
+                }
+            }
+        }
+
+        if (is_arrow) {
+            self.advance(); // consume =>
+            try self.arrowFunctionBody(params[0..param_count]);
+            return;
+        }
+
+        // Not an arrow function - restore and parse as grouping
+        self.tokenizer.current = saved_pos;
+        self.current = saved_current;
+        self.previous = saved_previous;
+
         try self.expression();
         try self.consume(.rparen, "Expected ')' after expression.");
+    }
+
+    fn arrowFunctionBody(self: *Parser, params: []const []const u8) !void {
+        // Create a function bytecode for the arrow function
+        // For simplicity, we'll compile it inline similar to function expressions
+
+        // Save current compiler state
+        const saved_locals = self.locals;
+        const saved_local_count = self.local_count;
+        const saved_scope_depth = self.scope_depth;
+
+        // Reset for arrow function body
+        self.local_count = 0;
+        self.scope_depth = 0;
+
+        // Declare parameters as locals
+        for (params) |param| {
+            try self.declareLocal(param, false);
+        }
+
+        // Compile body
+        if (self.match(.lbrace)) {
+            // Block body: (x) => { ... }
+            try self.block();
+            // If no explicit return, return undefined
+            try self.emitOp(.push_undefined);
+            try self.emitOp(.ret);
+        } else {
+            // Expression body: (x) => x + 1
+            try self.expression();
+            try self.emitOp(.ret);
+        }
+
+        // Restore compiler state
+        self.locals = saved_locals;
+        self.local_count = saved_local_count;
+        self.scope_depth = saved_scope_depth;
+
+        // Note: This is a simplified implementation that compiles inline
+        // A full implementation would create a separate function bytecode object
+        // For now, push undefined as placeholder (arrow functions need more work)
+        // TODO: Proper arrow function implementation with closure capture
     }
 
     /// Parse array literal: [elem1, elem2, ...]
@@ -1145,6 +1443,129 @@ pub const Parser = struct {
         try self.consume(.rbrace, "Expected '}' after object literal.");
     }
 
+    /// Parse template literal: `string` or `string${expr}string`
+    fn templateLiteral(self: *Parser, _: bool) !void {
+        const text = self.previous.text(self.tokenizer.source);
+
+        if (self.previous.type == .template_literal) {
+            // Simple template literal without expressions: `hello`
+            // Remove backticks and add as string constant
+            const content = text[1 .. text.len - 1];
+            const processed = try self.processTemplateString(content);
+            const const_idx = try self.addStringConstant(processed);
+            try self.emitOp(.push_const);
+            try self.emitU16(const_idx);
+        } else if (self.previous.type == .template_head) {
+            // Template with expressions: `hello ${
+            // Extract the head string (remove ` and ${)
+            const head_content = text[1 .. text.len - 2];
+            const processed_head = try self.processTemplateString(head_content);
+            const head_idx = try self.addStringConstant(processed_head);
+            try self.emitOp(.push_const);
+            try self.emitU16(head_idx);
+
+            // Parse expression
+            try self.expression();
+
+            // Convert expression to string and concatenate (simplified: just add)
+            try self.emitOp(.add);
+
+            // Continue parsing middle/tail parts
+            try self.parseTemplateRest();
+        }
+    }
+
+    /// Continue parsing template after first expression
+    fn parseTemplateRest(self: *Parser) !void {
+        while (true) {
+            // After expression, we need to scan for }string${ or }string`
+            const tok = self.scanTemplateMiddleOrTail();
+            const text = tok.text(self.tokenizer.source);
+
+            if (tok.type == .template_tail) {
+                // }string` - final part
+                const tail_content = text[1 .. text.len - 1]; // Remove } and `
+                if (tail_content.len > 0) {
+                    const processed = try self.processTemplateString(tail_content);
+                    const const_idx = try self.addStringConstant(processed);
+                    try self.emitOp(.push_const);
+                    try self.emitU16(const_idx);
+                    try self.emitOp(.add);
+                }
+                break;
+            } else if (tok.type == .template_middle) {
+                // }string${ - middle part
+                const middle_content = text[1 .. text.len - 2]; // Remove } and ${
+                if (middle_content.len > 0) {
+                    const processed = try self.processTemplateString(middle_content);
+                    const const_idx = try self.addStringConstant(processed);
+                    try self.emitOp(.push_const);
+                    try self.emitU16(const_idx);
+                    try self.emitOp(.add);
+                }
+
+                // Parse next expression
+                try self.expression();
+                try self.emitOp(.add);
+            } else {
+                self.errorAtCurrent("Unterminated template literal.");
+                break;
+            }
+        }
+    }
+
+    /// Scan for template middle (}...${) or tail (}...`)
+    fn scanTemplateMiddleOrTail(self: *Parser) Token {
+        const start = self.tokenizer.pos;
+        const start_line = self.tokenizer.line;
+
+        while (self.tokenizer.pos < self.tokenizer.source.len) {
+            const c = self.tokenizer.source[self.tokenizer.pos];
+            if (c == '`') {
+                self.tokenizer.pos += 1;
+                return .{
+                    .type = .template_tail,
+                    .start = @intCast(start),
+                    .len = @intCast(self.tokenizer.pos - start),
+                    .line = start_line,
+                };
+            } else if (c == '$' and self.tokenizer.pos + 1 < self.tokenizer.source.len and
+                self.tokenizer.source[self.tokenizer.pos + 1] == '{')
+            {
+                self.tokenizer.pos += 2;
+                return .{
+                    .type = .template_middle,
+                    .start = @intCast(start),
+                    .len = @intCast(self.tokenizer.pos - start),
+                    .line = start_line,
+                };
+            } else if (c == '\\' and self.tokenizer.pos + 1 < self.tokenizer.source.len) {
+                self.tokenizer.pos += 2; // Skip escape
+            } else {
+                if (c == '\n') {
+                    self.tokenizer.line += 1;
+                }
+                self.tokenizer.pos += 1;
+            }
+        }
+
+        // Unterminated
+        return .{
+            .type = .invalid,
+            .start = @intCast(start),
+            .len = @intCast(self.tokenizer.pos - start),
+            .line = start_line,
+        };
+    }
+
+    /// Process escape sequences in template string content
+    fn processTemplateString(self: *Parser, content: []const u8) ![]const u8 {
+        // For now, return as-is. A full implementation would process:
+        // \n, \t, \r, \\, \`, \$, etc.
+        _ = self;
+        return content;
+    }
+
     /// Parse 'this' keyword
     fn thisExpr(self: *Parser, _: bool) !void {
         try self.emitOp(.push_this);
@@ -1190,6 +1611,47 @@ pub const Parser = struct {
             .kw_typeof => try self.emitOp(.typeof),
             else => unreachable,
         }
+    }
+
+    /// Parse 'new' expression: new Constructor(args)
+    fn newExpr(self: *Parser, _: bool) !void {
+        // Parse the constructor expression (high precedence, stops before call)
+        try self.parsePrecedence(.call);
+
+        // Parse arguments if present
+        var arg_count: u8 = 0;
+        if (self.match(.lparen)) {
+            if (!self.check(.rparen)) {
+                while (true) {
+                    try self.expression();
+                    arg_count += 1;
+                    if (!self.match(.comma)) break;
+                }
+            }
+            try self.consume(.rparen, "Expected ')' after constructor arguments.");
+        }
+
+        try self.emitOp(.call_constructor);
+        try self.emitByte(arg_count);
+    }
+
+    /// Parse 'delete' expression: delete obj.prop or delete obj[key]
+    fn deleteExpr(self: *Parser, _: bool) !void {
+        // Parse the operand (must be a property access)
+        try self.parsePrecedence(.unary);
+
+        // For now, just emit delete_field or delete_elem
+        // In a full implementation, we'd check that the operand is a valid target
+        // Since we don't track the exact form, we'll emit a simplified version
+        // that pops the value and pushes true (delete always succeeds in non-strict mode)
+        try self.emitOp(.drop);
+        try self.emitOp(.push_true);
+    }
+
+    /// Parse 'instanceof' operator: obj instanceof Constructor
+    fn instanceofOp(self: *Parser, _: bool) !void {
+        try self.parsePrecedence(Precedence.comparison.higher());
+        try self.emitOp(.instanceof);
     }
 
     // Infix parsers
@@ -1309,6 +1771,9 @@ pub const Parser = struct {
             .slash, .star, .percent => .{ .prefix = null, .infix = binary, .precedence = .factor },
             .bang, .tilde => .{ .prefix = unary, .infix = null, .precedence = .none },
             .kw_typeof => .{ .prefix = unary, .infix = null, .precedence = .none },
+            .kw_delete => .{ .prefix = deleteExpr, .infix = null, .precedence = .none },
+            .kw_new => .{ .prefix = newExpr, .infix = null, .precedence = .none },
+            .kw_instanceof => .{ .prefix = null, .infix = instanceofOp, .precedence = .comparison },
             .eq, .ne, .eq_eq, .ne_ne => .{ .prefix = null, .infix = binary, .precedence = .equality },
             .lt, .le, .gt, .ge => .{ .prefix = null, .infix = binary, .precedence = .comparison },
             .ampersand, .pipe, .caret => .{ .prefix = null, .infix = binary, .precedence = .term },
@@ -1321,6 +1786,7 @@ pub const Parser = struct {
             .kw_this => .{ .prefix = thisExpr, .infix = null, .precedence = .none },
             .kw_function => .{ .prefix = functionExpr, .infix = null, .precedence = .none },
             .@"true", .@"false", .@"null", .undefined => .{ .prefix = literal, .infix = null, .precedence = .none },
+            .template_literal, .template_head => .{ .prefix = templateLiteral, .infix = null, .precedence = .none },
             else => .{ .prefix = null, .infix = null, .precedence = .none },
         };
     }

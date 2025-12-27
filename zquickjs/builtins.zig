@@ -154,6 +154,648 @@ pub const object_methods = [_]BuiltinFunc{
 };
 
 // ============================================================================
+// JSON methods
+// ============================================================================
+
+/// JSON.parse(text) - Parse JSON string to JS value
+pub fn jsonParse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = this;
+    if (args.len == 0) return value.JSValue.undefined_val;
+
+    // Get the string content
+    const str_val = args[0];
+    if (!str_val.isString()) return value.JSValue.undefined_val;
+
+    const js_str = str_val.toPtr(string.JSString);
+    const text = js_str.data();
+
+    // Parse the JSON
+    return parseJsonValue(ctx, text) catch value.JSValue.undefined_val;
+}
+
+/// JSON.stringify(value) - Convert JS value to JSON string
+pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = this;
+    if (args.len == 0) return value.JSValue.undefined_val;
+
+    const val = args[0];
+
+    // Build JSON string
+    var buffer = std.ArrayList(u8).init(ctx.allocator);
+    defer buffer.deinit();
+
+    stringifyValue(&buffer, val) catch return value.JSValue.undefined_val;
+
+    // Create JS string from result
+    const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
+}
+
+/// Wrapper for jsonParse that converts context pointer
+fn wrapJsonParse(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return jsonParse(ctx, this, args);
+}
+
+/// Wrapper for jsonStringify that converts context pointer
+fn wrapJsonStringify(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return jsonStringify(ctx, this, args);
+}
+
+/// Wrappers for Object methods
+fn wrapObjectKeys(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectKeys(ctx, this, args);
+}
+
+fn wrapObjectValues(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectValues(ctx, this, args);
+}
+
+fn wrapObjectEntries(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectEntries(ctx, this, args);
+}
+
+fn wrapObjectAssign(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectAssign(ctx, this, args);
+}
+
+fn wrapObjectHasOwn(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectHasOwn(ctx, this, args);
+}
+
+fn wrapObjectFreeze(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectFreeze(ctx, this, args);
+}
+
+fn wrapObjectIsFrozen(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return objectIsFrozen(ctx, this, args);
+}
+
+// ============================================================================
+// Error methods
+// ============================================================================
+
+/// Create a new Error object with message
+pub fn errorConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    return createErrorObject(ctx, this, args, "Error");
+}
+
+/// Create a new TypeError object
+pub fn typeErrorConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    return createErrorObject(ctx, this, args, "TypeError");
+}
+
+/// Create a new RangeError object
+pub fn rangeErrorConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    return createErrorObject(ctx, this, args, "RangeError");
+}
+
+/// Create a new SyntaxError object
+pub fn syntaxErrorConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    return createErrorObject(ctx, this, args, "SyntaxError");
+}
+
+/// Create a new ReferenceError object
+pub fn referenceErrorConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    return createErrorObject(ctx, this, args, "ReferenceError");
+}
+
+/// Helper to create error objects
+fn createErrorObject(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue, error_name: []const u8) value.JSValue {
+    // If called with 'new', use the provided 'this' object
+    // Otherwise create a new error object
+    const obj: *object.JSObject = if (this.isObject() and !this.isUndefined())
+        object.JSObject.fromValue(this)
+    else blk: {
+        const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+        break :blk object.JSObject.create(ctx.allocator, root_class, ctx.object_prototype) catch return value.JSValue.undefined_val;
+    };
+
+    // Set the 'name' property
+    const name_str = string.createString(ctx.allocator, error_name) catch return value.JSValue.undefined_val;
+    obj.setProperty(ctx.allocator, .name, value.JSValue.fromPtr(name_str)) catch {};
+
+    // Set the 'message' property
+    if (args.len > 0 and args[0].isString()) {
+        obj.setProperty(ctx.allocator, .message, args[0]) catch {};
+    } else if (args.len > 0) {
+        // Convert to string
+        const msg_str = valueToStringSimple(ctx.allocator, args[0]) catch {
+            const empty = string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val;
+            obj.setProperty(ctx.allocator, .message, value.JSValue.fromPtr(empty)) catch {};
+            return obj.toValue();
+        };
+        obj.setProperty(ctx.allocator, .message, value.JSValue.fromPtr(msg_str)) catch {};
+    } else {
+        const empty = string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val;
+        obj.setProperty(ctx.allocator, .message, value.JSValue.fromPtr(empty)) catch {};
+    }
+
+    obj.class_id = .@"error";
+    return obj.toValue();
+}
+
+/// Error.prototype.toString
+pub fn errorToString(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = args;
+
+    if (!this.isObject()) {
+        return value.JSValue.undefined_val;
+    }
+
+    const obj = object.JSObject.fromValue(this);
+
+    // Get name
+    var name_text: []const u8 = "Error";
+    if (obj.getProperty(.name)) |name_val| {
+        if (name_val.isString()) {
+            name_text = name_val.toPtr(string.JSString).data();
+        }
+    }
+
+    // Get message
+    var msg_text: []const u8 = "";
+    if (obj.getProperty(.message)) |msg_val| {
+        if (msg_val.isString()) {
+            msg_text = msg_val.toPtr(string.JSString).data();
+        }
+    }
+
+    // Format as "Name: message" or just "Name" if no message
+    if (msg_text.len == 0) {
+        const result = string.createString(ctx.allocator, name_text) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
+    }
+
+    // Concatenate: name + ": " + message
+    var buffer = std.ArrayList(u8).init(ctx.allocator);
+    defer buffer.deinit();
+    buffer.appendSlice(name_text) catch return value.JSValue.undefined_val;
+    buffer.appendSlice(": ") catch return value.JSValue.undefined_val;
+    buffer.appendSlice(msg_text) catch return value.JSValue.undefined_val;
+
+    const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
+}
+
+/// Simple value to string conversion
+fn valueToStringSimple(allocator: std.mem.Allocator, val: value.JSValue) !*string.JSString {
+    if (val.isString()) {
+        return val.toPtr(string.JSString);
+    }
+    if (val.isInt()) {
+        var buf: [32]u8 = undefined;
+        const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return try string.createString(allocator, "0");
+        return try string.createString(allocator, slice);
+    }
+    if (val.isNull()) return try string.createString(allocator, "null");
+    if (val.isUndefined()) return try string.createString(allocator, "undefined");
+    if (val.isTrue()) return try string.createString(allocator, "true");
+    if (val.isFalse()) return try string.createString(allocator, "false");
+    if (val.isObject()) return try string.createString(allocator, "[object Object]");
+    return try string.createString(allocator, "");
+}
+
+/// Wrapper for Error constructor
+fn wrapErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return errorConstructor(ctx, this, args);
+}
+
+fn wrapTypeErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return typeErrorConstructor(ctx, this, args);
+}
+
+fn wrapRangeErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return rangeErrorConstructor(ctx, this, args);
+}
+
+fn wrapSyntaxErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return syntaxErrorConstructor(ctx, this, args);
+}
+
+fn wrapReferenceErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return referenceErrorConstructor(ctx, this, args);
+}
+
+fn wrapErrorToString(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return errorToString(ctx, this, args);
+}
+
+/// Parse a JSON value from text
+fn parseJsonValue(ctx: *context.Context, text: []const u8) !value.JSValue {
+    var pos: usize = 0;
+    return parseJsonValueAt(ctx, text, &pos);
+}
+
+/// Parse JSON value at position
+fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+    // Skip whitespace
+    while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+        pos.* += 1;
+    }
+
+    if (pos.* >= text.len) return error.UnexpectedEof;
+
+    const c = text[pos.*];
+
+    // Object
+    if (c == '{') {
+        return parseJsonObject(ctx, text, pos);
+    }
+
+    // Array
+    if (c == '[') {
+        return parseJsonArray(ctx, text, pos);
+    }
+
+    // String
+    if (c == '"') {
+        return parseJsonString(ctx, text, pos);
+    }
+
+    // Number
+    if (c == '-' or (c >= '0' and c <= '9')) {
+        return parseJsonNumber(text, pos);
+    }
+
+    // true
+    if (text.len >= pos.* + 4 and std.mem.eql(u8, text[pos.*..][0..4], "true")) {
+        pos.* += 4;
+        return value.JSValue.true_val;
+    }
+
+    // false
+    if (text.len >= pos.* + 5 and std.mem.eql(u8, text[pos.*..][0..5], "false")) {
+        pos.* += 5;
+        return value.JSValue.false_val;
+    }
+
+    // null
+    if (text.len >= pos.* + 4 and std.mem.eql(u8, text[pos.*..][0..4], "null")) {
+        pos.* += 4;
+        return value.JSValue.null_val;
+    }
+
+    return error.InvalidJson;
+}
+
+/// Parse JSON object
+fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+    pos.* += 1; // skip '{'
+
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+    const obj = try object.JSObject.create(ctx.allocator, root_class, null);
+
+    // Skip whitespace
+    while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+        pos.* += 1;
+    }
+
+    if (pos.* < text.len and text[pos.*] == '}') {
+        pos.* += 1;
+        return obj.toValue();
+    }
+
+    while (pos.* < text.len) {
+        // Skip whitespace
+        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+            pos.* += 1;
+        }
+
+        // Parse key (must be string)
+        if (pos.* >= text.len or text[pos.*] != '"') return error.InvalidJson;
+        const key_val = try parseJsonString(ctx, text, pos);
+        const key_str = key_val.toPtr(string.JSString);
+
+        // Skip whitespace
+        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+            pos.* += 1;
+        }
+
+        // Expect ':'
+        if (pos.* >= text.len or text[pos.*] != ':') return error.InvalidJson;
+        pos.* += 1;
+
+        // Parse value
+        const val = try parseJsonValueAt(ctx, text, pos);
+
+        // Store in object using dynamic atom
+        const atom = try ctx.atoms.intern(key_str.data());
+        try obj.setProperty(ctx.allocator, atom, val);
+
+        // Skip whitespace
+        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+            pos.* += 1;
+        }
+
+        // Check for ',' or '}'
+        if (pos.* >= text.len) return error.InvalidJson;
+        if (text[pos.*] == '}') {
+            pos.* += 1;
+            return obj.toValue();
+        }
+        if (text[pos.*] == ',') {
+            pos.* += 1;
+            continue;
+        }
+        return error.InvalidJson;
+    }
+
+    return error.InvalidJson;
+}
+
+/// Parse JSON array
+fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+    pos.* += 1; // skip '['
+
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+    const arr = try object.JSObject.create(ctx.allocator, root_class, ctx.array_prototype);
+    arr.class_id = .array;
+
+    // Skip whitespace
+    while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+        pos.* += 1;
+    }
+
+    if (pos.* < text.len and text[pos.*] == ']') {
+        pos.* += 1;
+        try arr.setProperty(ctx.allocator, .length, value.JSValue.fromInt(0));
+        return arr.toValue();
+    }
+
+    var index: i32 = 0;
+    while (pos.* < text.len) {
+        // Parse element
+        const elem = try parseJsonValueAt(ctx, text, pos);
+        arr.setSlot(@intCast(index), elem);
+        index += 1;
+
+        // Skip whitespace
+        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
+            pos.* += 1;
+        }
+
+        // Check for ',' or ']'
+        if (pos.* >= text.len) return error.InvalidJson;
+        if (text[pos.*] == ']') {
+            pos.* += 1;
+            try arr.setProperty(ctx.allocator, .length, value.JSValue.fromInt(index));
+            return arr.toValue();
+        }
+        if (text[pos.*] == ',') {
+            pos.* += 1;
+            continue;
+        }
+        return error.InvalidJson;
+    }
+
+    return error.InvalidJson;
+}
+
+/// Parse JSON string
+fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+    pos.* += 1; // skip opening '"'
+
+    var buffer = std.ArrayList(u8).init(ctx.allocator);
+    defer buffer.deinit();
+
+    while (pos.* < text.len) {
+        const c = text[pos.*];
+        if (c == '"') {
+            pos.* += 1;
+            const result = try string.createString(ctx.allocator, buffer.items);
+            return value.JSValue.fromPtr(result);
+        }
+        if (c == '\\') {
+            pos.* += 1;
+            if (pos.* >= text.len) return error.InvalidJson;
+            const escaped = text[pos.*];
+            pos.* += 1;
+            switch (escaped) {
+                '"' => try buffer.append('"'),
+                '\\' => try buffer.append('\\'),
+                '/' => try buffer.append('/'),
+                'n' => try buffer.append('\n'),
+                'r' => try buffer.append('\r'),
+                't' => try buffer.append('\t'),
+                'b' => try buffer.append(0x08),
+                'f' => try buffer.append(0x0C),
+                'u' => {
+                    // Unicode escape \uXXXX
+                    if (pos.* + 4 > text.len) return error.InvalidJson;
+                    const hex = text[pos.*..][0..4];
+                    pos.* += 4;
+                    const code = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
+                    // Simple ASCII handling for now
+                    if (code < 128) {
+                        try buffer.append(@intCast(code));
+                    } else {
+                        // UTF-8 encoding for BMP characters
+                        if (code < 0x80) {
+                            try buffer.append(@intCast(code));
+                        } else if (code < 0x800) {
+                            try buffer.append(@intCast(0xC0 | (code >> 6)));
+                            try buffer.append(@intCast(0x80 | (code & 0x3F)));
+                        } else {
+                            try buffer.append(@intCast(0xE0 | (code >> 12)));
+                            try buffer.append(@intCast(0x80 | ((code >> 6) & 0x3F)));
+                            try buffer.append(@intCast(0x80 | (code & 0x3F)));
+                        }
+                    }
+                },
+                else => try buffer.append(escaped),
+            }
+        } else {
+            try buffer.append(c);
+            pos.* += 1;
+        }
+    }
+
+    return error.InvalidJson;
+}
+
+/// Parse JSON number
+fn parseJsonNumber(text: []const u8, pos: *usize) !value.JSValue {
+    const start = pos.*;
+
+    // Optional minus
+    if (pos.* < text.len and text[pos.*] == '-') {
+        pos.* += 1;
+    }
+
+    // Integer part
+    if (pos.* < text.len and text[pos.*] == '0') {
+        pos.* += 1;
+    } else {
+        while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') {
+            pos.* += 1;
+        }
+    }
+
+    // Fractional part
+    var is_float = false;
+    if (pos.* < text.len and text[pos.*] == '.') {
+        is_float = true;
+        pos.* += 1;
+        while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') {
+            pos.* += 1;
+        }
+    }
+
+    // Exponent part
+    if (pos.* < text.len and (text[pos.*] == 'e' or text[pos.*] == 'E')) {
+        is_float = true;
+        pos.* += 1;
+        if (pos.* < text.len and (text[pos.*] == '+' or text[pos.*] == '-')) {
+            pos.* += 1;
+        }
+        while (pos.* < text.len and text[pos.*] >= '0' and text[pos.*] <= '9') {
+            pos.* += 1;
+        }
+    }
+
+    const num_str = text[start..pos.*];
+
+    if (is_float) {
+        const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidJson;
+        // For now, truncate to int if it fits
+        if (f == @trunc(f) and f >= -2147483648 and f <= 2147483647) {
+            return value.JSValue.fromInt(@intFromFloat(f));
+        }
+        // Would need heap allocation for float - return as int truncated
+        return value.JSValue.fromInt(@intFromFloat(@trunc(f)));
+    } else {
+        const i = std.fmt.parseInt(i32, num_str, 10) catch {
+            // Try as float if integer overflow
+            const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidJson;
+            return value.JSValue.fromInt(@intFromFloat(@trunc(f)));
+        };
+        return value.JSValue.fromInt(i);
+    }
+}
+
+/// Stringify a JS value to JSON
+fn stringifyValue(buffer: *std.ArrayList(u8), val: value.JSValue) !void {
+    if (val.isNull()) {
+        try buffer.appendSlice("null");
+        return;
+    }
+
+    if (val.isUndefined()) {
+        try buffer.appendSlice("null"); // undefined becomes null in JSON
+        return;
+    }
+
+    if (val.isTrue()) {
+        try buffer.appendSlice("true");
+        return;
+    }
+
+    if (val.isFalse()) {
+        try buffer.appendSlice("false");
+        return;
+    }
+
+    if (val.isInt()) {
+        var num_buf: [32]u8 = undefined;
+        const slice = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch return error.OutOfMemory;
+        try buffer.appendSlice(slice);
+        return;
+    }
+
+    if (val.isString()) {
+        const str = val.toPtr(string.JSString);
+        try buffer.append('"');
+        for (str.data()) |c| {
+            switch (c) {
+                '"' => try buffer.appendSlice("\\\""),
+                '\\' => try buffer.appendSlice("\\\\"),
+                '\n' => try buffer.appendSlice("\\n"),
+                '\r' => try buffer.appendSlice("\\r"),
+                '\t' => try buffer.appendSlice("\\t"),
+                0x08 => try buffer.appendSlice("\\b"),
+                0x0C => try buffer.appendSlice("\\f"),
+                else => {
+                    if (c < 0x20) {
+                        // Control characters
+                        try buffer.appendSlice("\\u00");
+                        const hex = "0123456789abcdef";
+                        try buffer.append(hex[c >> 4]);
+                        try buffer.append(hex[c & 0xF]);
+                    } else {
+                        try buffer.append(c);
+                    }
+                },
+            }
+        }
+        try buffer.append('"');
+        return;
+    }
+
+    if (val.isObject()) {
+        const obj = object.JSObject.fromValue(val);
+
+        // Check if it's an array
+        if (obj.class_id == .array) {
+            try buffer.append('[');
+            const len = getArrayLength(obj);
+            var i: i32 = 0;
+            while (i < len) : (i += 1) {
+                if (i > 0) try buffer.append(',');
+                const elem = obj.getSlot(@intCast(i));
+                try stringifyValue(buffer, elem);
+            }
+            try buffer.append(']');
+            return;
+        }
+
+        // Regular object
+        try buffer.append('{');
+        var first = true;
+
+        // Get property slots
+        const hidden_class = obj.hidden_class;
+        for (hidden_class.transitions.items) |transition| {
+            if (!first) try buffer.append(',');
+            first = false;
+
+            // Get property name from atom (simplified - just use index)
+            var atom_buf: [32]u8 = undefined;
+            const atom_name = std.fmt.bufPrint(&atom_buf, "{d}", .{@intFromEnum(transition.atom)}) catch continue;
+            try buffer.append('"');
+            try buffer.appendSlice(atom_name);
+            try buffer.append('"');
+            try buffer.append(':');
+
+            if (obj.getProperty(transition.atom)) |prop_val| {
+                try stringifyValue(buffer, prop_val);
+            } else {
+                try buffer.appendSlice("null");
+            }
+        }
+        try buffer.append('}');
+        return;
+    }
+
+    // Unknown type - output null
+    try buffer.appendSlice("null");
+}
+
+// ============================================================================
 // Array methods
 // ============================================================================
 
@@ -1091,6 +1733,244 @@ fn wrapMathSign(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JS
     return mathSign(ctx, this, args);
 }
 
+// ============================================================================
+// Array method wrappers
+// ============================================================================
+
+fn wrapArrayIsArray(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayIsArray(ctx, this, args);
+}
+
+fn wrapArrayPush(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayPush(ctx, this, args);
+}
+
+fn wrapArrayPop(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayPop(ctx, this, args);
+}
+
+fn wrapArrayShift(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayShift(ctx, this, args);
+}
+
+fn wrapArrayUnshift(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayUnshift(ctx, this, args);
+}
+
+fn wrapArrayIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayIndexOf(ctx, this, args);
+}
+
+fn wrapArrayIncludes(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayIncludes(ctx, this, args);
+}
+
+fn wrapArrayJoin(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayJoin(ctx, this, args);
+}
+
+fn wrapArrayReverse(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayReverse(ctx, this, args);
+}
+
+fn wrapArraySlice(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arraySlice(ctx, this, args);
+}
+
+fn wrapArrayConcat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayConcat(ctx, this, args);
+}
+
+fn wrapArrayMap(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayMap(ctx, this, args);
+}
+
+fn wrapArrayFilter(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayFilter(ctx, this, args);
+}
+
+fn wrapArrayReduce(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayReduce(ctx, this, args);
+}
+
+fn wrapArrayForEach(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayForEach(ctx, this, args);
+}
+
+fn wrapArrayEvery(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayEvery(ctx, this, args);
+}
+
+fn wrapArraySome(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arraySome(ctx, this, args);
+}
+
+fn wrapArrayFind(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayFind(ctx, this, args);
+}
+
+fn wrapArrayFindIndex(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayFindIndex(ctx, this, args);
+}
+
+fn wrapArrayFill(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arrayFill(ctx, this, args);
+}
+
+fn wrapArraySort(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arraySort(ctx, this, args);
+}
+
+// ============================================================================
+// String method wrappers
+// ============================================================================
+
+fn wrapStringCharAt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringCharAt(ctx, this, args);
+}
+
+fn wrapStringCharCodeAt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringCharCodeAt(ctx, this, args);
+}
+
+fn wrapStringIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringIndexOf(ctx, this, args);
+}
+
+fn wrapStringLastIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringLastIndexOf(ctx, this, args);
+}
+
+fn wrapStringStartsWith(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringStartsWith(ctx, this, args);
+}
+
+fn wrapStringEndsWith(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringEndsWith(ctx, this, args);
+}
+
+fn wrapStringIncludes(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringIncludes(ctx, this, args);
+}
+
+fn wrapStringSlice(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringSlice(ctx, this, args);
+}
+
+fn wrapStringSubstring(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringSubstring(ctx, this, args);
+}
+
+fn wrapStringToLowerCase(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringToLowerCase(ctx, this, args);
+}
+
+fn wrapStringToUpperCase(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringToUpperCase(ctx, this, args);
+}
+
+fn wrapStringTrim(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringTrim(ctx, this, args);
+}
+
+fn wrapStringTrimStart(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringTrimStart(ctx, this, args);
+}
+
+fn wrapStringTrimEnd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringTrimEnd(ctx, this, args);
+}
+
+fn wrapStringSplit(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringSplit(ctx, this, args);
+}
+
+fn wrapStringRepeat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringRepeat(ctx, this, args);
+}
+
+fn wrapStringPadStart(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringPadStart(ctx, this, args);
+}
+
+fn wrapStringPadEnd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringPadEnd(ctx, this, args);
+}
+
+fn wrapStringConcat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringConcat(ctx, this, args);
+}
+
+fn wrapStringReplace(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringReplace(ctx, this, args);
+}
+
+fn wrapStringReplaceAll(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringReplaceAll(ctx, this, args);
+}
+
+fn wrapStringFromCharCode(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return stringFromCharCode(ctx, this, args);
+}
+
+/// Helper to add a method using a dynamic atom name
+fn addMethodDynamic(
+    ctx: *context.Context,
+    obj: *object.JSObject,
+    name: []const u8,
+    func: object.NativeFn,
+    arg_count: u8,
+) !void {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+    const atom = try ctx.atoms.intern(name);
+    const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, atom, arg_count);
+    try obj.setProperty(allocator, atom, func_obj.toValue());
+}
+
 /// Create a native function and add it as a property on an object
 fn addMethod(
     allocator: std.mem.Allocator,
@@ -1143,6 +2023,56 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Register Math on global
     try ctx.setGlobal(.Math, math_obj.toValue());
 
+    // Create JSON object
+    const json_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethod(allocator, json_obj, root_class, .parse, wrapJsonParse, 1);
+    try addMethod(allocator, json_obj, root_class, .stringify, wrapJsonStringify, 1);
+
+    // Register JSON on global
+    try ctx.setGlobal(.JSON, json_obj.toValue());
+
+    // Create Object constructor with static methods
+    const object_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, object_obj, "keys", wrapObjectKeys, 1);
+    try addMethodDynamic(ctx, object_obj, "values", wrapObjectValues, 1);
+    try addMethodDynamic(ctx, object_obj, "entries", wrapObjectEntries, 1);
+    try addMethodDynamic(ctx, object_obj, "assign", wrapObjectAssign, 2);
+    try addMethodDynamic(ctx, object_obj, "hasOwn", wrapObjectHasOwn, 2);
+    try addMethodDynamic(ctx, object_obj, "freeze", wrapObjectFreeze, 1);
+    try addMethodDynamic(ctx, object_obj, "isFrozen", wrapObjectIsFrozen, 1);
+
+    // Register Object on global
+    try ctx.setGlobal(.Object, object_obj.toValue());
+
+    // Create Error prototype with toString method
+    const error_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, error_proto, "toString", wrapErrorToString, 0);
+
+    // Create Error constructor
+    const error_ctor_func = try object.JSObject.createNativeFunction(allocator, root_class, wrapErrorConstructor, .Error, 1);
+    try error_ctor_func.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setGlobal(.Error, error_ctor_func.toValue());
+
+    // Create TypeError constructor
+    const type_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapTypeErrorConstructor, .TypeError, 1);
+    try type_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setGlobal(.TypeError, type_error_ctor.toValue());
+
+    // Create RangeError constructor
+    const range_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapRangeErrorConstructor, .RangeError, 1);
+    try range_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setGlobal(.RangeError, range_error_ctor.toValue());
+
+    // Create SyntaxError constructor
+    const syntax_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSyntaxErrorConstructor, .SyntaxError, 1);
+    try syntax_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setGlobal(.SyntaxError, syntax_error_ctor.toValue());
+
+    // Create ReferenceError constructor
+    const ref_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapReferenceErrorConstructor, .ReferenceError, 1);
+    try ref_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
+
     // Create Response object with static methods
     const response_obj = try object.JSObject.create(allocator, root_class, null);
 
@@ -1182,6 +2112,73 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const fragment_atom = try ctx.atoms.intern("Fragment");
     const fragment_str = try string.createString(allocator, http.FRAGMENT_MARKER);
     try ctx.setGlobal(fragment_atom, value.JSValue.fromPtr(fragment_str));
+
+    // ========================================================================
+    // Array.prototype
+    // ========================================================================
+    const array_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, array_proto, "push", wrapArrayPush, 1);
+    try addMethodDynamic(ctx, array_proto, "pop", wrapArrayPop, 0);
+    try addMethodDynamic(ctx, array_proto, "shift", wrapArrayShift, 0);
+    try addMethodDynamic(ctx, array_proto, "unshift", wrapArrayUnshift, 1);
+    try addMethodDynamic(ctx, array_proto, "indexOf", wrapArrayIndexOf, 1);
+    try addMethodDynamic(ctx, array_proto, "includes", wrapArrayIncludes, 1);
+    try addMethodDynamic(ctx, array_proto, "join", wrapArrayJoin, 1);
+    try addMethodDynamic(ctx, array_proto, "reverse", wrapArrayReverse, 0);
+    try addMethodDynamic(ctx, array_proto, "slice", wrapArraySlice, 2);
+    try addMethodDynamic(ctx, array_proto, "concat", wrapArrayConcat, 1);
+    try addMethodDynamic(ctx, array_proto, "map", wrapArrayMap, 1);
+    try addMethodDynamic(ctx, array_proto, "filter", wrapArrayFilter, 1);
+    try addMethodDynamic(ctx, array_proto, "reduce", wrapArrayReduce, 2);
+    try addMethodDynamic(ctx, array_proto, "forEach", wrapArrayForEach, 1);
+    try addMethodDynamic(ctx, array_proto, "every", wrapArrayEvery, 1);
+    try addMethodDynamic(ctx, array_proto, "some", wrapArraySome, 1);
+    try addMethodDynamic(ctx, array_proto, "find", wrapArrayFind, 1);
+    try addMethodDynamic(ctx, array_proto, "findIndex", wrapArrayFindIndex, 1);
+    try addMethodDynamic(ctx, array_proto, "fill", wrapArrayFill, 3);
+    try addMethodDynamic(ctx, array_proto, "sort", wrapArraySort, 1);
+    ctx.array_prototype = array_proto;
+
+    // Create Array constructor function on global
+    const array_atom = try ctx.atoms.intern("Array");
+    const array_ctor = try object.JSObject.create(allocator, root_class, null);
+    // Array.isArray static method
+    try addMethodDynamic(ctx, array_ctor, "isArray", wrapArrayIsArray, 1);
+    try ctx.setGlobal(array_atom, array_ctor.toValue());
+
+    // ========================================================================
+    // String.prototype
+    // ========================================================================
+    const string_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, string_proto, "charAt", wrapStringCharAt, 1);
+    try addMethodDynamic(ctx, string_proto, "charCodeAt", wrapStringCharCodeAt, 1);
+    try addMethodDynamic(ctx, string_proto, "indexOf", wrapStringIndexOf, 1);
+    try addMethodDynamic(ctx, string_proto, "lastIndexOf", wrapStringLastIndexOf, 1);
+    try addMethodDynamic(ctx, string_proto, "startsWith", wrapStringStartsWith, 1);
+    try addMethodDynamic(ctx, string_proto, "endsWith", wrapStringEndsWith, 1);
+    try addMethodDynamic(ctx, string_proto, "includes", wrapStringIncludes, 1);
+    try addMethodDynamic(ctx, string_proto, "slice", wrapStringSlice, 2);
+    try addMethodDynamic(ctx, string_proto, "substring", wrapStringSubstring, 2);
+    try addMethodDynamic(ctx, string_proto, "toLowerCase", wrapStringToLowerCase, 0);
+    try addMethodDynamic(ctx, string_proto, "toUpperCase", wrapStringToUpperCase, 0);
+    try addMethodDynamic(ctx, string_proto, "trim", wrapStringTrim, 0);
+    try addMethodDynamic(ctx, string_proto, "trimStart", wrapStringTrimStart, 0);
+    try addMethodDynamic(ctx, string_proto, "trimEnd", wrapStringTrimEnd, 0);
+    try addMethodDynamic(ctx, string_proto, "split", wrapStringSplit, 2);
+    try addMethodDynamic(ctx, string_proto, "repeat", wrapStringRepeat, 1);
+    try addMethodDynamic(ctx, string_proto, "padStart", wrapStringPadStart, 2);
+    try addMethodDynamic(ctx, string_proto, "padEnd", wrapStringPadEnd, 2);
+    try addMethodDynamic(ctx, string_proto, "concat", wrapStringConcat, 1);
+    try addMethodDynamic(ctx, string_proto, "replace", wrapStringReplace, 2);
+    try addMethodDynamic(ctx, string_proto, "replaceAll", wrapStringReplaceAll, 2);
+    ctx.string_prototype = string_proto;
+
+    // Create String constructor function on global
+    const string_atom = try ctx.atoms.intern("String");
+    const string_ctor = try object.JSObject.create(allocator, root_class, null);
+    // String.fromCharCode static method
+    try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrapStringFromCharCode, 1);
+    try ctx.setGlobal(string_atom, string_ctor.toValue());
 }
 
 test "Math.abs" {

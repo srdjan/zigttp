@@ -134,6 +134,11 @@ pub const Opcode = enum(u8) {
     typeof = 0x90,
     instanceof = 0x91,
 
+    // Exception handling
+    push_catch = 0x92, // +i16 offset to catch block
+    pop_catch = 0x93, // Remove catch handler (normal exit from try)
+    get_exception = 0x94, // Push caught exception value
+
     // Superinstructions (fused hot paths)
     get_loc_add = 0xA0, // get_loc + add
     get_loc_get_loc_add = 0xA1, // get_loc + get_loc + add

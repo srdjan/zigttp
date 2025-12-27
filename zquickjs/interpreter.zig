@@ -64,7 +64,7 @@ pub const Interpreter = struct {
 
     /// Main dispatch loop
     fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
-        while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
+        dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
             const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
             self.pc += 1;
 
@@ -375,6 +375,20 @@ pub const Interpreter = struct {
                 .@"throw" => {
                     const exception_val = self.ctx.pop();
                     self.ctx.throwException(exception_val);
+
+                    // Check for catch handler
+                    if (self.ctx.getCatchHandler()) |handler| {
+                        // Restore stack state
+                        self.ctx.sp = handler.sp;
+                        self.ctx.fp = handler.fp;
+                        // Pop the catch handler
+                        self.ctx.popCatch();
+                        // Jump to catch block
+                        self.pc = @ptrFromInt(handler.catch_pc);
+                        continue :dispatch;
+                    }
+
+                    // No catch handler - propagate exception
                     return value.JSValue.exception_val;
                 },
 
@@ -391,8 +405,8 @@ pub const Interpreter = struct {
                 .new_array => {
                     const length = readU16(self.pc);
                     self.pc += 2;
-                    // Create array object (simplified - just an object with length)
-                    const obj = try self.createObject();
+                    // Create array object with Array.prototype
+                    const obj = try self.createArray();
                     try obj.setProperty(self.ctx.allocator, .length, value.JSValue.fromInt(@intCast(length)));
                     obj.class_id = .array;
                     try self.ctx.push(obj.toValue());
@@ -411,8 +425,22 @@ pub const Interpreter = struct {
                         } else {
                             try self.ctx.push(value.JSValue.undefined_val);
                         }
+                    } else if (obj_val.isString()) {
+                        // Primitive string property access
+                        if (atom == .length) {
+                            const str = obj_val.toPtr(string.JSString);
+                            try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
+                        } else if (self.ctx.string_prototype) |proto| {
+                            // Look up method on String.prototype
+                            if (proto.getProperty(atom)) |prop_val| {
+                                try self.ctx.push(prop_val);
+                            } else {
+                                try self.ctx.push(value.JSValue.undefined_val);
+                            }
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
                     } else {
-                        // TODO: Handle primitive property access (e.g., string.length)
                         try self.ctx.push(value.JSValue.undefined_val);
                     }
                 },
@@ -521,6 +549,65 @@ pub const Interpreter = struct {
                     try self.ctx.push(value.JSValue.fromPtr(js_str));
                 },
 
+                .instanceof => {
+                    const ctor = self.ctx.pop();
+                    const obj = self.ctx.pop();
+
+                    // obj instanceof Constructor checks if Constructor.prototype
+                    // is in the prototype chain of obj
+                    if (!ctor.isObject()) {
+                        try self.ctx.push(value.JSValue.false_val);
+                        continue;
+                    }
+
+                    if (!obj.isObject()) {
+                        try self.ctx.push(value.JSValue.false_val);
+                        continue;
+                    }
+
+                    const ctor_obj = object.JSObject.fromValue(ctor);
+                    const target_obj = object.JSObject.fromValue(obj);
+
+                    // Get Constructor.prototype
+                    if (ctor_obj.getProperty(.prototype)) |proto_val| {
+                        if (proto_val.isObject()) {
+                            const proto = object.JSObject.fromValue(proto_val);
+                            // Walk the prototype chain of obj
+                            var current: ?*object.JSObject = target_obj.prototype;
+                            while (current) |p| {
+                                if (p == proto) {
+                                    try self.ctx.push(value.JSValue.true_val);
+                                    continue :dispatch;
+                                }
+                                current = p.prototype;
+                            }
+                        }
+                    }
+                    try self.ctx.push(value.JSValue.false_val);
+                },
+
+                // ========================================
+                // Exception Handling
+                // ========================================
+                .push_catch => {
+                    const offset = readI16(self.pc);
+                    self.pc += 2;
+                    // Calculate absolute address of catch block
+                    const catch_pc = @intFromPtr(self.pc) + @as(usize, @intCast(@as(i32, offset)));
+                    try self.ctx.pushCatch(catch_pc);
+                },
+
+                .pop_catch => {
+                    self.ctx.popCatch();
+                },
+
+                .get_exception => {
+                    // Push the exception value onto the stack
+                    try self.ctx.push(self.ctx.exception);
+                    // Clear the exception
+                    self.ctx.clearException();
+                },
+
                 // ========================================
                 // Function Calls
                 // ========================================
@@ -539,9 +626,7 @@ pub const Interpreter = struct {
                 .call_constructor => {
                     const argc: u8 = self.pc[0];
                     self.pc += 1;
-                    // TODO: Implement constructor call (creates new object, sets 'this')
-                    // For now, just do regular call
-                    try self.doCall(argc, false);
+                    try self.doConstruct(argc);
                 },
 
                 .tail_call => {
@@ -636,8 +721,8 @@ pub const Interpreter = struct {
         }
         if (val.isInt()) {
             var buf: [32]u8 = undefined;
-            const len = std.fmt.formatIntBuf(&buf, val.getInt(), 10, .lower, .{});
-            return try string.createString(self.ctx.allocator, buf[0..len]);
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return try string.createString(self.ctx.allocator, "0");
+            return try string.createString(self.ctx.allocator, slice);
         }
         if (val.isNull()) {
             return try string.createString(self.ctx.allocator, "null");
@@ -697,9 +782,13 @@ pub const Interpreter = struct {
     }
 
     fn createObject(self: *Interpreter) !*object.JSObject {
-        // Get or create root hidden class (simplified - should be cached)
-        const root_class = try object.HiddenClass.init(self.ctx.allocator);
+        const root_class = self.ctx.root_class orelse return error.NoRootClass;
         return try object.JSObject.create(self.ctx.allocator, root_class, null);
+    }
+
+    fn createArray(self: *Interpreter) !*object.JSObject {
+        const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        return try object.JSObject.create(self.ctx.allocator, root_class, self.ctx.array_prototype);
     }
 
     fn getConstant(self: *Interpreter, idx: u16) !value.JSValue {
@@ -806,6 +895,130 @@ pub const Interpreter = struct {
 
         // Unknown function type
         try self.ctx.push(value.JSValue.undefined_val);
+    }
+
+    /// Perform constructor call (new operator)
+    fn doConstruct(self: *Interpreter, argc: u8) InterpreterError!void {
+        // Stack layout: [constructor, arg0, arg1, ..., argN-1]
+
+        // Collect arguments (in reverse order from stack)
+        var args: [256]value.JSValue = undefined;
+        var i: usize = argc;
+        while (i > 0) {
+            i -= 1;
+            args[i] = self.ctx.pop();
+        }
+
+        // Pop constructor function
+        const ctor_val = self.ctx.pop();
+
+        // Check if callable
+        if (!ctor_val.isCallable()) {
+            return error.NotCallable;
+        }
+
+        // Get the constructor object
+        const ctor_obj = object.JSObject.fromValue(ctor_val);
+
+        // Create a new object with the constructor's prototype (if available)
+        // Look for a "prototype" property on the constructor
+        const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        var proto: ?*object.JSObject = null;
+
+        // Try to get constructor.prototype
+        const proto_atom = object.Atom.prototype;
+        if (ctor_obj.getProperty(proto_atom)) |proto_val| {
+            if (proto_val.isObject()) {
+                proto = object.JSObject.fromValue(proto_val);
+            }
+        }
+
+        // Create the new object
+        const new_obj = try object.JSObject.create(self.ctx.allocator, root_class, proto);
+        const this_val = new_obj.toValue();
+
+        // Check for native function constructor
+        if (ctor_obj.getNativeFunctionData()) |native_data| {
+            // Call native constructor
+            const result = native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
+                std.log.err("Native constructor error: {}", .{err});
+                return error.NativeFunctionError;
+            };
+
+            // If constructor returns an object, use that; otherwise use 'this'
+            if (result.isObject()) {
+                try self.ctx.push(result);
+            } else {
+                try self.ctx.push(this_val);
+            }
+            return;
+        }
+
+        // Check for bytecode function constructor
+        if (ctor_obj.getBytecodeFunctionData()) |bc_data| {
+            const func_bc = bc_data.bytecode;
+
+            // Save current interpreter state
+            const saved_pc = self.pc;
+            const saved_code_end = self.code_end;
+            const saved_constants = self.constants;
+            const saved_func = self.current_func;
+            const saved_fp = self.ctx.fp;
+
+            // Push call frame with the new object as 'this'
+            try self.ctx.pushFrame(ctor_val, this_val, @intFromPtr(self.pc));
+
+            // Set up new function's locals with arguments
+            const local_count = func_bc.local_count;
+            try self.ctx.ensureStack(local_count);
+
+            // Initialize locals: first N are arguments, rest are undefined
+            var local_idx: usize = 0;
+            while (local_idx < local_count) : (local_idx += 1) {
+                if (local_idx < argc) {
+                    try self.ctx.push(args[local_idx]);
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+            }
+
+            // Execute the constructor bytecode
+            self.pc = func_bc.code.ptr;
+            self.code_end = func_bc.code.ptr + func_bc.code.len;
+            self.constants = func_bc.constants;
+            self.current_func = func_bc;
+
+            const result = self.dispatch() catch |err| {
+                // Restore state on error
+                self.pc = saved_pc;
+                self.code_end = saved_code_end;
+                self.constants = saved_constants;
+                self.current_func = saved_func;
+                _ = self.ctx.popFrame();
+                return err;
+            };
+
+            // Restore interpreter state
+            self.pc = saved_pc;
+            self.code_end = saved_code_end;
+            self.constants = saved_constants;
+            self.current_func = saved_func;
+
+            // Pop call frame and restore stack
+            _ = self.ctx.popFrame();
+            self.ctx.fp = saved_fp;
+
+            // If constructor returns an object, use that; otherwise use 'this'
+            if (result.isObject()) {
+                try self.ctx.push(result);
+            } else {
+                try self.ctx.push(this_val);
+            }
+            return;
+        }
+
+        // Unknown constructor type - just return the new object
+        try self.ctx.push(this_val);
     }
 };
 
