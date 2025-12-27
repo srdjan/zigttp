@@ -4,6 +4,7 @@
 //! Supports ES5 + limited ES6 features matching mquickjs capabilities.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
@@ -712,6 +713,10 @@ pub const Parser = struct {
     local_count: u8,
     scope_depth: u8,
 
+    // Break/continue contexts
+    break_stack: [32]BreakContext,
+    break_depth: u8,
+
     // String table for interning
     strings: *string.StringTable,
 
@@ -744,6 +749,20 @@ pub const Parser = struct {
         is_const: bool,
     };
 
+    pub const BreakKind = enum { loop, switch_stmt };
+    pub const ContinueMode = enum { backward, forward };
+
+    pub const BreakContext = struct {
+        kind: BreakKind,
+        scope_depth: u8,
+        continue_mode: ContinueMode,
+        continue_target: ?u32,
+        break_jumps: [64]u32,
+        break_count: usize,
+        continue_jumps: [64]u32,
+        continue_count: usize,
+    };
+
     pub fn init(allocator: std.mem.Allocator, source: []const u8, strings: *string.StringTable) Parser {
         var parser = Parser{
             .tokenizer = Tokenizer.init(source),
@@ -754,7 +773,9 @@ pub const Parser = struct {
             .constants = std.array_list.Managed(value.JSValue).init(allocator),
             .locals = undefined,
             .local_count = 0,
-            .scope_depth = 1, // Start in local scope for eval/REPL mode
+            .scope_depth = 0, // Start in global scope
+            .break_stack = undefined,
+            .break_depth = 0,
             .strings = strings,
             .in_generator = false,
             .in_async = false,
@@ -1532,9 +1553,9 @@ pub const Parser = struct {
             try self.emitByte(idx);
         } else {
             // Global variable
-            const name_const = try self.addStringConstant(name);
+            const atom = try self.getOrCreateAtom(name);
             try self.emitOp(.define_global);
-            try self.emitByte(name_const);
+            try self.emitU16(atom);
         }
     }
 
@@ -1562,6 +1583,49 @@ pub const Parser = struct {
         return null;
     }
 
+    fn pushBreakContext(self: *Parser, kind: BreakKind, scope_depth: u8, continue_mode: ContinueMode, continue_target: ?u32) Error!void {
+        if (self.break_depth >= self.break_stack.len) return error.UnexpectedToken;
+        self.break_stack[self.break_depth] = .{
+            .kind = kind,
+            .scope_depth = scope_depth,
+            .continue_mode = continue_mode,
+            .continue_target = continue_target,
+            .break_jumps = undefined,
+            .break_count = 0,
+            .continue_jumps = undefined,
+            .continue_count = 0,
+        };
+        self.break_depth += 1;
+    }
+
+    fn popBreakContext(self: *Parser) BreakContext {
+        std.debug.assert(self.break_depth > 0);
+        self.break_depth -= 1;
+        return self.break_stack[self.break_depth];
+    }
+
+    fn currentBreakContext(self: *Parser) ?*BreakContext {
+        if (self.break_depth == 0) return null;
+        return &self.break_stack[self.break_depth - 1];
+    }
+
+    fn currentLoopContext(self: *Parser) ?*BreakContext {
+        var i = self.break_depth;
+        while (i > 0) {
+            i -= 1;
+            if (self.break_stack[i].kind == .loop) return &self.break_stack[i];
+        }
+        return null;
+    }
+
+    fn emitScopeExit(self: *Parser, target_depth: u8) Error!void {
+        var i: usize = self.local_count;
+        while (i > 0 and self.locals[i - 1].depth > target_depth) {
+            try self.emitOp(.drop);
+            i -= 1;
+        }
+    }
+
     // ========================================================================
     // Statements
     // ========================================================================
@@ -1577,6 +1641,10 @@ pub const Parser = struct {
             try self.switchStatement();
         } else if (self.match(.kw_return)) {
             try self.returnStatement();
+        } else if (self.match(.kw_break)) {
+            try self.breakStatement();
+        } else if (self.match(.kw_continue)) {
+            try self.continueStatement();
         } else if (self.match(.kw_throw)) {
             try self.throwStatement();
         } else if (self.match(.kw_try)) {
@@ -1587,6 +1655,55 @@ pub const Parser = struct {
             try self.endScope();
         } else {
             try self.expressionStatement();
+        }
+    }
+
+    fn breakStatement(self: *Parser) Error!void {
+        if (self.match(.identifier)) {
+            self.errorAtPrevious("Labeled break not supported.");
+            return error.UnexpectedToken;
+        }
+        _ = self.match(.semicolon);
+
+        const ctx = self.currentBreakContext() orelse {
+            self.errorAtPrevious("Break must be inside a loop or switch.");
+            return error.UnexpectedToken;
+        };
+
+        try self.emitScopeExit(ctx.scope_depth);
+        if (ctx.break_count < ctx.break_jumps.len) {
+            ctx.break_jumps[ctx.break_count] = try self.emitJump(.goto);
+            ctx.break_count += 1;
+        }
+    }
+
+    fn continueStatement(self: *Parser) Error!void {
+        if (self.match(.identifier)) {
+            self.errorAtPrevious("Labeled continue not supported.");
+            return error.UnexpectedToken;
+        }
+        _ = self.match(.semicolon);
+
+        const ctx = self.currentLoopContext() orelse {
+            self.errorAtPrevious("Continue must be inside a loop.");
+            return error.UnexpectedToken;
+        };
+
+        try self.emitScopeExit(ctx.scope_depth);
+        switch (ctx.continue_mode) {
+            .backward => {
+                const target = ctx.continue_target orelse {
+                    self.errorAtPrevious("Invalid continue target.");
+                    return error.UnexpectedToken;
+                };
+                try self.emitLoop(target);
+            },
+            .forward => {
+                if (ctx.continue_count < ctx.continue_jumps.len) {
+                    ctx.continue_jumps[ctx.continue_count] = try self.emitJump(.goto);
+                    ctx.continue_count += 1;
+                }
+            },
         }
     }
 
@@ -1618,9 +1735,14 @@ pub const Parser = struct {
 
         const exit_jump = try self.emitJump(.if_false);
         try self.emitOp(.drop);
+        try self.pushBreakContext(.loop, self.scope_depth, .backward, loop_start);
         try self.statement();
         try self.emitLoop(loop_start);
 
+        var ctx = self.popBreakContext();
+        for (ctx.break_jumps[0..ctx.break_count]) |jump| {
+            self.patchJump(jump);
+        }
         self.patchJump(exit_jump);
         try self.emitOp(.drop);
     }
@@ -1674,6 +1796,7 @@ pub const Parser = struct {
 
     fn regularForLoop(self: *Parser) Error!void {
         var loop_start = @as(u32, @intCast(self.code.items.len));
+        const loop_scope_depth = self.scope_depth;
 
         // Condition
         var exit_jump: ?u32 = null;
@@ -1697,9 +1820,14 @@ pub const Parser = struct {
         try self.consume(.rparen, "Expected ')' after for clauses.");
 
         // Body
+        try self.pushBreakContext(.loop, loop_scope_depth, .backward, loop_start);
         try self.statement();
         try self.emitLoop(loop_start);
 
+        var ctx = self.popBreakContext();
+        for (ctx.break_jumps[0..ctx.break_count]) |jump| {
+            self.patchJump(jump);
+        }
         if (exit_jump) |jump| {
             self.patchJump(jump);
             try self.emitOp(.drop);
@@ -1757,7 +1885,17 @@ pub const Parser = struct {
         try self.emitByte(elem_slot);
 
         // Execute body
+        try self.pushBreakContext(.loop, self.scope_depth, .forward, null);
         try self.statement();
+
+        if (self.currentBreakContext()) |ctx| {
+            if (ctx.continue_mode == .forward and ctx.continue_count > 0) {
+                for (ctx.continue_jumps[0..ctx.continue_count]) |jump| {
+                    self.patchJump(jump);
+                }
+                ctx.continue_count = 0;
+            }
+        }
 
         // Increment index
         try self.emitOp(.get_loc);
@@ -1769,6 +1907,10 @@ pub const Parser = struct {
         // Jump back to loop start
         try self.emitLoop(loop_start);
 
+        var ctx = self.popBreakContext();
+        for (ctx.break_jumps[0..ctx.break_count]) |jump| {
+            self.patchJump(jump);
+        }
         // Patch exit jump
         self.patchJump(exit_jump);
         try self.emitOp(.drop);
@@ -1799,7 +1941,20 @@ pub const Parser = struct {
 
         // Parse body but it won't execute (we jump over it)
         const skip_jump = try self.emitJump(.goto);
+        try self.pushBreakContext(.loop, self.scope_depth, .forward, null);
         try self.statement();
+        if (self.currentBreakContext()) |ctx| {
+            if (ctx.continue_mode == .forward and ctx.continue_count > 0) {
+                for (ctx.continue_jumps[0..ctx.continue_count]) |jump| {
+                    self.patchJump(jump);
+                }
+                ctx.continue_count = 0;
+            }
+        }
+        var ctx = self.popBreakContext();
+        for (ctx.break_jumps[0..ctx.break_count]) |jump| {
+            self.patchJump(jump);
+        }
         self.patchJump(skip_jump);
 
         try self.endScope();
@@ -1811,9 +1966,7 @@ pub const Parser = struct {
         try self.consume(.rparen, "Expected ')' after switch expression.");
         try self.consume(.lbrace, "Expected '{' before switch body.");
 
-        // Track breaks that need patching at the end
-        var break_jumps: [64]u32 = undefined;
-        var break_count: usize = 0;
+        try self.pushBreakContext(.switch_stmt, self.scope_depth, .forward, null);
 
         // First pass: emit jumps to case labels, collecting case values
         // We'll use a simpler approach: for each case, dup switch value, compare, jump
@@ -1836,16 +1989,7 @@ pub const Parser = struct {
                 while (!self.check(.kw_case) and !self.check(.kw_default) and
                     !self.check(.rbrace) and !self.check(.eof))
                 {
-                    if (self.match(.kw_break)) {
-                        _ = self.match(.semicolon);
-                        // Jump to end of switch
-                        if (break_count < break_jumps.len) {
-                            break_jumps[break_count] = try self.emitJump(.goto);
-                            break_count += 1;
-                        }
-                    } else {
-                        try self.statement();
-                    }
+                    try self.statement();
                 }
 
                 self.patchJump(skip_case);
@@ -1856,15 +2000,7 @@ pub const Parser = struct {
                 while (!self.check(.kw_case) and !self.check(.kw_default) and
                     !self.check(.rbrace) and !self.check(.eof))
                 {
-                    if (self.match(.kw_break)) {
-                        _ = self.match(.semicolon);
-                        if (break_count < break_jumps.len) {
-                            break_jumps[break_count] = try self.emitJump(.goto);
-                            break_count += 1;
-                        }
-                    } else {
-                        try self.statement();
-                    }
+                    try self.statement();
                 }
             } else {
                 self.errorAtCurrent("Expected 'case' or 'default' in switch.");
@@ -1874,8 +2010,9 @@ pub const Parser = struct {
 
         try self.consume(.rbrace, "Expected '}' after switch body.");
 
+        const ctx = self.popBreakContext();
         // Patch all break jumps to here
-        for (break_jumps[0..break_count]) |jump| {
+        for (ctx.break_jumps[0..ctx.break_count]) |jump| {
             self.patchJump(jump);
         }
 
@@ -2170,19 +2307,126 @@ pub const Parser = struct {
                 try self.emitOp(.put_loc);
                 try self.emitByte(idx);
             } else {
-                const name_const = try self.addStringConstant(name);
+                const atom = try self.getOrCreateAtom(name);
                 try self.emitOp(.put_global);
-                try self.emitByte(name_const);
+                try self.emitU16(atom);
+            }
+        } else if (can_assign and (self.match(.plus_plus) or self.previous.type == .plus_plus)) {
+            // Postfix increment: i++
+            // Get current value, dup for result, increment, store back
+            if (local_idx) |idx| {
+                try self.emitOp(.get_loc);
+                try self.emitByte(idx);
+                try self.emitOp(.dup); // Save original for expression result
+                try self.emitOp(.inc);
+                try self.emitOp(.put_loc);
+                try self.emitByte(idx);
+                // Stack: [original_value] (new value was stored)
+            } else {
+                const atom = try self.getOrCreateAtom(name);
+                try self.emitOp(.get_global);
+                try self.emitU16(atom);
+                try self.emitOp(.dup);
+                try self.emitOp(.inc);
+                try self.emitOp(.put_global);
+                try self.emitU16(atom);
+            }
+        } else if (can_assign and (self.match(.minus_minus) or self.previous.type == .minus_minus)) {
+            // Postfix decrement: i--
+            if (local_idx) |idx| {
+                try self.emitOp(.get_loc);
+                try self.emitByte(idx);
+                try self.emitOp(.dup);
+                try self.emitOp(.dec);
+                try self.emitOp(.put_loc);
+                try self.emitByte(idx);
+            } else {
+                const atom = try self.getOrCreateAtom(name);
+                try self.emitOp(.get_global);
+                try self.emitU16(atom);
+                try self.emitOp(.dup);
+                try self.emitOp(.dec);
+                try self.emitOp(.put_global);
+                try self.emitU16(atom);
             }
         } else {
             if (local_idx) |idx| {
                 try self.emitOp(.get_loc);
                 try self.emitByte(idx);
             } else {
-                const name_const = try self.addStringConstant(name);
+                const atom = try self.getOrCreateAtom(name);
                 try self.emitOp(.get_global);
-                try self.emitByte(name_const);
+                try self.emitU16(atom);
             }
+        }
+    }
+
+    /// Prefix increment: ++i
+    fn prefixIncrement(self: *Parser, _: bool) !void {
+        try self.consume(.identifier, "Expected identifier after '++'.");
+        const name = self.previous.text(self.tokenizer.source);
+
+        // Check for local
+        var local_idx: ?u8 = null;
+        var i: i32 = @as(i32, self.local_count) - 1;
+        while (i >= 0) : (i -= 1) {
+            const local = self.locals[@intCast(i)];
+            if (std.mem.eql(u8, local.name, name)) {
+                local_idx = @intCast(i);
+                break;
+            }
+        }
+
+        // Prefix: get, inc, dup, store (leaves incremented value on stack)
+        if (local_idx) |idx| {
+            try self.emitOp(.get_loc);
+            try self.emitByte(idx);
+            try self.emitOp(.inc);
+            try self.emitOp(.dup);
+            try self.emitOp(.put_loc);
+            try self.emitByte(idx);
+        } else {
+            const atom = try self.getOrCreateAtom(name);
+            try self.emitOp(.get_global);
+            try self.emitU16(atom);
+            try self.emitOp(.inc);
+            try self.emitOp(.dup);
+            try self.emitOp(.put_global);
+            try self.emitU16(atom);
+        }
+    }
+
+    /// Prefix decrement: --i
+    fn prefixDecrement(self: *Parser, _: bool) !void {
+        try self.consume(.identifier, "Expected identifier after '--'.");
+        const name = self.previous.text(self.tokenizer.source);
+
+        // Check for local
+        var local_idx: ?u8 = null;
+        var i: i32 = @as(i32, self.local_count) - 1;
+        while (i >= 0) : (i -= 1) {
+            const local = self.locals[@intCast(i)];
+            if (std.mem.eql(u8, local.name, name)) {
+                local_idx = @intCast(i);
+                break;
+            }
+        }
+
+        if (local_idx) |idx| {
+            try self.emitOp(.get_loc);
+            try self.emitByte(idx);
+            try self.emitOp(.dec);
+            try self.emitOp(.dup);
+            try self.emitOp(.put_loc);
+            try self.emitByte(idx);
+        } else {
+            const atom = try self.getOrCreateAtom(name);
+            try self.emitOp(.get_global);
+            try self.emitU16(atom);
+            try self.emitOp(.dec);
+            try self.emitOp(.dup);
+            try self.emitOp(.put_global);
+            try self.emitU16(atom);
         }
     }
 
@@ -2961,6 +3205,8 @@ pub const Parser = struct {
             .plus => .{ .prefix = null, .infix = binary, .precedence = .term },
             .slash, .star, .percent => .{ .prefix = null, .infix = binary, .precedence = .factor },
             .bang, .tilde => .{ .prefix = unary, .infix = null, .precedence = .none },
+            .plus_plus => .{ .prefix = prefixIncrement, .infix = null, .precedence = .none },
+            .minus_minus => .{ .prefix = prefixDecrement, .infix = null, .precedence = .none },
             .kw_typeof => .{ .prefix = unary, .infix = null, .precedence = .none },
             .kw_delete => .{ .prefix = deleteExpr, .infix = null, .precedence = .none },
             .kw_new => .{ .prefix = newExpr, .infix = null, .precedence = .none },
@@ -3108,6 +3354,7 @@ pub const Parser = struct {
         // Globals
         if (std.mem.eql(u8, name, "console")) return object_mod.Atom.console;
         if (std.mem.eql(u8, name, "Math")) return object_mod.Atom.Math;
+        if (std.mem.eql(u8, name, "handler")) return object_mod.Atom.handler;
         if (std.mem.eql(u8, name, "JSON")) return object_mod.Atom.JSON;
         if (std.mem.eql(u8, name, "Object")) return object_mod.Atom.Object;
         if (std.mem.eql(u8, name, "Array")) return object_mod.Atom.Array;
@@ -3115,6 +3362,23 @@ pub const Parser = struct {
         if (std.mem.eql(u8, name, "Number")) return object_mod.Atom.Number;
         if (std.mem.eql(u8, name, "Boolean")) return object_mod.Atom.Boolean;
         if (std.mem.eql(u8, name, "Function")) return object_mod.Atom.Function;
+        // HTTP Response
+        if (std.mem.eql(u8, name, "Response")) return object_mod.Atom.Response;
+        if (std.mem.eql(u8, name, "text")) return object_mod.Atom.text;
+        if (std.mem.eql(u8, name, "html")) return object_mod.Atom.html;
+        if (std.mem.eql(u8, name, "json")) return object_mod.Atom.json;
+        if (std.mem.eql(u8, name, "body")) return object_mod.Atom.body;
+        if (std.mem.eql(u8, name, "status")) return object_mod.Atom.status;
+        if (std.mem.eql(u8, name, "headers")) return object_mod.Atom.headers;
+        if (std.mem.eql(u8, name, "method")) return object_mod.Atom.method;
+        if (std.mem.eql(u8, name, "url")) return object_mod.Atom.url;
+        // JSX runtime
+        if (std.mem.eql(u8, name, "h")) return object_mod.Atom.h;
+        if (std.mem.eql(u8, name, "renderToString")) return object_mod.Atom.renderToString;
+        if (std.mem.eql(u8, name, "Fragment")) return object_mod.Atom.Fragment;
+        if (std.mem.eql(u8, name, "tag")) return object_mod.Atom.tag;
+        if (std.mem.eql(u8, name, "props")) return object_mod.Atom.props;
+        if (std.mem.eql(u8, name, "children")) return object_mod.Atom.children;
         return null;
     }
 
@@ -3196,7 +3460,6 @@ pub const Parser = struct {
         self.had_error = true;
         _ = token;
         _ = message;
-        // In a real implementation, we'd log the error with line info
     }
 };
 

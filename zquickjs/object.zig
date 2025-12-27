@@ -178,17 +178,77 @@ pub const Atom = enum(u32) {
     Uint32Array = 156,
     Float32Array = 157,
     Float64Array = 158,
+    handler = 159, // Used for handler function lookup
+    Response = 160, // Response object for HTTP handlers
+    text = 161,
+    html = 162,
+    json = 163,
+    body = 164,
+    status = 165,
+    headers = 166,
+    method = 167,
+    url = 168,
+    // JSX runtime atoms
+    h = 169, // h(tag, props, ...children)
+    renderToString = 170, // renderToString(node)
+    Fragment = 171, // Fragment constant
+    tag = 172, // Virtual DOM tag property
+    props = 173, // Virtual DOM props property
+    children = 174, // Virtual DOM children property
     // Reserved for more builtins
-    __count__ = 160,
+    __count__ = 200,
 
-    // Dynamic atoms start at 161
+    // Dynamic atoms start at 201
     _,
 
-    pub const FIRST_DYNAMIC: u32 = 161;
+    pub const FIRST_DYNAMIC: u32 = 201;
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
         return @intFromEnum(self) < FIRST_DYNAMIC;
+    }
+
+    /// Get the string name for a predefined atom
+    pub fn toPredefinedName(self: Atom) ?[]const u8 {
+        return switch (self) {
+            .@"null" => "null",
+            .@"true" => "true",
+            .@"false" => "false",
+            .undefined => "undefined",
+            .length => "length",
+            .prototype => "prototype",
+            .constructor => "constructor",
+            .toString => "toString",
+            .valueOf => "valueOf",
+            .name => "name",
+            .message => "message",
+            .push => "push",
+            .pop => "pop",
+            .shift => "shift",
+            .unshift => "unshift",
+            .slice => "slice",
+            .splice => "splice",
+            .concat => "concat",
+            .join => "join",
+            .indexOf => "indexOf",
+            .handler => "handler",
+            .Response => "Response",
+            .text => "text",
+            .html => "html",
+            .json => "json",
+            .body => "body",
+            .status => "status",
+            .headers => "headers",
+            .method => "method",
+            .url => "url",
+            .h => "h",
+            .renderToString => "renderToString",
+            .Fragment => "Fragment",
+            .tag => "tag",
+            .props => "props",
+            .children => "children",
+            else => null,
+        };
     }
 };
 
@@ -490,11 +550,21 @@ pub const JSObject = extern struct {
 
     /// Get bytecode function data (if this is a bytecode function)
     pub fn getBytecodeFunctionData(self: *const JSObject) ?*BytecodeFunctionData {
-        if (self.class_id != .function or !self.flags.is_callable) return null;
+        if (self.class_id != .function or !self.flags.is_callable) {
+            std.log.debug("getBytecodeFunc fail: class_id={} is_callable={}", .{ @intFromEnum(self.class_id), self.flags.is_callable });
+            return null;
+        }
         const slot = self.inline_slots[0];
-        if (!slot.isPtr()) return null;
+        if (!slot.isPtr()) {
+            std.log.debug("getBytecodeFunc fail: slot0 not ptr, raw={x}", .{slot.raw});
+            return null;
+        }
         // Bytecode functions have non-undefined in slot 1
-        if (self.inline_slots[1].isUndefined()) return null;
+        if (self.inline_slots[1].isUndefined()) {
+            std.log.debug("getBytecodeFunc fail: slot1 is undefined", .{});
+            return null;
+        }
+        std.log.debug("getBytecodeFunc success!", .{});
         return slot.toPtr(BytecodeFunctionData);
     }
 
@@ -686,16 +756,16 @@ pub const JSObject = extern struct {
 
     /// Get all own enumerable property names
     pub fn getOwnEnumerableKeys(self: *const JSObject, allocator: std.mem.Allocator) ![]Atom {
-        var keys = std.ArrayList(Atom).init(allocator);
-        errdefer keys.deinit();
+        var keys = std.ArrayList(Atom).empty;
+        errdefer keys.deinit(allocator);
 
         for (self.hidden_class.properties) |prop| {
             if (prop.flags.enumerable) {
-                try keys.append(prop.name);
+                try keys.append(allocator, prop.name);
             }
         }
 
-        return keys.toOwnedSlice();
+        return keys.toOwnedSlice(allocator);
     }
 
     /// Convert to JSValue
@@ -706,6 +776,140 @@ pub const JSObject = extern struct {
     /// Get from JSValue (unsafe - caller must verify isObject)
     pub fn fromValue(val: value.JSValue) *JSObject {
         return val.toPtr(JSObject);
+    }
+
+    // ========================================================================
+    // Array Methods
+    // ========================================================================
+
+    /// Create an array object
+    pub fn createArray(allocator: std.mem.Allocator, class: *HiddenClass) !*JSObject {
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .array,
+            .flags = .{ .is_exotic = true, .has_small_array = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+        };
+        // Slot 0 holds array length
+        obj.inline_slots[0] = value.JSValue.fromInt(0);
+        return obj;
+    }
+
+    /// Check if this is an array
+    pub fn isArray(self: *const JSObject) bool {
+        return self.class_id == .array;
+    }
+
+    /// Get array length (for arrays)
+    pub fn getArrayLength(self: *const JSObject) u32 {
+        if (self.class_id != .array) return 0;
+        const len_val = self.inline_slots[0];
+        if (len_val.isInt()) {
+            const len = len_val.getInt();
+            return if (len >= 0) @intCast(len) else 0;
+        }
+        return 0;
+    }
+
+    /// Set array length
+    pub fn setArrayLength(self: *JSObject, len: u32) void {
+        if (self.class_id != .array) return;
+        self.inline_slots[0] = value.JSValue.fromInt(@intCast(len));
+    }
+
+    /// Get element at index (for arrays)
+    /// Array elements are stored starting at inline_slots[1]
+    pub fn getIndex(self: *const JSObject, index: u32) ?value.JSValue {
+        if (self.class_id != .array) return null;
+        const len = self.getArrayLength();
+        if (index >= len) return null;
+
+        // Element storage starts at slot 1 (slot 0 is length)
+        const slot = index + 1;
+        if (slot < INLINE_SLOT_COUNT) {
+            const val = self.inline_slots[slot];
+            if (val.isUndefined()) return null;
+            return val;
+        }
+
+        // Check overflow slots
+        const overflow_idx = slot - INLINE_SLOT_COUNT;
+        if (self.overflow_slots) |slots| {
+            if (overflow_idx < self.overflow_capacity) {
+                const val = slots[overflow_idx];
+                if (val.isUndefined()) return null;
+                return val;
+            }
+        }
+        return null;
+    }
+
+    /// Set element at index (for arrays)
+    pub fn setIndex(self: *JSObject, allocator: std.mem.Allocator, index: u32, val: value.JSValue) !void {
+        if (self.class_id != .array) return;
+
+        // Update length if needed
+        const current_len = self.getArrayLength();
+        if (index >= current_len) {
+            self.setArrayLength(index + 1);
+        }
+
+        // Element storage starts at slot 1
+        const slot = index + 1;
+        if (slot < INLINE_SLOT_COUNT) {
+            self.inline_slots[slot] = val;
+            return;
+        }
+
+        // Need overflow slots
+        const overflow_idx: u16 = @intCast(slot - INLINE_SLOT_COUNT);
+        try self.ensureOverflowCapacity(allocator, overflow_idx + 1);
+        self.overflow_slots.?[overflow_idx] = val;
+    }
+
+    /// Push element to end of array
+    pub fn arrayPush(self: *JSObject, allocator: std.mem.Allocator, val: value.JSValue) !void {
+        if (self.class_id != .array) return;
+        const len = self.getArrayLength();
+        try self.setIndex(allocator, len, val);
+    }
+
+    // ========================================================================
+    // Property Iterator
+    // ========================================================================
+
+    pub const PropertyEntry = struct {
+        atom: Atom,
+        value: value.JSValue,
+    };
+
+    pub const PropertyIterator = struct {
+        obj: *const JSObject,
+        index: usize,
+
+        pub fn next(self: *PropertyIterator) ?PropertyEntry {
+            const props = self.obj.hidden_class.properties;
+            if (self.index >= props.len) return null;
+
+            const slot = props[self.index];
+            const val = self.obj.getSlot(slot.offset);
+            self.index += 1;
+
+            return .{
+                .atom = slot.name,
+                .value = val,
+            };
+        }
+    };
+
+    /// Get property iterator
+    pub fn propertyIterator(self: *const JSObject) PropertyIterator {
+        return .{ .obj = self, .index = 0 };
     }
 };
 

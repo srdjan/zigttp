@@ -72,11 +72,8 @@ const Transformer = struct {
             }
         }
 
-        // Append null terminator for C compatibility (JS_Eval may scan past length)
-        self.output.append(self.allocator, 0) catch return TransformError.OutOfMemory;
-        const slice = self.output.toOwnedSlice(self.allocator) catch return TransformError.OutOfMemory;
-        // Return slice without the null terminator (but memory has it)
-        const code = slice[0 .. slice.len - 1];
+        // Get the transformed code (zquickjs is pure Zig, no null terminator needed)
+        const code = self.output.toOwnedSlice(self.allocator) catch return TransformError.OutOfMemory;
         return TransformResult{
             .code = code,
             .allocator = self.allocator,

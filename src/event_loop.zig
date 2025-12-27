@@ -174,6 +174,13 @@ pub const PendingOp = struct {
                 }
                 allocator.free(@constCast(self.data.fetch.url));
             },
+            .read_file => {
+                allocator.free(@constCast(self.data.read_file.path));
+            },
+            .write_file => {
+                allocator.free(@constCast(self.data.write_file.path));
+                allocator.free(@constCast(self.data.write_file.content));
+            },
             else => {},
         }
     }
@@ -229,6 +236,7 @@ pub const PendingOp = struct {
 
     fn pollReadFile(self: *Self, loop: *EventLoop) !bool {
         const file_data = &self.data.read_file;
+        defer loop.allocator.free(@constCast(file_data.path));
 
         const content = std.fs.cwd().readFileAlloc(
             loop.allocator,
@@ -251,6 +259,8 @@ pub const PendingOp = struct {
 
     fn pollWriteFile(self: *Self, loop: *EventLoop) !bool {
         const file_data = &self.data.write_file;
+        defer loop.allocator.free(@constCast(file_data.path));
+        defer loop.allocator.free(@constCast(file_data.content));
 
         std.fs.cwd().writeFile(.{
             .sub_path = file_data.path,

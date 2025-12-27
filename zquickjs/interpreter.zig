@@ -518,6 +518,7 @@ pub const Interpreter = struct {
                     self.pc += 2;
                     const atom: object.Atom = @enumFromInt(atom_idx);
                     const val = self.ctx.pop();
+                    std.log.debug("define_global: atom_idx={} atom={} is_callable={}", .{ atom_idx, @intFromEnum(atom), val.isCallable() });
                     try self.ctx.defineGlobal(atom, val);
                 },
 

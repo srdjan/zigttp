@@ -382,6 +382,23 @@ pub const AtomTable = struct {
     pub fn count(self: *AtomTable) usize {
         return self.strings.count();
     }
+
+    /// Get string name for an atom (reverse lookup)
+    pub fn getName(self: *AtomTable, atom: object.Atom) ?[]const u8 {
+        // Check predefined atoms first
+        if (atom.isPredefined()) {
+            return atom.toPredefinedName();
+        }
+
+        // Search dynamic atoms
+        var it = self.strings.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == atom) {
+                return entry.key_ptr.*;
+            }
+        }
+        return null;
+    }
 };
 
 test "Context stack operations" {

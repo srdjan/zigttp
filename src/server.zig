@@ -1,11 +1,12 @@
 //! HTTP Server with JavaScript Request Handlers
 //!
 //! Architecture:
-//! - Blocking I/O using Zig's std.Io with Threaded backend
+//! - Evented I/O using Zig's std.Io with kqueue/io_uring backend
 //! - Per-request JS context isolation via RuntimePool
 //! - Deno-compatible handler API
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const net = std.Io.net;
 const jsx = @import("jsx.zig");
@@ -50,6 +51,9 @@ pub const ServerConfig = struct {
 
     /// Static file directory (null = disabled)
     static_dir: ?[]const u8 = null,
+
+    /// Write transformed JSX to /tmp/transformed.js for debugging
+    debug_jsx_output: bool = false,
 };
 
 pub const HandlerSource = union(enum) {
@@ -67,7 +71,8 @@ pub const HandlerSource = union(enum) {
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
-    threaded_io: Io.Threaded,
+    io_backend: IoBackend,
+    evented_ready: bool,
     listener: ?net.Server,
     pool: ?RuntimePool,
     handler_code: []const u8,
@@ -75,6 +80,8 @@ pub const Server = struct {
     request_count: std.atomic.Value(u64),
 
     const Self = @This();
+    const ConnectionEvent = enum { done, timeout };
+    const IoBackend = if (useEventedBackend()) Io.Evented else Io.Threaded;
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
         // Load handler code
@@ -91,6 +98,13 @@ pub const Server = struct {
                         return error.JsxTransformFailed;
                     };
                     allocator.free(source);
+                    if (config.debug_jsx_output) {
+                        const debug_file = std.fs.cwd().createFile("/tmp/transformed.js", .{}) catch null;
+                        if (debug_file) |f| {
+                            defer f.close();
+                            f.writeAll(result.code) catch {};
+                        }
+                    }
                     break :blk result.code;
                 }
 
@@ -101,7 +115,8 @@ pub const Server = struct {
         return Self{
             .config = config,
             .allocator = allocator,
-            .threaded_io = Io.Threaded.init(allocator),
+            .io_backend = undefined,
+            .evented_ready = false,
             .listener = null,
             .pool = null,
             .handler_code = handler_code,
@@ -111,10 +126,12 @@ pub const Server = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        const io = self.threaded_io.io();
         if (self.pool) |*p| p.deinit();
-        if (self.listener) |*l| l.deinit(io);
-        self.threaded_io.deinit();
+        if (self.evented_ready) {
+            const io = self.io_backend.io();
+            if (self.listener) |*l| l.deinit(io);
+            self.io_backend.deinit();
+        }
 
         // Free handler code if loaded from file
         if (self.config.handler == .file_path) {
@@ -123,7 +140,9 @@ pub const Server = struct {
     }
 
     pub fn start(self: *Self) !void {
-        const io = self.threaded_io.io();
+        try initIoBackend(&self.io_backend, self.allocator);
+        self.evented_ready = true;
+        const io = self.io_backend.io();
 
         // Initialize runtime pool
         self.pool = try RuntimePool.init(
@@ -152,31 +171,96 @@ pub const Server = struct {
     }
 
     fn acceptLoop(self: *Self) !void {
-        const io = self.threaded_io.io();
+        const io = self.io_backend.io();
         var listener = self.listener orelse return error.NotStarted;
+        var group: Io.Group = .init;
+        defer group.cancel(io);
 
         while (self.running) {
-            var stream = listener.accept(io) catch |err| {
+            const stream = listener.accept(io) catch |err| {
                 if (err == error.ConnectionAborted) continue;
                 return err;
             };
 
-            self.handleConnection(&stream, io) catch |err| {
-                std.log.err("Connection error: {}", .{err});
-            };
-            stream.close(io);
+            group.async(io, handleConnectionTask, .{ self, stream, io });
         }
+    }
+
+    fn handleConnectionTask(self: *Self, stream: net.Stream, io: Io) void {
+        var stream_mut = stream;
+        if (self.config.timeout_ms == 0) {
+            self.handleConnection(&stream_mut, io) catch |err| {
+                if (err != error.Canceled) {
+                    std.log.err("Connection error: {}", .{err});
+                }
+            };
+            stream_mut.close(io);
+            return;
+        }
+        self.handleConnectionWithTimeout(stream_mut, io);
+    }
+
+    fn handleConnectionWithTimeout(self: *Self, stream: net.Stream, io: Io) void {
+        var queue_buf: [2]ConnectionEvent = undefined;
+        var queue = Io.Queue(ConnectionEvent).init(&queue_buf);
+        var group: Io.Group = .init;
+        var timed_out = std.atomic.Value(bool).init(false);
+        defer group.cancel(io);
+
+        group.async(io, connectionRunner, .{ self, stream, io, &queue, &timed_out });
+        group.async(io, timeoutRunner, .{ self.config.timeout_ms, io, &queue, &timed_out });
+
+        _ = queue.getOne(io) catch return;
+        group.cancel(io);
+    }
+
+    fn connectionRunner(
+        self: *Self,
+        stream: net.Stream,
+        io: Io,
+        queue: *Io.Queue(ConnectionEvent),
+        timed_out: *std.atomic.Value(bool),
+    ) void {
+        var stream_mut = stream;
+        defer stream_mut.close(io);
+        self.handleConnection(&stream_mut, io) catch |err| {
+            if (err == error.RequestTimedOut and timed_out.load(.acquire)) {
+                self.sendErrorResponse(&stream_mut, io, 408, "Request Timeout") catch {};
+                return;
+            }
+            if (err != error.Canceled and err != error.RequestTimedOut) {
+                std.log.err("Connection error: {}", .{err});
+            }
+        };
+        _ = queue.putOneUncancelable(io, .done) catch {};
+    }
+
+    fn timeoutRunner(
+        timeout_ms: u32,
+        io: Io,
+        queue: *Io.Queue(ConnectionEvent),
+        timed_out: *std.atomic.Value(bool),
+    ) void {
+        if (timeout_ms == 0) return;
+        const duration = Io.Duration.fromMilliseconds(@intCast(timeout_ms));
+        const timeout = Io.Timeout{ .duration = .{ .raw = duration, .clock = .awake } };
+        _ = timeout.sleep(io) catch {};
+        timed_out.store(true, .release);
+        _ = queue.putOneUncancelable(io, .timeout) catch {};
     }
 
     fn handleConnection(self: *Self, stream: *net.Stream, io: Io) !void {
         const start_instant = std.time.Instant.now() catch null;
 
+        var request_started = false;
         // Parse HTTP request
-        var request = try self.parseRequest(stream, io);
-        defer {
-            request.headers.deinit();
-            if (request.body) |b| self.allocator.free(b);
-        }
+        var request = self.parseRequest(stream, io, &request_started) catch |err| {
+            if (err == error.Canceled and request_started) {
+                return error.RequestTimedOut;
+            }
+            return err;
+        };
+        defer request.deinit(self.allocator);
 
         // Handle static files if configured
         if (self.config.static_dir) |static_dir| {
@@ -213,9 +297,9 @@ pub const Server = struct {
 
         // Add CORS headers if enabled
         if (self.config.enable_cors) {
-            try response.headers.put("Access-Control-Allow-Origin", "*");
-            try response.headers.put("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-            try response.headers.put("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            try response.putHeader("Access-Control-Allow-Origin", "*");
+            try response.putHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+            try response.putHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
         }
 
         // Send response
@@ -238,17 +322,18 @@ pub const Server = struct {
         }
     }
 
-    fn parseRequest(self: *Self, stream: *net.Stream, io: Io) !ParsedRequest {
+    fn parseRequest(self: *Self, stream: *net.Stream, io: Io, request_started: *bool) !ParsedRequest {
         var buf: [8192]u8 = undefined;
         var reader_buf: [4096]u8 = undefined;
         var headers = std.StringHashMap([]const u8).init(self.allocator);
-        errdefer headers.deinit();
+        errdefer freeHeaderMap(self.allocator, &headers);
 
         // Use buffered reader for efficient parsing
         var reader = BufferedReader.init(stream, io, &reader_buf);
 
         // Read request line
         const request_line = try reader.readLine(&buf);
+        request_started.* = true;
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
         // Duplicate method and url immediately before reading headers
@@ -271,12 +356,12 @@ pub const Server = struct {
 
             // Duplicate strings since they point into buf
             const key_dup = try self.allocator.dupe(u8, key);
-            errdefer self.allocator.free(key_dup);
-
             const value_dup = try self.allocator.dupe(u8, value);
-            errdefer self.allocator.free(value_dup);
-
-            try headers.put(key_dup, value_dup);
+            headers.put(key_dup, value_dup) catch |err| {
+                self.allocator.free(key_dup);
+                self.allocator.free(value_dup);
+                return err;
+            };
         }
 
         // Read body if Content-Length present
@@ -315,6 +400,8 @@ pub const Server = struct {
 
         var header_iter = response.headers.iterator();
         while (header_iter.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "Content-Length")) continue;
+            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "Connection")) continue;
             try out.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
 
@@ -396,6 +483,13 @@ const ParsedRequest = struct {
     url: []const u8,
     headers: std.StringHashMap([]const u8),
     body: ?[]u8,
+
+    pub fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.method);
+        allocator.free(self.url);
+        if (self.body) |b| allocator.free(b);
+        freeHeaderMap(allocator, &self.headers);
+    }
 };
 
 // ============================================================================
@@ -507,6 +601,35 @@ fn getContentType(path: []const u8) []const u8 {
     if (std.mem.eql(u8, ext, ".xml")) return "application/xml";
     if (std.mem.eql(u8, ext, ".pdf")) return "application/pdf";
     return "application/octet-stream";
+}
+
+fn freeHeaderMap(allocator: std.mem.Allocator, headers: *std.StringHashMap([]const u8)) void {
+    var it = headers.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.*);
+    }
+    headers.deinit();
+}
+
+fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
+    const Backend = @TypeOf(io.*);
+    if (Backend == Io.Threaded) {
+        io.* = Io.Threaded.init(allocator);
+        return;
+    }
+    if (@hasDecl(Backend, "InitOptions")) {
+        try io.init(allocator, .{});
+    } else {
+        try io.init(allocator);
+    }
+}
+
+fn useEventedBackend() bool {
+    return switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => false,
+        else => true,
+    };
 }
 
 // ============================================================================

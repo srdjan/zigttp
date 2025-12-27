@@ -357,7 +357,7 @@ pub const StringTable = struct {
         // Free all strings
         for (self.strings.items) |str| {
             const total_size = @sizeOf(JSString) + str.len;
-            const ptr: [*]u8 = @ptrCast(str);
+            const ptr: [*]align(@alignOf(JSString)) u8 = @ptrCast(@alignCast(str));
             self.allocator.free(ptr[0..total_size]);
         }
         self.strings.deinit(self.allocator);
@@ -392,7 +392,7 @@ pub const StringTable = struct {
     /// Create a new JSString
     fn createString(self: *StringTable, s: []const u8, hash: u64) !*JSString {
         const total_size = @sizeOf(JSString) + s.len;
-        const mem = try self.allocator.alloc(u8, total_size);
+        const mem = try self.allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
         const str: *JSString = @ptrCast(@alignCast(mem.ptr));
         str.* = .{
@@ -423,7 +423,7 @@ pub const StringTable = struct {
 /// Create a non-interned string (caller owns memory)
 pub fn createString(allocator: std.mem.Allocator, s: []const u8) !*JSString {
     const total_size = @sizeOf(JSString) + s.len;
-    const mem = try allocator.alloc(u8, total_size);
+    const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
     const str: *JSString = @ptrCast(@alignCast(mem.ptr));
     str.* = .{

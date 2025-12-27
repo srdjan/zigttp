@@ -59,6 +59,11 @@ pub const HttpRequest = struct {
         allocator.free(self.method);
         allocator.free(self.url);
         if (self.body) |b| allocator.free(b);
+        var it = self.headers.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
         self.headers.deinit();
     }
 };
@@ -79,10 +84,23 @@ pub const HttpResponse = struct {
     }
 
     pub fn deinit(self: *HttpResponse) void {
+        var it = self.headers.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
         self.headers.deinit();
         if (self.body.len > 0) {
             self.allocator.free(self.body);
         }
+    }
+
+    pub fn putHeader(self: *HttpResponse, key: []const u8, value: []const u8) !void {
+        const key_dup = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(key_dup);
+        const value_dup = try self.allocator.dupe(u8, value);
+        errdefer self.allocator.free(value_dup);
+        try self.headers.put(key_dup, value_dup);
     }
 };
 
@@ -143,14 +161,19 @@ pub const Runtime = struct {
 
     /// Install native API bindings (console, Response helpers, etc.)
     fn installBindings(self: *Self) !void {
-        // Intern common atoms
-        self.handler_atom = try self.ctx.atoms.intern("handler");
+        // Use predefined handler atom
+        self.handler_atom = zq.Atom.handler;
 
         // Install console object
         try self.installConsole();
 
         // Install Response helpers
         try self.installResponseHelpers();
+
+        // Install JSX runtime (h, renderToString, Fragment)
+        if (self.config.enable_jsx) {
+            try self.installJsxRuntime();
+        }
     }
 
     fn installConsole(self: *Self) !void {
@@ -192,42 +215,66 @@ pub const Runtime = struct {
         // Create Response object with static methods
         const response_obj = try zq.JSObject.create(self.allocator, root_class, null);
 
-        // Response.json()
-        const json_atom = try self.ctx.atoms.intern("json");
+        // Response.json() - use predefined atoms
         const json_func = try zq.JSObject.createNativeFunction(
             self.allocator,
             root_class,
             responseJson,
-            json_atom,
+            zq.Atom.json,
             2,
         );
-        try response_obj.setProperty(self.allocator, json_atom, json_func.toValue());
+        try response_obj.setProperty(self.allocator, zq.Atom.json, json_func.toValue());
 
-        // Response.text()
-        const text_atom = try self.ctx.atoms.intern("text");
+        // Response.text() - use predefined atoms
         const text_func = try zq.JSObject.createNativeFunction(
             self.allocator,
             root_class,
             responseText,
-            text_atom,
+            zq.Atom.text,
             2,
         );
-        try response_obj.setProperty(self.allocator, text_atom, text_func.toValue());
+        try response_obj.setProperty(self.allocator, zq.Atom.text, text_func.toValue());
 
-        // Response.html()
-        const html_atom = try self.ctx.atoms.intern("html");
+        // Response.html() - use predefined atoms
         const html_func = try zq.JSObject.createNativeFunction(
             self.allocator,
             root_class,
             responseHtml,
-            html_atom,
+            zq.Atom.html,
             2,
         );
-        try response_obj.setProperty(self.allocator, html_atom, html_func.toValue());
+        try response_obj.setProperty(self.allocator, zq.Atom.html, html_func.toValue());
 
-        // Register on global
-        const response_atom = try self.ctx.atoms.intern("Response");
-        try self.ctx.setGlobal(response_atom, response_obj.toValue());
+        // Register on global using predefined Response atom
+        try self.ctx.setGlobal(zq.Atom.Response, response_obj.toValue());
+    }
+
+    fn installJsxRuntime(self: *Self) !void {
+        const root_class = self.ctx.root_class orelse return error.NoRootClass;
+
+        // h(tag, props, ...children) - creates virtual DOM node using predefined atom
+        const h_func = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            root_class,
+            jsxH,
+            zq.Atom.h,
+            2,
+        );
+        try self.ctx.setGlobal(zq.Atom.h, h_func.toValue());
+
+        // renderToString(node) - renders virtual DOM to HTML using predefined atom
+        const render_func = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            root_class,
+            jsxRenderToString,
+            zq.Atom.renderToString,
+            1,
+        );
+        try self.ctx.setGlobal(zq.Atom.renderToString, render_func.toValue());
+
+        // Fragment constant using predefined atom
+        const fragment_str = try zq.createString(self.allocator, "__fragment__");
+        try self.ctx.setGlobal(zq.Atom.Fragment, zq.JSValue.fromPtr(fragment_str));
     }
 
     /// Load and compile JavaScript code
@@ -253,6 +300,16 @@ pub const Runtime = struct {
             .source_map = null,
         };
 
+        std.log.debug("loadCode: bytecode length={}, bytes: {x} {x} {x} {x} {x} {x}", .{
+            bytecode_data.len,
+            if (bytecode_data.len > 0) bytecode_data[0] else 0,
+            if (bytecode_data.len > 1) bytecode_data[1] else 0,
+            if (bytecode_data.len > 2) bytecode_data[2] else 0,
+            if (bytecode_data.len > 3) bytecode_data[3] else 0,
+            if (bytecode_data.len > 4) bytecode_data[4] else 0,
+            if (bytecode_data.len > 5) bytecode_data[5] else 0,
+        });
+
         // Execute the compiled code to define functions
         _ = try self.interpreter.run(&func);
     }
@@ -266,8 +323,15 @@ pub const Runtime = struct {
     pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
         const handler_atom = self.handler_atom orelse return error.NoHandler;
 
+        std.log.debug("executeHandler: looking for handler_atom={}", .{@intFromEnum(handler_atom)});
+
         // Get handler function from globals
-        const handler_val = self.ctx.getGlobal(handler_atom) orelse return error.NoHandler;
+        const handler_val = self.ctx.getGlobal(handler_atom) orelse {
+            std.log.debug("executeHandler: handler not found in globals!", .{});
+            return error.NoHandler;
+        };
+
+        std.log.debug("executeHandler: got handler_val, isCallable={}, raw=0x{x}", .{ handler_val.isCallable(), @as(u64, @bitCast(handler_val)) });
 
         if (!handler_val.isCallable()) {
             return error.HandlerNotCallable;
@@ -293,21 +357,29 @@ pub const Runtime = struct {
         const root_class = self.ctx.root_class orelse return error.NoRootClass;
         const req_obj = try zq.JSObject.create(self.allocator, root_class, null);
 
-        // Set URL
-        const url_atom = try self.ctx.atoms.intern("url");
+        // Set URL using predefined atom
         const url_str = try self.createString(request.url);
-        try req_obj.setProperty(self.allocator, url_atom, url_str);
+        try req_obj.setProperty(self.allocator, zq.Atom.url, url_str);
 
-        // Set method
-        const method_atom = try self.ctx.atoms.intern("method");
+        // Set method using predefined atom
         const method_str = try self.createString(request.method);
-        try req_obj.setProperty(self.allocator, method_atom, method_str);
+        try req_obj.setProperty(self.allocator, zq.Atom.method, method_str);
 
-        // Set body if present
+        // Set body if present using predefined atom
         if (request.body) |body| {
-            const body_atom = try self.ctx.atoms.intern("body");
             const body_str = try self.createString(body);
-            try req_obj.setProperty(self.allocator, body_atom, body_str);
+            try req_obj.setProperty(self.allocator, zq.Atom.body, body_str);
+        }
+
+        if (request.headers.count() > 0) {
+            const headers_obj = try zq.JSObject.create(self.allocator, root_class, null);
+            var it = request.headers.iterator();
+            while (it.next()) |entry| {
+                const key_atom = try self.ctx.atoms.intern(entry.key_ptr.*);
+                const value_str = try self.createString(entry.value_ptr.*);
+                try headers_obj.setProperty(self.allocator, key_atom, value_str);
+            }
+            try req_obj.setProperty(self.allocator, zq.Atom.headers, headers_obj.toValue());
         }
 
         return req_obj.toValue();
@@ -319,12 +391,18 @@ pub const Runtime = struct {
     }
 
     fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {
+        std.log.debug("callFunction: class_id={}, is_callable={}", .{ @intFromEnum(func_obj.class_id), func_obj.flags.is_callable });
+        std.log.debug("callFunction: slot0={x}, slot1={x}", .{ @as(u64, @bitCast(func_obj.inline_slots[0])), @as(u64, @bitCast(func_obj.inline_slots[1])) });
+
         // Get bytecode function data
         const bc_data = func_obj.getBytecodeFunctionData() orelse {
+            std.log.debug("callFunction: no bytecode data, trying native", .{});
             // Try native function
             const native_data = func_obj.getNativeFunctionData() orelse return error.NotCallable;
             return native_data.func(self.ctx, zq.JSValue.undefined_val, args);
         };
+
+        std.log.debug("callFunction: got bc_data, pushing {} args", .{args.len});
 
         // Push arguments onto stack
         for (args) |arg| {
@@ -332,7 +410,13 @@ pub const Runtime = struct {
         }
 
         // Execute bytecode
-        return self.interpreter.run(bc_data.bytecode);
+        std.log.debug("callFunction: running bytecode", .{});
+        const result = self.interpreter.run(bc_data.bytecode) catch |err| {
+            std.log.debug("callFunction: bytecode execution failed: {}", .{err});
+            return err;
+        };
+        std.log.debug("callFunction: success", .{});
+        return result;
     }
 
     fn extractResponse(self: *Self, result: zq.JSValue) !HttpResponse {
@@ -349,27 +433,36 @@ pub const Runtime = struct {
 
         const result_obj = result.toPtr(zq.JSObject);
 
-        // Extract status
-        const status_atom = try self.ctx.atoms.intern("status");
-        if (result_obj.getOwnProperty(status_atom)) |status_val| {
+        // Extract status using predefined atom
+        if (result_obj.getOwnProperty(zq.Atom.status)) |status_val| {
             if (status_val.isInt()) {
                 response.status = @intCast(status_val.getInt());
             }
         }
 
-        // Extract body
-        const body_atom = try self.ctx.atoms.intern("body");
-        if (result_obj.getOwnProperty(body_atom)) |body_val| {
+        // Extract body using predefined atom
+        if (result_obj.getOwnProperty(zq.Atom.body)) |body_val| {
             if (body_val.isString()) {
                 const str = body_val.toPtr(zq.JSString);
                 response.body = try self.allocator.dupe(u8, str.data());
             }
         }
 
-        // Extract headers (TODO: Iterate headers object and populate response.headers)
-        const headers_atom = try self.ctx.atoms.intern("headers");
-        if (result_obj.getOwnProperty(headers_atom)) |headers_val| {
-            _ = headers_val.isObject(); // Headers extraction not yet implemented
+        // Extract headers
+        if (result_obj.getOwnProperty(zq.Atom.headers)) |headers_val| {
+            if (headers_val.isObject()) {
+                const headers_obj = headers_val.toPtr(zq.JSObject);
+                const keys = try headers_obj.getOwnEnumerableKeys(self.allocator);
+                defer self.allocator.free(keys);
+                for (keys) |key_atom| {
+                    const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
+                    const header_val = headers_obj.getOwnProperty(key_atom) orelse continue;
+                    if (header_val.isString()) {
+                        const str = header_val.toPtr(zq.JSString);
+                        try response.putHeader(key_name, str.data());
+                    }
+                }
+            }
         }
 
         return response;
@@ -386,9 +479,30 @@ pub const Runtime = struct {
         if (self.gc_state.nursery.used() > self.gc_state.config.nursery_size / 2) {
             self.gc_state.minorGC();
         }
+        self.clearUserGlobals() catch |err| {
+            std.log.warn("Failed to clear user globals: {}", .{err});
+        };
+    }
 
-        // Reset atom table (clear user-defined atoms)
-        self.ctx.atoms.reset();
+    fn clearUserGlobals(self: *Self) !void {
+        const global_obj = self.ctx.global_obj orelse return;
+        const keys = try global_obj.getOwnEnumerableKeys(self.allocator);
+        defer self.allocator.free(keys);
+
+        for (keys) |atom| {
+            if (isProtectedGlobal(atom, self.handler_atom)) continue;
+            _ = global_obj.deleteProperty(atom);
+        }
+    }
+
+    fn isProtectedGlobal(atom: zq.Atom, handler_atom: ?zq.Atom) bool {
+        if (handler_atom) |h| {
+            if (atom == h) return true;
+        }
+        return switch (atom) {
+            .handler, .Response, .console, .h, .renderToString, .Fragment => true,
+            else => false,
+        };
     }
 };
 
@@ -448,21 +562,18 @@ fn responseJson(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) an
     const root_class = ctx.root_class orelse return error.NoRootClass;
     const resp_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
 
-    // Set status 200
-    const status_atom = try ctx.atoms.intern("status");
-    try resp_obj.setProperty(ctx.allocator, status_atom, zq.JSValue.fromInt(200));
+    // Set status 200 using predefined atom
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.status, zq.JSValue.fromInt(200));
 
     // Set Content-Type header
-    const headers_atom = try ctx.atoms.intern("headers");
     const headers_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
     const ct_atom = try ctx.atoms.intern("Content-Type");
     const ct_val = try zq.createString(ctx.allocator, "application/json");
     try headers_obj.setProperty(ctx.allocator, ct_atom, zq.JSValue.fromPtr(ct_val));
-    try resp_obj.setProperty(ctx.allocator, headers_atom, headers_obj.toValue());
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.headers, headers_obj.toValue());
 
     // Stringify body (simplified - just store the value for now)
-    const body_atom = try ctx.atoms.intern("body");
-    try resp_obj.setProperty(ctx.allocator, body_atom, args[0]);
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.body, args[0]);
 
     return resp_obj.toValue();
 }
@@ -475,18 +586,18 @@ fn responseText(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) an
     const root_class = ctx.root_class orelse return error.NoRootClass;
     const resp_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
 
-    const status_atom = try ctx.atoms.intern("status");
-    try resp_obj.setProperty(ctx.allocator, status_atom, zq.JSValue.fromInt(200));
+    // Set status 200 using predefined atom
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.status, zq.JSValue.fromInt(200));
 
-    const headers_atom = try ctx.atoms.intern("headers");
+    // Set Content-Type header
     const headers_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
     const ct_atom = try ctx.atoms.intern("Content-Type");
     const ct_val = try zq.createString(ctx.allocator, "text/plain");
     try headers_obj.setProperty(ctx.allocator, ct_atom, zq.JSValue.fromPtr(ct_val));
-    try resp_obj.setProperty(ctx.allocator, headers_atom, headers_obj.toValue());
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.headers, headers_obj.toValue());
 
-    const body_atom = try ctx.atoms.intern("body");
-    try resp_obj.setProperty(ctx.allocator, body_atom, args[0]);
+    // Set body using predefined atom
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.body, args[0]);
 
     return resp_obj.toValue();
 }
@@ -499,20 +610,232 @@ fn responseHtml(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) an
     const root_class = ctx.root_class orelse return error.NoRootClass;
     const resp_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
 
-    const status_atom = try ctx.atoms.intern("status");
-    try resp_obj.setProperty(ctx.allocator, status_atom, zq.JSValue.fromInt(200));
+    // Set status 200 using predefined atom
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.status, zq.JSValue.fromInt(200));
 
-    const headers_atom = try ctx.atoms.intern("headers");
+    // Set Content-Type header
     const headers_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
     const ct_atom = try ctx.atoms.intern("Content-Type");
     const ct_val = try zq.createString(ctx.allocator, "text/html");
     try headers_obj.setProperty(ctx.allocator, ct_atom, zq.JSValue.fromPtr(ct_val));
-    try resp_obj.setProperty(ctx.allocator, headers_atom, headers_obj.toValue());
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.headers, headers_obj.toValue());
 
-    const body_atom = try ctx.atoms.intern("body");
-    try resp_obj.setProperty(ctx.allocator, body_atom, args[0]);
+    // Set body using predefined atom
+    try resp_obj.setProperty(ctx.allocator, zq.Atom.body, args[0]);
 
     return resp_obj.toValue();
+}
+
+// ============================================================================
+// JSX Runtime Functions
+// ============================================================================
+
+/// h(tag, props, ...children) - creates a virtual DOM node
+/// Returns: { tag: string, props: object, children: array }
+fn jsxH(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+
+    // Create the virtual DOM node object
+    const node = try zq.JSObject.create(ctx.allocator, root_class, null);
+
+    // Set tag (first argument) using predefined atom
+    if (args.len > 0) {
+        try node.setProperty(ctx.allocator, zq.Atom.tag, args[0]);
+    } else {
+        try node.setProperty(ctx.allocator, zq.Atom.tag, zq.JSValue.null_val);
+    }
+
+    // Set props (second argument, default to empty object) using predefined atom
+    if (args.len > 1 and !args[1].isNull() and !args[1].isUndefined()) {
+        try node.setProperty(ctx.allocator, zq.Atom.props, args[1]);
+    } else {
+        const empty_props = try zq.JSObject.create(ctx.allocator, root_class, null);
+        try node.setProperty(ctx.allocator, zq.Atom.props, empty_props.toValue());
+    }
+
+    // Set children (remaining arguments as array) using predefined atom
+    const children_arr = try zq.JSObject.createArray(ctx.allocator, root_class);
+    var child_idx: u32 = 0;
+    for (args[2..]) |child| {
+        if (!child.isNull() and !child.isUndefined()) {
+            try children_arr.setIndex(ctx.allocator, child_idx, child);
+            child_idx += 1;
+        }
+    }
+    try node.setProperty(ctx.allocator, zq.Atom.children, children_arr.toValue());
+
+    return node.toValue();
+}
+
+/// renderToString(node) - renders virtual DOM to HTML string
+fn jsxRenderToString(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+
+    if (args.len == 0) {
+        const empty = try zq.createString(ctx.allocator, "");
+        return zq.JSValue.fromPtr(empty);
+    }
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(ctx.allocator);
+
+    try renderNode(ctx, ctx.allocator, args[0], &buffer);
+
+    const result = try zq.createString(ctx.allocator, buffer.items);
+    return zq.JSValue.fromPtr(result);
+}
+
+fn renderNode(ctx: *zq.Context, allocator: std.mem.Allocator, node: zq.JSValue, buffer: *std.ArrayList(u8)) !void {
+    // null/undefined -> empty string
+    if (node.isNull() or node.isUndefined()) return;
+
+    // String -> escape and append
+    if (node.isString()) {
+        const str = node.toPtr(zq.JSString);
+        try escapeHtml(allocator, buffer, str.data());
+        return;
+    }
+
+    // Number -> convert to string
+    if (node.isInt()) {
+        var num_buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&num_buf, "{d}", .{node.getInt()}) catch return;
+        try buffer.appendSlice(allocator, s);
+        return;
+    }
+
+    // Boolean -> empty string
+    if (node.isTrue() or node.isFalse()) return;
+
+    // Object (virtual DOM node or array)
+    if (node.isObject()) {
+        const obj = node.toPtr(zq.JSObject);
+
+        // Check if it's an array (render each element)
+        if (obj.isArray()) {
+            const len = obj.getArrayLength();
+            for (0..len) |i| {
+                if (obj.getIndex(@intCast(i))) |child| {
+                    try renderNode(ctx, allocator, child, buffer);
+                }
+            }
+            return;
+        }
+
+        // Virtual DOM node: { tag, props, children }
+        // Virtual DOM node: { tag, props, children } - use predefined atoms
+        const tag_val = obj.getOwnProperty(zq.Atom.tag) orelse return;
+
+        // Check for Fragment
+        if (tag_val.isString()) {
+            const tag_str = tag_val.toPtr(zq.JSString);
+            if (std.mem.eql(u8, tag_str.data(), "__fragment__")) {
+                // Fragment: just render children
+                if (obj.getOwnProperty(zq.Atom.children)) |children| {
+                    try renderNode(ctx, allocator, children, buffer);
+                }
+                return;
+            }
+
+            // Regular HTML tag
+            const tag = tag_str.data();
+            try buffer.appendSlice(allocator, "<");
+            try buffer.appendSlice(allocator, tag);
+
+            // Render props/attributes
+            if (obj.getOwnProperty(zq.Atom.props)) |props_val| {
+                if (props_val.isObject()) {
+                    try renderProps(ctx, allocator, props_val.toPtr(zq.JSObject), buffer);
+                }
+            }
+
+            // Void elements
+            const void_elements = [_][]const u8{
+                "area", "base", "br", "col", "embed", "hr", "img",
+                "input", "link", "meta", "param", "source", "track", "wbr",
+            };
+            for (void_elements) |ve| {
+                if (std.mem.eql(u8, tag, ve)) {
+                    try buffer.appendSlice(allocator, " />");
+                    return;
+                }
+            }
+
+            try buffer.appendSlice(allocator, ">");
+
+            // Render children
+            if (obj.getOwnProperty(zq.Atom.children)) |children| {
+                try renderNode(ctx, allocator, children, buffer);
+            }
+
+            try buffer.appendSlice(allocator, "</");
+            try buffer.appendSlice(allocator, tag);
+            try buffer.appendSlice(allocator, ">");
+        }
+    }
+}
+
+fn renderProps(ctx: *zq.Context, allocator: std.mem.Allocator, props: *zq.JSObject, buffer: *std.ArrayList(u8)) !void {
+    // Iterate over properties
+    var iter = props.propertyIterator();
+    while (iter.next()) |entry| {
+        const name = ctx.atoms.getName(entry.atom) orelse continue;
+        const val = entry.value;
+
+        // Skip null/undefined/false values
+        if (val.isNull() or val.isUndefined() or val.isFalse()) continue;
+
+        // Skip event handlers (start with "on")
+        if (name.len >= 2 and name[0] == 'o' and name[1] == 'n') continue;
+
+        // Boolean true -> just attribute name
+        if (val.isTrue()) {
+            try buffer.appendSlice(allocator, " ");
+            try buffer.appendSlice(allocator, name);
+            continue;
+        }
+
+        // className -> class
+        const attr_name = if (std.mem.eql(u8, name, "className")) "class" else name;
+
+        try buffer.appendSlice(allocator, " ");
+        try buffer.appendSlice(allocator, attr_name);
+        try buffer.appendSlice(allocator, "=\"");
+
+        // Value as string
+        if (val.isString()) {
+            const str = val.toPtr(zq.JSString);
+            try escapeAttr(allocator, buffer, str.data());
+        } else if (val.isInt()) {
+            var num_buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch continue;
+            try buffer.appendSlice(allocator, s);
+        }
+
+        try buffer.appendSlice(allocator, "\"");
+    }
+}
+
+fn escapeHtml(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), str: []const u8) !void {
+    for (str) |c| {
+        switch (c) {
+            '&' => try buffer.appendSlice(allocator, "&amp;"),
+            '<' => try buffer.appendSlice(allocator, "&lt;"),
+            '>' => try buffer.appendSlice(allocator, "&gt;"),
+            else => try buffer.append(allocator, c),
+        }
+    }
+}
+
+fn escapeAttr(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), str: []const u8) !void {
+    for (str) |c| {
+        switch (c) {
+            '&' => try buffer.appendSlice(allocator, "&amp;"),
+            '"' => try buffer.appendSlice(allocator, "&quot;"),
+            else => try buffer.append(allocator, c),
+        }
+    }
 }
 
 // ============================================================================
@@ -634,7 +957,9 @@ pub const RuntimePool = struct {
 // ============================================================================
 
 test "Runtime creation" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const rt = try Runtime.init(allocator, .{});
     defer rt.deinit();
 
@@ -642,7 +967,9 @@ test "Runtime creation" {
 }
 
 test "RuntimePool basic operations" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const handler_code = "function handler(req) { return { status: 200, body: 'ok' }; }";
     var pool = try RuntimePool.init(allocator, .{}, handler_code, 2);
     defer pool.deinit();

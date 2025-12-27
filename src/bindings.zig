@@ -426,6 +426,7 @@ fn installDeno(ctx: *mq.JSContext, global: mq.JSValue) !void {
 fn denoReadTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]mq.JSValue) callconv(.c) mq.JSValue {
     const ctx = ctx_.?;
     const loop = current_loop orelse return mq.throwError(ctx, "No event loop");
+    const allocator = current_allocator orelse return mq.throwError(ctx, "No allocator");
 
     if (argc < 1) {
         return mq.throwError(ctx, "readTextFile requires a path argument");
@@ -441,13 +442,18 @@ fn denoReadTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: 
         return mq.throwError(ctx, "Invalid path: traversal not allowed");
     }
 
+    const path = allocator.dupe(u8, path_str.ok) catch {
+        return mq.throwError(ctx, "Out of memory");
+    };
+
     return createPromiseWithOp(ctx, loop, .{
         .kind = .read_file,
         .state = .pending,
         .resolve_ref = null,
         .reject_ref = null,
-        .data = .{ .read_file = .{ .path = path_str.ok } },
+        .data = .{ .read_file = .{ .path = path } },
     }) catch {
+        allocator.free(path);
         return mq.throwError(ctx, "Failed to create Promise");
     };
 }
@@ -455,6 +461,7 @@ fn denoReadTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: 
 fn denoWriteTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv: [*c]mq.JSValue) callconv(.c) mq.JSValue {
     const ctx = ctx_.?;
     const loop = current_loop orelse return mq.throwError(ctx, "No event loop");
+    const allocator = current_allocator orelse return mq.throwError(ctx, "No allocator");
 
     if (argc < 2) {
         return mq.throwError(ctx, "writeTextFile requires path and content arguments");
@@ -472,16 +479,26 @@ fn denoWriteTextFile(ctx_: ?*mq.JSContext, _: [*c]mq.JSValue, argc: c_int, argv:
         return mq.throwError(ctx, "Invalid path: traversal not allowed");
     }
 
+    const path = allocator.dupe(u8, path_str.ok) catch {
+        return mq.throwError(ctx, "Out of memory");
+    };
+    const content = allocator.dupe(u8, content_str.ok) catch {
+        allocator.free(path);
+        return mq.throwError(ctx, "Out of memory");
+    };
+
     return createPromiseWithOp(ctx, loop, .{
         .kind = .write_file,
         .state = .pending,
         .resolve_ref = null,
         .reject_ref = null,
         .data = .{ .write_file = .{
-            .path = path_str.ok,
-            .content = content_str.ok,
+            .path = path,
+            .content = content,
         } },
     }) catch {
+        allocator.free(path);
+        allocator.free(content);
         return mq.throwError(ctx, "Failed to create Promise");
     };
 }

@@ -14,6 +14,8 @@ zigttp-server is a **serverless JavaScript runtime** for FaaS (Function-as-a-Ser
 
 ## Build Commands
 
+Requires Zig 0.16.0+ (nightly).
+
 ```bash
 # Build
 zig build                           # Debug build
@@ -24,7 +26,9 @@ zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
 zig build run -- examples/handler.js -p 3000
 
 # Test
-zig build test
+zig build test                      # All src/ tests
+zig build test-zquickjs             # zquickjs engine tests only
+zig build test-zruntime             # Native Zig runtime tests only
 ```
 
 ## Architecture
@@ -33,23 +37,31 @@ zig build test
 
 - **main.zig** - CLI argument parsing, creates ServerConfig, starts server
 - **server.zig** - HTTP listener, request parsing, connection handling, static file serving, JSX detection
-- **runtime.zig** - JS runtime wrapper, RuntimePool for request isolation, Request/Response conversion, JSX runtime
+- **zruntime.zig** - Native Zig runtime: RuntimePool, JS context management, Request/Response conversion, JSX runtime (uses zquickjs)
+- **runtime.zig** - Legacy runtime wrapper around mquickjs (C bindings) - retained for benchmarking only
 - **bindings.zig** - Native API implementations (console, fetch, Deno namespace, timers)
 - **event_loop.zig** - Async operation management, microtask queue, Promise resolution
 - **jsx.zig** - JSX-to-JavaScript transformer for SSR
 
 ### zquickjs Engine (Pure Zig)
 
+- **zquickjs/root.zig** - Module entry point, re-exports main types
 - **zquickjs/parser.zig** - Tokenizer + direct bytecode emission (no AST)
+- **zquickjs/bytecode.zig** - Opcode definitions and FunctionBytecode struct
 - **zquickjs/interpreter.zig** - Stack-based bytecode VM
 - **zquickjs/value.zig** - NaN-boxing value representation
-- **zquickjs/object.zig** - Hidden classes for inline caching
+- **zquickjs/object.zig** - Hidden classes, Atom interning, inline caching
+- **zquickjs/string.zig** - JSString and StringTable for string interning
+- **zquickjs/context.zig** - JS execution context (globals, stack, atoms)
 - **zquickjs/gc.zig** - Generational GC (nursery + tenured)
 - **zquickjs/heap.zig** - Size-class segregated allocator
+- **zquickjs/pool.zig** - Lock-free runtime pooling
+- **zquickjs/builtins.zig** - Built-in JavaScript functions
 
 ### Legacy (Benchmarking Only)
 
 - **mquickjs.zig** - C bindings to mquickjs (used only for performance comparisons)
+- **runtime.zig** - Legacy runtime using mquickjs
 
 ### Request Flow
 
