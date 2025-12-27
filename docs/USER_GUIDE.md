@@ -1,6 +1,6 @@
 # zigttp-server User Guide
 
-A lightweight HTTP server powered by Zig and MicroQuickJS for running JavaScript request handlers with minimal resource usage.
+A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure Functions, Cloudflare Workers), powered by Zig and zquickjs.
 
 ---
 
@@ -27,35 +27,27 @@ A lightweight HTTP server powered by Zig and MicroQuickJS for running JavaScript
 ### Prerequisites
 
 - **Zig 0.15.0+**: Download from [ziglang.org](https://ziglang.org/download/)
-- **Git**: For cloning mquickjs sources
 
-### Setup
+### Build
 
 ```bash
-# Extract the archive
-unzip zig-mquickjs.zip
-cd zig-mquickjs
+# Clone the repository
+git clone https://github.com/your-org/zigttp
+cd zigttp
 
-# Run setup (fetches mquickjs sources and builds)
-./setup.sh
+# Build release version (optimized for deployment)
+zig build -Doptimize=ReleaseFast
+
+# Or debug version
+zig build
 
 # Verify installation
 ./zig-out/bin/zigttp-server --help
 ```
 
-### Manual Build
+### Deployment Package
 
-```bash
-# Clone mquickjs sources
-rm -rf mquickjs
-git clone https://github.com/bellard/mquickjs mquickjs
-
-# Build release version
-zig build -Doptimize=ReleaseFast
-
-# Or debug version
-zig build
-```
+The resulting binary (~500KB) has zero runtime dependencies and can be deployed directly to FaaS platforms or container environments.
 
 ---
 
@@ -664,7 +656,7 @@ function handler(request) {
 
 ## JavaScript Subset Reference
 
-MicroQuickJS implements ES5 with some ES6+ extensions. Here's what's available:
+zquickjs implements ES5 with some ES6+ extensions. Here's what's available:
 
 ### Supported Features
 
@@ -725,7 +717,7 @@ new Number(1)                // No value boxing
 
 ### Strict Mode
 
-MicroQuickJS always runs in strict mode:
+zquickjs always runs in strict mode:
 
 ```javascript
 // These are errors:
@@ -885,17 +877,17 @@ function renderHomePage() {
     return layout('Home', [
         '<h1>Welcome to My Site</h1>',
         '<p>This is a simple web application powered by zigttp-server.</p>',
-        '<p>Built with Zig and MicroQuickJS for minimal resource usage.</p>'
+        '<p>Built with Zig and zquickjs for serverless deployments.</p>'
     ].join('\n'));
 }
 
 function renderAboutPage() {
     return layout('About', [
         '<h1>About</h1>',
-        '<p>zigttp-server is a lightweight HTTP server that embeds the MicroQuickJS JavaScript engine.</p>',
+        '<p>zigttp-server is a serverless JavaScript runtime powered by zquickjs.</p>',
         '<h2>Features</h2>',
         '<ul>',
-        '  <li>Fast startup times</li>',
+        '  <li>Instant cold starts</li>',
         '  <li>Zero dependencies</li>',
         '  <li>ES5 JavaScript with select ES6+ features</li>',
         '</ul>'
@@ -963,7 +955,7 @@ function handler(request) {
             uptime_ms: uptime,
             uptime_seconds: Math.floor(uptime / 1000),
             total_requests: requestCount,
-            runtime: 'mquickjs'
+            runtime: 'zquickjs'
         });
     }
     
@@ -981,20 +973,27 @@ function handler(request) {
 
 ---
 
-## Performance Tuning
+## Performance Tuning for FaaS
 
 ### Memory Configuration
 
 ```bash
-# Minimal (10KB) - simple handlers only
-./zig-out/bin/zigttp-server -m 10k handler.js
-
 # Default (256KB) - typical API handlers
 ./zig-out/bin/zigttp-server handler.js
 
 # Larger (1MB) - complex processing, large JSON
 ./zig-out/bin/zigttp-server -m 1m handler.js
+
+# Smaller (64KB) - minimal functions
+./zig-out/bin/zigttp-server -m 64k handler.js
 ```
+
+### Cold Start Optimization
+
+zigttp-server is optimized for FaaS cold starts:
+- Binary initialization: < 1ms
+- Handler loading: typically < 5ms
+- No JIT warm-up required
 
 ### Optimize Handler Code
 
@@ -1020,24 +1019,39 @@ function handler(request) {
 
 ### Production Deployment
 
+#### Standalone Server
+
 ```bash
 # Quiet mode, bind to all interfaces
 ./zig-out/bin/zigttp-server -q -h 0.0.0.0 -p 8080 handler.js
-
-# With systemd (example unit file)
-# /etc/systemd/system/mqjs.service
-# [Unit]
-# Description=zigttp-server
-# After=network.target
-# 
-# [Service]
-# ExecStart=/opt/mqjs/zigttp-server -q -h 0.0.0.0 -p 8080 /opt/mqjs/handler.js
-# Restart=always
-# User=www-data
-# 
-# [Install]
-# WantedBy=multi-user.target
 ```
+
+#### Docker Container
+
+```dockerfile
+FROM scratch
+COPY zig-out/bin/zigttp-server /zigttp-server
+COPY handler.js /handler.js
+EXPOSE 8080
+ENTRYPOINT ["/zigttp-server", "-q", "-h", "0.0.0.0", "/handler.js"]
+```
+
+#### AWS Lambda (Custom Runtime)
+
+```bash
+# Build for Lambda
+zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux
+
+# Package as Lambda deployment
+zip function.zip bootstrap handler.js
+aws lambda create-function --function-name my-function \
+  --zip-file fileb://function.zip --runtime provided.al2 \
+  --handler handler.handler --role arn:aws:iam::...
+```
+
+#### Cloudflare Workers (via Wasm)
+
+Build with wasm32 target for edge deployment (experimental).
 
 ---
 

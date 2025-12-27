@@ -1,16 +1,23 @@
-# zigttp HTTP Server
+# zigttp - Serverless JavaScript Runtime
 
 > **Note**: This project is experimental and under active development.
 
-A lightweight HTTP server written in Zig that embeds [MicroQuickJS](https://github.com/bellard/mquickjs) (mquickjs) for JavaScript request handlers.
-
+A serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases, powered by **zquickjs** - a pure Zig JavaScript engine. Designed for AWS Lambda, Azure Functions, Cloudflare Workers, and edge computing deployments.
 
 ## Features
 
-- **Fast startup**: No JIT compilation, instant cold starts
-- **Zero dependencies**: Just Zig and the mquickjs C sources
+- **Instant cold starts**: No JIT warm-up, predictable startup times
+- **Small deployment package**: Pure Zig, zero external dependencies
+- **Request isolation**: RuntimePool with pre-warmed contexts
 - **Functional API**: Response helpers similar to Deno/Fetch API
-- **Safe by default**: Strict mode JavaScript, no eval of local variables
+- **Safe by default**: Strict mode JavaScript, sandboxed execution
+
+## Use Cases
+
+- AWS Lambda / Azure Functions / Cloudflare Workers style deployments
+- Edge computing with JavaScript handlers
+- Lightweight HTTP function handlers
+- Multi-tenant request processing
 
 ## Quick Start
 
@@ -184,7 +191,7 @@ function handler(request) {
 
 ## JavaScript Subset
 
-mquickjs implements ES5 with some ES6+ extensions. Key limitations:
+zquickjs implements ES5 with some ES6+ extensions. Key limitations:
 
 - **Strict mode only**: No `with`, globals must be declared with `var`
 - **No array holes**: `[1,,3]` is a syntax error
@@ -208,46 +215,51 @@ Supported ES6+ features:
 │                     zigttp-server (Zig)                       │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ HTTP Server │──│   Runtime   │──│  Native Bindings    │  │
-│  │  (std.net)  │  │  Wrapper    │  │ (console, Response) │  │
+│  │ HTTP Server │──│ RuntimePool │──│  Native Bindings    │  │
+│  │  (std.net)  │  │  (contexts) │  │ (console, Response) │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
-│                    mquickjs (C)                             │
+│                    zquickjs (Pure Zig)                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │   Parser    │──│  Bytecode   │──│  Tracing GC         │  │
-│  │             │  │     VM      │  │  (Compacting)       │  │
+│  │   Parser    │──│  Bytecode   │──│  Generational GC    │  │
+│  │             │  │     VM      │  │ (Nursery + Tenured) │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Memory Model
+### Runtime Model
 
-mquickjs uses a **compacting garbage collector** which means:
+zquickjs uses a **generational garbage collector** with:
 
-1. Object addresses can change after any JS allocation
-2. The Zig bindings use `GCRef` guards for stable references
-3. String slices returned from JS are only valid until the next allocation
+1. NaN-boxing for efficient value representation (64-bit tagged values)
+2. Hidden classes for inline caching (V8-style optimization)
+3. RuntimePool for request isolation in FaaS environments
 
-This is why the bindings use a Result type pattern - to make error handling explicit and avoid dangling pointers.
+The Result<T> pattern throughout makes error handling explicit and prevents silent failures.
 
 ## Project Structure
 
 ```
 zigttp-server/
 ├── build.zig              # Zig build configuration
-├── mquickjs/              # Vendored mquickjs sources (from bellard/mquickjs)
+├── zquickjs/              # Pure Zig JavaScript engine
+│   ├── parser.zig         # Tokenizer + bytecode compiler
+│   ├── interpreter.zig    # Stack-based VM
+│   ├── value.zig          # NaN-boxing value representation
+│   ├── object.zig         # Hidden classes, object system
+│   ├── gc.zig             # Generational GC
+│   └── heap.zig           # Size-class allocator
+├── mquickjs/              # Legacy C engine (benchmarks only)
 ├── src/
 │   ├── main.zig           # CLI entry point
-│   ├── mquickjs.zig       # Low-level C bindings
-│   ├── runtime.zig        # High-level JS runtime wrapper
+│   ├── runtime.zig        # RuntimePool, JS context management
 │   ├── server.zig         # HTTP server implementation
+│   ├── bindings.zig       # Native APIs (console, fetch, Deno)
 │   └── jsx.zig            # JSX transformer
 └── examples/
     ├── handler.js         # Example JavaScript handler
     ├── handler.jsx        # Same example using JSX
     ├── htmx-todo/         # HTMX Todo app example
-    ├── jsx-simple.jsx     # Simple JSX example
-    ├── jsx-component.jsx  # Component JSX example
     └── jsx-ssr.jsx        # Full SSR example
 ```
 
@@ -290,21 +302,31 @@ const my_fn = mq.newCFunction(ctx, myNativeFunction, "myFunction", 0);
 _ = mq.setPropertyStr(ctx, global, "myFunction", my_fn.ok);
 ```
 
-## Performance Notes
+## Performance for FaaS
 
-- **Startup**: < 1ms to initialize runtime and load handler
-- **Memory**: 256KB default JS heap (configurable)
-- **Requests**: Single-threaded, sequential processing
-- **Compute**: Comparable to QuickJS (~50% of V8 for compute-bound)
+- **Cold start**: < 1ms to initialize runtime and load handler
+- **Warm invocations**: RuntimePool reuses pre-warmed contexts
+- **Memory**: 256KB default JS heap (configurable per function)
+- **Deployment size**: ~500KB binary, zero runtime dependencies
 
-For high-throughput scenarios, consider running multiple instances behind a load balancer.
+### Deployment Patterns
+
+```bash
+# Single instance (Lambda-style)
+./zigttp-server handler.js
+
+# Multiple instances behind load balancer
+# Each instance handles one request at a time for isolation
+```
+
+For high-throughput scenarios, deploy multiple instances. The small binary size and instant cold starts make horizontal scaling efficient.
 
 ## License
 
-This Zig server host is MIT licensed.
-mquickjs is MIT licensed (Copyright Fabrice Bellard & Charlie Gordon).
+MIT licensed.
 
 ## Credits
 
-- [MicroQuickJS](https://github.com/bellard/mquickjs) by Fabrice Bellard
+- **zquickjs** - Pure Zig JavaScript engine (part of this project)
 - [Zig](https://ziglang.org/) programming language
+- [MicroQuickJS](https://github.com/bellard/mquickjs) by Fabrice Bellard (legacy benchmarking only)

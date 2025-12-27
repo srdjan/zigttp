@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-zigttp-server is a lightweight HTTP server written in Zig that embeds MicroQuickJS or zQuickJS (a minimal JavaScript engine) to execute JavaScript request handlers. Design goals: instant cold starts, zero external dependencies.
+zigttp-server is a **serverless JavaScript runtime** for FaaS (Function-as-a-Service) use cases, powered by **zquickjs** - a pure Zig JavaScript engine. Target deployments: AWS Lambda, Azure Functions, Cloudflare Workers, edge computing.
 
-**Trade-offs for simplicity**: Single-threaded sequential processing, compile-time configuration, ES5 JavaScript subset (with some ES6).
+**Design goals**: Instant cold starts, small deployment package, request isolation, zero external dependencies.
+
+**Trade-offs for FaaS optimization**: Single-threaded sequential processing (one request per instance), compile-time configuration, ES5 JavaScript subset (with some ES6).
+
+**Note**: mquickjs.zig is **legacy code retained only for benchmarking**. zquickjs is the active JavaScript engine.
 
 ## Build Commands
 
@@ -30,10 +34,22 @@ zig build test
 - **main.zig** - CLI argument parsing, creates ServerConfig, starts server
 - **server.zig** - HTTP listener, request parsing, connection handling, static file serving, JSX detection
 - **runtime.zig** - JS runtime wrapper, RuntimePool for request isolation, Request/Response conversion, JSX runtime
-- **mquickjs.zig** - Low-level C bindings with type-safe Zig wrapper around mquickjs API
 - **bindings.zig** - Native API implementations (console, fetch, Deno namespace, timers)
 - **event_loop.zig** - Async operation management, microtask queue, Promise resolution
 - **jsx.zig** - JSX-to-JavaScript transformer for SSR
+
+### zquickjs Engine (Pure Zig)
+
+- **zquickjs/parser.zig** - Tokenizer + direct bytecode emission (no AST)
+- **zquickjs/interpreter.zig** - Stack-based bytecode VM
+- **zquickjs/value.zig** - NaN-boxing value representation
+- **zquickjs/object.zig** - Hidden classes for inline caching
+- **zquickjs/gc.zig** - Generational GC (nursery + tenured)
+- **zquickjs/heap.zig** - Size-class segregated allocator
+
+### Legacy (Benchmarking Only)
+
+- **mquickjs.zig** - C bindings to mquickjs (used only for performance comparisons)
 
 ### Request Flow
 
@@ -46,21 +62,19 @@ zig build test
 
 ### Key Patterns
 
-**Runtime Pool**: Pre-allocates JS contexts for per-request isolation. Mutex-protected acquire/release.
+**Runtime Pool**: Pre-allocates JS contexts for per-request isolation. Mutex-protected acquire/release. Critical for FaaS warm instance reuse.
 
 **Result Type**: Functional error handling throughout - `Result(T)` union with `ok`/`err` variants. Maps JS exceptions to Zig errors.
 
-**GC Reference Guards**: MicroQuickJS uses compacting GC where object addresses change after allocations. Use `pushGCRef()` to protect values across JS allocations:
-```zig
-var guard = try mq.pushGCRef(ctx);
-defer guard.deinit();
-```
+**NaN-Boxing**: zquickjs uses NaN-boxing for efficient 64-bit tagged values. Allows storing integers, floats, and pointers in a single 64-bit word.
 
-**Thread-Local Context**: Native C callbacks access event loop via `threadlocal var current_loop`.
+**Hidden Classes**: V8-style hidden class transitions for inline caching. Enables fast property access.
+
+**Thread-Local Context**: Native callbacks access event loop via `threadlocal var current_loop`.
 
 ### Memory Model
 
-Fixed buffer architecture - user specifies memory limit (default 512KB), Zig allocates buffer upfront, mquickjs uses it as heap. Each runtime instance has its own buffer.
+Generational GC with nursery (young generation) and tenured (old generation) heaps. Each runtime instance has isolated memory. Size-class segregated allocator for efficient small object allocation.
 
 ## JavaScript Runtime
 
