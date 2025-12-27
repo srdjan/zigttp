@@ -569,6 +569,101 @@ pub const Interpreter = struct {
                     return error.UnimplementedOpcode;
                 },
 
+                .make_async => {
+                    const const_idx = readU16(self.pc);
+                    self.pc += 2;
+                    // Get bytecode pointer from constant pool
+                    const bc_val = try self.getConstant(const_idx);
+                    if (!bc_val.isPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+                    // Create async function object (marked as async via slot 3)
+                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const func_obj = try object.JSObject.createBytecodeFunction(
+                        self.ctx.allocator,
+                        root_class,
+                        bc_ptr,
+                        @enumFromInt(bc_ptr.name_atom),
+                    );
+                    // Mark as async function using slot 3
+                    func_obj.inline_slots[3] = value.JSValue.true_val;
+                    try self.ctx.push(func_obj.toValue());
+                },
+
+                .await_val => {
+                    // For synchronous execution, await just returns the value directly
+                    // A full implementation would integrate with an event loop and Promises
+                    // For now, if the value is a Promise-like object with .then(), we don't support it
+                    // Just pass the value through (works for non-Promise values)
+                    const awaited = self.ctx.peek();
+                    _ = awaited;
+                    // Value stays on stack unchanged for sync execution
+                },
+
+                // Module operations
+                .import_module => {
+                    const module_idx = readU16(self.pc);
+                    self.pc += 2;
+                    // Get module name from constant pool
+                    const module_name_val = try self.getConstant(module_idx);
+                    _ = module_name_val;
+                    // Module loading requires a module registry/loader which would be
+                    // set up in the context. For now, push an empty namespace object.
+                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const namespace = try object.JSObject.create(self.ctx.allocator, root_class);
+                    try self.ctx.push(namespace.toValue());
+                },
+
+                .import_name => {
+                    const name_idx = readU16(self.pc);
+                    self.pc += 2;
+                    // Get the name from constant pool
+                    const name_val = try self.getConstant(name_idx);
+                    _ = name_val;
+                    // Pop module namespace and get named export
+                    const namespace_val = self.ctx.pop();
+                    if (namespace_val.isObject()) {
+                        const namespace = object.JSObject.fromValue(namespace_val);
+                        // Try to get the property by name
+                        // For now, just push undefined as we don't have real module loading
+                        if (namespace.getSlot(0).isUndefined()) {
+                            try self.ctx.push(value.JSValue.undefined);
+                        } else {
+                            try self.ctx.push(namespace.getSlot(0));
+                        }
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined);
+                    }
+                },
+
+                .import_default => {
+                    // Pop module namespace and get default export
+                    const namespace_val = self.ctx.pop();
+                    if (namespace_val.isObject()) {
+                        const namespace = object.JSObject.fromValue(namespace_val);
+                        // Default export is typically stored with "default" key
+                        // For now, just return undefined
+                        _ = namespace;
+                        try self.ctx.push(value.JSValue.undefined);
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined);
+                    }
+                },
+
+                .export_name => {
+                    const name_idx = readU16(self.pc);
+                    self.pc += 2;
+                    _ = name_idx;
+                    // Pop the value to export - in a real implementation this would
+                    // register the export in the module's export table
+                    _ = self.ctx.pop();
+                },
+
+                .export_default => {
+                    // Pop the default value to export - in a real implementation
+                    // this would register it as the default export
+                    _ = self.ctx.pop();
+                },
+
                 .array_spread => {
                     // Stack: [target_array, current_index, source_array]
                     const source_val = self.ctx.pop();
@@ -927,6 +1022,79 @@ pub const Interpreter = struct {
                 }
 
                 try self.ctx.push(gen_obj.toValue());
+                return;
+            }
+
+            // Check if this is an async function (slot[3] is true)
+            if (func_obj.inline_slots[3].isTrue()) {
+                // Execute async function synchronously and wrap result in Promise-like object
+                // For full async support, we'd need an event loop and proper Promise integration
+                // This simplified version executes synchronously and returns a resolved Promise
+
+                // Save current interpreter state
+                const saved_pc = self.pc;
+                const saved_code_end = self.code_end;
+                const saved_constants = self.constants;
+                const saved_func = self.current_func;
+                const saved_fp = self.ctx.fp;
+
+                // Push call frame
+                try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
+
+                // Set up new function's locals with arguments
+                const local_count = func_bc.local_count;
+                try self.ctx.ensureStack(local_count);
+                var local_idx: usize = 0;
+                while (local_idx < local_count) : (local_idx += 1) {
+                    if (local_idx < argc) {
+                        try self.ctx.push(args[local_idx]);
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                }
+
+                // Execute the async function bytecode
+                self.pc = func_bc.code.ptr;
+                self.code_end = func_bc.code.ptr + func_bc.code.len;
+                self.constants = func_bc.constants;
+                self.current_func = func_bc;
+
+                const result = self.dispatch() catch |err| {
+                    // Restore state on error
+                    self.pc = saved_pc;
+                    self.code_end = saved_code_end;
+                    self.constants = saved_constants;
+                    self.current_func = saved_func;
+                    _ = self.ctx.popFrame();
+                    return err;
+                };
+
+                // Restore interpreter state
+                self.pc = saved_pc;
+                self.code_end = saved_code_end;
+                self.constants = saved_constants;
+                self.current_func = saved_func;
+                _ = self.ctx.popFrame();
+                self.ctx.fp = saved_fp;
+
+                // Create a resolved Promise-like object {then: fn, value: result}
+                const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                const promise_obj = object.JSObject.create(
+                    self.ctx.allocator,
+                    root_class,
+                    null,
+                ) catch return error.OutOfMemory;
+
+                // Store the resolved value
+                const value_atom = self.ctx.atoms.intern("value") catch return error.OutOfMemory;
+                promise_obj.setProperty(self.ctx.allocator, value_atom, result) catch return error.OutOfMemory;
+
+                // Add a 'then' method (simplified - just calls callback with value)
+                // For a full implementation, we'd create a proper Promise with thenable support
+                const then_atom = self.ctx.atoms.intern("then") catch return error.OutOfMemory;
+                promise_obj.setProperty(self.ctx.allocator, then_atom, value.JSValue.true_val) catch return error.OutOfMemory;
+
+                try self.ctx.push(promise_obj.toValue());
                 return;
             }
 

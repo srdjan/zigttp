@@ -146,6 +146,17 @@ pub const Opcode = enum(u8) {
     yield_star = 0x96, // Yield* delegation to another iterator
     make_generator = 0x97, // Create generator object from function bytecode
 
+    // Async operations
+    await_val = 0x98, // Await a value/Promise, suspends execution
+    make_async = 0x99, // Create async function from bytecode
+
+    // Module operations
+    import_module = 0x9A, // +u16 module_name_idx (load module, push namespace)
+    import_name = 0x9B, // +u16 name_idx (get named export from module namespace)
+    import_default = 0x9C, // Get default export from module namespace
+    export_name = 0x9D, // +u16 name_idx (export a binding)
+    export_default = 0x9E, // Export default value
+
     // Superinstructions (fused hot paths)
     get_loc_add = 0xA0, // get_loc + add
     get_loc_get_loc_add = 0xA1, // get_loc + get_loc + add

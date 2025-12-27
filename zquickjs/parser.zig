@@ -119,6 +119,12 @@ pub const TokenType = enum(u8) {
     kw_delete,
     kw_instanceof,
     kw_yield,
+    kw_async,
+    kw_await,
+    kw_import,
+    kw_export,
+    kw_from,
+    kw_as,
 
     // Special
     eof,
@@ -136,6 +142,22 @@ pub const Token = struct {
     pub fn text(self: Token, source: []const u8) []const u8 {
         return source[self.start..][0..self.len];
     }
+};
+
+/// Module import entry
+pub const ImportEntry = struct {
+    module_name: []const u8, // The module specifier (e.g., "./foo.js")
+    local_name: []const u8, // Local binding name
+    imported_name: []const u8, // Name in the source module (or "default")
+    is_namespace: bool, // import * as ns
+};
+
+/// Module export entry
+pub const ExportEntry = struct {
+    local_name: []const u8, // Local binding name
+    export_name: []const u8, // Exported as (or "default")
+    is_reexport: bool, // export { x } from "module"
+    from_module: ?[]const u8, // Source module for re-exports
 };
 
 /// Tokenizer state
@@ -639,6 +661,12 @@ fn getKeyword(text: []const u8) ?TokenType {
         .{ "delete", .kw_delete },
         .{ "instanceof", .kw_instanceof },
         .{ "yield", .kw_yield },
+        .{ "async", .kw_async },
+        .{ "await", .kw_await },
+        .{ "import", .kw_import },
+        .{ "export", .kw_export },
+        .{ "from", .kw_from },
+        .{ "as", .kw_as },
         .{ "true", .@"true" },
         .{ "false", .@"false" },
         .{ "null", .@"null" },
@@ -687,8 +715,14 @@ pub const Parser = struct {
     // String table for interning
     strings: *string.StringTable,
 
-    // Generator state
+    // Generator/async state
     in_generator: bool,
+    in_async: bool,
+
+    // Module state
+    is_module: bool,
+    exports: std.ArrayList(ExportEntry),
+    imports: std.ArrayList(ImportEntry),
 
     // Error state
     had_error: bool,
@@ -723,6 +757,10 @@ pub const Parser = struct {
             .scope_depth = 1, // Start in local scope for eval/REPL mode
             .strings = strings,
             .in_generator = false,
+            .in_async = false,
+            .is_module = false,
+            .exports = std.ArrayList(ExportEntry).init(allocator),
+            .imports = std.ArrayList(ImportEntry).init(allocator),
             .had_error = false,
             .panic_mode = false,
         };
@@ -738,6 +776,8 @@ pub const Parser = struct {
     pub fn deinit(self: *Parser) void {
         self.code.deinit();
         self.constants.deinit();
+        self.exports.deinit();
+        self.imports.deinit();
     }
 
     /// Parse a complete script
@@ -755,8 +795,16 @@ pub const Parser = struct {
     // ========================================================================
 
     fn declaration(self: *Parser) Error!void {
-        if (self.match(.kw_var) or self.match(.kw_let) or self.match(.kw_const)) {
+        if (self.match(.kw_import)) {
+            try self.importDeclaration();
+        } else if (self.match(.kw_export)) {
+            try self.exportDeclaration();
+        } else if (self.match(.kw_var) or self.match(.kw_let) or self.match(.kw_const)) {
             try self.varDeclaration(self.previous.type == .kw_const);
+        } else if (self.match(.kw_async)) {
+            // async function declaration
+            try self.consume(.kw_function, "Expected 'function' after 'async'.");
+            try self.asyncFunctionDeclaration();
         } else if (self.match(.kw_function)) {
             try self.functionDeclaration();
         } else {
@@ -908,16 +956,341 @@ pub const Parser = struct {
     fn functionDeclaration(self: *Parser) Error!void {
         const is_generator = self.match(.star); // function* for generators
         const name = try self.parseVariable("Expected function name.");
-        try self.compileFunction(name, is_generator);
+        try self.compileFunction(name, is_generator, false);
         try self.defineVariable(name, false);
     }
 
+    fn asyncFunctionDeclaration(self: *Parser) Error!void {
+        const name = try self.parseVariable("Expected function name.");
+        try self.compileFunction(name, false, true);
+        try self.defineVariable(name, false);
+    }
+
+    /// Parse import declaration
+    /// import defaultExport from "module";
+    /// import { export1, export2 as alias } from "module";
+    /// import * as namespace from "module";
+    /// import "module"; (side-effect only)
+    fn importDeclaration(self: *Parser) Error!void {
+        self.is_module = true;
+
+        // Side-effect import: import "module";
+        if (self.check(.string)) {
+            const module_name = self.current.text(self.tokenizer.source);
+            self.advance();
+            try self.consume(.semicolon, "Expected ';' after import.");
+
+            // Emit import for side effects
+            const module_idx = try self.addStringConstant(module_name[1 .. module_name.len - 1]); // Strip quotes
+            try self.emitOp(.import_module);
+            try self.emitU16(module_idx);
+            try self.emitOp(.drop); // Discard module namespace
+            return;
+        }
+
+        // import * as namespace from "module";
+        if (self.match(.star)) {
+            try self.consume(.kw_as, "Expected 'as' after '*'.");
+            try self.consume(.identifier, "Expected namespace identifier.");
+            const local_name = self.previous.text(self.tokenizer.source);
+
+            try self.consume(.kw_from, "Expected 'from' after namespace.");
+            try self.consume(.string, "Expected module specifier.");
+            const module_name = self.previous.text(self.tokenizer.source);
+            try self.consume(.semicolon, "Expected ';' after import.");
+
+            // Record import
+            try self.imports.append(.{
+                .module_name = module_name[1 .. module_name.len - 1],
+                .local_name = local_name,
+                .imported_name = "*",
+                .is_namespace = true,
+            });
+
+            // Emit bytecode to load module and bind to local
+            const module_idx = try self.addStringConstant(module_name[1 .. module_name.len - 1]);
+            try self.emitOp(.import_module);
+            try self.emitU16(module_idx);
+
+            // Define the local variable
+            const slot = try self.declareVariable(local_name, true);
+            try self.emitOp(.put_loc);
+            try self.emitByte(slot);
+            return;
+        }
+
+        // import defaultExport from "module"; OR import { ... } from "module";
+        var has_default = false;
+        var default_name: []const u8 = "";
+
+        // Check for default import
+        if (self.check(.identifier)) {
+            has_default = true;
+            default_name = self.current.text(self.tokenizer.source);
+            self.advance();
+
+            // Check for comma (followed by named imports)
+            if (!self.match(.comma)) {
+                // Just default import
+                try self.consume(.kw_from, "Expected 'from' after default import.");
+                try self.consume(.string, "Expected module specifier.");
+                const module_name = self.previous.text(self.tokenizer.source);
+                try self.consume(.semicolon, "Expected ';' after import.");
+
+                try self.imports.append(.{
+                    .module_name = module_name[1 .. module_name.len - 1],
+                    .local_name = default_name,
+                    .imported_name = "default",
+                    .is_namespace = false,
+                });
+
+                // Emit bytecode
+                const module_idx = try self.addStringConstant(module_name[1 .. module_name.len - 1]);
+                try self.emitOp(.import_module);
+                try self.emitU16(module_idx);
+                try self.emitOp(.import_default);
+
+                const slot = try self.declareVariable(default_name, true);
+                try self.emitOp(.put_loc);
+                try self.emitByte(slot);
+                return;
+            }
+        }
+
+        // Named imports: { export1, export2 as alias }
+        try self.consume(.lbrace, "Expected '{' for named imports.");
+
+        var module_name: []const u8 = "";
+        var named_imports = std.ArrayList(struct { imported: []const u8, local: []const u8 }).init(self.allocator);
+        defer named_imports.deinit();
+
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            try self.consume(.identifier, "Expected import name.");
+            const imported_name = self.previous.text(self.tokenizer.source);
+            var local_name = imported_name;
+
+            if (self.match(.kw_as)) {
+                try self.consume(.identifier, "Expected local name after 'as'.");
+                local_name = self.previous.text(self.tokenizer.source);
+            }
+
+            try named_imports.append(.{ .imported = imported_name, .local = local_name });
+
+            if (!self.match(.comma)) break;
+        }
+
+        try self.consume(.rbrace, "Expected '}' after named imports.");
+        try self.consume(.kw_from, "Expected 'from' after import specifiers.");
+        try self.consume(.string, "Expected module specifier.");
+        module_name = self.previous.text(self.tokenizer.source);
+        try self.consume(.semicolon, "Expected ';' after import.");
+
+        // Emit bytecode to load module
+        const module_idx = try self.addStringConstant(module_name[1 .. module_name.len - 1]);
+        try self.emitOp(.import_module);
+        try self.emitU16(module_idx);
+
+        // Handle default import if present
+        if (has_default) {
+            try self.emitOp(.dup); // Keep module namespace on stack
+            try self.emitOp(.import_default);
+            const slot = try self.declareVariable(default_name, true);
+            try self.emitOp(.put_loc);
+            try self.emitByte(slot);
+
+            try self.imports.append(.{
+                .module_name = module_name[1 .. module_name.len - 1],
+                .local_name = default_name,
+                .imported_name = "default",
+                .is_namespace = false,
+            });
+        }
+
+        // Handle named imports
+        for (named_imports.items) |import_item| {
+            try self.emitOp(.dup); // Keep module namespace on stack
+            const name_idx = try self.addStringConstant(import_item.imported);
+            try self.emitOp(.import_name);
+            try self.emitU16(name_idx);
+
+            const slot = try self.declareVariable(import_item.local, true);
+            try self.emitOp(.put_loc);
+            try self.emitByte(slot);
+
+            try self.imports.append(.{
+                .module_name = module_name[1 .. module_name.len - 1],
+                .local_name = import_item.local,
+                .imported_name = import_item.imported,
+                .is_namespace = false,
+            });
+        }
+
+        try self.emitOp(.drop); // Drop module namespace
+    }
+
+    /// Parse export declaration
+    /// export { name1, name2 as alias };
+    /// export default expression;
+    /// export function name() { }
+    /// export const/let/var name = value;
+    fn exportDeclaration(self: *Parser) Error!void {
+        self.is_module = true;
+
+        // export default expression;
+        if (self.match(.kw_default)) {
+            // Parse the expression or declaration
+            if (self.match(.kw_function)) {
+                // export default function name() { } or export default function() { }
+                var name: []const u8 = "";
+                if (self.check(.identifier)) {
+                    name = self.current.text(self.tokenizer.source);
+                    self.advance();
+                }
+                try self.compileFunction(if (name.len > 0) name else "default", false, false);
+            } else if (self.match(.kw_async)) {
+                try self.consume(.kw_function, "Expected 'function' after 'async'.");
+                var name: []const u8 = "";
+                if (self.check(.identifier)) {
+                    name = self.current.text(self.tokenizer.source);
+                    self.advance();
+                }
+                try self.compileFunction(if (name.len > 0) name else "default", false, true);
+            } else {
+                // export default expression;
+                try self.expression();
+                try self.consume(.semicolon, "Expected ';' after export default.");
+            }
+
+            try self.emitOp(.export_default);
+
+            try self.exports.append(.{
+                .local_name = "default",
+                .export_name = "default",
+                .is_reexport = false,
+                .from_module = null,
+            });
+            return;
+        }
+
+        // export function name() { }
+        if (self.match(.kw_function)) {
+            const is_generator = self.match(.star);
+            try self.consume(.identifier, "Expected function name.");
+            const name = self.previous.text(self.tokenizer.source);
+            try self.compileFunction(name, is_generator, false);
+            try self.defineVariable(name, false);
+
+            // Export the function
+            const name_idx = try self.addStringConstant(name);
+            try self.emitOp(.get_loc);
+            try self.emitByte(try self.resolveLocal(name) orelse 0);
+            try self.emitOp(.export_name);
+            try self.emitU16(name_idx);
+
+            try self.exports.append(.{
+                .local_name = name,
+                .export_name = name,
+                .is_reexport = false,
+                .from_module = null,
+            });
+            return;
+        }
+
+        // export async function name() { }
+        if (self.match(.kw_async)) {
+            try self.consume(.kw_function, "Expected 'function' after 'async'.");
+            try self.consume(.identifier, "Expected function name.");
+            const name = self.previous.text(self.tokenizer.source);
+            try self.compileFunction(name, false, true);
+            try self.defineVariable(name, false);
+
+            const name_idx = try self.addStringConstant(name);
+            try self.emitOp(.get_loc);
+            try self.emitByte(try self.resolveLocal(name) orelse 0);
+            try self.emitOp(.export_name);
+            try self.emitU16(name_idx);
+
+            try self.exports.append(.{
+                .local_name = name,
+                .export_name = name,
+                .is_reexport = false,
+                .from_module = null,
+            });
+            return;
+        }
+
+        // export const/let/var name = value;
+        if (self.match(.kw_const) or self.match(.kw_let) or self.match(.kw_var)) {
+            const is_const = self.previous.type == .kw_const;
+            try self.consume(.identifier, "Expected variable name.");
+            const name = self.previous.text(self.tokenizer.source);
+
+            if (self.match(.eq)) {
+                try self.expression();
+            } else {
+                try self.emitOp(.push_undefined);
+            }
+            try self.consume(.semicolon, "Expected ';' after variable declaration.");
+
+            try self.defineVariable(name, is_const);
+
+            const name_idx = try self.addStringConstant(name);
+            try self.emitOp(.get_loc);
+            try self.emitByte(try self.resolveLocal(name) orelse 0);
+            try self.emitOp(.export_name);
+            try self.emitU16(name_idx);
+
+            try self.exports.append(.{
+                .local_name = name,
+                .export_name = name,
+                .is_reexport = false,
+                .from_module = null,
+            });
+            return;
+        }
+
+        // export { name1, name2 as alias };
+        try self.consume(.lbrace, "Expected '{' for named exports.");
+
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            try self.consume(.identifier, "Expected export name.");
+            const local_name = self.previous.text(self.tokenizer.source);
+            var export_name = local_name;
+
+            if (self.match(.kw_as)) {
+                try self.consume(.identifier, "Expected export alias after 'as'.");
+                export_name = self.previous.text(self.tokenizer.source);
+            }
+
+            const name_idx = try self.addStringConstant(export_name);
+            try self.emitOp(.get_loc);
+            try self.emitByte(try self.resolveLocal(local_name) orelse 0);
+            try self.emitOp(.export_name);
+            try self.emitU16(name_idx);
+
+            try self.exports.append(.{
+                .local_name = local_name,
+                .export_name = export_name,
+                .is_reexport = false,
+                .from_module = null,
+            });
+
+            if (!self.match(.comma)) break;
+        }
+
+        try self.consume(.rbrace, "Expected '}' after named exports.");
+        try self.consume(.semicolon, "Expected ';' after export.");
+    }
+
     /// Parse and compile a function, pushing its value onto the stack
-    fn compileFunction(self: *Parser, name: []const u8, is_generator: bool) Error!void {
-        // Save and set generator flag
+    fn compileFunction(self: *Parser, name: []const u8, is_generator: bool, is_async: bool) Error!void {
+        // Save and set generator/async flags
         const outer_in_generator = self.in_generator;
+        const outer_in_async = self.in_async;
         self.in_generator = is_generator;
+        self.in_async = is_async;
         defer self.in_generator = outer_in_generator;
+        defer self.in_async = outer_in_async;
 
         try self.consume(.lparen, "Expected '(' after function name.");
 
@@ -1104,7 +1477,7 @@ pub const Parser = struct {
             .arg_count = param_count,
             .local_count = self.local_count,
             .stack_size = 256,
-            .flags = .{ .is_generator = is_generator },
+            .flags = .{ .is_generator = is_generator, .is_async = is_async },
             .code = code_copy,
             .constants = consts_copy,
             .source_map = null,
@@ -1121,10 +1494,12 @@ pub const Parser = struct {
         self.local_count = outer_local_count;
         self.scope_depth = outer_scope_depth;
 
-        // Store function bytecode in constant pool and emit make_function/make_generator
+        // Store function bytecode in constant pool and emit appropriate opcode
         const const_idx = try self.addConstant(value.JSValue.fromPtr(func_bc));
         if (is_generator) {
             try self.emitOp(.make_generator);
+        } else if (is_async) {
+            try self.emitOp(.make_async);
         } else {
             try self.emitOp(.make_function);
         }
@@ -2242,7 +2617,18 @@ pub const Parser = struct {
         if (self.match(.identifier)) {
             name = self.previous.text(self.tokenizer.source);
         }
-        try self.compileFunction(name, is_generator);
+        try self.compileFunction(name, is_generator, false);
+    }
+
+    /// Parse async function expression: async function() {} or async function name() {}
+    fn asyncFunctionExpr(self: *Parser, _: bool) !void {
+        try self.consume(.kw_function, "Expected 'function' after 'async'.");
+        // Optional name for named async function expressions
+        var name: []const u8 = "";
+        if (self.match(.identifier)) {
+            name = self.previous.text(self.tokenizer.source);
+        }
+        try self.compileFunction(name, false, true);
     }
 
     /// Parse yield expression: yield, yield expr, yield* expr
@@ -2273,6 +2659,20 @@ pub const Parser = struct {
         } else {
             try self.emitOp(.yield_val);
         }
+    }
+
+    /// Parse await expression: await expr
+    fn awaitExpr(self: *Parser, _: bool) !void {
+        if (!self.in_async) {
+            self.errorAtPrevious("'await' is only valid inside an async function");
+            return error.ParseError;
+        }
+
+        // Parse the expression to await
+        try self.parsePrecedence(.unary);
+
+        // Emit await opcode
+        try self.emitOp(.await_val);
     }
 
     /// Parse ternary conditional: a ? b : c
@@ -2552,6 +2952,8 @@ pub const Parser = struct {
             .template_literal, .template_head => .{ .prefix = templateLiteral, .infix = null, .precedence = .none },
             .regex_literal => .{ .prefix = regexLiteral, .infix = null, .precedence = .none },
             .kw_yield => .{ .prefix = yieldExpr, .infix = null, .precedence = .none },
+            .kw_async => .{ .prefix = asyncFunctionExpr, .infix = null, .precedence = .none },
+            .kw_await => .{ .prefix = awaitExpr, .infix = null, .precedence = .none },
             else => .{ .prefix = null, .infix = null, .precedence = .none },
         };
     }
@@ -2916,4 +3318,166 @@ test "Parser yield expression" {
     };
 
     try std.testing.expect(code.len > 0);
+}
+
+test "Parser async function" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Test async function syntax
+    var parser = Parser.init(allocator, "async function fetchData() { return 42; }", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+}
+
+test "Parser await expression" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Test await inside async function
+    var parser = Parser.init(allocator, "async function test() { var x = await fetch(); return x; }", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+}
+
+test "Parser async function expression" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Test async function expression
+    var parser = Parser.init(allocator, "var f = async function() { await delay(100); };", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+}
+
+test "Parser import default" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var parser = Parser.init(allocator, "import foo from \"./foo.js\";", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+    try std.testing.expect(parser.is_module);
+}
+
+test "Parser import named" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var parser = Parser.init(allocator, "import { foo, bar as baz } from \"./module.js\";", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+    try std.testing.expect(parser.is_module);
+}
+
+test "Parser import namespace" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var parser = Parser.init(allocator, "import * as utils from \"./utils.js\";", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+    try std.testing.expect(parser.is_module);
+}
+
+test "Parser export default" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var parser = Parser.init(allocator, "export default 42;", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+    try std.testing.expect(parser.is_module);
+}
+
+test "Parser export function" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var parser = Parser.init(allocator, "export function hello() { return 1; }", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+    try std.testing.expect(parser.is_module);
+}
+
+test "Parser export const" {
+    const allocator = std.testing.allocator;
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var parser = Parser.init(allocator, "export const x = 10;", &strings);
+    defer parser.deinit();
+
+    const code = parser.parse() catch |err| {
+        std.debug.print("Parse error: {}\n", .{err});
+        return err;
+    };
+
+    try std.testing.expect(code.len > 0);
+    try std.testing.expect(parser.is_module);
 }

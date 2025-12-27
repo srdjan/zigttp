@@ -149,6 +149,73 @@ pub const JSValue = packed struct {
     }
 
     // ========================================================================
+    // Symbol Support (heap-boxed)
+    // ========================================================================
+
+    /// Symbol box header (heap-allocated)
+    /// Symbols are unique identifiers with an optional description
+    pub const SymbolBox = extern struct {
+        header: u32, // MemTag.symbol + gc_mark (tag 8)
+        id: u32, // Unique symbol ID
+        description_ptr: ?[*]const u8, // Optional description string
+        description_len: u32, // Length of description
+
+        pub fn getId(self: *const SymbolBox) u32 {
+            return self.id;
+        }
+
+        pub fn getDescription(self: *const SymbolBox) ?[]const u8 {
+            if (self.description_ptr) |ptr| {
+                return ptr[0..self.description_len];
+            }
+            return null;
+        }
+    };
+
+    /// Well-known symbol IDs (predefined)
+    pub const WellKnownSymbol = enum(u32) {
+        iterator = 1,
+        asyncIterator = 2,
+        toStringTag = 3,
+        toPrimitive = 4,
+        hasInstance = 5,
+        isConcatSpreadable = 6,
+        species = 7,
+        match = 8,
+        replace = 9,
+        search = 10,
+        split = 11,
+        unscopables = 12,
+    };
+
+    /// Check if value is a symbol
+    pub inline fn isSymbol(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        return ((header.* >> 1) & 0xF) == 8; // MemTag.symbol
+    }
+
+    /// Get symbol ID (unsafe - caller must verify isSymbol)
+    pub inline fn getSymbolId(self: JSValue) u32 {
+        std.debug.assert(self.isSymbol());
+        const box = self.toPtr(SymbolBox);
+        return box.id;
+    }
+
+    /// Get symbol description (unsafe - caller must verify isSymbol)
+    pub inline fn getSymbolDescription(self: JSValue) ?[]const u8 {
+        std.debug.assert(self.isSymbol());
+        const box = self.toPtr(SymbolBox);
+        return box.getDescription();
+    }
+
+    /// Check if symbol is a well-known symbol
+    pub inline fn isWellKnownSymbol(self: JSValue, which: WellKnownSymbol) bool {
+        if (!self.isSymbol()) return false;
+        return self.getSymbolId() == @intFromEnum(which);
+    }
+
+    // ========================================================================
     // Type Checking Utilities
     // ========================================================================
 

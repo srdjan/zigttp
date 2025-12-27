@@ -3847,6 +3847,501 @@ fn wrapGeneratorThrow(ctx_ptr: *anyopaque, this: value.JSValue, args: []const va
     return generatorThrow(ctx, this, args);
 }
 
+// ============================================================================
+// Symbol implementation
+// ============================================================================
+
+/// Global symbol counter for unique IDs
+var symbol_counter: u32 = 100; // Start after well-known symbols
+
+/// Global symbol registry for Symbol.for()
+var symbol_registry: ?std.StringHashMap(value.JSValue) = null;
+
+/// Create a new unique symbol
+pub fn createSymbol(allocator: std.mem.Allocator, description: ?[]const u8) !value.JSValue {
+    const symbol_box = try allocator.create(value.JSValue.SymbolBox);
+    symbol_counter += 1;
+    symbol_box.* = .{
+        .header = (@as(u32, 8) << 1), // MemTag.symbol = 8
+        .id = symbol_counter,
+        .description_ptr = if (description) |d| d.ptr else null,
+        .description_len = if (description) |d| @intCast(d.len) else 0,
+    };
+    return value.JSValue.fromPtr(symbol_box);
+}
+
+/// Create a well-known symbol
+pub fn createWellKnownSymbol(allocator: std.mem.Allocator, which: value.JSValue.WellKnownSymbol, description: []const u8) !value.JSValue {
+    const symbol_box = try allocator.create(value.JSValue.SymbolBox);
+    symbol_box.* = .{
+        .header = (@as(u32, 8) << 1), // MemTag.symbol = 8
+        .id = @intFromEnum(which),
+        .description_ptr = description.ptr,
+        .description_len = @intCast(description.len),
+    };
+    return value.JSValue.fromPtr(symbol_box);
+}
+
+/// Symbol() - Create a new unique symbol
+pub fn symbolConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    // Symbol() must be called as a function, not with new
+    const allocator = ctx.allocator;
+
+    // Get optional description
+    var description: ?[]const u8 = null;
+    if (args.len > 0 and args[0].isString()) {
+        description = ctx.getString(args[0]);
+    }
+
+    const symbol = createSymbol(allocator, description) catch return value.JSValue.undefined_val;
+    return symbol;
+}
+
+fn wrapSymbolConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return symbolConstructor(ctx, this, args);
+}
+
+/// Symbol.for(key) - Get or create a symbol in the global registry
+pub fn symbolFor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (args.len == 0) return value.JSValue.undefined_val;
+
+    const key = ctx.getString(args[0]) orelse return value.JSValue.undefined_val;
+
+    // Initialize registry if needed
+    if (symbol_registry == null) {
+        symbol_registry = std.StringHashMap(value.JSValue).init(ctx.allocator);
+    }
+
+    // Check if symbol exists
+    if (symbol_registry.?.get(key)) |existing| {
+        return existing;
+    }
+
+    // Create new symbol and register it
+    const symbol = createSymbol(ctx.allocator, key) catch return value.JSValue.undefined_val;
+    symbol_registry.?.put(key, symbol) catch return value.JSValue.undefined_val;
+    return symbol;
+}
+
+fn wrapSymbolFor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return symbolFor(ctx, this, args);
+}
+
+/// Symbol.keyFor(sym) - Get the key for a registered symbol
+pub fn symbolKeyFor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (args.len == 0) return value.JSValue.undefined_val;
+
+    const sym = args[0];
+    if (!sym.isSymbol()) return value.JSValue.undefined_val;
+
+    const sym_id = sym.getSymbolId();
+
+    // Search registry for matching symbol
+    if (symbol_registry) |*reg| {
+        var iter = reg.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.*.getSymbolId() == sym_id) {
+                return ctx.createString(entry.key_ptr.*) catch return value.JSValue.undefined_val;
+            }
+        }
+    }
+
+    return value.JSValue.undefined_val;
+}
+
+fn wrapSymbolKeyFor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return symbolKeyFor(ctx, this, args);
+}
+
+/// Symbol.prototype.toString() - Get symbol as string
+pub fn symbolToString(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isSymbol()) return value.JSValue.undefined_val;
+
+    const desc = this.getSymbolDescription();
+    if (desc) |d| {
+        // Return "Symbol(description)"
+        var buf: [256]u8 = undefined;
+        const result = std.fmt.bufPrint(&buf, "Symbol({s})", .{d}) catch return value.JSValue.undefined_val;
+        return ctx.createString(result) catch return value.JSValue.undefined_val;
+    }
+
+    return ctx.createString("Symbol()") catch return value.JSValue.undefined_val;
+}
+
+fn wrapSymbolToString(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return symbolToString(ctx, this, args);
+}
+
+/// Symbol.prototype.description getter
+pub fn symbolDescription(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isSymbol()) return value.JSValue.undefined_val;
+
+    const desc = this.getSymbolDescription();
+    if (desc) |d| {
+        return ctx.createString(d) catch return value.JSValue.undefined_val;
+    }
+
+    return value.JSValue.undefined_val;
+}
+
+fn wrapSymbolDescription(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return symbolDescription(ctx, this, args);
+}
+
+// ============================================================================
+// WeakMap implementation
+// ============================================================================
+
+/// WeakMap uses object identity as keys with weak references
+/// Simplified implementation - uses a regular map but with object pointer keys
+pub const WeakMapData = struct {
+    entries: std.AutoHashMap(usize, value.JSValue),
+
+    pub fn init(allocator: std.mem.Allocator) WeakMapData {
+        return .{
+            .entries = std.AutoHashMap(usize, value.JSValue).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *WeakMapData) void {
+        self.entries.deinit();
+    }
+
+    pub fn get(self: *WeakMapData, key: value.JSValue) ?value.JSValue {
+        if (!key.isObject()) return null;
+        const ptr_key = key.raw & ~@as(u64, 0x7);
+        return self.entries.get(ptr_key);
+    }
+
+    pub fn set(self: *WeakMapData, key: value.JSValue, val: value.JSValue) !void {
+        if (!key.isObject()) return error.InvalidKey;
+        const ptr_key = key.raw & ~@as(u64, 0x7);
+        try self.entries.put(ptr_key, val);
+    }
+
+    pub fn has(self: *WeakMapData, key: value.JSValue) bool {
+        if (!key.isObject()) return false;
+        const ptr_key = key.raw & ~@as(u64, 0x7);
+        return self.entries.contains(ptr_key);
+    }
+
+    pub fn delete(self: *WeakMapData, key: value.JSValue) bool {
+        if (!key.isObject()) return false;
+        const ptr_key = key.raw & ~@as(u64, 0x7);
+        return self.entries.remove(ptr_key);
+    }
+};
+
+/// WeakMap constructor - new WeakMap()
+pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+
+    // Create WeakMap object
+    const weak_map = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    weak_map.class_id = .weak_map;
+
+    // Allocate and store WeakMapData
+    const data = allocator.create(WeakMapData) catch return value.JSValue.undefined_val;
+    data.* = WeakMapData.init(allocator);
+    weak_map.inline_slots[0] = value.JSValue.fromPtr(data);
+
+    // If iterable argument provided, add entries
+    if (args.len > 0 and args[0].isObject()) {
+        // TODO: Iterate over argument and add entries
+    }
+
+    return weak_map.toValue();
+}
+
+fn wrapWeakMapConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakMapConstructor(ctx, this, args);
+}
+
+/// WeakMap.prototype.get(key)
+pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.undefined_val;
+    if (args.len == 0) return value.JSValue.undefined_val;
+
+    const map_obj = object.JSObject.fromValue(this);
+    if (map_obj.class_id != .weak_map) return value.JSValue.undefined_val;
+
+    const data_val = map_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.undefined_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+
+    return data.get(args[0]) orelse value.JSValue.undefined_val;
+}
+
+fn wrapWeakMapGet(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakMapGet(ctx, this, args);
+}
+
+/// WeakMap.prototype.set(key, value)
+pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.undefined_val;
+    if (args.len < 2) return this;
+
+    const map_obj = object.JSObject.fromValue(this);
+    if (map_obj.class_id != .weak_map) return value.JSValue.undefined_val;
+
+    const data_val = map_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.undefined_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+
+    data.set(args[0], args[1]) catch return value.JSValue.undefined_val;
+    return this; // Return the WeakMap for chaining
+}
+
+fn wrapWeakMapSet(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakMapSet(ctx, this, args);
+}
+
+/// WeakMap.prototype.has(key)
+pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.false_val;
+    if (args.len == 0) return value.JSValue.false_val;
+
+    const map_obj = object.JSObject.fromValue(this);
+    if (map_obj.class_id != .weak_map) return value.JSValue.false_val;
+
+    const data_val = map_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.false_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+
+    return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
+}
+
+fn wrapWeakMapHas(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakMapHas(ctx, this, args);
+}
+
+/// WeakMap.prototype.delete(key)
+pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.false_val;
+    if (args.len == 0) return value.JSValue.false_val;
+
+    const map_obj = object.JSObject.fromValue(this);
+    if (map_obj.class_id != .weak_map) return value.JSValue.false_val;
+
+    const data_val = map_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.false_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+
+    return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
+}
+
+fn wrapWeakMapDelete(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakMapDelete(ctx, this, args);
+}
+
+// ============================================================================
+// WeakSet implementation
+// ============================================================================
+
+/// WeakSet uses object identity with weak references
+pub const WeakSetData = struct {
+    entries: std.AutoHashMap(usize, void),
+
+    pub fn init(allocator: std.mem.Allocator) WeakSetData {
+        return .{
+            .entries = std.AutoHashMap(usize, void).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *WeakSetData) void {
+        self.entries.deinit();
+    }
+
+    pub fn add(self: *WeakSetData, val: value.JSValue) !void {
+        if (!val.isObject()) return error.InvalidValue;
+        const ptr_key = val.raw & ~@as(u64, 0x7);
+        try self.entries.put(ptr_key, {});
+    }
+
+    pub fn has(self: *WeakSetData, val: value.JSValue) bool {
+        if (!val.isObject()) return false;
+        const ptr_key = val.raw & ~@as(u64, 0x7);
+        return self.entries.contains(ptr_key);
+    }
+
+    pub fn delete(self: *WeakSetData, val: value.JSValue) bool {
+        if (!val.isObject()) return false;
+        const ptr_key = val.raw & ~@as(u64, 0x7);
+        return self.entries.remove(ptr_key);
+    }
+};
+
+/// WeakSet constructor - new WeakSet()
+pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+
+    // Create WeakSet object
+    const weak_set = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    weak_set.class_id = .weak_set;
+
+    // Allocate and store WeakSetData
+    const data = allocator.create(WeakSetData) catch return value.JSValue.undefined_val;
+    data.* = WeakSetData.init(allocator);
+    weak_set.inline_slots[0] = value.JSValue.fromPtr(data);
+
+    // If iterable argument provided, add entries
+    if (args.len > 0 and args[0].isObject()) {
+        // TODO: Iterate over argument and add entries
+    }
+
+    return weak_set.toValue();
+}
+
+fn wrapWeakSetConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakSetConstructor(ctx, this, args);
+}
+
+/// WeakSet.prototype.add(value)
+pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.undefined_val;
+    if (args.len == 0) return this;
+
+    const set_obj = object.JSObject.fromValue(this);
+    if (set_obj.class_id != .weak_set) return value.JSValue.undefined_val;
+
+    const data_val = set_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.undefined_val;
+    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
+
+    data.add(args[0]) catch return value.JSValue.undefined_val;
+    return this; // Return the WeakSet for chaining
+}
+
+fn wrapWeakSetAdd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakSetAdd(ctx, this, args);
+}
+
+/// WeakSet.prototype.has(value)
+pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.false_val;
+    if (args.len == 0) return value.JSValue.false_val;
+
+    const set_obj = object.JSObject.fromValue(this);
+    if (set_obj.class_id != .weak_set) return value.JSValue.false_val;
+
+    const data_val = set_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.false_val;
+    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
+
+    return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
+}
+
+fn wrapWeakSetHas(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakSetHas(ctx, this, args);
+}
+
+/// WeakSet.prototype.delete(value)
+pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.false_val;
+    if (args.len == 0) return value.JSValue.false_val;
+
+    const set_obj = object.JSObject.fromValue(this);
+    if (set_obj.class_id != .weak_set) return value.JSValue.false_val;
+
+    const data_val = set_obj.inline_slots[0];
+    if (!data_val.isPtr()) return value.JSValue.false_val;
+    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
+
+    return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
+}
+
+fn wrapWeakSetDelete(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return weakSetDelete(ctx, this, args);
+}
+
+/// Initialize WeakMap and WeakSet built-ins
+pub fn initWeakCollections(ctx: *context.Context) !void {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+
+    // Create WeakMap prototype
+    const weak_map_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, weak_map_proto, "get", wrapWeakMapGet, 1);
+    try addMethodDynamic(ctx, weak_map_proto, "set", wrapWeakMapSet, 2);
+    try addMethodDynamic(ctx, weak_map_proto, "has", wrapWeakMapHas, 1);
+    try addMethodDynamic(ctx, weak_map_proto, "delete", wrapWeakMapDelete, 1);
+
+    // Create WeakMap constructor
+    const weak_map_atom = try ctx.atoms.intern("WeakMap");
+    const weak_map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakMapConstructor, weak_map_atom, 0);
+    try weak_map_ctor.setProperty(allocator, .prototype, weak_map_proto.toValue());
+    try ctx.setGlobal(weak_map_atom, weak_map_ctor.toValue());
+
+    // Create WeakSet prototype
+    const weak_set_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, weak_set_proto, "add", wrapWeakSetAdd, 1);
+    try addMethodDynamic(ctx, weak_set_proto, "has", wrapWeakSetHas, 1);
+    try addMethodDynamic(ctx, weak_set_proto, "delete", wrapWeakSetDelete, 1);
+
+    // Create WeakSet constructor
+    const weak_set_atom = try ctx.atoms.intern("WeakSet");
+    const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakSetConstructor, weak_set_atom, 0);
+    try weak_set_ctor.setProperty(allocator, .prototype, weak_set_proto.toValue());
+    try ctx.setGlobal(weak_set_atom, weak_set_ctor.toValue());
+}
+
+/// Initialize Symbol built-in and well-known symbols
+pub fn initSymbol(ctx: *context.Context) !void {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+
+    // Create Symbol prototype
+    const symbol_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, symbol_proto, "toString", wrapSymbolToString, 0);
+    try addMethodDynamic(ctx, symbol_proto, "valueOf", wrapSymbolDescription, 0);
+
+    // Create Symbol constructor
+    const symbol_atom = try ctx.atoms.intern("Symbol");
+    const symbol_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSymbolConstructor, symbol_atom, 1);
+    try symbol_ctor.setProperty(allocator, .prototype, symbol_proto.toValue());
+
+    // Add static methods
+    try addMethodDynamic(ctx, symbol_ctor, "for", wrapSymbolFor, 1);
+    try addMethodDynamic(ctx, symbol_ctor, "keyFor", wrapSymbolKeyFor, 1);
+
+    // Add well-known symbols as static properties
+    const iterator_sym = try createWellKnownSymbol(allocator, .iterator, "Symbol.iterator");
+    const async_iterator_sym = try createWellKnownSymbol(allocator, .asyncIterator, "Symbol.asyncIterator");
+    const to_string_tag_sym = try createWellKnownSymbol(allocator, .toStringTag, "Symbol.toStringTag");
+    const to_primitive_sym = try createWellKnownSymbol(allocator, .toPrimitive, "Symbol.toPrimitive");
+    const has_instance_sym = try createWellKnownSymbol(allocator, .hasInstance, "Symbol.hasInstance");
+
+    const iterator_atom = try ctx.atoms.intern("iterator");
+    const async_iterator_atom = try ctx.atoms.intern("asyncIterator");
+    const to_string_tag_atom = try ctx.atoms.intern("toStringTag");
+    const to_primitive_atom = try ctx.atoms.intern("toPrimitive");
+    const has_instance_atom = try ctx.atoms.intern("hasInstance");
+
+    try symbol_ctor.setProperty(allocator, iterator_atom, iterator_sym);
+    try symbol_ctor.setProperty(allocator, async_iterator_atom, async_iterator_sym);
+    try symbol_ctor.setProperty(allocator, to_string_tag_atom, to_string_tag_sym);
+    try symbol_ctor.setProperty(allocator, to_primitive_atom, to_primitive_sym);
+    try symbol_ctor.setProperty(allocator, has_instance_atom, has_instance_sym);
+
+    try ctx.setGlobal(symbol_atom, symbol_ctor.toValue());
+}
+
 test "Math.abs" {
     const gc = @import("gc.zig");
     const allocator = std.testing.allocator;

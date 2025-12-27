@@ -16,7 +16,8 @@ pub const MemTag = enum(u4) {
     value_array = 5,
     byte_array = 6,
     varref = 7,
-    // 8-15 reserved for future use
+    symbol = 8,
+    // 9-15 reserved for future use
 };
 
 /// Memory block header (packed for minimal overhead)
