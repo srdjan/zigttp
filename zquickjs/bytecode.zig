@@ -129,6 +129,8 @@ pub const Opcode = enum(u8) {
     put_global = 0x84, // +u16 atom_idx
     define_global = 0x85, // +u16 atom_idx (declare global var)
     make_function = 0x86, // +u16 const_idx (creates function from bytecode in constant pool)
+    array_spread = 0x87, // Spread source array into target array (pops source, target on stack)
+    call_spread = 0x88, // Call function with spread args (special handling)
 
     // Type checks
     typeof = 0x90,
@@ -138,6 +140,11 @@ pub const Opcode = enum(u8) {
     push_catch = 0x92, // +i16 offset to catch block
     pop_catch = 0x93, // Remove catch handler (normal exit from try)
     get_exception = 0x94, // Push caught exception value
+
+    // Generator operations
+    yield_val = 0x95, // Yield value from generator, suspends execution
+    yield_star = 0x96, // Yield* delegation to another iterator
+    make_generator = 0x97, // Create generator object from function bytecode
 
     // Superinstructions (fused hot paths)
     get_loc_add = 0xA0, // get_loc + add

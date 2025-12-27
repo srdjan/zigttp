@@ -538,6 +538,74 @@ pub const Interpreter = struct {
                     try self.ctx.push(func_obj.toValue());
                 },
 
+                .make_generator => {
+                    const const_idx = readU16(self.pc);
+                    self.pc += 2;
+                    // Get bytecode pointer from constant pool
+                    const bc_val = try self.getConstant(const_idx);
+                    if (!bc_val.isPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+                    // Create generator function object (marked as generator via slot 2)
+                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const func_obj = try object.JSObject.createBytecodeFunction(
+                        self.ctx.allocator,
+                        root_class,
+                        bc_ptr,
+                        @enumFromInt(bc_ptr.name_atom),
+                    );
+                    // Mark as generator function using slot 2
+                    func_obj.inline_slots[2] = value.JSValue.true_val;
+                    try self.ctx.push(func_obj.toValue());
+                },
+
+                .yield_val => {
+                    // This is handled specially in runGenerator
+                    // If we reach it during normal execution, it's an error
+                    return error.UnimplementedOpcode;
+                },
+
+                .yield_star => {
+                    // Delegate to another iterator - complex, placeholder for now
+                    return error.UnimplementedOpcode;
+                },
+
+                .array_spread => {
+                    // Stack: [target_array, current_index, source_array]
+                    const source_val = self.ctx.pop();
+                    const idx_val = self.ctx.pop();
+                    const target_val = self.ctx.peek();
+
+                    if (target_val.isObject() and source_val.isObject() and idx_val.isInt()) {
+                        const target = object.JSObject.fromValue(target_val);
+                        const source = object.JSObject.fromValue(source_val);
+                        var idx: usize = @intCast(idx_val.getInt());
+
+                        // Get source array length
+                        if (source.getProperty(.length)) |len_val| {
+                            if (len_val.isInt()) {
+                                const src_len: usize = @intCast(len_val.getInt());
+                                // Copy each element from source to target
+                                for (0..src_len) |i| {
+                                    const elem = source.getSlot(i);
+                                    target.setSlot(idx, elem);
+                                    idx += 1;
+                                }
+                                // Push new index for subsequent elements
+                                try self.ctx.push(value.JSValue.fromInt(@intCast(idx)));
+                                continue;
+                            }
+                        }
+                    }
+                    // If spread failed, just push the original index back
+                    try self.ctx.push(idx_val);
+                },
+
+                .call_spread => {
+                    // For now, call_spread is not fully implemented
+                    // Would need to collect spread arguments into a single args array
+                    try self.ctx.push(value.JSValue.undefined_val);
+                },
+
                 .typeof => {
                     const a = self.ctx.pop();
                     const type_str = a.typeOf();
@@ -838,6 +906,30 @@ pub const Interpreter = struct {
         if (func_obj.getBytecodeFunctionData()) |bc_data| {
             const func_bc = bc_data.bytecode;
 
+            // Check if this is a generator function (slot[2] is true)
+            if (func_obj.inline_slots[2].isTrue()) {
+                // Create a generator object instead of executing
+                const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                const gen_obj = object.JSObject.createGenerator(
+                    self.ctx.allocator,
+                    root_class,
+                    func_bc,
+                    self.ctx.generator_prototype,
+                ) catch return error.OutOfMemory;
+
+                // Initialize generator locals with arguments
+                const gen_data = gen_obj.getGeneratorData().?;
+                var local_idx: usize = 0;
+                while (local_idx < gen_data.locals.len) : (local_idx += 1) {
+                    if (local_idx < argc) {
+                        gen_data.locals[local_idx] = args[local_idx];
+                    }
+                }
+
+                try self.ctx.push(gen_obj.toValue());
+                return;
+            }
+
             // Save current interpreter state
             const saved_pc = self.pc;
             const saved_code_end = self.code_end;
@@ -1019,6 +1111,302 @@ pub const Interpreter = struct {
 
         // Unknown constructor type - just return the new object
         try self.ctx.push(this_val);
+    }
+
+    /// Generator result for next() calls
+    pub const GeneratorResult = struct {
+        value: value.JSValue,
+        done: bool,
+    };
+
+    /// Run generator until next yield or return
+    pub fn runGenerator(self: *Interpreter, gen_obj: *object.JSObject) InterpreterError!GeneratorResult {
+        const gen_data = gen_obj.getGeneratorData() orelse return error.TypeError;
+
+        // Check if generator is already completed
+        if (gen_data.state == .completed) {
+            return .{ .value = value.JSValue.undefined_val, .done = true };
+        }
+
+        // Mark as executing
+        gen_data.state = .executing;
+
+        const func_bc = gen_data.bytecode;
+
+        // Set up interpreter state
+        self.pc = func_bc.code.ptr + gen_data.pc_offset;
+        self.code_end = func_bc.code.ptr + func_bc.code.len;
+        self.constants = func_bc.constants;
+        self.current_func = func_bc;
+
+        // Restore locals to stack
+        try self.ctx.ensureStack(gen_data.locals.len + gen_data.stack_len);
+        for (gen_data.locals) |local| {
+            try self.ctx.push(local);
+        }
+        // Restore saved stack values
+        for (0..gen_data.stack_len) |i| {
+            try self.ctx.push(gen_data.stack[i]);
+        }
+
+        // Execute until yield or return
+        while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
+            const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
+            self.pc += 1;
+
+            switch (op) {
+                .yield_val => {
+                    // Pop the yielded value
+                    const yielded = self.ctx.pop();
+
+                    // Save current state
+                    gen_data.pc_offset = @intCast(@intFromPtr(self.pc) - @intFromPtr(func_bc.code.ptr));
+                    gen_data.state = .suspended_yield;
+
+                    // Save locals
+                    for (0..gen_data.locals.len) |i| {
+                        gen_data.locals[i] = self.ctx.getLocal(@intCast(i));
+                    }
+
+                    // Save remaining stack
+                    gen_data.stack_len = 0;
+                    while (self.ctx.sp > gen_data.locals.len) {
+                        if (gen_data.stack_len >= gen_data.stack.len) break;
+                        gen_data.stack[gen_data.stack_len] = self.ctx.pop();
+                        gen_data.stack_len += 1;
+                    }
+
+                    // Clean up stack
+                    self.ctx.sp = 0;
+
+                    return .{ .value = yielded, .done = false };
+                },
+                .ret, .ret_undefined => {
+                    const result = if (op == .ret) self.ctx.pop() else value.JSValue.undefined_val;
+                    gen_data.state = .completed;
+                    self.ctx.sp = 0;
+                    return .{ .value = result, .done = true };
+                },
+                else => {
+                    // Handle all other opcodes using main dispatch
+                    // This is a simplified approach - we inline critical opcodes
+                    self.pc -= 1; // Back up to re-read opcode
+                    const result = self.dispatchOne();
+                    if (result) |_| {
+                        // Should not happen in generator
+                        gen_data.state = .completed;
+                        self.ctx.sp = 0;
+                        return .{ .value = value.JSValue.undefined_val, .done = true };
+                    } else |_| {
+                        // Continue with next opcode
+                    }
+                },
+            }
+        }
+
+        // Reached end of bytecode without explicit return
+        gen_data.state = .completed;
+        self.ctx.sp = 0;
+        return .{ .value = value.JSValue.undefined_val, .done = true };
+    }
+
+    /// Dispatch a single opcode (returns result if halt/ret, error otherwise to continue)
+    fn dispatchOne(self: *Interpreter) InterpreterError!value.JSValue {
+        const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
+        self.pc += 1;
+
+        switch (op) {
+            .nop => return error.NoTransition,
+            .halt => {
+                if (self.ctx.sp > 0) return self.ctx.pop();
+                return value.JSValue.undefined_val;
+            },
+            .push_0 => {
+                try self.ctx.push(value.JSValue.fromInt(0));
+                return error.NoTransition;
+            },
+            .push_1 => {
+                try self.ctx.push(value.JSValue.fromInt(1));
+                return error.NoTransition;
+            },
+            .push_2 => {
+                try self.ctx.push(value.JSValue.fromInt(2));
+                return error.NoTransition;
+            },
+            .push_3 => {
+                try self.ctx.push(value.JSValue.fromInt(3));
+                return error.NoTransition;
+            },
+            .push_null => {
+                try self.ctx.push(value.JSValue.null_val);
+                return error.NoTransition;
+            },
+            .push_undefined => {
+                try self.ctx.push(value.JSValue.undefined_val);
+                return error.NoTransition;
+            },
+            .push_true => {
+                try self.ctx.push(value.JSValue.true_val);
+                return error.NoTransition;
+            },
+            .push_false => {
+                try self.ctx.push(value.JSValue.false_val);
+                return error.NoTransition;
+            },
+            .push_i8 => {
+                const val: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                try self.ctx.push(value.JSValue.fromInt(val));
+                return error.NoTransition;
+            },
+            .push_const => {
+                const idx = readU16(self.pc);
+                self.pc += 2;
+                try self.ctx.push(try self.getConstant(idx));
+                return error.NoTransition;
+            },
+            .get_loc => {
+                const idx = self.pc[0];
+                self.pc += 1;
+                try self.ctx.push(self.ctx.getLocal(idx));
+                return error.NoTransition;
+            },
+            .put_loc => {
+                const idx = self.pc[0];
+                self.pc += 1;
+                self.ctx.setLocal(idx, self.ctx.pop());
+                return error.NoTransition;
+            },
+            .get_loc_0 => {
+                try self.ctx.push(self.ctx.getLocal(0));
+                return error.NoTransition;
+            },
+            .get_loc_1 => {
+                try self.ctx.push(self.ctx.getLocal(1));
+                return error.NoTransition;
+            },
+            .get_loc_2 => {
+                try self.ctx.push(self.ctx.getLocal(2));
+                return error.NoTransition;
+            },
+            .get_loc_3 => {
+                try self.ctx.push(self.ctx.getLocal(3));
+                return error.NoTransition;
+            },
+            .put_loc_0 => {
+                self.ctx.setLocal(0, self.ctx.pop());
+                return error.NoTransition;
+            },
+            .put_loc_1 => {
+                self.ctx.setLocal(1, self.ctx.pop());
+                return error.NoTransition;
+            },
+            .put_loc_2 => {
+                self.ctx.setLocal(2, self.ctx.pop());
+                return error.NoTransition;
+            },
+            .put_loc_3 => {
+                self.ctx.setLocal(3, self.ctx.pop());
+                return error.NoTransition;
+            },
+            .add => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                try self.ctx.push(try self.addValues(a, b));
+                return error.NoTransition;
+            },
+            .sub => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                try self.ctx.push(try subValues(a, b));
+                return error.NoTransition;
+            },
+            .lt => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                const order = try compareValues(a, b);
+                try self.ctx.push(if (order == .lt) value.JSValue.true_val else value.JSValue.false_val);
+                return error.NoTransition;
+            },
+            .lte => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                const order = try compareValues(a, b);
+                try self.ctx.push(if (order != .gt) value.JSValue.true_val else value.JSValue.false_val);
+                return error.NoTransition;
+            },
+            .gt => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                const order = try compareValues(a, b);
+                try self.ctx.push(if (order == .gt) value.JSValue.true_val else value.JSValue.false_val);
+                return error.NoTransition;
+            },
+            .gte => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                const order = try compareValues(a, b);
+                try self.ctx.push(if (order != .lt) value.JSValue.true_val else value.JSValue.false_val);
+                return error.NoTransition;
+            },
+            .if_true => {
+                const cond = self.ctx.pop();
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                if (cond.toBoolean()) {
+                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                }
+                return error.NoTransition;
+            },
+            .if_false => {
+                const cond = self.ctx.pop();
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                if (!cond.toBoolean()) {
+                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                }
+                return error.NoTransition;
+            },
+            .goto => {
+                const offset = readI16(self.pc);
+                self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                return error.NoTransition;
+            },
+            .loop => {
+                const offset = readI16(self.pc);
+                self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                return error.NoTransition;
+            },
+            .inc => {
+                const val = self.ctx.pop();
+                if (val.isInt()) {
+                    try self.ctx.push(value.JSValue.fromInt(val.getInt() + 1));
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                return error.NoTransition;
+            },
+            .dec => {
+                const val = self.ctx.pop();
+                if (val.isInt()) {
+                    try self.ctx.push(value.JSValue.fromInt(val.getInt() - 1));
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                return error.NoTransition;
+            },
+            .dup => {
+                try self.ctx.push(self.ctx.peek());
+                return error.NoTransition;
+            },
+            .drop => {
+                _ = self.ctx.pop();
+                return error.NoTransition;
+            },
+            .ret => return self.ctx.pop(),
+            .ret_undefined => return value.JSValue.undefined_val,
+            else => return error.UnimplementedOpcode,
+        }
     }
 };
 
@@ -1927,6 +2315,49 @@ test "Interpreter typeof" {
     try std.testing.expect(result.isString());
     const result_str = result.toPtr(string.JSString);
     try std.testing.expectEqualStrings("number", result_str.data());
+
+    // Cleanup
+    string.freeString(allocator, result_str);
+}
+
+test "End-to-end: default parameters" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Test: function with default parameter
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = parser_mod.Parser.init(allocator, "function greet(name = 'World') { return name; } greet()", &strings);
+    defer p.deinit();
+
+    const code = try p.parse();
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isString());
+    const result_str = result.toPtr(string.JSString);
+    try std.testing.expectEqualStrings("World", result_str.data());
 
     // Cleanup
     string.freeString(allocator, result_str);

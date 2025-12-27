@@ -57,6 +57,7 @@ pub const Context = struct {
     string_prototype: ?*object.JSObject,
     object_prototype: ?*object.JSObject,
     function_prototype: ?*object.JSObject,
+    generator_prototype: ?*object.JSObject,
     /// Atom table for dynamic atoms
     atoms: AtomTable,
     /// Exception value (if any)
@@ -100,6 +101,7 @@ pub const Context = struct {
             .string_prototype = null,
             .object_prototype = null,
             .function_prototype = null,
+            .generator_prototype = null,
             .atoms = AtomTable.init(allocator),
             .exception = value.JSValue.undefined_val,
             .catch_stack = undefined,
