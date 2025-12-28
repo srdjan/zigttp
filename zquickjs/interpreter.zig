@@ -48,6 +48,12 @@ pub const Interpreter = struct {
         };
     }
 
+    /// Offset the program counter by a signed value
+    /// Consolidates the verbose type-casting pattern used throughout dispatch
+    inline fn offsetPc(self: *Interpreter, offset: i16) void {
+        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+    }
+
     /// Run bytecode function
     pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
         self.pc = func.code.ptr;
@@ -444,12 +450,12 @@ pub const Interpreter = struct {
                 .goto => {
                     const offset = readI16(self.pc);
                     self.pc += 2;
-                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                    self.offsetPc(offset);
                 },
                 .loop => {
                     const offset = readI16(self.pc);
                     self.pc += 2;
-                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) - offset)));
+                    self.offsetPc(-offset);
                 },
 
                 .if_true => {
@@ -457,7 +463,7 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (cond.toBoolean()) {
-                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                        self.offsetPc(offset);
                     }
                 },
 
@@ -466,7 +472,7 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (!cond.toBoolean()) {
-                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                        self.offsetPc(offset);
                     }
                 },
 
@@ -948,7 +954,7 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (!cond.toBoolean()) {
-                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                        self.offsetPc(offset);
                     }
                 },
 
@@ -1124,7 +1130,11 @@ pub const Interpreter = struct {
         if (func_obj.getNativeFunctionData()) |native_data| {
             // Call native function
             const result = native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
-                std.log.err("Native function error: {}", .{err});
+                // Create error message with function name for better debugging
+                const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
+                std.log.err("Native function '{s}' error: {}", .{ func_name, err });
+                // Set exception on context for JS-level error handling
+                self.ctx.throwException(value.JSValue.exception_val);
                 return error.NativeFunctionError;
             };
             try self.ctx.push(result);
@@ -1200,8 +1210,13 @@ pub const Interpreter = struct {
     fn doConstruct(self: *Interpreter, argc: u8) InterpreterError!void {
         // Stack layout: [constructor, arg0, arg1, ..., argN-1]
 
+        // Bounds check (same as doCall)
+        if (argc > MAX_STACK_ARGS) {
+            return error.TooManyArguments;
+        }
+
         // Collect arguments (in reverse order from stack)
-        var args: [256]value.JSValue = undefined;
+        var args: [MAX_STACK_ARGS]value.JSValue = undefined;
         var i: usize = argc;
         while (i > 0) {
             i -= 1;
@@ -1240,7 +1255,11 @@ pub const Interpreter = struct {
         if (ctor_obj.getNativeFunctionData()) |native_data| {
             // Call native constructor
             const result = native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
-                std.log.err("Native constructor error: {}", .{err});
+                // Create error message with constructor name for better debugging
+                const ctor_name = if (native_data.name.toPredefinedName()) |name| name else "<constructor>";
+                std.log.err("Native constructor '{s}' error: {}", .{ ctor_name, err });
+                // Set exception on context for JS-level error handling
+                self.ctx.throwException(value.JSValue.exception_val);
                 return error.NativeFunctionError;
             };
 
@@ -1512,7 +1531,7 @@ pub const Interpreter = struct {
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (cond.toBoolean()) {
-                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                    self.offsetPc(offset);
                 }
                 return error.NoTransition;
             },
@@ -1521,20 +1540,20 @@ pub const Interpreter = struct {
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (!cond.toBoolean()) {
-                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                    self.offsetPc(offset);
                 }
                 return error.NoTransition;
             },
             .goto => {
                 const offset = readI16(self.pc);
                 self.pc += 2;
-                self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                self.offsetPc(offset);
                 return error.NoTransition;
             },
             .loop => {
                 const offset = readI16(self.pc);
                 self.pc += 2;
-                self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) - offset)));
+                self.offsetPc(-offset);
                 return error.NoTransition;
             },
             .inc => {

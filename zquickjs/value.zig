@@ -251,8 +251,9 @@ pub const JSValue = packed struct {
 
     /// Check if value is an array
     pub inline fn isArray(self: JSValue) bool {
-        // Arrays are objects with array class - need full object check
-        return self.isObject(); // TODO: Check class_id
+        if (!self.isObject()) return false;
+        const obj_ptr = self.toPtr(@import("object.zig").JSObject);
+        return obj_ptr.class_id == .array;
     }
 
     /// Check if value is callable (function)

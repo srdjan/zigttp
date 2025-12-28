@@ -2457,15 +2457,7 @@ pub const Parser = struct {
         }
 
         // Check for local
-        var local_idx: ?u8 = null;
-        var i: i32 = @as(i32, self.local_count) - 1;
-        while (i >= 0) : (i -= 1) {
-            const local = self.locals[@intCast(i)];
-            if (std.mem.eql(u8, local.name, name)) {
-                local_idx = @intCast(i);
-                break;
-            }
-        }
+        const local_idx = self.resolveLocal(name);
 
         if (can_assign and self.match(.assign)) {
             try self.expression();
@@ -2533,15 +2525,7 @@ pub const Parser = struct {
         const name = self.previous.text(self.tokenizer.source);
 
         // Check for local
-        var local_idx: ?u8 = null;
-        var i: i32 = @as(i32, self.local_count) - 1;
-        while (i >= 0) : (i -= 1) {
-            const local = self.locals[@intCast(i)];
-            if (std.mem.eql(u8, local.name, name)) {
-                local_idx = @intCast(i);
-                break;
-            }
-        }
+        const local_idx = self.resolveLocal(name);
 
         // Prefix: get, inc, dup, store (leaves incremented value on stack)
         if (local_idx) |idx| {
@@ -2568,15 +2552,7 @@ pub const Parser = struct {
         const name = self.previous.text(self.tokenizer.source);
 
         // Check for local
-        var local_idx: ?u8 = null;
-        var i: i32 = @as(i32, self.local_count) - 1;
-        while (i >= 0) : (i -= 1) {
-            const local = self.locals[@intCast(i)];
-            if (std.mem.eql(u8, local.name, name)) {
-                local_idx = @intCast(i);
-                break;
-            }
-        }
+        const local_idx = self.resolveLocal(name);
 
         if (local_idx) |idx| {
             try self.emitOp(.get_loc);

@@ -308,15 +308,17 @@ pub const Context = struct {
     }
 };
 
-/// Dynamic atom table
+/// Dynamic atom table with O(1) reverse lookup
 pub const AtomTable = struct {
     strings: std.StringHashMap(object.Atom),
+    reverse: std.AutoHashMap(object.Atom, []const u8), // O(1) reverse lookup
     next_id: u32,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) AtomTable {
         return .{
             .strings = std.StringHashMap(object.Atom).init(allocator),
+            .reverse = std.AutoHashMap(object.Atom, []const u8).init(allocator),
             .next_id = object.Atom.FIRST_DYNAMIC,
             .allocator = allocator,
         };
@@ -329,6 +331,7 @@ pub const AtomTable = struct {
             self.allocator.free(key.*);
         }
         self.strings.deinit();
+        self.reverse.deinit();
     }
 
     /// Intern a string and get its atom
@@ -346,6 +349,7 @@ pub const AtomTable = struct {
         // Copy string for storage
         const key = try self.allocator.dupe(u8, s);
         try self.strings.put(key, atom);
+        try self.reverse.put(atom, key); // Populate reverse map
 
         return atom;
     }
@@ -355,7 +359,9 @@ pub const AtomTable = struct {
     pub fn pruneUnused(self: *AtomTable, used_atoms: *const std.AutoHashMap(object.Atom, void)) void {
         // Build list of keys to remove (can't remove during iteration)
         var to_remove = std.ArrayList([]const u8).init(self.allocator);
+        var atoms_to_remove = std.ArrayList(object.Atom).init(self.allocator);
         defer to_remove.deinit();
+        defer atoms_to_remove.deinit();
 
         var it = self.strings.iterator();
         while (it.next()) |entry| {
@@ -366,12 +372,14 @@ pub const AtomTable = struct {
             // Check if this dynamic atom is still referenced
             if (!used_atoms.contains(atom)) {
                 to_remove.append(entry.key_ptr.*) catch continue;
+                atoms_to_remove.append(atom) catch continue;
             }
         }
 
-        // Remove unreferenced atoms
-        for (to_remove.items) |key| {
+        // Remove unreferenced atoms from both maps
+        for (to_remove.items, atoms_to_remove.items) |key, atom| {
             _ = self.strings.remove(key);
+            _ = self.reverse.remove(atom);
             self.allocator.free(key);
         }
     }
@@ -384,6 +392,7 @@ pub const AtomTable = struct {
             self.allocator.free(key.*);
         }
         self.strings.clearRetainingCapacity();
+        self.reverse.clearRetainingCapacity();
         self.next_id = object.Atom.FIRST_DYNAMIC;
     }
 
@@ -392,21 +401,14 @@ pub const AtomTable = struct {
         return self.strings.count();
     }
 
-    /// Get string name for an atom (reverse lookup)
+    /// Get string name for an atom - O(1) using reverse lookup map
     pub fn getName(self: *AtomTable, atom: object.Atom) ?[]const u8 {
-        // Check predefined atoms first
+        // Check predefined atoms first (already O(1) via switch)
         if (atom.isPredefined()) {
             return atom.toPredefinedName();
         }
-
-        // Search dynamic atoms
-        var it = self.strings.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.* == atom) {
-                return entry.key_ptr.*;
-            }
-        }
-        return null;
+        // O(1) lookup for dynamic atoms
+        return self.reverse.get(atom);
     }
 };
 

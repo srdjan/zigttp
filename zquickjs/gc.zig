@@ -27,13 +27,6 @@ pub const GCConfig = struct {
     gray_stack_capacity: usize = 1024,
 };
 
-/// GC colors for tri-color marking
-pub const GCColor = enum(u2) {
-    white = 0, // Not visited, potentially garbage
-    gray = 1, // Visited but children not scanned
-    black = 2, // Visited and children scanned
-};
-
 /// Nursery heap with bump allocation
 pub const NurseryHeap = struct {
     base: [*]u8,
@@ -193,11 +186,13 @@ pub const TenuredHeap = struct {
                 }
 
                 // CRITICAL: Actually free the memory to prevent leak
+                // Objects in tenured were allocated via heap, so we must use heap.free()
                 if (heap_ptr) |h| {
                     h.free(obj);
                 } else {
-                    // Fallback: use the allocator directly
-                    self.allocator.destroy(@as(*u8, @ptrCast(obj)));
+                    // Cannot safely free without heap - objects have MemBlockHeader
+                    // This is a programming error: majorGC should be called with heap_ptr
+                    std.log.warn("GC sweep: cannot free object without heap reference (memory leak)", .{});
                 }
 
                 self.last_sweep_freed += 1;

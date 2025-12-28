@@ -35,15 +35,24 @@ pub const ClassId = enum(u8) {
     // Add more as needed
 };
 
-/// Native function signature - matches object.NativeFn
-pub const NativeFunc = *const fn (*context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue;
+// ============================================================================
+// Generic Native Function Wrapper
+// ============================================================================
 
-/// Built-in function descriptor
-pub const BuiltinFunc = struct {
-    name: object.Atom,
-    func: object.NativeFn,
-    arg_count: u8,
-};
+/// Type signature for implementation functions that take a typed Context pointer
+const ImplFn = *const fn (*context.Context, value.JSValue, []const value.JSValue) value.JSValue;
+
+/// Create a native function wrapper from an implementation function.
+/// Eliminates boilerplate wrapper functions by generating them at compile time.
+/// Example: `wrap(jsonParse)` instead of `wrapJsonParse`
+pub fn wrap(comptime impl: ImplFn) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            return impl(ctx, this, args);
+        }
+    }.call;
+}
 
 // ============================================================================
 // Object methods
@@ -145,16 +154,6 @@ pub fn objectIsFrozen(ctx: *context.Context, this: value.JSValue, args: []const 
     return value.JSValue.true_val;
 }
 
-pub const object_methods = [_]BuiltinFunc{
-    .{ .name = "keys", .func = objectKeys, .arg_count = 1 },
-    .{ .name = "values", .func = objectValues, .arg_count = 1 },
-    .{ .name = "entries", .func = objectEntries, .arg_count = 1 },
-    .{ .name = "assign", .func = objectAssign, .arg_count = 2 },
-    .{ .name = "hasOwn", .func = objectHasOwn, .arg_count = 2 },
-    .{ .name = "freeze", .func = objectFreeze, .arg_count = 1 },
-    .{ .name = "isFrozen", .func = objectIsFrozen, .arg_count = 1 },
-};
-
 // ============================================================================
 // JSON methods
 // ============================================================================
@@ -192,55 +191,6 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
     const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
-
-/// Wrapper for jsonParse that converts context pointer
-fn wrapJsonParse(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return jsonParse(ctx, this, args);
-}
-
-/// Wrapper for jsonStringify that converts context pointer
-fn wrapJsonStringify(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return jsonStringify(ctx, this, args);
-}
-
-/// Wrappers for Object methods
-fn wrapObjectKeys(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectKeys(ctx, this, args);
-}
-
-fn wrapObjectValues(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectValues(ctx, this, args);
-}
-
-fn wrapObjectEntries(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectEntries(ctx, this, args);
-}
-
-fn wrapObjectAssign(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectAssign(ctx, this, args);
-}
-
-fn wrapObjectHasOwn(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectHasOwn(ctx, this, args);
-}
-
-fn wrapObjectFreeze(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectFreeze(ctx, this, args);
-}
-
-fn wrapObjectIsFrozen(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return objectIsFrozen(ctx, this, args);
-}
-
 // ============================================================================
 // Error methods
 // ============================================================================
@@ -364,37 +314,6 @@ fn valueToStringSimple(allocator: std.mem.Allocator, val: value.JSValue) !*strin
     if (val.isFalse()) return try string.createString(allocator, "false");
     if (val.isObject()) return try string.createString(allocator, "[object Object]");
     return try string.createString(allocator, "");
-}
-
-/// Wrapper for Error constructor
-fn wrapErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return errorConstructor(ctx, this, args);
-}
-
-fn wrapTypeErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return typeErrorConstructor(ctx, this, args);
-}
-
-fn wrapRangeErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return rangeErrorConstructor(ctx, this, args);
-}
-
-fn wrapSyntaxErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return syntaxErrorConstructor(ctx, this, args);
-}
-
-fn wrapReferenceErrorConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return referenceErrorConstructor(ctx, this, args);
-}
-
-fn wrapErrorToString(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return errorToString(ctx, this, args);
 }
 
 // ============================================================================
@@ -535,33 +454,6 @@ pub fn promiseCatch(ctx: *context.Context, this: value.JSValue, args: []const va
     const on_rejected = if (args.len > 0) args[0] else value.JSValue.undefined_val;
     return promiseThen(ctx, this, &[_]value.JSValue{ value.JSValue.undefined_val, on_rejected });
 }
-
-/// Wrapper for Promise constructor
-fn wrapPromiseConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return promiseConstructor(ctx, this, args);
-}
-
-fn wrapPromiseResolve(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return promiseResolve(ctx, this, args);
-}
-
-fn wrapPromiseReject(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return promiseReject(ctx, this, args);
-}
-
-fn wrapPromiseThen(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return promiseThen(ctx, this, args);
-}
-
-fn wrapPromiseCatch(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return promiseCatch(ctx, this, args);
-}
-
 // ============================================================================
 // Number methods
 // ============================================================================
@@ -855,40 +747,12 @@ pub fn numberToString(ctx: *context.Context, this: value.JSValue, args: []const 
     return value.JSValue.fromPtr(str);
 }
 
-fn wrapNumberIsInteger(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberIsInteger(ctx, this, args);
-}
 
-fn wrapNumberIsNaN(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberIsNaN(ctx, this, args);
-}
 
-fn wrapNumberIsFinite(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberIsFinite(ctx, this, args);
-}
 
-fn wrapNumberParseFloat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberParseFloat(ctx, this, args);
-}
 
-fn wrapNumberParseInt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberParseInt(ctx, this, args);
-}
 
-fn wrapNumberToFixed(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberToFixed(ctx, this, args);
-}
 
-fn wrapNumberToString(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return numberToString(ctx, this, args);
-}
 
 /// Global isNaN - coerces argument to number first (unlike Number.isNaN)
 pub fn globalIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -925,15 +789,7 @@ pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value
     return value.JSValue.fromBool(false);
 }
 
-fn wrapGlobalIsNaN(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return globalIsNaN(ctx, this, args);
-}
 
-fn wrapGlobalIsFinite(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return globalIsFinite(ctx, this, args);
-}
 
 // ============================================================================
 // Map implementation
@@ -1159,35 +1015,11 @@ pub fn mapClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
     return value.JSValue.undefined_val;
 }
 
-fn wrapMapConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mapConstructor(ctx, this, args);
-}
 
-fn wrapMapSet(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mapSet(ctx, this, args);
-}
 
-fn wrapMapGet(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mapGet(ctx, this, args);
-}
 
-fn wrapMapHas(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mapHas(ctx, this, args);
-}
 
-fn wrapMapDelete(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mapDelete(ctx, this, args);
-}
 
-fn wrapMapClear(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mapClear(ctx, this, args);
-}
 
 // ============================================================================
 // Set implementation
@@ -1349,30 +1181,10 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
     return value.JSValue.undefined_val;
 }
 
-fn wrapSetConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return setConstructor(ctx, this, args);
-}
 
-fn wrapSetAdd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return setAdd(ctx, this, args);
-}
 
-fn wrapSetHas(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return setHas(ctx, this, args);
-}
 
-fn wrapSetDelete(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return setDelete(ctx, this, args);
-}
 
-fn wrapSetClear(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return setClear(ctx, this, args);
-}
 
 const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass };
 
@@ -1882,15 +1694,7 @@ pub fn arrayOf(ctx: *context.Context, _: value.JSValue, args: []const value.JSVa
     return result.toValue();
 }
 
-fn wrapArrayFrom(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayFrom(ctx, this, args);
-}
 
-fn wrapArrayOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayOf(ctx, this, args);
-}
 
 /// Array.prototype.push(...items) - Add elements to end, return new length
 pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -2230,30 +2034,6 @@ pub fn arraySort(ctx: *context.Context, this: value.JSValue, args: []const value
     _ = args;
     return this;
 }
-
-pub const array_methods = [_]BuiltinFunc{
-    .{ .name = "isArray", .func = arrayIsArray, .arg_count = 1 },
-    .{ .name = "push", .func = arrayPush, .arg_count = 1 },
-    .{ .name = "pop", .func = arrayPop, .arg_count = 0 },
-    .{ .name = "shift", .func = arrayShift, .arg_count = 0 },
-    .{ .name = "unshift", .func = arrayUnshift, .arg_count = 1 },
-    .{ .name = "indexOf", .func = arrayIndexOf, .arg_count = 1 },
-    .{ .name = "includes", .func = arrayIncludes, .arg_count = 1 },
-    .{ .name = "join", .func = arrayJoin, .arg_count = 1 },
-    .{ .name = "reverse", .func = arrayReverse, .arg_count = 0 },
-    .{ .name = "slice", .func = arraySlice, .arg_count = 2 },
-    .{ .name = "concat", .func = arrayConcat, .arg_count = 1 },
-    .{ .name = "map", .func = arrayMap, .arg_count = 1 },
-    .{ .name = "filter", .func = arrayFilter, .arg_count = 1 },
-    .{ .name = "reduce", .func = arrayReduce, .arg_count = 2 },
-    .{ .name = "forEach", .func = arrayForEach, .arg_count = 1 },
-    .{ .name = "every", .func = arrayEvery, .arg_count = 1 },
-    .{ .name = "some", .func = arraySome, .arg_count = 1 },
-    .{ .name = "find", .func = arrayFind, .arg_count = 1 },
-    .{ .name = "findIndex", .func = arrayFindIndex, .arg_count = 1 },
-    .{ .name = "fill", .func = arrayFill, .arg_count = 1 },
-    .{ .name = "sort", .func = arraySort, .arg_count = 1 },
-};
 
 // ============================================================================
 // String methods
@@ -2809,15 +2589,7 @@ pub fn stringSearch(ctx: *context.Context, this: value.JSValue, args: []const va
     return value.JSValue.fromInt(-1);
 }
 
-fn wrapStringMatch(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringMatch(ctx, this, args);
-}
 
-fn wrapStringSearch(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringSearch(ctx, this, args);
-}
 
 /// String.fromCharCode(...charCodes) - Create string from char codes
 pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -2826,34 +2598,6 @@ pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []co
     // Return length for now
     return value.JSValue.fromInt(@intCast(args.len));
 }
-
-pub const string_methods = [_]BuiltinFunc{
-    .{ .name = "length", .func = stringLength, .arg_count = 0 },
-    .{ .name = "charAt", .func = stringCharAt, .arg_count = 1 },
-    .{ .name = "charCodeAt", .func = stringCharCodeAt, .arg_count = 1 },
-    .{ .name = "indexOf", .func = stringIndexOf, .arg_count = 1 },
-    .{ .name = "lastIndexOf", .func = stringLastIndexOf, .arg_count = 1 },
-    .{ .name = "startsWith", .func = stringStartsWith, .arg_count = 1 },
-    .{ .name = "endsWith", .func = stringEndsWith, .arg_count = 1 },
-    .{ .name = "includes", .func = stringIncludes, .arg_count = 1 },
-    .{ .name = "slice", .func = stringSlice, .arg_count = 2 },
-    .{ .name = "substring", .func = stringSubstring, .arg_count = 2 },
-    .{ .name = "toLowerCase", .func = stringToLowerCase, .arg_count = 0 },
-    .{ .name = "toUpperCase", .func = stringToUpperCase, .arg_count = 0 },
-    .{ .name = "trim", .func = stringTrim, .arg_count = 0 },
-    .{ .name = "trimStart", .func = stringTrimStart, .arg_count = 0 },
-    .{ .name = "trimEnd", .func = stringTrimEnd, .arg_count = 0 },
-    .{ .name = "split", .func = stringSplit, .arg_count = 1 },
-    .{ .name = "repeat", .func = stringRepeat, .arg_count = 1 },
-    .{ .name = "padStart", .func = stringPadStart, .arg_count = 1 },
-    .{ .name = "padEnd", .func = stringPadEnd, .arg_count = 1 },
-    .{ .name = "concat", .func = stringConcat, .arg_count = 1 },
-    .{ .name = "replace", .func = stringReplace, .arg_count = 2 },
-    .{ .name = "replaceAll", .func = stringReplaceAll, .arg_count = 2 },
-    .{ .name = "match", .func = stringMatch, .arg_count = 1 },
-    .{ .name = "search", .func = stringSearch, .arg_count = 1 },
-    .{ .name = "fromCharCode", .func = stringFromCharCode, .arg_count = 1 },
-};
 
 // ============================================================================
 // Math methods
@@ -3021,25 +2765,6 @@ pub fn mathSign(ctx: *context.Context, this: value.JSValue, args: []const value.
     return value.JSValue.fromInt(0);
 }
 
-pub const math_methods = [_]BuiltinFunc{
-    .{ .name = "abs", .func = mathAbs, .arg_count = 1 },
-    .{ .name = "floor", .func = mathFloor, .arg_count = 1 },
-    .{ .name = "ceil", .func = mathCeil, .arg_count = 1 },
-    .{ .name = "round", .func = mathRound, .arg_count = 1 },
-    .{ .name = "trunc", .func = mathTrunc, .arg_count = 1 },
-    .{ .name = "min", .func = mathMin, .arg_count = 2 },
-    .{ .name = "max", .func = mathMax, .arg_count = 2 },
-    .{ .name = "pow", .func = mathPow, .arg_count = 2 },
-    .{ .name = "sqrt", .func = mathSqrt, .arg_count = 1 },
-    .{ .name = "sin", .func = mathSin, .arg_count = 1 },
-    .{ .name = "cos", .func = mathCos, .arg_count = 1 },
-    .{ .name = "tan", .func = mathTan, .arg_count = 1 },
-    .{ .name = "log", .func = mathLog, .arg_count = 1 },
-    .{ .name = "exp", .func = mathExp, .arg_count = 1 },
-    .{ .name = "random", .func = mathRandom, .arg_count = 0 },
-    .{ .name = "sign", .func = mathSign, .arg_count = 1 },
-};
-
 /// Math constants
 pub const math_constants = struct {
     pub const PI: f64 = 3.141592653589793;
@@ -3122,339 +2847,81 @@ fn printValue(writer: anytype, val: value.JSValue) !void {
     }
 }
 
-pub const console_methods = [_]BuiltinFunc{
-    .{ .name = "log", .func = consoleLog, .arg_count = 0 },
-    .{ .name = "warn", .func = consoleWarn, .arg_count = 0 },
-    .{ .name = "error", .func = consoleError, .arg_count = 0 },
-};
-
 // ============================================================================
 // Initialization
 // ============================================================================
 
 /// Wrapper to convert context.Context native function signature to object.NativeFn
-fn wrapConsoleLog(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return consoleLog(ctx, this, args);
-}
 
-fn wrapConsoleWarn(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return consoleWarn(ctx, this, args);
-}
 
-fn wrapConsoleError(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return consoleError(ctx, this, args);
-}
 
-fn wrapMathAbs(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathAbs(ctx, this, args);
-}
 
-fn wrapMathFloor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathFloor(ctx, this, args);
-}
 
-fn wrapMathCeil(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathCeil(ctx, this, args);
-}
 
-fn wrapMathRound(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathRound(ctx, this, args);
-}
 
-fn wrapMathTrunc(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathTrunc(ctx, this, args);
-}
 
-fn wrapMathMin(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathMin(ctx, this, args);
-}
 
-fn wrapMathMax(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathMax(ctx, this, args);
-}
 
-fn wrapMathPow(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathPow(ctx, this, args);
-}
 
-fn wrapMathSqrt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathSqrt(ctx, this, args);
-}
 
-fn wrapMathSin(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathSin(ctx, this, args);
-}
 
-fn wrapMathCos(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathCos(ctx, this, args);
-}
 
-fn wrapMathTan(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathTan(ctx, this, args);
-}
 
-fn wrapMathLog(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathLog(ctx, this, args);
-}
 
-fn wrapMathExp(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathExp(ctx, this, args);
-}
 
-fn wrapMathRandom(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathRandom(ctx, this, args);
-}
 
-fn wrapMathSign(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return mathSign(ctx, this, args);
-}
 
 // ============================================================================
 // Array method wrappers
 // ============================================================================
 
-fn wrapArrayIsArray(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayIsArray(ctx, this, args);
-}
 
-fn wrapArrayPush(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayPush(ctx, this, args);
-}
 
-fn wrapArrayPop(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayPop(ctx, this, args);
-}
 
-fn wrapArrayShift(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayShift(ctx, this, args);
-}
 
-fn wrapArrayUnshift(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayUnshift(ctx, this, args);
-}
 
-fn wrapArraySplice(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arraySplice(ctx, this, args);
-}
 
-fn wrapArrayIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayIndexOf(ctx, this, args);
-}
 
-fn wrapArrayIncludes(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayIncludes(ctx, this, args);
-}
 
-fn wrapArrayJoin(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayJoin(ctx, this, args);
-}
 
-fn wrapArrayReverse(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayReverse(ctx, this, args);
-}
 
-fn wrapArraySlice(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arraySlice(ctx, this, args);
-}
 
-fn wrapArrayConcat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayConcat(ctx, this, args);
-}
 
-fn wrapArrayMap(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayMap(ctx, this, args);
-}
 
-fn wrapArrayFilter(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayFilter(ctx, this, args);
-}
 
-fn wrapArrayReduce(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayReduce(ctx, this, args);
-}
 
-fn wrapArrayForEach(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayForEach(ctx, this, args);
-}
 
-fn wrapArrayEvery(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayEvery(ctx, this, args);
-}
 
-fn wrapArraySome(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arraySome(ctx, this, args);
-}
 
-fn wrapArrayFind(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayFind(ctx, this, args);
-}
 
-fn wrapArrayFindIndex(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayFindIndex(ctx, this, args);
-}
 
-fn wrapArrayFill(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arrayFill(ctx, this, args);
-}
 
-fn wrapArraySort(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return arraySort(ctx, this, args);
-}
 
 // ============================================================================
 // String method wrappers
 // ============================================================================
 
-fn wrapStringCharAt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringCharAt(ctx, this, args);
-}
 
-fn wrapStringCharCodeAt(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringCharCodeAt(ctx, this, args);
-}
 
-fn wrapStringIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringIndexOf(ctx, this, args);
-}
 
-fn wrapStringLastIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringLastIndexOf(ctx, this, args);
-}
 
-fn wrapStringStartsWith(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringStartsWith(ctx, this, args);
-}
 
-fn wrapStringEndsWith(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringEndsWith(ctx, this, args);
-}
 
-fn wrapStringIncludes(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringIncludes(ctx, this, args);
-}
 
-fn wrapStringSlice(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringSlice(ctx, this, args);
-}
 
-fn wrapStringSubstring(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringSubstring(ctx, this, args);
-}
 
-fn wrapStringToLowerCase(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringToLowerCase(ctx, this, args);
-}
 
-fn wrapStringToUpperCase(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringToUpperCase(ctx, this, args);
-}
 
-fn wrapStringTrim(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringTrim(ctx, this, args);
-}
 
-fn wrapStringTrimStart(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringTrimStart(ctx, this, args);
-}
 
-fn wrapStringTrimEnd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringTrimEnd(ctx, this, args);
-}
 
-fn wrapStringSplit(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringSplit(ctx, this, args);
-}
 
-fn wrapStringRepeat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringRepeat(ctx, this, args);
-}
 
-fn wrapStringPadStart(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringPadStart(ctx, this, args);
-}
 
-fn wrapStringPadEnd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringPadEnd(ctx, this, args);
-}
 
-fn wrapStringConcat(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringConcat(ctx, this, args);
-}
 
-fn wrapStringReplace(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringReplace(ctx, this, args);
-}
 
-fn wrapStringReplaceAll(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringReplaceAll(ctx, this, args);
-}
 
-fn wrapStringFromCharCode(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return stringFromCharCode(ctx, this, args);
-}
 
 /// Helper to add a method using a dynamic atom name
 fn addMethodDynamic(
@@ -3496,7 +2963,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create console object
     const console_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, console_obj, root_class, .log, wrapConsoleLog, 0);
+    try addMethod(allocator, console_obj, root_class, .log, wrap(consoleLog), 0);
     // Note: .warn and .error atoms don't exist in predefined atoms, use .log for now
     // In full implementation would add dynamic atoms
 
@@ -3505,20 +2972,20 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create Math object
     const math_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, math_obj, root_class, .abs, wrapMathAbs, 1);
-    try addMethod(allocator, math_obj, root_class, .floor, wrapMathFloor, 1);
-    try addMethod(allocator, math_obj, root_class, .ceil, wrapMathCeil, 1);
-    try addMethod(allocator, math_obj, root_class, .round, wrapMathRound, 1);
-    try addMethod(allocator, math_obj, root_class, .min, wrapMathMin, 2);
-    try addMethod(allocator, math_obj, root_class, .max, wrapMathMax, 2);
-    try addMethod(allocator, math_obj, root_class, .pow, wrapMathPow, 2);
-    try addMethod(allocator, math_obj, root_class, .sqrt, wrapMathSqrt, 1);
-    try addMethod(allocator, math_obj, root_class, .sin, wrapMathSin, 1);
-    try addMethod(allocator, math_obj, root_class, .cos, wrapMathCos, 1);
-    try addMethod(allocator, math_obj, root_class, .tan, wrapMathTan, 1);
-    try addMethod(allocator, math_obj, root_class, .log, wrapMathLog, 1);
-    try addMethod(allocator, math_obj, root_class, .exp, wrapMathExp, 1);
-    try addMethod(allocator, math_obj, root_class, .random, wrapMathRandom, 0);
+    try addMethod(allocator, math_obj, root_class, .abs, wrap(mathAbs), 1);
+    try addMethod(allocator, math_obj, root_class, .floor, wrap(mathFloor), 1);
+    try addMethod(allocator, math_obj, root_class, .ceil, wrap(mathCeil), 1);
+    try addMethod(allocator, math_obj, root_class, .round, wrap(mathRound), 1);
+    try addMethod(allocator, math_obj, root_class, .min, wrap(mathMin), 2);
+    try addMethod(allocator, math_obj, root_class, .max, wrap(mathMax), 2);
+    try addMethod(allocator, math_obj, root_class, .pow, wrap(mathPow), 2);
+    try addMethod(allocator, math_obj, root_class, .sqrt, wrap(mathSqrt), 1);
+    try addMethod(allocator, math_obj, root_class, .sin, wrap(mathSin), 1);
+    try addMethod(allocator, math_obj, root_class, .cos, wrap(mathCos), 1);
+    try addMethod(allocator, math_obj, root_class, .tan, wrap(mathTan), 1);
+    try addMethod(allocator, math_obj, root_class, .log, wrap(mathLog), 1);
+    try addMethod(allocator, math_obj, root_class, .exp, wrap(mathExp), 1);
+    try addMethod(allocator, math_obj, root_class, .random, wrap(mathRandom), 0);
 
     // Add Math constants as properties
     const pi_box = try ctx.gc_state.allocFloat(math_constants.PI);
@@ -3530,76 +2997,76 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create JSON object
     const json_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, json_obj, root_class, .parse, wrapJsonParse, 1);
-    try addMethod(allocator, json_obj, root_class, .stringify, wrapJsonStringify, 1);
+    try addMethod(allocator, json_obj, root_class, .parse, wrap(jsonParse), 1);
+    try addMethod(allocator, json_obj, root_class, .stringify, wrap(jsonStringify), 1);
 
     // Register JSON on global
     try ctx.setGlobal(.JSON, json_obj.toValue());
 
     // Create Object constructor with static methods
     const object_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, object_obj, "keys", wrapObjectKeys, 1);
-    try addMethodDynamic(ctx, object_obj, "values", wrapObjectValues, 1);
-    try addMethodDynamic(ctx, object_obj, "entries", wrapObjectEntries, 1);
-    try addMethodDynamic(ctx, object_obj, "assign", wrapObjectAssign, 2);
-    try addMethodDynamic(ctx, object_obj, "hasOwn", wrapObjectHasOwn, 2);
-    try addMethodDynamic(ctx, object_obj, "freeze", wrapObjectFreeze, 1);
-    try addMethodDynamic(ctx, object_obj, "isFrozen", wrapObjectIsFrozen, 1);
+    try addMethodDynamic(ctx, object_obj, "keys", wrap(objectKeys), 1);
+    try addMethodDynamic(ctx, object_obj, "values", wrap(objectValues), 1);
+    try addMethodDynamic(ctx, object_obj, "entries", wrap(objectEntries), 1);
+    try addMethodDynamic(ctx, object_obj, "assign", wrap(objectAssign), 2);
+    try addMethodDynamic(ctx, object_obj, "hasOwn", wrap(objectHasOwn), 2);
+    try addMethodDynamic(ctx, object_obj, "freeze", wrap(objectFreeze), 1);
+    try addMethodDynamic(ctx, object_obj, "isFrozen", wrap(objectIsFrozen), 1);
 
     // Register Object on global
     try ctx.setGlobal(.Object, object_obj.toValue());
 
     // Create Error prototype with toString method
     const error_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, error_proto, "toString", wrapErrorToString, 0);
+    try addMethodDynamic(ctx, error_proto, "toString", wrap(errorToString), 0);
 
     // Create Error constructor
-    const error_ctor_func = try object.JSObject.createNativeFunction(allocator, root_class, wrapErrorConstructor, .Error, 1);
+    const error_ctor_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(errorConstructor), .Error, 1);
     try error_ctor_func.setProperty(allocator, .prototype, error_proto.toValue());
     try ctx.setGlobal(.Error, error_ctor_func.toValue());
 
     // Create TypeError constructor
-    const type_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapTypeErrorConstructor, .TypeError, 1);
+    const type_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(typeErrorConstructor), .TypeError, 1);
     try type_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
     try ctx.setGlobal(.TypeError, type_error_ctor.toValue());
 
     // Create RangeError constructor
-    const range_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapRangeErrorConstructor, .RangeError, 1);
+    const range_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(rangeErrorConstructor), .RangeError, 1);
     try range_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
     try ctx.setGlobal(.RangeError, range_error_ctor.toValue());
 
     // Create SyntaxError constructor
-    const syntax_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSyntaxErrorConstructor, .SyntaxError, 1);
+    const syntax_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(syntaxErrorConstructor), .SyntaxError, 1);
     try syntax_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
     try ctx.setGlobal(.SyntaxError, syntax_error_ctor.toValue());
 
     // Create ReferenceError constructor
-    const ref_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapReferenceErrorConstructor, .ReferenceError, 1);
+    const ref_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(referenceErrorConstructor), .ReferenceError, 1);
     try ref_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
     try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
 
     // Create Promise prototype with then/catch methods
     const promise_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, promise_proto, "then", wrapPromiseThen, 2);
-    try addMethodDynamic(ctx, promise_proto, "catch", wrapPromiseCatch, 1);
+    try addMethodDynamic(ctx, promise_proto, "then", wrap(promiseThen), 2);
+    try addMethodDynamic(ctx, promise_proto, "catch", wrap(promiseCatch), 1);
 
     // Create Promise constructor with static methods
-    const promise_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapPromiseConstructor, .Promise, 1);
+    const promise_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(promiseConstructor), .Promise, 1);
     try promise_ctor.setProperty(allocator, .prototype, promise_proto.toValue());
 
     // Add static methods: Promise.resolve, Promise.reject
-    try addMethodDynamic(ctx, promise_ctor, "resolve", wrapPromiseResolve, 1);
-    try addMethodDynamic(ctx, promise_ctor, "reject", wrapPromiseReject, 1);
+    try addMethodDynamic(ctx, promise_ctor, "resolve", wrap(promiseResolve), 1);
+    try addMethodDynamic(ctx, promise_ctor, "reject", wrap(promiseReject), 1);
 
     try ctx.setGlobal(.Promise, promise_ctor.toValue());
 
     // Create Number object with static methods
     const number_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, number_obj, "isInteger", wrapNumberIsInteger, 1);
-    try addMethodDynamic(ctx, number_obj, "isNaN", wrapNumberIsNaN, 1);
-    try addMethodDynamic(ctx, number_obj, "isFinite", wrapNumberIsFinite, 1);
-    try addMethodDynamic(ctx, number_obj, "parseFloat", wrapNumberParseFloat, 1);
-    try addMethodDynamic(ctx, number_obj, "parseInt", wrapNumberParseInt, 2);
+    try addMethodDynamic(ctx, number_obj, "isInteger", wrap(numberIsInteger), 1);
+    try addMethodDynamic(ctx, number_obj, "isNaN", wrap(numberIsNaN), 1);
+    try addMethodDynamic(ctx, number_obj, "isFinite", wrap(numberIsFinite), 1);
+    try addMethodDynamic(ctx, number_obj, "parseFloat", wrap(numberParseFloat), 1);
+    try addMethodDynamic(ctx, number_obj, "parseInt", wrap(numberParseInt), 2);
 
     // Add Number constants
     const max_value_atom = try ctx.atoms.intern("MAX_VALUE");
@@ -3626,44 +3093,44 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Also register parseFloat and parseInt globally (JS convention)
     const global_parse_float_atom = try ctx.atoms.intern("parseFloat");
-    const parse_float_func = try object.JSObject.createNativeFunction(allocator, root_class, wrapNumberParseFloat, global_parse_float_atom, 1);
+    const parse_float_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(numberParseFloat), global_parse_float_atom, 1);
     try ctx.setGlobal(global_parse_float_atom, parse_float_func.toValue());
 
     const global_parse_int_atom = try ctx.atoms.intern("parseInt");
-    const parse_int_func = try object.JSObject.createNativeFunction(allocator, root_class, wrapNumberParseInt, global_parse_int_atom, 2);
+    const parse_int_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(numberParseInt), global_parse_int_atom, 2);
     try ctx.setGlobal(global_parse_int_atom, parse_int_func.toValue());
 
     // Also register isNaN and isFinite globally (JS convention)
     const global_is_nan_atom = try ctx.atoms.intern("isNaN");
-    const global_is_nan_func = try object.JSObject.createNativeFunction(allocator, root_class, wrapGlobalIsNaN, global_is_nan_atom, 1);
+    const global_is_nan_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(globalIsNaN), global_is_nan_atom, 1);
     try ctx.setGlobal(global_is_nan_atom, global_is_nan_func.toValue());
 
     const global_is_finite_atom = try ctx.atoms.intern("isFinite");
-    const global_is_finite_func = try object.JSObject.createNativeFunction(allocator, root_class, wrapGlobalIsFinite, global_is_finite_atom, 1);
+    const global_is_finite_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(globalIsFinite), global_is_finite_atom, 1);
     try ctx.setGlobal(global_is_finite_atom, global_is_finite_func.toValue());
 
     // Create Map prototype with methods
     const map_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, map_proto, "set", wrapMapSet, 2);
-    try addMethodDynamic(ctx, map_proto, "get", wrapMapGet, 1);
-    try addMethodDynamic(ctx, map_proto, "has", wrapMapHas, 1);
-    try addMethodDynamic(ctx, map_proto, "delete", wrapMapDelete, 1);
-    try addMethodDynamic(ctx, map_proto, "clear", wrapMapClear, 0);
+    try addMethodDynamic(ctx, map_proto, "set", wrap(mapSet), 2);
+    try addMethodDynamic(ctx, map_proto, "get", wrap(mapGet), 1);
+    try addMethodDynamic(ctx, map_proto, "has", wrap(mapHas), 1);
+    try addMethodDynamic(ctx, map_proto, "delete", wrap(mapDelete), 1);
+    try addMethodDynamic(ctx, map_proto, "clear", wrap(mapClear), 0);
 
     // Create Map constructor
-    const map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapMapConstructor, .Map, 0);
+    const map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(mapConstructor), .Map, 0);
     try map_ctor.setProperty(allocator, .prototype, map_proto.toValue());
     try ctx.setGlobal(.Map, map_ctor.toValue());
 
     // Create Set prototype with methods
     const set_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, set_proto, "add", wrapSetAdd, 1);
-    try addMethodDynamic(ctx, set_proto, "has", wrapSetHas, 1);
-    try addMethodDynamic(ctx, set_proto, "delete", wrapSetDelete, 1);
-    try addMethodDynamic(ctx, set_proto, "clear", wrapSetClear, 0);
+    try addMethodDynamic(ctx, set_proto, "add", wrap(setAdd), 1);
+    try addMethodDynamic(ctx, set_proto, "has", wrap(setHas), 1);
+    try addMethodDynamic(ctx, set_proto, "delete", wrap(setDelete), 1);
+    try addMethodDynamic(ctx, set_proto, "clear", wrap(setClear), 0);
 
     // Create Set constructor
-    const set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSetConstructor, .Set, 0);
+    const set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(setConstructor), .Set, 0);
     try set_ctor.setProperty(allocator, .prototype, set_proto.toValue());
     try ctx.setGlobal(.Set, set_ctor.toValue());
 
@@ -3710,85 +3177,85 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Array.prototype
     // ========================================================================
     const array_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, array_proto, "push", wrapArrayPush, 1);
-    try addMethodDynamic(ctx, array_proto, "pop", wrapArrayPop, 0);
-    try addMethodDynamic(ctx, array_proto, "shift", wrapArrayShift, 0);
-    try addMethodDynamic(ctx, array_proto, "unshift", wrapArrayUnshift, 1);
-    try addMethodDynamic(ctx, array_proto, "indexOf", wrapArrayIndexOf, 1);
-    try addMethodDynamic(ctx, array_proto, "includes", wrapArrayIncludes, 1);
-    try addMethodDynamic(ctx, array_proto, "join", wrapArrayJoin, 1);
-    try addMethodDynamic(ctx, array_proto, "reverse", wrapArrayReverse, 0);
-    try addMethodDynamic(ctx, array_proto, "slice", wrapArraySlice, 2);
-    try addMethodDynamic(ctx, array_proto, "splice", wrapArraySplice, 2);
-    try addMethodDynamic(ctx, array_proto, "concat", wrapArrayConcat, 1);
-    try addMethodDynamic(ctx, array_proto, "map", wrapArrayMap, 1);
-    try addMethodDynamic(ctx, array_proto, "filter", wrapArrayFilter, 1);
-    try addMethodDynamic(ctx, array_proto, "reduce", wrapArrayReduce, 2);
-    try addMethodDynamic(ctx, array_proto, "forEach", wrapArrayForEach, 1);
-    try addMethodDynamic(ctx, array_proto, "every", wrapArrayEvery, 1);
-    try addMethodDynamic(ctx, array_proto, "some", wrapArraySome, 1);
-    try addMethodDynamic(ctx, array_proto, "find", wrapArrayFind, 1);
-    try addMethodDynamic(ctx, array_proto, "findIndex", wrapArrayFindIndex, 1);
-    try addMethodDynamic(ctx, array_proto, "fill", wrapArrayFill, 3);
-    try addMethodDynamic(ctx, array_proto, "sort", wrapArraySort, 1);
+    try addMethodDynamic(ctx, array_proto, "push", wrap(arrayPush), 1);
+    try addMethodDynamic(ctx, array_proto, "pop", wrap(arrayPop), 0);
+    try addMethodDynamic(ctx, array_proto, "shift", wrap(arrayShift), 0);
+    try addMethodDynamic(ctx, array_proto, "unshift", wrap(arrayUnshift), 1);
+    try addMethodDynamic(ctx, array_proto, "indexOf", wrap(arrayIndexOf), 1);
+    try addMethodDynamic(ctx, array_proto, "includes", wrap(arrayIncludes), 1);
+    try addMethodDynamic(ctx, array_proto, "join", wrap(arrayJoin), 1);
+    try addMethodDynamic(ctx, array_proto, "reverse", wrap(arrayReverse), 0);
+    try addMethodDynamic(ctx, array_proto, "slice", wrap(arraySlice), 2);
+    try addMethodDynamic(ctx, array_proto, "splice", wrap(arraySplice), 2);
+    try addMethodDynamic(ctx, array_proto, "concat", wrap(arrayConcat), 1);
+    try addMethodDynamic(ctx, array_proto, "map", wrap(arrayMap), 1);
+    try addMethodDynamic(ctx, array_proto, "filter", wrap(arrayFilter), 1);
+    try addMethodDynamic(ctx, array_proto, "reduce", wrap(arrayReduce), 2);
+    try addMethodDynamic(ctx, array_proto, "forEach", wrap(arrayForEach), 1);
+    try addMethodDynamic(ctx, array_proto, "every", wrap(arrayEvery), 1);
+    try addMethodDynamic(ctx, array_proto, "some", wrap(arraySome), 1);
+    try addMethodDynamic(ctx, array_proto, "find", wrap(arrayFind), 1);
+    try addMethodDynamic(ctx, array_proto, "findIndex", wrap(arrayFindIndex), 1);
+    try addMethodDynamic(ctx, array_proto, "fill", wrap(arrayFill), 3);
+    try addMethodDynamic(ctx, array_proto, "sort", wrap(arraySort), 1);
     ctx.array_prototype = array_proto;
 
     // Create Array constructor function on global
     const array_ctor = try object.JSObject.create(allocator, root_class, null);
     // Array static methods
-    try addMethodDynamic(ctx, array_ctor, "isArray", wrapArrayIsArray, 1);
-    try addMethodDynamic(ctx, array_ctor, "from", wrapArrayFrom, 1);
-    try addMethodDynamic(ctx, array_ctor, "of", wrapArrayOf, 0);
+    try addMethodDynamic(ctx, array_ctor, "isArray", wrap(arrayIsArray), 1);
+    try addMethodDynamic(ctx, array_ctor, "from", wrap(arrayFrom), 1);
+    try addMethodDynamic(ctx, array_ctor, "of", wrap(arrayOf), 0);
     try ctx.setGlobal(.Array, array_ctor.toValue());
 
     // ========================================================================
     // String.prototype
     // ========================================================================
     const string_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, string_proto, "charAt", wrapStringCharAt, 1);
-    try addMethodDynamic(ctx, string_proto, "charCodeAt", wrapStringCharCodeAt, 1);
-    try addMethodDynamic(ctx, string_proto, "indexOf", wrapStringIndexOf, 1);
-    try addMethodDynamic(ctx, string_proto, "lastIndexOf", wrapStringLastIndexOf, 1);
-    try addMethodDynamic(ctx, string_proto, "startsWith", wrapStringStartsWith, 1);
-    try addMethodDynamic(ctx, string_proto, "endsWith", wrapStringEndsWith, 1);
-    try addMethodDynamic(ctx, string_proto, "includes", wrapStringIncludes, 1);
-    try addMethodDynamic(ctx, string_proto, "slice", wrapStringSlice, 2);
-    try addMethodDynamic(ctx, string_proto, "substring", wrapStringSubstring, 2);
-    try addMethodDynamic(ctx, string_proto, "toLowerCase", wrapStringToLowerCase, 0);
-    try addMethodDynamic(ctx, string_proto, "toUpperCase", wrapStringToUpperCase, 0);
-    try addMethodDynamic(ctx, string_proto, "trim", wrapStringTrim, 0);
-    try addMethodDynamic(ctx, string_proto, "trimStart", wrapStringTrimStart, 0);
-    try addMethodDynamic(ctx, string_proto, "trimEnd", wrapStringTrimEnd, 0);
-    try addMethodDynamic(ctx, string_proto, "split", wrapStringSplit, 2);
-    try addMethodDynamic(ctx, string_proto, "repeat", wrapStringRepeat, 1);
-    try addMethodDynamic(ctx, string_proto, "padStart", wrapStringPadStart, 2);
-    try addMethodDynamic(ctx, string_proto, "padEnd", wrapStringPadEnd, 2);
-    try addMethodDynamic(ctx, string_proto, "concat", wrapStringConcat, 1);
-    try addMethodDynamic(ctx, string_proto, "replace", wrapStringReplace, 2);
-    try addMethodDynamic(ctx, string_proto, "replaceAll", wrapStringReplaceAll, 2);
+    try addMethodDynamic(ctx, string_proto, "charAt", wrap(stringCharAt), 1);
+    try addMethodDynamic(ctx, string_proto, "charCodeAt", wrap(stringCharCodeAt), 1);
+    try addMethodDynamic(ctx, string_proto, "indexOf", wrap(stringIndexOf), 1);
+    try addMethodDynamic(ctx, string_proto, "lastIndexOf", wrap(stringLastIndexOf), 1);
+    try addMethodDynamic(ctx, string_proto, "startsWith", wrap(stringStartsWith), 1);
+    try addMethodDynamic(ctx, string_proto, "endsWith", wrap(stringEndsWith), 1);
+    try addMethodDynamic(ctx, string_proto, "includes", wrap(stringIncludes), 1);
+    try addMethodDynamic(ctx, string_proto, "slice", wrap(stringSlice), 2);
+    try addMethodDynamic(ctx, string_proto, "substring", wrap(stringSubstring), 2);
+    try addMethodDynamic(ctx, string_proto, "toLowerCase", wrap(stringToLowerCase), 0);
+    try addMethodDynamic(ctx, string_proto, "toUpperCase", wrap(stringToUpperCase), 0);
+    try addMethodDynamic(ctx, string_proto, "trim", wrap(stringTrim), 0);
+    try addMethodDynamic(ctx, string_proto, "trimStart", wrap(stringTrimStart), 0);
+    try addMethodDynamic(ctx, string_proto, "trimEnd", wrap(stringTrimEnd), 0);
+    try addMethodDynamic(ctx, string_proto, "split", wrap(stringSplit), 2);
+    try addMethodDynamic(ctx, string_proto, "repeat", wrap(stringRepeat), 1);
+    try addMethodDynamic(ctx, string_proto, "padStart", wrap(stringPadStart), 2);
+    try addMethodDynamic(ctx, string_proto, "padEnd", wrap(stringPadEnd), 2);
+    try addMethodDynamic(ctx, string_proto, "concat", wrap(stringConcat), 1);
+    try addMethodDynamic(ctx, string_proto, "replace", wrap(stringReplace), 2);
+    try addMethodDynamic(ctx, string_proto, "replaceAll", wrap(stringReplaceAll), 2);
     ctx.string_prototype = string_proto;
 
     // Create String constructor function on global
     const string_ctor = try object.JSObject.create(allocator, root_class, null);
     // String.fromCharCode static method
-    try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrapStringFromCharCode, 1);
+    try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrap(stringFromCharCode), 1);
     try ctx.setGlobal(.String, string_ctor.toValue());
 
     // Create RegExp prototype with test/exec methods
     const regexp_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, regexp_proto, "test", wrapRegExpTest, 1);
-    try addMethodDynamic(ctx, regexp_proto, "exec", wrapRegExpExec, 1);
+    try addMethodDynamic(ctx, regexp_proto, "test", wrap(regExpTest), 1);
+    try addMethodDynamic(ctx, regexp_proto, "exec", wrap(regExpExec), 1);
 
     // Create RegExp constructor
-    const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapRegExpConstructor, .RegExp, 2);
+    const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(regExpConstructor), .RegExp, 2);
     try regexp_ctor.setProperty(allocator, .prototype, regexp_proto.toValue());
     try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
 
     // Create Generator prototype with next/return/throw methods
     const generator_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, generator_proto, "next", wrapGeneratorNext, 1);
-    try addMethodDynamic(ctx, generator_proto, "return", wrapGeneratorReturn, 1);
-    try addMethodDynamic(ctx, generator_proto, "throw", wrapGeneratorThrow, 1);
+    try addMethodDynamic(ctx, generator_proto, "next", wrap(generatorNext), 1);
+    try addMethodDynamic(ctx, generator_proto, "return", wrap(generatorReturn), 1);
+    try addMethodDynamic(ctx, generator_proto, "throw", wrap(generatorThrow), 1);
     ctx.generator_prototype = generator_proto;
 }
 
@@ -3857,10 +3324,6 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     return regexp_obj.toValue();
 }
 
-fn wrapRegExpConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return regExpConstructor(ctx, this, args);
-}
 
 /// RegExp.prototype.test(string) - Returns true if pattern matches
 pub fn regExpTest(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -3894,10 +3357,6 @@ pub fn regExpTest(ctx: *context.Context, this: value.JSValue, args: []const valu
     return if (compiled.match(input)) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-fn wrapRegExpTest(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return regExpTest(ctx, this, args);
-}
 
 /// RegExp.prototype.exec(string) - Returns match array or null
 pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -3956,10 +3415,6 @@ pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const valu
     return value.JSValue.null_val;
 }
 
-fn wrapRegExpExec(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return regExpExec(ctx, this, args);
-}
 
 /// Create a RegExp object from pattern and flags strings (used by parser for literals)
 pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []const u8) !*object.JSObject {
@@ -4033,10 +3488,6 @@ pub fn generatorNext(ctx: *context.Context, this: value.JSValue, _: []const valu
     return result_obj.toValue();
 }
 
-fn wrapGeneratorNext(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return generatorNext(ctx, this, args);
-}
 
 /// Generator.prototype.return(value) - Force generator to return
 pub fn generatorReturn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4063,10 +3514,6 @@ pub fn generatorReturn(ctx: *context.Context, this: value.JSValue, args: []const
     return result_obj.toValue();
 }
 
-fn wrapGeneratorReturn(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return generatorReturn(ctx, this, args);
-}
 
 /// Generator.prototype.throw(error) - Throw error into generator
 pub fn generatorThrow(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
@@ -4092,10 +3539,6 @@ pub fn generatorThrow(ctx: *context.Context, this: value.JSValue, _: []const val
     return result_obj.toValue();
 }
 
-fn wrapGeneratorThrow(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return generatorThrow(ctx, this, args);
-}
 
 // ============================================================================
 // Symbol implementation
@@ -4147,10 +3590,6 @@ pub fn symbolConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     return symbol;
 }
 
-fn wrapSymbolConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return symbolConstructor(ctx, this, args);
-}
 
 /// Symbol.for(key) - Get or create a symbol in the global registry
 pub fn symbolFor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4174,10 +3613,6 @@ pub fn symbolFor(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     return symbol;
 }
 
-fn wrapSymbolFor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return symbolFor(ctx, this, args);
-}
 
 /// Symbol.keyFor(sym) - Get the key for a registered symbol
 pub fn symbolKeyFor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4201,10 +3636,6 @@ pub fn symbolKeyFor(ctx: *context.Context, _: value.JSValue, args: []const value
     return value.JSValue.undefined_val;
 }
 
-fn wrapSymbolKeyFor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return symbolKeyFor(ctx, this, args);
-}
 
 /// Symbol.prototype.toString() - Get symbol as string
 pub fn symbolToString(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
@@ -4221,10 +3652,6 @@ pub fn symbolToString(ctx: *context.Context, this: value.JSValue, _: []const val
     return ctx.createString("Symbol()") catch return value.JSValue.undefined_val;
 }
 
-fn wrapSymbolToString(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return symbolToString(ctx, this, args);
-}
 
 /// Symbol.prototype.description getter
 pub fn symbolDescription(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
@@ -4238,10 +3665,6 @@ pub fn symbolDescription(ctx: *context.Context, this: value.JSValue, _: []const 
     return value.JSValue.undefined_val;
 }
 
-fn wrapSymbolDescription(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return symbolDescription(ctx, this, args);
-}
 
 // ============================================================================
 // WeakMap implementation
@@ -4309,10 +3732,6 @@ pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     return weak_map.toValue();
 }
 
-fn wrapWeakMapConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakMapConstructor(ctx, this, args);
-}
 
 /// WeakMap.prototype.get(key)
 pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4329,10 +3748,6 @@ pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.
     return data.get(args[0]) orelse value.JSValue.undefined_val;
 }
 
-fn wrapWeakMapGet(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakMapGet(ctx, this, args);
-}
 
 /// WeakMap.prototype.set(key, value)
 pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4350,10 +3765,6 @@ pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.
     return this; // Return the WeakMap for chaining
 }
 
-fn wrapWeakMapSet(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakMapSet(ctx, this, args);
-}
 
 /// WeakMap.prototype.has(key)
 pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4370,10 +3781,6 @@ pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.
     return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-fn wrapWeakMapHas(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakMapHas(ctx, this, args);
-}
 
 /// WeakMap.prototype.delete(key)
 pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4390,10 +3797,6 @@ pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const val
     return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-fn wrapWeakMapDelete(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakMapDelete(ctx, this, args);
-}
 
 // ============================================================================
 // WeakSet implementation
@@ -4454,10 +3857,6 @@ pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     return weak_set.toValue();
 }
 
-fn wrapWeakSetConstructor(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakSetConstructor(ctx, this, args);
-}
 
 /// WeakSet.prototype.add(value)
 pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4475,10 +3874,6 @@ pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.
     return this; // Return the WeakSet for chaining
 }
 
-fn wrapWeakSetAdd(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakSetAdd(ctx, this, args);
-}
 
 /// WeakSet.prototype.has(value)
 pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4495,10 +3890,6 @@ pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.
     return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-fn wrapWeakSetHas(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakSetHas(ctx, this, args);
-}
 
 /// WeakSet.prototype.delete(value)
 pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -4515,10 +3906,6 @@ pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const val
     return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-fn wrapWeakSetDelete(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    return weakSetDelete(ctx, this, args);
-}
 
 /// Initialize WeakMap and WeakSet built-ins
 pub fn initWeakCollections(ctx: *context.Context) !void {
@@ -4527,24 +3914,24 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
 
     // Create WeakMap prototype
     const weak_map_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, weak_map_proto, "get", wrapWeakMapGet, 1);
-    try addMethodDynamic(ctx, weak_map_proto, "set", wrapWeakMapSet, 2);
-    try addMethodDynamic(ctx, weak_map_proto, "has", wrapWeakMapHas, 1);
-    try addMethodDynamic(ctx, weak_map_proto, "delete", wrapWeakMapDelete, 1);
+    try addMethodDynamic(ctx, weak_map_proto, "get", wrap(weakMapGet), 1);
+    try addMethodDynamic(ctx, weak_map_proto, "set", wrap(weakMapSet), 2);
+    try addMethodDynamic(ctx, weak_map_proto, "has", wrap(weakMapHas), 1);
+    try addMethodDynamic(ctx, weak_map_proto, "delete", wrap(weakMapDelete), 1);
 
     // Create WeakMap constructor
-    const weak_map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakMapConstructor, .WeakMap, 0);
+    const weak_map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(weakMapConstructor), .WeakMap, 0);
     try weak_map_ctor.setProperty(allocator, .prototype, weak_map_proto.toValue());
     try ctx.setGlobal(.WeakMap, weak_map_ctor.toValue());
 
     // Create WeakSet prototype
     const weak_set_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, weak_set_proto, "add", wrapWeakSetAdd, 1);
-    try addMethodDynamic(ctx, weak_set_proto, "has", wrapWeakSetHas, 1);
-    try addMethodDynamic(ctx, weak_set_proto, "delete", wrapWeakSetDelete, 1);
+    try addMethodDynamic(ctx, weak_set_proto, "add", wrap(weakSetAdd), 1);
+    try addMethodDynamic(ctx, weak_set_proto, "has", wrap(weakSetHas), 1);
+    try addMethodDynamic(ctx, weak_set_proto, "delete", wrap(weakSetDelete), 1);
 
     // Create WeakSet constructor
-    const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakSetConstructor, .WeakSet, 0);
+    const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(weakSetConstructor), .WeakSet, 0);
     try weak_set_ctor.setProperty(allocator, .prototype, weak_set_proto.toValue());
     try ctx.setGlobal(.WeakSet, weak_set_ctor.toValue());
 }
@@ -4556,16 +3943,16 @@ pub fn initSymbol(ctx: *context.Context) !void {
 
     // Create Symbol prototype
     const symbol_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, symbol_proto, "toString", wrapSymbolToString, 0);
-    try addMethodDynamic(ctx, symbol_proto, "valueOf", wrapSymbolDescription, 0);
+    try addMethodDynamic(ctx, symbol_proto, "toString", wrap(symbolToString), 0);
+    try addMethodDynamic(ctx, symbol_proto, "valueOf", wrap(symbolDescription), 0);
 
     // Create Symbol constructor
-    const symbol_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSymbolConstructor, .Symbol, 1);
+    const symbol_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(symbolConstructor), .Symbol, 1);
     try symbol_ctor.setProperty(allocator, .prototype, symbol_proto.toValue());
 
     // Add static methods
-    try addMethodDynamic(ctx, symbol_ctor, "for", wrapSymbolFor, 1);
-    try addMethodDynamic(ctx, symbol_ctor, "keyFor", wrapSymbolKeyFor, 1);
+    try addMethodDynamic(ctx, symbol_ctor, "for", wrap(symbolFor), 1);
+    try addMethodDynamic(ctx, symbol_ctor, "keyFor", wrap(symbolKeyFor), 1);
 
     // Add well-known symbols as static properties
     const iterator_sym = try createWellKnownSymbol(allocator, .iterator, "Symbol.iterator");
