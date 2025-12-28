@@ -628,6 +628,16 @@ fn jsxH(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!z
 
     // Set tag (first argument) using predefined atom
     if (args.len > 0) {
+        // Debug: log tag value when it's a component function
+        if (args[0].isCallable()) {
+            const func_obj = args[0].toPtr(zq.JSObject);
+            std.log.debug("jsxH: storing component tag, class_id={} is_callable={} slot0_isPtr={} slot1_isUndefined={}", .{
+                @intFromEnum(func_obj.class_id),
+                func_obj.flags.is_callable,
+                func_obj.inline_slots[0].isPtr(),
+                func_obj.inline_slots[1].isUndefined(),
+            });
+        }
         try node.setProperty(ctx.allocator, zq.Atom.tag, args[0]);
     } else {
         try node.setProperty(ctx.allocator, zq.Atom.tag, zq.JSValue.null_val);

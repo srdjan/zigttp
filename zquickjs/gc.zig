@@ -537,10 +537,10 @@ pub const GC = struct {
 
     /// Update pointers within a single object
     fn updateObjectPointers(self: *GC, ptr: *anyopaque) void {
-        // In a real implementation, we'd need object layout information
-        // to know which fields are pointers. For now, this is a placeholder.
-        // The actual implementation would iterate object slots and update
-        // any pointers that have forwarding addresses.
+        // TODO: Implement proper pointer updating when GC is integrated with object allocation.
+        // Currently objects are allocated via allocator.create(), not GC nursery, so this is unused.
+        // When GC is properly integrated, this should update inline_slots, overflow_slots,
+        // and prototype pointers within JSObject to point to new forwarded locations.
         _ = self;
         _ = ptr;
     }
