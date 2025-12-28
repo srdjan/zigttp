@@ -162,7 +162,7 @@ export fn JS_NewFloat64(ctx: ?*JSContext, d: f64) JSValue {
 
     const float_box = allocator.create(value.JSValue.Float64Box) catch return JSValue.undefined_val;
     float_box.* = .{
-        .header = 2, // MemTag.float64
+        .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
         ._pad = 0,
         .value = d,
     };
@@ -585,7 +585,7 @@ export fn JS_Eval(ctx: ?*JSContext, input: ?[*]const u8, input_len: usize, filen
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
-        .local_count = p.local_count,
+        .local_count = p.max_local_count,
         .stack_size = 256,
         .flags = .{},
         .code = code,

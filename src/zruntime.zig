@@ -305,7 +305,7 @@ pub const Runtime = struct {
             .header = .{},
             .name_atom = 0,
             .arg_count = 0,
-            .local_count = p.local_count,
+            .local_count = p.max_local_count,
             .stack_size = 256,
             .flags = .{},
             .code = bytecode_data,
@@ -982,4 +982,87 @@ test "RuntimePool basic operations" {
 
     pool.release(rt1);
     pool.release(rt2);
+}
+
+test "string prototype methods are callable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const proto = rt.ctx.string_prototype orelse return error.NoRootClass;
+    const split_val = proto.getProperty(zq.Atom.split) orelse return error.NoHandler;
+    try std.testing.expect(split_val.isCallable());
+
+    try rt.loadHandler("function handler(req){ return Response.text(typeof ''.split); }", "<test>");
+
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("function", response.body);
+}
+
+test "request body split works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        "function handler(req){ var parts = req.body.split('&'); return Response.text('' + parts.length); }";
+    try rt.loadHandler(handler_code, "<test>");
+
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = try allocator.dupe(u8, "a=1&b=2"),
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("2", response.body);
+}
+
+test "for loop locals preserve numeric values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        "function handler(req){ for (var i=0; i<1; i++){ return Response.text(typeof i); } return Response.text('none'); }";
+    try rt.loadHandler(handler_code, "<test>");
+
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("number", response.body);
 }

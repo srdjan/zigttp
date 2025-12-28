@@ -370,7 +370,7 @@ pub const Heap = struct {
 
             const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(node));
             box.* = .{
-                .header = @as(u32, 2) | ((@as(u32, @intCast(size / 8))) << 5), // tag=float64(2), size_words in upper bits
+                .header = MemBlockHeader.init(.float64, size),
                 ._pad = 0,
                 .value = val,
             };

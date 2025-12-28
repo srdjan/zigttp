@@ -418,7 +418,7 @@ pub const GC = struct {
         const ptr = try self.allocWithGC(size);
         const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(ptr));
         box.* = .{
-            .header = 2, // MemTag.float64
+            .header = heap.MemBlockHeader.init(.float64, size),
             ._pad = 0,
             .value = v,
         };

@@ -4,6 +4,7 @@
 //! Supports ES5 + limited ES6 features matching mquickjs capabilities.
 
 const std = @import("std");
+const heap = @import("heap.zig");
 const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
@@ -711,6 +712,7 @@ pub const Parser = struct {
     // Local variables
     locals: [256]Local,
     local_count: u8,
+    max_local_count: u8,
     scope_depth: u8,
 
     // Break/continue contexts
@@ -779,6 +781,7 @@ pub const Parser = struct {
             .constants = std.array_list.Managed(value.JSValue).init(allocator),
             .locals = undefined,
             .local_count = 0,
+            .max_local_count = 0,
             .scope_depth = 0, // Start in global scope
             .break_stack = undefined,
             .break_depth = 0,
@@ -1403,12 +1406,14 @@ pub const Parser = struct {
         const outer_constants = self.constants;
         const outer_locals = self.locals;
         const outer_local_count = self.local_count;
+        const outer_max_local_count = self.max_local_count;
         const outer_scope_depth = self.scope_depth;
 
         // Initialize new function scope
         self.code = std.array_list.Managed(u8).init(self.allocator);
         self.constants = std.array_list.Managed(value.JSValue).init(self.allocator);
         self.local_count = 0;
+        self.max_local_count = 0;
         self.scope_depth = 1;
 
         // Add parameters as locals
@@ -1430,6 +1435,9 @@ pub const Parser = struct {
                 .is_const = false,
             };
             self.local_count += 1;
+            if (self.local_count > self.max_local_count) {
+                self.max_local_count = self.local_count;
+            }
         }
 
         // Emit default value initialization code
@@ -1509,7 +1517,7 @@ pub const Parser = struct {
             .header = .{},
             .name_atom = name_atom,
             .arg_count = param_count,
-            .local_count = self.local_count,
+            .local_count = self.max_local_count,
             .stack_size = 256,
             .flags = .{ .is_generator = is_generator, .is_async = is_async },
             .code = code_copy,
@@ -1526,6 +1534,7 @@ pub const Parser = struct {
         self.constants = outer_constants;
         self.locals = outer_locals;
         self.local_count = outer_local_count;
+        self.max_local_count = outer_max_local_count;
         self.scope_depth = outer_scope_depth;
 
         // Store function bytecode in constant pool and emit appropriate opcode
@@ -1556,6 +1565,9 @@ pub const Parser = struct {
                 .is_const = is_const,
             };
             self.local_count += 1;
+            if (self.local_count > self.max_local_count) {
+                self.max_local_count = self.local_count;
+            }
             // Store the value in the local slot
             try self.emitOp(.put_loc);
             try self.emitByte(idx);
@@ -1577,6 +1589,9 @@ pub const Parser = struct {
             .is_const = is_const,
         };
         self.local_count += 1;
+        if (self.local_count > self.max_local_count) {
+            self.max_local_count = self.local_count;
+        }
     }
 
     /// Resolve a local variable by name, returning its slot index.
@@ -1627,11 +1642,8 @@ pub const Parser = struct {
     }
 
     fn emitScopeExit(self: *Parser, target_depth: u8) Error!void {
-        var i: usize = self.local_count;
-        while (i > 0 and self.locals[i - 1].depth > target_depth) {
-            try self.emitOp(.drop);
-            i -= 1;
-        }
+        _ = self;
+        _ = target_depth;
     }
 
     // ========================================================================
@@ -1776,16 +1788,17 @@ pub const Parser = struct {
             }
 
             // Not for...of or for...in, treat as regular for with var declaration
-            // Rewind and parse normally
-            self.tokenizer.pos = self.previous.start;
-            self.tokenizer.pos = self.previous.start;
-            self.advance();
-            if (is_const) {
-                // We already consumed 'const', need to handle this differently
-                try self.varDeclaration(true);
+            // Parse initializer directly without rewinding tokenizer.
+            if (self.match(.assign)) {
+                try self.expression();
             } else {
-                try self.varDeclaration(false);
+                try self.emitOp(.push_undefined);
             }
+            try self.defineVariable(var_name, is_const);
+            _ = self.match(.semicolon);
+
+            try self.regularForLoop();
+            return;
         } else if (self.match(.semicolon)) {
             // No initializer - regular for loop
         } else if (!is_const and !is_let and !is_var) {
@@ -1815,6 +1828,7 @@ pub const Parser = struct {
             const body_jump = try self.emitJump(.goto);
             const increment_start = @as(u32, @intCast(self.code.items.len));
             try self.expression();
+            try self.emitOp(.drop);
             try self.emitLoop(loop_start);
             loop_start = increment_start;
             self.patchJump(body_jump);
@@ -2223,7 +2237,7 @@ pub const Parser = struct {
             // Float goes in constant pool as Float64Box
             const float_box = self.allocator.create(value.JSValue.Float64Box) catch return error.OutOfMemory;
             float_box.* = .{
-                .header = 2, // MemTag.float64
+                .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
                 ._pad = 0,
                 .value = num,
             };
@@ -2237,9 +2251,162 @@ pub const Parser = struct {
         const text = self.previous.text(self.tokenizer.source);
         // Remove quotes and process escapes
         const content = text[1 .. text.len - 1];
-        const const_idx = try self.addStringConstant(content);
+        const unescaped = try self.unescapeStringLiteral(content);
+        defer if (unescaped) |buf| self.allocator.free(buf);
+        const const_idx = try self.addStringConstant(unescaped orelse content);
         try self.emitOp(.push_const);
         try self.emitU16(const_idx);
+    }
+
+    fn unescapeStringLiteral(self: *Parser, content: []const u8) !?[]u8 {
+        if (std.mem.indexOfScalar(u8, content, '\\') == null) return null;
+
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+
+        var i: usize = 0;
+        while (i < content.len) {
+            const c = content[i];
+            if (c != '\\') {
+                try out.append(self.allocator, c);
+                i += 1;
+                continue;
+            }
+
+            i += 1;
+            if (i >= content.len) {
+                try out.append(self.allocator, '\\');
+                break;
+            }
+
+            const esc = content[i];
+            switch (esc) {
+                'n' => {
+                    try out.append(self.allocator, '\n');
+                    i += 1;
+                },
+                'r' => {
+                    try out.append(self.allocator, '\r');
+                    i += 1;
+                },
+                't' => {
+                    try out.append(self.allocator, '\t');
+                    i += 1;
+                },
+                'b' => {
+                    try out.append(self.allocator, 0x08);
+                    i += 1;
+                },
+                'f' => {
+                    try out.append(self.allocator, 0x0c);
+                    i += 1;
+                },
+                'v' => {
+                    try out.append(self.allocator, 0x0b);
+                    i += 1;
+                },
+                '\\' => {
+                    try out.append(self.allocator, '\\');
+                    i += 1;
+                },
+                '\'' => {
+                    try out.append(self.allocator, '\'');
+                    i += 1;
+                },
+                '"' => {
+                    try out.append(self.allocator, '"');
+                    i += 1;
+                },
+                '0' => {
+                    try out.append(self.allocator, 0);
+                    i += 1;
+                },
+                'x' => {
+                    if (i + 2 < content.len) {
+                        const hi = hexValue(content[i + 1]);
+                        const lo = hexValue(content[i + 2]);
+                        if (hi != null and lo != null) {
+                            const byte: u8 = @intCast((hi.? << 4) | lo.?);
+                            try out.append(self.allocator, byte);
+                            i += 3;
+                            continue;
+                        }
+                    }
+                    try out.append(self.allocator, 'x');
+                    i += 1;
+                },
+                'u' => {
+                    if (i + 1 < content.len and content[i + 1] == '{') {
+                        var j: usize = i + 2;
+                        var cp: u21 = 0;
+                        var saw_digit = false;
+                        var invalid = false;
+                        while (j < content.len and content[j] != '}') : (j += 1) {
+                            const hv = hexValue(content[j]) orelse {
+                                invalid = true;
+                                break;
+                            };
+                            saw_digit = true;
+                            cp = (cp << 4) | @as(u21, hv);
+                        }
+                        if (!invalid and saw_digit and j < content.len and content[j] == '}') {
+                            try appendCodepoint(&out, self.allocator, cp);
+                            i = j + 1;
+                            continue;
+                        }
+                    } else if (i + 4 < content.len) {
+                        const h0 = hexValue(content[i + 1]);
+                        const h1 = hexValue(content[i + 2]);
+                        const h2 = hexValue(content[i + 3]);
+                        const h3 = hexValue(content[i + 4]);
+                        if (h0 != null and h1 != null and h2 != null and h3 != null) {
+                            const cp: u21 = (@as(u21, h0.?) << 12) |
+                                (@as(u21, h1.?) << 8) |
+                                (@as(u21, h2.?) << 4) |
+                                @as(u21, h3.?);
+                            try appendCodepoint(&out, self.allocator, cp);
+                            i += 5;
+                            continue;
+                        }
+                    }
+                    try out.append(self.allocator, 'u');
+                    i += 1;
+                },
+                '\n' => {
+                    i += 1;
+                },
+                '\r' => {
+                    i += 1;
+                    if (i < content.len and content[i] == '\n') {
+                        i += 1;
+                    }
+                },
+                else => {
+                    try out.append(self.allocator, esc);
+                    i += 1;
+                },
+            }
+        }
+
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    fn hexValue(c: u8) ?u8 {
+        return switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => null,
+        };
+    }
+
+    fn appendCodepoint(out: *std.ArrayList(u8), allocator: std.mem.Allocator, cp: u21) !void {
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &buf) catch {
+            try out.append(allocator, '?');
+            return;
+        };
+        try out.appendSlice(allocator, buf[0..len]);
     }
 
     fn regexLiteral(self: *Parser, _: bool) !void {
@@ -2491,12 +2658,14 @@ pub const Parser = struct {
         const outer_constants = self.constants;
         const outer_locals = self.locals;
         const outer_local_count = self.local_count;
+        const outer_max_local_count = self.max_local_count;
         const outer_scope_depth = self.scope_depth;
 
         // Initialize new function scope
         self.code = std.array_list.Managed(u8).init(self.allocator);
         self.constants = std.array_list.Managed(value.JSValue).init(self.allocator);
         self.local_count = 0;
+        self.max_local_count = 0;
         self.scope_depth = 1;
 
         // Add parameters as locals
@@ -2512,6 +2681,9 @@ pub const Parser = struct {
                 .is_const = false,
             };
             self.local_count += 1;
+            if (self.local_count > self.max_local_count) {
+                self.max_local_count = self.local_count;
+            }
         }
 
         // Compile body
@@ -2536,7 +2708,7 @@ pub const Parser = struct {
             .header = .{},
             .name_atom = 0, // Arrow functions are anonymous
             .arg_count = param_count,
-            .local_count = self.local_count,
+            .local_count = self.max_local_count,
             .stack_size = 256,
             .flags = .{},
             .code = code_copy,
@@ -2553,6 +2725,7 @@ pub const Parser = struct {
         self.constants = outer_constants;
         self.locals = outer_locals;
         self.local_count = outer_local_count;
+        self.max_local_count = outer_max_local_count;
         self.scope_depth = outer_scope_depth;
 
         // Store function bytecode in constant pool and emit make_function
@@ -3332,7 +3505,6 @@ pub const Parser = struct {
     fn endScope(self: *Parser) !void {
         self.scope_depth -= 1;
         while (self.local_count > 0 and self.locals[self.local_count - 1].depth > self.scope_depth) {
-            try self.emitOp(.drop);
             self.local_count -= 1;
         }
     }
@@ -3724,4 +3896,50 @@ test "Parser export const" {
 
     try std.testing.expect(code.len > 0);
     try std.testing.expect(parser.is_module);
+}
+
+test "parser emits split atom for string member access" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var parser = Parser.init(allocator, "function handler(){ return ''.split; }", &strings, &atoms);
+    defer parser.deinit();
+    _ = try parser.parse();
+
+    const make_fn = @intFromEnum(bytecode.Opcode.make_function);
+    var func_const_idx: ?u16 = null;
+    var i: usize = 0;
+    while (i + 2 < parser.code.items.len) : (i += 1) {
+        if (parser.code.items[i] == make_fn) {
+            func_const_idx = @as(u16, parser.code.items[i + 1]) |
+                (@as(u16, parser.code.items[i + 2]) << 8);
+            break;
+        }
+    }
+    try std.testing.expect(func_const_idx != null);
+
+    const func_val = parser.constants.items[func_const_idx.?];
+    const func_bc = func_val.toPtr(bytecode.FunctionBytecode);
+
+    const get_field = @intFromEnum(bytecode.Opcode.get_field);
+    var found_split = false;
+    var j: usize = 0;
+    while (j + 2 < func_bc.code.len) : (j += 1) {
+        if (func_bc.code[j] == get_field) {
+            const atom_val = @as(u16, func_bc.code[j + 1]) |
+                (@as(u16, func_bc.code[j + 2]) << 8);
+            if (atom_val == @intFromEnum(object.Atom.split)) {
+                found_split = true;
+                break;
+            }
+        }
+    }
+
+    try std.testing.expect(found_split);
 }

@@ -239,7 +239,8 @@ pub const Interpreter = struct {
                 .put_loc => {
                     const idx = self.pc[0];
                     self.pc += 1;
-                    self.ctx.setLocal(idx, self.ctx.pop());
+                    const val = self.ctx.pop();
+                    self.ctx.setLocal(idx, val);
                 },
 
                 .get_loc_0 => try self.ctx.push(self.ctx.getLocal(0)),
@@ -444,6 +445,11 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                },
+                .loop => {
+                    const offset = readI16(self.pc);
+                    self.pc += 2;
+                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) - offset)));
                 },
 
                 .if_true => {
@@ -2021,7 +2027,7 @@ test "End-to-end: parse and execute JS" {
             .header = .{},
             .name_atom = 0,
             .arg_count = 0,
-            .local_count = p.local_count,
+            .local_count = p.max_local_count,
             .stack_size = 256,
             .flags = .{},
             .code = code,
@@ -2052,7 +2058,7 @@ test "End-to-end: parse and execute JS" {
             .header = .{},
             .name_atom = 0,
             .arg_count = 0,
-            .local_count = p.local_count,
+            .local_count = p.max_local_count,
             .stack_size = 256,
             .flags = .{},
             .code = code,
@@ -2364,7 +2370,7 @@ test "End-to-end: function declaration" {
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
-        .local_count = p.local_count,
+        .local_count = p.max_local_count,
         .stack_size = 256,
         .flags = .{},
         .code = code,
@@ -2501,7 +2507,7 @@ test "End-to-end: default parameters" {
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
-        .local_count = p.local_count,
+        .local_count = p.max_local_count,
         .stack_size = 256,
         .flags = .{},
         .code = code,

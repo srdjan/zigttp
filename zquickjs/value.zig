@@ -4,6 +4,7 @@
 //! Compatible with C mquickjs JSValue encoding.
 
 const std = @import("std");
+const heap = @import("heap.zig");
 
 /// 64-bit NaN-boxed JavaScript value
 pub const JSValue = packed struct {
@@ -110,7 +111,7 @@ pub const JSValue = packed struct {
 
     /// Float64 box header (heap-allocated)
     pub const Float64Box = extern struct {
-        header: u32, // MemTag.float64 + gc_mark
+        header: heap.MemBlockHeader,
         _pad: u32,
         value: f64,
 
@@ -123,7 +124,7 @@ pub const JSValue = packed struct {
     pub inline fn isFloat64(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const box = self.toPtr(Float64Box);
-        return (box.header & 0xF) == 2; // MemTag.float64
+        return box.header.tag == .float64;
     }
 
     /// Alias for isFloat64 for API compatibility
@@ -313,7 +314,7 @@ pub const JSValue = packed struct {
         if (self.isBool()) return "boolean";
         if (self.isNumber()) return "number";
         if (self.isString()) return "string";
-        if (self.isFunction()) return "function";
+        if (self.isCallable()) return "function";
         return "object";
     }
 

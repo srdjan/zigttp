@@ -333,6 +333,9 @@ pub const AtomTable = struct {
 
     /// Intern a string and get its atom
     pub fn intern(self: *AtomTable, s: []const u8) !object.Atom {
+        if (object.lookupPredefinedAtom(s)) |predef| {
+            return predef;
+        }
         if (self.strings.get(s)) |existing| {
             return existing;
         }
