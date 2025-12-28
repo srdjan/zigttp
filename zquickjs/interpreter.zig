@@ -1117,24 +1117,28 @@ pub const Interpreter = struct {
 
         // Check if callable
         if (!func_val.isCallable()) {
-            // Debug: log the non-callable value's type
+            // Debug: log the non-callable value's type and current function context
             const call_type: []const u8 = if (is_method) "call_method" else "call";
+            const current_fn_name: []const u8 = if (self.current_func) |cf|
+                (self.ctx.atoms.getName(@enumFromInt(cf.name_atom)) orelse object.Atom.toPredefinedName(@enumFromInt(cf.name_atom)) orelse "<anon>")
+            else
+                "<top-level>";
             if (func_val.isUndefined()) {
-                std.log.err("doCall: NotCallable - function is undefined ({s}, argc={})", .{ call_type, argc });
+                std.log.err("doCall: NotCallable - function is undefined ({s}, argc={}) in {s}", .{ call_type, argc, current_fn_name });
             } else if (func_val.isNull()) {
-                std.log.err("doCall: NotCallable - function is null ({s}, argc={})", .{ call_type, argc });
+                std.log.err("doCall: NotCallable - function is null ({s}, argc={}) in {s}", .{ call_type, argc, current_fn_name });
             } else if (func_val.isInt()) {
-                std.log.err("doCall: NotCallable - function is int {} ({s}, argc={})", .{ func_val.getInt(), call_type, argc });
+                std.log.err("doCall: NotCallable - function is int {} ({s}, argc={}) in {s}", .{ func_val.getInt(), call_type, argc, current_fn_name });
             } else if (func_val.isPtr()) {
                 // Check what kind of pointer it is
                 if (func_val.isObject()) {
                     const obj = object.JSObject.fromValue(func_val);
-                    std.log.err("doCall: NotCallable - object class_id={} is_callable={} ({s}, argc={})", .{ @intFromEnum(obj.class_id), obj.flags.is_callable, call_type, argc });
+                    std.log.err("doCall: NotCallable - object class_id={} is_callable={} ({s}, argc={}) in {s}", .{ @intFromEnum(obj.class_id), obj.flags.is_callable, call_type, argc, current_fn_name });
                 } else {
-                    std.log.err("doCall: NotCallable - function is ptr 0x{x} ({s}, argc={})", .{ func_val.raw, call_type, argc });
+                    std.log.err("doCall: NotCallable - function is ptr 0x{x} ({s}, argc={}) in {s}", .{ func_val.raw, call_type, argc, current_fn_name });
                 }
             } else {
-                std.log.err("doCall: NotCallable - function raw=0x{x} ({s}, argc={})", .{ func_val.raw, call_type, argc });
+                std.log.err("doCall: NotCallable - function raw=0x{x} ({s}, argc={}) in {s}", .{ func_val.raw, call_type, argc, current_fn_name });
             }
             return error.NotCallable;
         }
