@@ -373,7 +373,7 @@ pub const Interpreter = struct {
 
                 .ret_undefined => return value.JSValue.undefined_val,
 
-                .@"throw" => {
+                .throw => {
                     const exception_val = self.ctx.pop();
                     self.ctx.throwException(exception_val);
 
@@ -408,8 +408,7 @@ pub const Interpreter = struct {
                     self.pc += 2;
                     // Create array object with Array.prototype
                     const obj = try self.createArray();
-                    try obj.setProperty(self.ctx.allocator, .length, value.JSValue.fromInt(@intCast(length)));
-                    obj.class_id = .array;
+                    obj.setArrayLength(@intCast(length));
                     try self.ctx.push(obj.toValue());
                 },
 
@@ -424,6 +423,11 @@ pub const Interpreter = struct {
                         if (obj.getProperty(atom)) |prop_val| {
                             try self.ctx.push(prop_val);
                         } else {
+                            const name = if (atom.isPredefined())
+                                (atom.toPredefinedName() orelse "<predef>")
+                            else
+                                (self.ctx.atoms.getName(atom) orelse "<dynamic>");
+                            std.log.err("get_field miss: atom={} name={s} class_id={}", .{ @intFromEnum(atom), name, obj.class_id });
                             try self.ctx.push(value.JSValue.undefined_val);
                         }
                     } else if (obj_val.isString()) {
@@ -466,12 +470,24 @@ pub const Interpreter = struct {
 
                     if (obj_val.isObject() and index_val.isInt()) {
                         const obj = object.JSObject.fromValue(obj_val);
-                        // Convert integer index to atom (simplified)
                         const idx = index_val.getInt();
                         if (idx >= 0) {
-                            // For arrays, access element by index
-                            // For now, treat index as a slot offset (simplified)
-                            try self.ctx.push(obj.getSlot(@intCast(idx)));
+                            if (obj.class_id == .array) {
+                                const val = obj.getIndex(@intCast(idx)) orelse value.JSValue.undefined_val;
+                                try self.ctx.push(val);
+                            } else {
+                                var idx_buf: [32]u8 = undefined;
+                                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
+                                    try self.ctx.push(value.JSValue.undefined_val);
+                                    continue :dispatch;
+                                };
+                                const atom = self.ctx.atoms.intern(idx_slice) catch {
+                                    try self.ctx.push(value.JSValue.undefined_val);
+                                    continue :dispatch;
+                                };
+                                const val = obj.getProperty(atom) orelse value.JSValue.undefined_val;
+                                try self.ctx.push(val);
+                            }
                         } else {
                             try self.ctx.push(value.JSValue.undefined_val);
                         }
@@ -489,7 +505,14 @@ pub const Interpreter = struct {
                         const obj = object.JSObject.fromValue(obj_val);
                         const idx = index_val.getInt();
                         if (idx >= 0) {
-                            obj.setSlot(@intCast(idx), val);
+                            if (obj.class_id == .array) {
+                                try obj.setIndex(self.ctx.allocator, @intCast(idx), val);
+                            } else {
+                                var idx_buf: [32]u8 = undefined;
+                                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch continue :dispatch;
+                                const atom = self.ctx.atoms.intern(idx_slice) catch continue :dispatch;
+                                try obj.setProperty(self.ctx.allocator, atom, val);
+                            }
                         }
                     }
                 },
@@ -518,7 +541,6 @@ pub const Interpreter = struct {
                     self.pc += 2;
                     const atom: object.Atom = @enumFromInt(atom_idx);
                     const val = self.ctx.pop();
-                    std.log.debug("define_global: atom_idx={} atom={} is_callable={}", .{ atom_idx, @intFromEnum(atom), val.isCallable() });
                     try self.ctx.defineGlobal(atom, val);
                 },
 
@@ -953,7 +975,9 @@ pub const Interpreter = struct {
 
     fn createArray(self: *Interpreter) !*object.JSObject {
         const root_class = self.ctx.root_class orelse return error.NoRootClass;
-        return try object.JSObject.create(self.ctx.allocator, root_class, self.ctx.array_prototype);
+        const obj = try object.JSObject.createArray(self.ctx.allocator, root_class);
+        obj.prototype = self.ctx.array_prototype;
+        return obj;
     }
 
     fn getConstant(self: *Interpreter, idx: u16) !value.JSValue {
@@ -989,9 +1013,7 @@ pub const Interpreter = struct {
         const this_val = if (is_method) self.ctx.pop() else value.JSValue.undefined_val;
 
         // Check if callable
-        if (!func_val.isCallable()) {
-            return error.NotCallable;
-        }
+        if (!func_val.isCallable()) return error.NotCallable;
 
         // Get the function object
         const func_obj = object.JSObject.fromValue(func_val);
@@ -1739,14 +1761,11 @@ test "Interpreter local variables" {
 
     // Code: local0 = 10; local1 = 20; return local0 + local1
     const code = [_]u8{
-        @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.put_loc_0),
-        @intFromEnum(bytecode.Opcode.push_i8), 20,
-        @intFromEnum(bytecode.Opcode.put_loc_1),
-        @intFromEnum(bytecode.Opcode.get_loc_0),
-        @intFromEnum(bytecode.Opcode.get_loc_1),
-        @intFromEnum(bytecode.Opcode.add),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_i8),   10,
+        @intFromEnum(bytecode.Opcode.put_loc_0), @intFromEnum(bytecode.Opcode.push_i8),
+        20,                                      @intFromEnum(bytecode.Opcode.put_loc_1),
+        @intFromEnum(bytecode.Opcode.get_loc_0), @intFromEnum(bytecode.Opcode.get_loc_1),
+        @intFromEnum(bytecode.Opcode.add),       @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -1782,8 +1801,7 @@ test "Interpreter bitwise operations" {
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 0xFF,
         @intFromEnum(bytecode.Opcode.push_i8), 0x0F,
-        @intFromEnum(bytecode.Opcode.bit_and),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.bit_and), @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -1818,7 +1836,8 @@ test "Interpreter shift operations" {
     // Code: 1 << 4 = 16
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_1),
-        @intFromEnum(bytecode.Opcode.push_i8), 4,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        4,
         @intFromEnum(bytecode.Opcode.shl),
         @intFromEnum(bytecode.Opcode.ret),
     };
@@ -1856,8 +1875,7 @@ test "Interpreter comparison" {
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 5,
         @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.lt),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.lt),      @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -1891,11 +1909,9 @@ test "Interpreter conditional jump" {
     // Code: if (true) { return 42 } else { return 0 }
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_true),
-        @intFromEnum(bytecode.Opcode.if_false), 5, 0, // jump +5 if false
-        @intFromEnum(bytecode.Opcode.push_i8), 42,
-        @intFromEnum(bytecode.Opcode.ret),
-        @intFromEnum(bytecode.Opcode.push_0),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.if_false), 5,                                 0, // jump +5 if false
+        @intFromEnum(bytecode.Opcode.push_i8),  42,                                @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_0),   @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -1929,12 +1945,11 @@ test "Interpreter superinstruction get_loc_get_loc_add" {
 
     // Code: local0 = 7; local1 = 8; return local0 + local1 (using superinstruction)
     const code = [_]u8{
-        @intFromEnum(bytecode.Opcode.push_i8), 7,
-        @intFromEnum(bytecode.Opcode.put_loc_0),
-        @intFromEnum(bytecode.Opcode.push_i8), 8,
-        @intFromEnum(bytecode.Opcode.put_loc_1),
-        @intFromEnum(bytecode.Opcode.get_loc_get_loc_add), 0, 1,
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_i8),             7,
+        @intFromEnum(bytecode.Opcode.put_loc_0),           @intFromEnum(bytecode.Opcode.push_i8),
+        8,                                                 @intFromEnum(bytecode.Opcode.put_loc_1),
+        @intFromEnum(bytecode.Opcode.get_loc_get_loc_add), 0,
+        1,                                                 @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -1969,8 +1984,7 @@ test "Interpreter division produces float" {
     // Code: 7 / 2 = 3.5
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 7,
-        @intFromEnum(bytecode.Opcode.push_2),
-        @intFromEnum(bytecode.Opcode.div),
+        @intFromEnum(bytecode.Opcode.push_2),  @intFromEnum(bytecode.Opcode.div),
         @intFromEnum(bytecode.Opcode.ret),
     };
 
@@ -2007,8 +2021,7 @@ test "Interpreter modulo" {
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 17,
         @intFromEnum(bytecode.Opcode.push_i8), 5,
-        @intFromEnum(bytecode.Opcode.mod),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.mod),     @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -2045,7 +2058,7 @@ test "End-to-end: parse and execute JS" {
         var strings = string_mod.StringTable.init(allocator);
         defer strings.deinit();
 
-        var p = parser_mod.Parser.init(allocator, "1 + 2", &strings);
+        var p = parser_mod.Parser.init(allocator, "1 + 2", &strings, null);
         defer p.deinit();
 
         const code = try p.parse();
@@ -2076,7 +2089,7 @@ test "End-to-end: parse and execute JS" {
         var strings = string_mod.StringTable.init(allocator);
         defer strings.deinit();
 
-        var p = parser_mod.Parser.init(allocator, "var x = 10; x * 2", &strings);
+        var p = parser_mod.Parser.init(allocator, "var x = 10; x * 2", &strings, null);
         defer p.deinit();
 
         const code = try p.parse();
@@ -2378,7 +2391,7 @@ test "End-to-end: function declaration" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = parser_mod.Parser.init(allocator, "function add(a, b) { return a + b; } add(3, 4)", &strings);
+    var p = parser_mod.Parser.init(allocator, "function add(a, b) { return a + b; } add(3, 4)", &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -2514,7 +2527,7 @@ test "End-to-end: default parameters" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = parser_mod.Parser.init(allocator, "function greet(name = 'World') { return name; } greet()", &strings);
+    var p = parser_mod.Parser.init(allocator, "function greet(name = 'World') { return name; } greet()", &strings, null);
     defer p.deinit();
 
     const code = try p.parse();

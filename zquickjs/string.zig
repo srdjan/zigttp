@@ -200,13 +200,15 @@ fn simdIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
     while (i + 32 <= search_end) : (i += 32) {
         const chunk: Vec = haystack[i..][0..32].*;
         const matches = chunk == first_char;
+        const match_bytes: @Vector(32, u8) = @intFromBool(matches);
+        const match_array: [32]u8 = @bitCast(match_bytes);
 
         // Check if any matches
         if (@reduce(.Or, matches)) {
             // Found potential match, verify full needle
             var j: usize = 0;
             while (j < 32) : (j += 1) {
-                if (matches[j]) {
+                if (match_array[j] != 0) {
                     const pos = i + j;
                     if (pos + needle.len <= haystack.len) {
                         if (eqlStrings(haystack[pos..][0..needle.len], needle)) {

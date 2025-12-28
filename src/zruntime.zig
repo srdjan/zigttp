@@ -135,6 +135,9 @@ pub const Runtime = struct {
         const ctx = try zq.Context.init(allocator, gc_state, .{});
         errdefer ctx.deinit();
 
+        // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
+        try zq.builtins.initBuiltins(ctx);
+
         self.* = .{
             .allocator = allocator,
             .ctx = ctx,
@@ -282,7 +285,7 @@ pub const Runtime = struct {
         _ = filename;
 
         // Parse the source code
-        var p = zq.Parser.init(self.allocator, code, &self.strings);
+        var p = zq.Parser.init(self.allocator, code, &self.strings, &self.ctx.atoms);
         defer p.deinit();
 
         const bytecode_data = try p.parse();
@@ -752,7 +755,7 @@ fn renderNode(ctx: *zq.Context, allocator: std.mem.Allocator, node: zq.JSValue, 
 
             // Void elements
             const void_elements = [_][]const u8{
-                "area", "base", "br", "col", "embed", "hr", "img",
+                "area",  "base", "br",   "col",   "embed",  "hr",    "img",
                 "input", "link", "meta", "param", "source", "track", "wbr",
             };
             for (void_elements) |ve| {

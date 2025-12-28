@@ -4,11 +4,11 @@
 //! Supports ES5 + limited ES6 features matching mquickjs capabilities.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
+const context = @import("context.zig");
 
 /// Token types
 pub const TokenType = enum(u8) {
@@ -16,9 +16,9 @@ pub const TokenType = enum(u8) {
     number,
     string_literal,
     identifier,
-    @"true",
-    @"false",
-    @"null",
+    true,
+    false,
+    null,
     undefined,
 
     // Operators
@@ -668,9 +668,9 @@ fn getKeyword(text: []const u8) ?TokenType {
         .{ "export", .kw_export },
         .{ "from", .kw_from },
         .{ "as", .kw_as },
-        .{ "true", .@"true" },
-        .{ "false", .@"false" },
-        .{ "null", .@"null" },
+        .{ "true", .true },
+        .{ "false", .false },
+        .{ "null", .null },
         .{ "undefined", .undefined },
     };
 
@@ -719,6 +719,7 @@ pub const Parser = struct {
 
     // String table for interning
     strings: *string.StringTable,
+    atoms: ?*context.AtomTable,
 
     // Generator/async state
     in_generator: bool,
@@ -763,7 +764,7 @@ pub const Parser = struct {
         continue_count: usize,
     };
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8, strings: *string.StringTable) Parser {
+    pub fn init(allocator: std.mem.Allocator, source: []const u8, strings: *string.StringTable, atoms: ?*context.AtomTable) Parser {
         var parser = Parser{
             .tokenizer = Tokenizer.init(source),
             .current = undefined,
@@ -777,6 +778,7 @@ pub const Parser = struct {
             .break_stack = undefined,
             .break_depth = 0,
             .strings = strings,
+            .atoms = atoms,
             .in_generator = false,
             .in_async = false,
             .is_module = false,
@@ -968,10 +970,7 @@ pub const Parser = struct {
     }
 
     fn internAtom(self: *Parser, name: []const u8) !u32 {
-        if (lookupPredefinedAtom(name)) |atom| {
-            return @intFromEnum(atom);
-        }
-        return @as(u32, try self.addStringConstant(name));
+        return @as(u32, try self.getOrCreateAtom(name));
     }
 
     fn functionDeclaration(self: *Parser) Error!void {
@@ -1492,7 +1491,7 @@ pub const Parser = struct {
         const consts_copy = self.allocator.dupe(value.JSValue, self.constants.items) catch return error.OutOfMemory;
 
         // Get name atom
-        const name_atom: u32 = if (lookupPredefinedAtom(name)) |atom|
+        const name_atom: u32 = if (object.lookupPredefinedAtom(name)) |atom|
             @intFromEnum(atom)
         else
             0;
@@ -2034,7 +2033,7 @@ pub const Parser = struct {
         // throw requires an expression
         try self.expression();
         _ = self.match(.semicolon);
-        try self.emitOp(.@"throw");
+        try self.emitOp(.throw);
     }
 
     fn tryStatement(self: *Parser) !void {
@@ -2180,9 +2179,9 @@ pub const Parser = struct {
     // Prefix parsers
     fn literal(self: *Parser, _: bool) !void {
         switch (self.previous.type) {
-            .@"true" => try self.emitOp(.push_true),
-            .@"false" => try self.emitOp(.push_false),
-            .@"null" => try self.emitOp(.push_null),
+            .true => try self.emitOp(.push_true),
+            .false => try self.emitOp(.push_false),
+            .null => try self.emitOp(.push_null),
             .undefined => try self.emitOp(.push_undefined),
             else => unreachable,
         }
@@ -2623,12 +2622,9 @@ pub const Parser = struct {
 
                     // For now, fall back to simpler index tracking if no spread
                     if (!has_spread) {
-                        // No spread yet - we can use static index
-                        // Swap: [index, array]
-                        try self.emitOp(.swap);
-                        // Drop index: [array]
+                        // No spread yet - we can use static indexing
+                        // Stack is [array, index]; drop index to keep array
                         try self.emitOp(.drop);
-                        // Emit the rest with static indexing
                         try self.arrayLiteralStatic();
                         return;
                     }
@@ -2654,7 +2650,6 @@ pub const Parser = struct {
         try self.consume(.rbracket, "Expected ']' after array elements.");
 
         // Drop the index, keep array
-        try self.emitOp(.swap);
         try self.emitOp(.drop);
         // Stack: [array]
     }
@@ -3223,7 +3218,7 @@ pub const Parser = struct {
             .identifier => .{ .prefix = identifier, .infix = null, .precedence = .none },
             .kw_this => .{ .prefix = thisExpr, .infix = null, .precedence = .none },
             .kw_function => .{ .prefix = functionExpr, .infix = null, .precedence = .none },
-            .@"true", .@"false", .@"null", .undefined => .{ .prefix = literal, .infix = null, .precedence = .none },
+            .true, .false, .null, .undefined => .{ .prefix = literal, .infix = null, .precedence = .none },
             .template_literal, .template_head => .{ .prefix = templateLiteral, .infix = null, .precedence = .none },
             .regex_literal => .{ .prefix = regexLiteral, .infix = null, .precedence = .none },
             .kw_yield => .{ .prefix = yieldExpr, .infix = null, .precedence = .none },
@@ -3290,96 +3285,20 @@ pub const Parser = struct {
     }
 
     /// Get atom index for a property name
-    /// Uses predefined atoms for common names, otherwise uses string constant index + offset
+    /// Uses predefined atoms for common names, otherwise uses shared atom table or constant pool
     fn getOrCreateAtom(self: *Parser, name: []const u8) !u16 {
-        const object_mod = @import("object.zig");
-        // Check predefined atoms first (all < 256)
-        if (lookupPredefinedAtom(name)) |atom| {
+        // Check predefined atoms first (all < FIRST_DYNAMIC)
+        if (object.lookupPredefinedAtom(name)) |atom| {
             return @truncate(@intFromEnum(atom));
         }
-        // Use constant pool index + offset for dynamic atoms
+        // Use shared atom table when available (keeps runtime/builtins aligned)
+        if (self.atoms) |atoms| {
+            const atom = try atoms.intern(name);
+            return @truncate(@intFromEnum(atom));
+        }
+        // Fallback: constant pool index + offset for dynamic atoms
         const const_idx = try self.addStringConstant(name);
-        return @truncate(@as(u32, object_mod.Atom.FIRST_DYNAMIC) + @as(u32, const_idx));
-    }
-
-    /// Lookup predefined atom by name
-    fn lookupPredefinedAtom(name: []const u8) ?@import("object.zig").Atom {
-        const object_mod = @import("object.zig");
-        // Common property names
-        if (std.mem.eql(u8, name, "length")) return object_mod.Atom.length;
-        if (std.mem.eql(u8, name, "prototype")) return object_mod.Atom.prototype;
-        if (std.mem.eql(u8, name, "constructor")) return object_mod.Atom.constructor;
-        if (std.mem.eql(u8, name, "toString")) return object_mod.Atom.toString;
-        if (std.mem.eql(u8, name, "valueOf")) return object_mod.Atom.valueOf;
-        if (std.mem.eql(u8, name, "name")) return object_mod.Atom.name;
-        if (std.mem.eql(u8, name, "message")) return object_mod.Atom.message;
-        // Array methods
-        if (std.mem.eql(u8, name, "push")) return object_mod.Atom.push;
-        if (std.mem.eql(u8, name, "pop")) return object_mod.Atom.pop;
-        if (std.mem.eql(u8, name, "map")) return object_mod.Atom.map;
-        if (std.mem.eql(u8, name, "filter")) return object_mod.Atom.filter;
-        if (std.mem.eql(u8, name, "forEach")) return object_mod.Atom.forEach;
-        if (std.mem.eql(u8, name, "indexOf")) return object_mod.Atom.indexOf;
-        if (std.mem.eql(u8, name, "slice")) return object_mod.Atom.slice;
-        if (std.mem.eql(u8, name, "concat")) return object_mod.Atom.concat;
-        if (std.mem.eql(u8, name, "join")) return object_mod.Atom.join;
-        // String methods
-        if (std.mem.eql(u8, name, "split")) return object_mod.Atom.split;
-        if (std.mem.eql(u8, name, "substring")) return object_mod.Atom.substring;
-        if (std.mem.eql(u8, name, "toLowerCase")) return object_mod.Atom.toLowerCase;
-        if (std.mem.eql(u8, name, "toUpperCase")) return object_mod.Atom.toUpperCase;
-        if (std.mem.eql(u8, name, "trim")) return object_mod.Atom.trim;
-        if (std.mem.eql(u8, name, "replace")) return object_mod.Atom.replace;
-        if (std.mem.eql(u8, name, "startsWith")) return object_mod.Atom.startsWith;
-        if (std.mem.eql(u8, name, "endsWith")) return object_mod.Atom.endsWith;
-        if (std.mem.eql(u8, name, "includes")) return object_mod.Atom.includes;
-        // Math methods
-        if (std.mem.eql(u8, name, "abs")) return object_mod.Atom.abs;
-        if (std.mem.eql(u8, name, "floor")) return object_mod.Atom.floor;
-        if (std.mem.eql(u8, name, "ceil")) return object_mod.Atom.ceil;
-        if (std.mem.eql(u8, name, "round")) return object_mod.Atom.round;
-        if (std.mem.eql(u8, name, "min")) return object_mod.Atom.min;
-        if (std.mem.eql(u8, name, "max")) return object_mod.Atom.max;
-        if (std.mem.eql(u8, name, "random")) return object_mod.Atom.random;
-        if (std.mem.eql(u8, name, "pow")) return object_mod.Atom.pow;
-        if (std.mem.eql(u8, name, "sqrt")) return object_mod.Atom.sqrt;
-        if (std.mem.eql(u8, name, "log")) return object_mod.Atom.log;
-        // JSON
-        if (std.mem.eql(u8, name, "parse")) return object_mod.Atom.parse;
-        if (std.mem.eql(u8, name, "stringify")) return object_mod.Atom.stringify;
-        // Promise
-        if (std.mem.eql(u8, name, "then")) return object_mod.Atom.then;
-        if (std.mem.eql(u8, name, "resolve")) return object_mod.Atom.resolve;
-        if (std.mem.eql(u8, name, "reject")) return object_mod.Atom.reject;
-        // Globals
-        if (std.mem.eql(u8, name, "console")) return object_mod.Atom.console;
-        if (std.mem.eql(u8, name, "Math")) return object_mod.Atom.Math;
-        if (std.mem.eql(u8, name, "handler")) return object_mod.Atom.handler;
-        if (std.mem.eql(u8, name, "JSON")) return object_mod.Atom.JSON;
-        if (std.mem.eql(u8, name, "Object")) return object_mod.Atom.Object;
-        if (std.mem.eql(u8, name, "Array")) return object_mod.Atom.Array;
-        if (std.mem.eql(u8, name, "String")) return object_mod.Atom.String;
-        if (std.mem.eql(u8, name, "Number")) return object_mod.Atom.Number;
-        if (std.mem.eql(u8, name, "Boolean")) return object_mod.Atom.Boolean;
-        if (std.mem.eql(u8, name, "Function")) return object_mod.Atom.Function;
-        // HTTP Response
-        if (std.mem.eql(u8, name, "Response")) return object_mod.Atom.Response;
-        if (std.mem.eql(u8, name, "text")) return object_mod.Atom.text;
-        if (std.mem.eql(u8, name, "html")) return object_mod.Atom.html;
-        if (std.mem.eql(u8, name, "json")) return object_mod.Atom.json;
-        if (std.mem.eql(u8, name, "body")) return object_mod.Atom.body;
-        if (std.mem.eql(u8, name, "status")) return object_mod.Atom.status;
-        if (std.mem.eql(u8, name, "headers")) return object_mod.Atom.headers;
-        if (std.mem.eql(u8, name, "method")) return object_mod.Atom.method;
-        if (std.mem.eql(u8, name, "url")) return object_mod.Atom.url;
-        // JSX runtime
-        if (std.mem.eql(u8, name, "h")) return object_mod.Atom.h;
-        if (std.mem.eql(u8, name, "renderToString")) return object_mod.Atom.renderToString;
-        if (std.mem.eql(u8, name, "Fragment")) return object_mod.Atom.Fragment;
-        if (std.mem.eql(u8, name, "tag")) return object_mod.Atom.tag;
-        if (std.mem.eql(u8, name, "props")) return object_mod.Atom.props;
-        if (std.mem.eql(u8, name, "children")) return object_mod.Atom.children;
-        return null;
+        return @truncate(@as(u32, object.Atom.FIRST_DYNAMIC) + @as(u32, const_idx));
     }
 
     // ========================================================================
@@ -3495,11 +3414,10 @@ test "Tokenizer operators" {
     var tokenizer = Tokenizer.init("+ - * / % ** ++ -- == === != !== < <= > >= && || !");
 
     const expected = [_]TokenType{
-        .plus,   .minus, .star, .slash, .percent,
-        .star_star, .plus_plus, .minus_minus,
-        .eq, .eq_eq, .ne, .ne_ne,
-        .lt, .le, .gt, .ge,
-        .ampersand_ampersand, .pipe_pipe, .bang,
+        .plus,      .minus,               .star,        .slash, .percent,
+        .star_star, .plus_plus,           .minus_minus, .eq,    .eq_eq,
+        .ne,        .ne_ne,               .lt,          .le,    .gt,
+        .ge,        .ampersand_ampersand, .pipe_pipe,   .bang,
     };
 
     for (expected) |exp| {
@@ -3547,7 +3465,7 @@ test "Parser simple expression" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "1 + 2", &strings);
+    var parser = Parser.init(allocator, "1 + 2", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3565,7 +3483,7 @@ test "Parser variable declaration" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "var x = 10;", &strings);
+    var parser = Parser.init(allocator, "var x = 10;", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3583,7 +3501,7 @@ test "Parser generator function" {
     defer strings.deinit();
 
     // Test function* syntax
-    var parser = Parser.init(allocator, "function* gen() { yield 1; yield 2; }", &strings);
+    var parser = Parser.init(allocator, "function* gen() { yield 1; yield 2; }", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3601,7 +3519,7 @@ test "Parser yield expression" {
     defer strings.deinit();
 
     // Test yield with expression
-    var parser = Parser.init(allocator, "function* gen(x) { yield x + 1; }", &strings);
+    var parser = Parser.init(allocator, "function* gen(x) { yield x + 1; }", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3619,7 +3537,7 @@ test "Parser async function" {
     defer strings.deinit();
 
     // Test async function syntax
-    var parser = Parser.init(allocator, "async function fetchData() { return 42; }", &strings);
+    var parser = Parser.init(allocator, "async function fetchData() { return 42; }", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3637,7 +3555,7 @@ test "Parser await expression" {
     defer strings.deinit();
 
     // Test await inside async function
-    var parser = Parser.init(allocator, "async function test() { var x = await fetch(); return x; }", &strings);
+    var parser = Parser.init(allocator, "async function test() { var x = await fetch(); return x; }", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3655,7 +3573,7 @@ test "Parser async function expression" {
     defer strings.deinit();
 
     // Test async function expression
-    var parser = Parser.init(allocator, "var f = async function() { await delay(100); };", &strings);
+    var parser = Parser.init(allocator, "var f = async function() { await delay(100); };", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3672,7 +3590,7 @@ test "Parser import default" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "import foo from \"./foo.js\";", &strings);
+    var parser = Parser.init(allocator, "import foo from \"./foo.js\";", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3690,7 +3608,7 @@ test "Parser import named" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "import { foo, bar as baz } from \"./module.js\";", &strings);
+    var parser = Parser.init(allocator, "import { foo, bar as baz } from \"./module.js\";", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3708,7 +3626,7 @@ test "Parser import namespace" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "import * as utils from \"./utils.js\";", &strings);
+    var parser = Parser.init(allocator, "import * as utils from \"./utils.js\";", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3726,7 +3644,7 @@ test "Parser export default" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "export default 42;", &strings);
+    var parser = Parser.init(allocator, "export default 42;", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3744,7 +3662,7 @@ test "Parser export function" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "export function hello() { return 1; }", &strings);
+    var parser = Parser.init(allocator, "export function hello() { return 1; }", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {
@@ -3762,7 +3680,7 @@ test "Parser export const" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var parser = Parser.init(allocator, "export const x = 10;", &strings);
+    var parser = Parser.init(allocator, "export const x = 10;", &strings, null);
     defer parser.deinit();
 
     const code = parser.parse() catch |err| {

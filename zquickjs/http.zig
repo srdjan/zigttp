@@ -239,16 +239,16 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
     const node = try object.JSObject.create(allocator, root_class, null);
 
     // Set tag (first arg)
-    const tag_atom = try ctx.atoms.intern("tag");
+    const tag_atom: object.Atom = .tag;
     if (args.len > 0) {
         try node.setProperty(allocator, tag_atom, args[0]);
     } else {
         const div_str = try string.createString(allocator, "div");
-        try node.setProperty(allocator, div_str, value.JSValue.fromPtr(div_str));
+        try node.setProperty(allocator, tag_atom, value.JSValue.fromPtr(div_str));
     }
 
     // Set props (second arg or empty object)
-    const props_atom = try ctx.atoms.intern("props");
+    const props_atom: object.Atom = .props;
     if (args.len > 1 and args[1].isObject()) {
         try node.setProperty(allocator, props_atom, args[1]);
     } else {
@@ -257,21 +257,20 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
     }
 
     // Collect children (remaining args)
-    const children_atom = try ctx.atoms.intern("children");
-    const children_arr = try object.JSObject.create(allocator, root_class, null);
-    children_arr.class_id = .array;
+    const children_atom: object.Atom = .children;
+    const children_arr = try object.JSObject.createArray(allocator, root_class);
+    children_arr.prototype = ctx.array_prototype;
 
-    var child_count: i32 = 0;
+    var child_count: u32 = 0;
     for (args[2..]) |child| {
         // Skip null/undefined
         if (child.isNull() or child.isUndefined()) continue;
 
         // TODO: Flatten arrays of children
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(child_count)) + object.Atom.FIRST_DYNAMIC);
-        try children_arr.setProperty(allocator, idx_atom, child);
+        try children_arr.setIndex(allocator, child_count, child);
         child_count += 1;
     }
-    try children_arr.setProperty(allocator, .length, value.JSValue.fromInt(child_count));
+    children_arr.setArrayLength(child_count);
     try node.setProperty(allocator, children_atom, children_arr.toValue());
 
     return node.toValue();
@@ -286,17 +285,21 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
         return value.JSValue.fromPtr(empty);
     }
 
-    var buffer = std.ArrayList(u8).init(ctx.allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
 
-    try renderNode(ctx, args[0], buffer.writer());
+    var aw: std.Io.Writer.Allocating = .fromArrayList(ctx.allocator, &buffer);
+    try renderNode(ctx, args[0], &aw.writer);
+    buffer = aw.toArrayList();
 
     const result = try string.createString(ctx.allocator, buffer.items);
     return value.JSValue.fromPtr(result);
 }
 
+const RenderError = std.Io.Writer.Error || error{OutOfMemory};
+
 /// Render a single node to the writer
-fn renderNode(ctx: *context.Context, node: value.JSValue, writer: anytype) !void {
+fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer) RenderError!void {
     // Handle null/undefined
     if (node.isNull() or node.isUndefined()) return;
 
@@ -321,15 +324,13 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: anytype) !void
         const obj = object.JSObject.fromValue(node);
 
         // Check for tag property
-        const tag_atom = ctx.atoms.intern("tag") catch return;
-        const tag_val = obj.getProperty(tag_atom) orelse return;
+        const tag_val = obj.getProperty(.tag) orelse return;
 
         // Fragment: just render children
         if (tag_val.isString()) {
             const tag_str = tag_val.toPtr(string.JSString);
             if (std.mem.eql(u8, tag_str.data(), FRAGMENT_MARKER)) {
-                const children_atom = ctx.atoms.intern("children") catch return;
-                if (obj.getProperty(children_atom)) |children| {
+                if (obj.getProperty(.children)) |children| {
                     try renderChildren(ctx, children, writer);
                 }
                 return;
@@ -340,8 +341,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: anytype) !void
             try writer.writeAll(tag_str.data());
 
             // Render attributes from props
-            const props_atom = ctx.atoms.intern("props") catch return;
-            if (obj.getProperty(props_atom)) |props_val| {
+            if (obj.getProperty(.props)) |props_val| {
                 if (props_val.isObject()) {
                     try renderAttributes(ctx, props_val, writer);
                 }
@@ -357,8 +357,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: anytype) !void
             try writer.writeByte('>');
 
             // Render children
-            const children_atom = ctx.atoms.intern("children") catch return;
-            if (obj.getProperty(children_atom)) |children| {
+            if (obj.getProperty(.children)) |children| {
                 try renderChildren(ctx, children, writer);
             }
 
@@ -375,13 +374,12 @@ fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: anytyp
     if (!children.isObject()) return;
 
     const children_obj = object.JSObject.fromValue(children);
-    const len_val = children_obj.getProperty(.length) orelse return;
-    if (!len_val.isInt()) return;
+    if (children_obj.class_id != .array) return;
 
-    const len = len_val.getInt();
-    for (0..@intCast(len)) |i| {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)) + object.Atom.FIRST_DYNAMIC);
-        if (children_obj.getProperty(idx_atom)) |child| {
+    const len = children_obj.getArrayLength();
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        if (children_obj.getIndex(i)) |child| {
             try renderNode(ctx, child, writer);
         }
     }
@@ -425,7 +423,7 @@ fn renderAttributes(_: *context.Context, props: value.JSValue, writer: anytype) 
 }
 
 /// Escape HTML special characters
-fn escapeHtml(text: []const u8, writer: anytype) !void {
+fn escapeHtml(text: []const u8, writer: *std.Io.Writer) RenderError!void {
     for (text) |c| {
         switch (c) {
             '&' => try writer.writeAll("&amp;"),
@@ -450,7 +448,7 @@ fn escapeAttr(text: []const u8, writer: anytype) !void {
 /// Check if element is a void element (self-closing)
 fn isVoidElement(tag: []const u8) bool {
     const void_elements = [_][]const u8{
-        "area", "base", "br", "col", "embed", "hr", "img",
+        "area",  "base", "br",   "col",   "embed",  "hr",    "img",
         "input", "link", "meta", "param", "source", "track", "wbr",
     };
     for (void_elements) |ve| {
@@ -473,14 +471,16 @@ fn getStringArg(val: value.JSValue) ![]const u8 {
 
 /// Convert a JSValue to JSON string (simplified)
 fn valueToJson(allocator: std.mem.Allocator, val: value.JSValue) ![]u8 {
-    var buffer = std.ArrayList(u8).init(allocator);
-    errdefer buffer.deinit();
+    var buffer = std.ArrayList(u8).empty;
+    errdefer buffer.deinit(allocator);
 
-    try writeJson(val, buffer.writer());
-    return buffer.toOwnedSlice();
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buffer);
+    try writeJson(val, &aw.writer);
+    buffer = aw.toArrayList();
+    return buffer.toOwnedSlice(allocator);
 }
 
-fn writeJson(val: value.JSValue, writer: anytype) !void {
+fn writeJson(val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
     if (val.isNull()) {
         try writer.writeAll("null");
     } else if (val.isUndefined()) {

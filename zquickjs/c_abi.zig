@@ -219,12 +219,8 @@ export fn JS_NewArray(ctx: ?*JSContext, initial_len: c_int) JSValue {
         global_root_class = object.HiddenClass.init(allocator) catch return JSValue.undefined_val;
     }
 
-    const obj = object.JSObject.create(allocator, global_root_class.?, null) catch return JSValue.undefined_val;
-    obj.class_id = .array;
-    obj.flags.is_exotic = true;
-
-    // Set length property
-    obj.setProperty(allocator, .length, JSValue.fromInt(initial_len)) catch {};
+    const obj = object.JSObject.createArray(allocator, global_root_class.?) catch return JSValue.undefined_val;
+    obj.setArrayLength(@intCast(@max(initial_len, 0)));
 
     return obj.toValue();
 }
@@ -576,7 +572,7 @@ export fn JS_Eval(ctx: ?*JSContext, input: ?[*]const u8, input_len: usize, filen
     defer strings.deinit();
 
     // Parse the source code
-    var p = parser.Parser.init(allocator, source, &strings);
+    var p = parser.Parser.init(allocator, source, &strings, null);
     defer p.deinit();
 
     const code = p.parse() catch |err| {

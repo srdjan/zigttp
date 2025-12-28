@@ -9,9 +9,9 @@ const value = @import("value.zig");
 /// Atom - interned property name identifier
 pub const Atom = enum(u32) {
     // Predefined atoms (0-160)
-    @"null" = 0,
-    @"true" = 1,
-    @"false" = 2,
+    null = 0,
+    true = 1,
+    false = 2,
     undefined = 3,
     length = 4,
     prototype = 5,
@@ -23,9 +23,9 @@ pub const Atom = enum(u32) {
     arguments = 11,
     caller = 12,
     callee = 13,
-    @"this" = 14,
+    this = 14,
     @"return" = 15,
-    @"throw" = 16,
+    throw = 16,
     @"try" = 17,
     @"catch" = 18,
     finally = 19,
@@ -33,7 +33,7 @@ pub const Atom = enum(u32) {
     @"else" = 21,
     @"while" = 22,
     @"for" = 23,
-    @"do" = 24,
+    do = 24,
     @"switch" = 25,
     case = 26,
     default = 27,
@@ -46,7 +46,7 @@ pub const Atom = enum(u32) {
     new = 34,
     delete = 35,
     typeof = 36,
-    @"void" = 37,
+    void = 37,
     in = 38,
     instanceof = 39,
     // Object properties
@@ -211,9 +211,9 @@ pub const Atom = enum(u32) {
     /// Get the string name for a predefined atom
     pub fn toPredefinedName(self: Atom) ?[]const u8 {
         return switch (self) {
-            .@"null" => "null",
-            .@"true" => "true",
-            .@"false" => "false",
+            .null => "null",
+            .true => "true",
+            .false => "false",
             .undefined => "undefined",
             .length => "length",
             .prototype => "prototype",
@@ -251,6 +251,84 @@ pub const Atom = enum(u32) {
         };
     }
 };
+
+/// Lookup predefined atom by name (shared with parser/builtins)
+pub fn lookupPredefinedAtom(name: []const u8) ?Atom {
+    // Common property names
+    if (std.mem.eql(u8, name, "length")) return Atom.length;
+    if (std.mem.eql(u8, name, "prototype")) return Atom.prototype;
+    if (std.mem.eql(u8, name, "constructor")) return Atom.constructor;
+    if (std.mem.eql(u8, name, "toString")) return Atom.toString;
+    if (std.mem.eql(u8, name, "valueOf")) return Atom.valueOf;
+    if (std.mem.eql(u8, name, "name")) return Atom.name;
+    if (std.mem.eql(u8, name, "message")) return Atom.message;
+    // Array methods
+    if (std.mem.eql(u8, name, "push")) return Atom.push;
+    if (std.mem.eql(u8, name, "pop")) return Atom.pop;
+    if (std.mem.eql(u8, name, "map")) return Atom.map;
+    if (std.mem.eql(u8, name, "filter")) return Atom.filter;
+    if (std.mem.eql(u8, name, "forEach")) return Atom.forEach;
+    if (std.mem.eql(u8, name, "indexOf")) return Atom.indexOf;
+    if (std.mem.eql(u8, name, "slice")) return Atom.slice;
+    if (std.mem.eql(u8, name, "concat")) return Atom.concat;
+    if (std.mem.eql(u8, name, "join")) return Atom.join;
+    // String methods
+    if (std.mem.eql(u8, name, "split")) return Atom.split;
+    if (std.mem.eql(u8, name, "substring")) return Atom.substring;
+    if (std.mem.eql(u8, name, "toLowerCase")) return Atom.toLowerCase;
+    if (std.mem.eql(u8, name, "toUpperCase")) return Atom.toUpperCase;
+    if (std.mem.eql(u8, name, "trim")) return Atom.trim;
+    if (std.mem.eql(u8, name, "replace")) return Atom.replace;
+    if (std.mem.eql(u8, name, "startsWith")) return Atom.startsWith;
+    if (std.mem.eql(u8, name, "endsWith")) return Atom.endsWith;
+    if (std.mem.eql(u8, name, "includes")) return Atom.includes;
+    // Math methods
+    if (std.mem.eql(u8, name, "abs")) return Atom.abs;
+    if (std.mem.eql(u8, name, "floor")) return Atom.floor;
+    if (std.mem.eql(u8, name, "ceil")) return Atom.ceil;
+    if (std.mem.eql(u8, name, "round")) return Atom.round;
+    if (std.mem.eql(u8, name, "min")) return Atom.min;
+    if (std.mem.eql(u8, name, "max")) return Atom.max;
+    if (std.mem.eql(u8, name, "random")) return Atom.random;
+    if (std.mem.eql(u8, name, "pow")) return Atom.pow;
+    if (std.mem.eql(u8, name, "sqrt")) return Atom.sqrt;
+    if (std.mem.eql(u8, name, "log")) return Atom.log;
+    // JSON
+    if (std.mem.eql(u8, name, "parse")) return Atom.parse;
+    if (std.mem.eql(u8, name, "stringify")) return Atom.stringify;
+    // Promise
+    if (std.mem.eql(u8, name, "then")) return Atom.then;
+    if (std.mem.eql(u8, name, "resolve")) return Atom.resolve;
+    if (std.mem.eql(u8, name, "reject")) return Atom.reject;
+    // Globals
+    if (std.mem.eql(u8, name, "console")) return Atom.console;
+    if (std.mem.eql(u8, name, "Math")) return Atom.Math;
+    if (std.mem.eql(u8, name, "handler")) return Atom.handler;
+    if (std.mem.eql(u8, name, "JSON")) return Atom.JSON;
+    if (std.mem.eql(u8, name, "Object")) return Atom.Object;
+    if (std.mem.eql(u8, name, "Array")) return Atom.Array;
+    if (std.mem.eql(u8, name, "String")) return Atom.String;
+    if (std.mem.eql(u8, name, "Number")) return Atom.Number;
+    if (std.mem.eql(u8, name, "Boolean")) return Atom.Boolean;
+    if (std.mem.eql(u8, name, "Function")) return Atom.Function;
+    // Response/JSX runtime
+    if (std.mem.eql(u8, name, "Response")) return Atom.Response;
+    if (std.mem.eql(u8, name, "text")) return Atom.text;
+    if (std.mem.eql(u8, name, "html")) return Atom.html;
+    if (std.mem.eql(u8, name, "json")) return Atom.json;
+    if (std.mem.eql(u8, name, "body")) return Atom.body;
+    if (std.mem.eql(u8, name, "status")) return Atom.status;
+    if (std.mem.eql(u8, name, "headers")) return Atom.headers;
+    if (std.mem.eql(u8, name, "method")) return Atom.method;
+    if (std.mem.eql(u8, name, "url")) return Atom.url;
+    if (std.mem.eql(u8, name, "h")) return Atom.h;
+    if (std.mem.eql(u8, name, "renderToString")) return Atom.renderToString;
+    if (std.mem.eql(u8, name, "Fragment")) return Atom.Fragment;
+    if (std.mem.eql(u8, name, "tag")) return Atom.tag;
+    if (std.mem.eql(u8, name, "props")) return Atom.props;
+    if (std.mem.eql(u8, name, "children")) return Atom.children;
+    return null;
+}
 
 /// Native function signature
 /// ctx: execution context, this: this value, args: argument slice
@@ -649,6 +727,9 @@ pub const JSObject = extern struct {
 
     /// Get property by name (with prototype chain lookup)
     pub fn getProperty(self: *const JSObject, name: Atom) ?value.JSValue {
+        if (self.class_id == .array and name == .length) {
+            return self.inline_slots[0];
+        }
         // Check own properties first
         if (self.hidden_class.findProperty(name)) |slot| {
             return self.getSlot(slot.offset);
@@ -668,6 +749,9 @@ pub const JSObject = extern struct {
 
     /// Get own property (no prototype lookup)
     pub fn getOwnProperty(self: *const JSObject, name: Atom) ?value.JSValue {
+        if (self.class_id == .array and name == .length) {
+            return self.inline_slots[0];
+        }
         if (self.hidden_class.findProperty(name)) |slot| {
             return self.getSlot(slot.offset);
         }
@@ -676,6 +760,15 @@ pub const JSObject = extern struct {
 
     /// Set property (with hidden class transition)
     pub fn setProperty(self: *JSObject, allocator: std.mem.Allocator, name: Atom, val: value.JSValue) !void {
+        if (self.class_id == .array and name == .length) {
+            if (val.isInt()) {
+                const len = val.getInt();
+                if (len >= 0) {
+                    self.setArrayLength(@intCast(len));
+                }
+            }
+            return;
+        }
         // Check if property exists
         if (self.hidden_class.findProperty(name)) |slot| {
             self.setSlot(slot.offset, val);
@@ -734,6 +827,7 @@ pub const JSObject = extern struct {
 
     /// Delete property
     pub fn deleteProperty(self: *JSObject, name: Atom) bool {
+        if (self.class_id == .array and name == .length) return false;
         if (self.hidden_class.findProperty(name)) |slot| {
             if (!slot.flags.configurable) return false;
             // Note: In a full implementation, we'd transition to a new hidden class

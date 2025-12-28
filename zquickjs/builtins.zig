@@ -3,6 +3,7 @@
 //! Standard library implementation for Object, Array, String, etc.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("value.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
@@ -182,10 +183,10 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
     const val = args[0];
 
     // Build JSON string
-    var buffer = std.ArrayList(u8).init(ctx.allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
 
-    stringifyValue(&buffer, val) catch return value.JSValue.undefined_val;
+    stringifyValue(&buffer, ctx.allocator, val) catch return value.JSValue.undefined_val;
 
     // Create JS string from result
     const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
@@ -337,11 +338,11 @@ pub fn errorToString(ctx: *context.Context, this: value.JSValue, args: []const v
     }
 
     // Concatenate: name + ": " + message
-    var buffer = std.ArrayList(u8).init(ctx.allocator);
-    defer buffer.deinit();
-    buffer.appendSlice(name_text) catch return value.JSValue.undefined_val;
-    buffer.appendSlice(": ") catch return value.JSValue.undefined_val;
-    buffer.appendSlice(msg_text) catch return value.JSValue.undefined_val;
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
+    buffer.appendSlice(ctx.allocator, name_text) catch return value.JSValue.undefined_val;
+    buffer.appendSlice(ctx.allocator, ": ") catch return value.JSValue.undefined_val;
+    buffer.appendSlice(ctx.allocator, msg_text) catch return value.JSValue.undefined_val;
 
     const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
@@ -575,7 +576,7 @@ pub fn numberIsInteger(_: *context.Context, _: value.JSValue, args: []const valu
 
     // Check if it's a float that's an integer
     if (val.isFloat()) {
-        const n = val.getFloat();
+        const n = val.getFloat64();
         if (std.math.isNan(n) or std.math.isInf(n)) return value.JSValue.fromBool(false);
         return value.JSValue.fromBool(@floor(n) == n);
     }
@@ -589,7 +590,7 @@ pub fn numberIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JS
     const val = args[0];
 
     if (!val.isFloat()) return value.JSValue.fromBool(false);
-    return value.JSValue.fromBool(std.math.isNan(val.getFloat()));
+    return value.JSValue.fromBool(std.math.isNan(val.getFloat64()));
 }
 
 /// Number.isFinite(value) - Returns true if value is a finite number
@@ -600,7 +601,7 @@ pub fn numberIsFinite(_: *context.Context, _: value.JSValue, args: []const value
     if (val.isInt()) return value.JSValue.fromBool(true);
 
     if (val.isFloat()) {
-        const n = val.getFloat();
+        const n = val.getFloat64();
         return value.JSValue.fromBool(!std.math.isNan(n) and !std.math.isInf(n));
     }
 
@@ -896,7 +897,7 @@ pub fn globalIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JS
 
     // Try to get as number
     if (val.isInt()) return value.JSValue.fromBool(false);
-    if (val.isFloat()) return value.JSValue.fromBool(std.math.isNan(val.getFloat()));
+    if (val.isFloat()) return value.JSValue.fromBool(std.math.isNan(val.getFloat64()));
     if (val.isNull()) return value.JSValue.fromBool(false); // null coerces to 0
     if (val.isUndefined()) return value.JSValue.fromBool(true);
     if (val.isBool()) return value.JSValue.fromBool(false); // true->1, false->0
@@ -913,7 +914,7 @@ pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value
 
     if (val.isInt()) return value.JSValue.fromBool(true);
     if (val.isFloat()) {
-        const n = val.getFloat();
+        const n = val.getFloat64();
         return value.JSValue.fromBool(!std.math.isNan(n) and !std.math.isInf(n));
     }
     if (val.isNull()) return value.JSValue.fromBool(true); // null coerces to 0
@@ -998,7 +999,7 @@ pub fn mapSet(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (keys_arr.getProperty(idx_atom)) |existing_key| {
-            if (value.strictEqual(existing_key, key)) {
+            if (existing_key.strictEquals(key)) {
                 // Update existing value
                 values_arr.setProperty(allocator, idx_atom, val) catch return this;
                 return this;
@@ -1042,7 +1043,7 @@ pub fn mapGet(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (keys_arr.getProperty(idx_atom)) |existing_key| {
-            if (value.strictEqual(existing_key, key)) {
+            if (existing_key.strictEquals(key)) {
                 return values_arr.getProperty(idx_atom) orelse value.JSValue.undefined_val;
             }
         }
@@ -1071,7 +1072,7 @@ pub fn mapHas(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (keys_arr.getProperty(idx_atom)) |existing_key| {
-            if (value.strictEqual(existing_key, key)) {
+            if (existing_key.strictEquals(key)) {
                 return value.JSValue.fromBool(true);
             }
         }
@@ -1107,7 +1108,7 @@ pub fn mapDelete(ctx: *context.Context, this: value.JSValue, args: []const value
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (keys_arr.getProperty(idx_atom)) |existing_key| {
-            if (value.strictEqual(existing_key, key)) {
+            if (existing_key.strictEquals(key)) {
                 // Shift remaining elements
                 var j = i;
                 while (j < len - 1) : (j += 1) {
@@ -1241,7 +1242,7 @@ pub fn setAdd(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (values_arr.getProperty(idx_atom)) |existing| {
-            if (value.strictEqual(existing, val)) {
+            if (existing.strictEquals(val)) {
                 return this; // Already exists
             }
         }
@@ -1276,7 +1277,7 @@ pub fn setHas(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (values_arr.getProperty(idx_atom)) |existing| {
-            if (value.strictEqual(existing, val)) {
+            if (existing.strictEquals(val)) {
                 return value.JSValue.fromBool(true);
             }
         }
@@ -1307,7 +1308,7 @@ pub fn setDelete(ctx: *context.Context, this: value.JSValue, args: []const value
     while (i < len) : (i += 1) {
         const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
         if (values_arr.getProperty(idx_atom)) |existing| {
-            if (value.strictEqual(existing, val)) {
+            if (existing.strictEquals(val)) {
                 // Shift remaining elements
                 var j = i;
                 while (j < len - 1) : (j += 1) {
@@ -1372,14 +1373,16 @@ fn wrapSetClear(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JS
     return setClear(ctx, this, args);
 }
 
+const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass };
+
 /// Parse a JSON value from text
-fn parseJsonValue(ctx: *context.Context, text: []const u8) !value.JSValue {
+fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSValue {
     var pos: usize = 0;
     return parseJsonValueAt(ctx, text, &pos);
 }
 
 /// Parse JSON value at position
-fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     // Skip whitespace
     while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
         pos.* += 1;
@@ -1431,7 +1434,7 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) !value
 }
 
 /// Parse JSON object
-fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip '{'
 
     const root_class = ctx.root_class orelse return error.NoRootClass;
@@ -1496,12 +1499,12 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) !value.
 }
 
 /// Parse JSON array
-fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip '['
 
     const root_class = ctx.root_class orelse return error.NoRootClass;
-    const arr = try object.JSObject.create(ctx.allocator, root_class, ctx.array_prototype);
-    arr.class_id = .array;
+    const arr = try object.JSObject.createArray(ctx.allocator, root_class);
+    arr.prototype = ctx.array_prototype;
 
     // Skip whitespace
     while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
@@ -1510,15 +1513,15 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) !value.J
 
     if (pos.* < text.len and text[pos.*] == ']') {
         pos.* += 1;
-        try arr.setProperty(ctx.allocator, .length, value.JSValue.fromInt(0));
+        arr.setArrayLength(0);
         return arr.toValue();
     }
 
-    var index: i32 = 0;
+    var index: u32 = 0;
     while (pos.* < text.len) {
         // Parse element
         const elem = try parseJsonValueAt(ctx, text, pos);
-        arr.setSlot(@intCast(index), elem);
+        try arr.setIndex(ctx.allocator, index, elem);
         index += 1;
 
         // Skip whitespace
@@ -1530,7 +1533,7 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) !value.J
         if (pos.* >= text.len) return error.InvalidJson;
         if (text[pos.*] == ']') {
             pos.* += 1;
-            try arr.setProperty(ctx.allocator, .length, value.JSValue.fromInt(index));
+            arr.setArrayLength(index);
             return arr.toValue();
         }
         if (text[pos.*] == ',') {
@@ -1544,11 +1547,11 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) !value.J
 }
 
 /// Parse JSON string
-fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) !value.JSValue {
+fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip opening '"'
 
-    var buffer = std.ArrayList(u8).init(ctx.allocator);
-    defer buffer.deinit();
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
 
     while (pos.* < text.len) {
         const c = text[pos.*];
@@ -1563,14 +1566,14 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) !value.
             const escaped = text[pos.*];
             pos.* += 1;
             switch (escaped) {
-                '"' => try buffer.append('"'),
-                '\\' => try buffer.append('\\'),
-                '/' => try buffer.append('/'),
-                'n' => try buffer.append('\n'),
-                'r' => try buffer.append('\r'),
-                't' => try buffer.append('\t'),
-                'b' => try buffer.append(0x08),
-                'f' => try buffer.append(0x0C),
+                '"' => try buffer.append(ctx.allocator, '"'),
+                '\\' => try buffer.append(ctx.allocator, '\\'),
+                '/' => try buffer.append(ctx.allocator, '/'),
+                'n' => try buffer.append(ctx.allocator, '\n'),
+                'r' => try buffer.append(ctx.allocator, '\r'),
+                't' => try buffer.append(ctx.allocator, '\t'),
+                'b' => try buffer.append(ctx.allocator, 0x08),
+                'f' => try buffer.append(ctx.allocator, 0x0C),
                 'u' => {
                     // Unicode escape \uXXXX
                     if (pos.* + 4 > text.len) return error.InvalidJson;
@@ -1579,25 +1582,25 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) !value.
                     const code = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
                     // Simple ASCII handling for now
                     if (code < 128) {
-                        try buffer.append(@intCast(code));
+                        try buffer.append(ctx.allocator, @intCast(code));
                     } else {
                         // UTF-8 encoding for BMP characters
                         if (code < 0x80) {
-                            try buffer.append(@intCast(code));
+                            try buffer.append(ctx.allocator, @intCast(code));
                         } else if (code < 0x800) {
-                            try buffer.append(@intCast(0xC0 | (code >> 6)));
-                            try buffer.append(@intCast(0x80 | (code & 0x3F)));
+                            try buffer.append(ctx.allocator, @intCast(0xC0 | (code >> 6)));
+                            try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
                         } else {
-                            try buffer.append(@intCast(0xE0 | (code >> 12)));
-                            try buffer.append(@intCast(0x80 | ((code >> 6) & 0x3F)));
-                            try buffer.append(@intCast(0x80 | (code & 0x3F)));
+                            try buffer.append(ctx.allocator, @intCast(0xE0 | (code >> 12)));
+                            try buffer.append(ctx.allocator, @intCast(0x80 | ((code >> 6) & 0x3F)));
+                            try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
                         }
                     }
                 },
-                else => try buffer.append(escaped),
+                else => try buffer.append(ctx.allocator, escaped),
             }
         } else {
-            try buffer.append(c);
+            try buffer.append(ctx.allocator, c);
             pos.* += 1;
         }
     }
@@ -1606,7 +1609,7 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) !value.
 }
 
 /// Parse JSON number
-fn parseJsonNumber(text: []const u8, pos: *usize) !value.JSValue {
+fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
     const start = pos.*;
 
     // Optional minus
@@ -1666,60 +1669,60 @@ fn parseJsonNumber(text: []const u8, pos: *usize) !value.JSValue {
 }
 
 /// Stringify a JS value to JSON
-fn stringifyValue(buffer: *std.ArrayList(u8), val: value.JSValue) !void {
+fn stringifyValue(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, val: value.JSValue) !void {
     if (val.isNull()) {
-        try buffer.appendSlice("null");
+        try buffer.appendSlice(allocator, "null");
         return;
     }
 
     if (val.isUndefined()) {
-        try buffer.appendSlice("null"); // undefined becomes null in JSON
+        try buffer.appendSlice(allocator, "null"); // undefined becomes null in JSON
         return;
     }
 
     if (val.isTrue()) {
-        try buffer.appendSlice("true");
+        try buffer.appendSlice(allocator, "true");
         return;
     }
 
     if (val.isFalse()) {
-        try buffer.appendSlice("false");
+        try buffer.appendSlice(allocator, "false");
         return;
     }
 
     if (val.isInt()) {
         var num_buf: [32]u8 = undefined;
         const slice = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch return error.OutOfMemory;
-        try buffer.appendSlice(slice);
+        try buffer.appendSlice(allocator, slice);
         return;
     }
 
     if (val.isString()) {
         const str = val.toPtr(string.JSString);
-        try buffer.append('"');
+        try buffer.append(allocator, '"');
         for (str.data()) |c| {
             switch (c) {
-                '"' => try buffer.appendSlice("\\\""),
-                '\\' => try buffer.appendSlice("\\\\"),
-                '\n' => try buffer.appendSlice("\\n"),
-                '\r' => try buffer.appendSlice("\\r"),
-                '\t' => try buffer.appendSlice("\\t"),
-                0x08 => try buffer.appendSlice("\\b"),
-                0x0C => try buffer.appendSlice("\\f"),
+                '"' => try buffer.appendSlice(allocator, "\\\""),
+                '\\' => try buffer.appendSlice(allocator, "\\\\"),
+                '\n' => try buffer.appendSlice(allocator, "\\n"),
+                '\r' => try buffer.appendSlice(allocator, "\\r"),
+                '\t' => try buffer.appendSlice(allocator, "\\t"),
+                0x08 => try buffer.appendSlice(allocator, "\\b"),
+                0x0C => try buffer.appendSlice(allocator, "\\f"),
                 else => {
                     if (c < 0x20) {
                         // Control characters
-                        try buffer.appendSlice("\\u00");
+                        try buffer.appendSlice(allocator, "\\u00");
                         const hex = "0123456789abcdef";
-                        try buffer.append(hex[c >> 4]);
-                        try buffer.append(hex[c & 0xF]);
+                        try buffer.append(allocator, hex[c >> 4]);
+                        try buffer.append(allocator, hex[c & 0xF]);
                     } else {
-                        try buffer.append(c);
+                        try buffer.append(allocator, c);
                     }
                 },
             }
         }
-        try buffer.append('"');
+        try buffer.append(allocator, '"');
         return;
     }
 
@@ -1728,48 +1731,48 @@ fn stringifyValue(buffer: *std.ArrayList(u8), val: value.JSValue) !void {
 
         // Check if it's an array
         if (obj.class_id == .array) {
-            try buffer.append('[');
+            try buffer.append(allocator, '[');
             const len = getArrayLength(obj);
             var i: i32 = 0;
             while (i < len) : (i += 1) {
-                if (i > 0) try buffer.append(',');
+                if (i > 0) try buffer.append(allocator, ',');
                 const elem = obj.getSlot(@intCast(i));
-                try stringifyValue(buffer, elem);
+                try stringifyValue(buffer, allocator, elem);
             }
-            try buffer.append(']');
+            try buffer.append(allocator, ']');
             return;
         }
 
         // Regular object
-        try buffer.append('{');
+        try buffer.append(allocator, '{');
         var first = true;
 
         // Get property slots
         const hidden_class = obj.hidden_class;
-        for (hidden_class.transitions.items) |transition| {
-            if (!first) try buffer.append(',');
+        for (hidden_class.properties) |prop| {
+            if (!first) try buffer.append(allocator, ',');
             first = false;
 
             // Get property name from atom (simplified - just use index)
             var atom_buf: [32]u8 = undefined;
-            const atom_name = std.fmt.bufPrint(&atom_buf, "{d}", .{@intFromEnum(transition.atom)}) catch continue;
-            try buffer.append('"');
-            try buffer.appendSlice(atom_name);
-            try buffer.append('"');
-            try buffer.append(':');
+            const atom_name = std.fmt.bufPrint(&atom_buf, "{d}", .{@intFromEnum(prop.name)}) catch continue;
+            try buffer.append(allocator, '"');
+            try buffer.appendSlice(allocator, atom_name);
+            try buffer.append(allocator, '"');
+            try buffer.append(allocator, ':');
 
-            if (obj.getProperty(transition.atom)) |prop_val| {
-                try stringifyValue(buffer, prop_val);
+            if (obj.getProperty(prop.name)) |prop_val| {
+                try stringifyValue(buffer, allocator, prop_val);
             } else {
-                try buffer.appendSlice("null");
+                try buffer.appendSlice(allocator, "null");
             }
         }
-        try buffer.append('}');
+        try buffer.append(allocator, '}');
         return;
     }
 
     // Unknown type - output null
-    try buffer.appendSlice("null");
+    try buffer.appendSlice(allocator, "null");
 }
 
 // ============================================================================
@@ -1778,6 +1781,9 @@ fn stringifyValue(buffer: *std.ArrayList(u8), val: value.JSValue) !void {
 
 /// Get array length from object
 fn getArrayLength(obj: *object.JSObject) i32 {
+    if (obj.class_id == .array) {
+        return @intCast(obj.getArrayLength());
+    }
     if (obj.getOwnProperty(.length)) |len_val| {
         if (len_val.isInt()) return len_val.getInt();
     }
@@ -1786,6 +1792,10 @@ fn getArrayLength(obj: *object.JSObject) i32 {
 
 /// Set array length on object
 fn setArrayLength(obj: *object.JSObject, allocator: std.mem.Allocator, len: i32) void {
+    if (obj.class_id == .array) {
+        obj.setArrayLength(@intCast(@max(len, 0)));
+        return;
+    }
     obj.setProperty(allocator, .length, value.JSValue.fromInt(len)) catch {};
 }
 
@@ -1810,26 +1820,24 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
 
     // Create result array
-    const result = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    result.class_id = .array;
+    const result = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
 
     // Handle string - convert to array of characters
     if (source.isString()) {
         const str = source.toPtr(string.JSString);
         const data = str.data();
-        var idx: i32 = 0;
+        var idx: u32 = 0;
 
         var i: usize = 0;
         while (i < data.len) {
-            const char_len = string.utf8CodepointByteLen(data[i]);
+            const char_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
             const char_slice = data[i..@min(i + char_len, data.len)];
             const char_str = string.createString(allocator, char_slice) catch return result.toValue();
-            const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(idx)));
-            result.setProperty(allocator, idx_atom, value.JSValue.fromPtr(char_str)) catch {};
+            result.setIndex(allocator, idx, value.JSValue.fromPtr(char_str)) catch return result.toValue();
             idx += 1;
             i += char_len;
         }
-        result.setProperty(allocator, .length, value.JSValue.fromInt(idx)) catch {};
         return result.toValue();
     }
 
@@ -1841,17 +1849,21 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
                 const len = len_val.getInt();
                 var idx: i32 = 0;
                 while (idx < len) : (idx += 1) {
-                    const src_atom: object.Atom = @enumFromInt(@as(u32, @intCast(idx)));
-                    const elem = src_obj.getProperty(src_atom) orelse value.JSValue.undefined_val;
-                    result.setProperty(allocator, src_atom, elem) catch {};
+                    const elem = if (src_obj.class_id == .array)
+                        (src_obj.getIndex(@intCast(idx)) orelse value.JSValue.undefined_val)
+                    else blk: {
+                        var idx_buf: [32]u8 = undefined;
+                        const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch break :blk value.JSValue.undefined_val;
+                        const idx_atom = ctx.atoms.intern(idx_slice) catch break :blk value.JSValue.undefined_val;
+                        break :blk src_obj.getProperty(idx_atom) orelse value.JSValue.undefined_val;
+                    };
+                    result.setIndex(allocator, @intCast(idx), elem) catch return result.toValue();
                 }
-                result.setProperty(allocator, .length, value.JSValue.fromInt(len)) catch {};
                 return result.toValue();
             }
         }
     }
 
-    result.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch {};
     return result.toValue();
 }
 
@@ -1860,14 +1872,12 @@ pub fn arrayOf(ctx: *context.Context, _: value.JSValue, args: []const value.JSVa
     const allocator = ctx.allocator;
     const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
 
-    const result = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    result.class_id = .array;
+    const result = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
 
     for (args, 0..) |arg, i| {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        result.setProperty(allocator, idx_atom, arg) catch {};
+        result.setIndex(allocator, @intCast(i), arg) catch return value.JSValue.undefined_val;
     }
-    result.setProperty(allocator, .length, value.JSValue.fromInt(@intCast(args.len))) catch {};
     return result.toValue();
 }
 
@@ -1884,37 +1894,28 @@ fn wrapArrayOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSV
 /// Array.prototype.push(...items) - Add elements to end, return new length
 pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    var len = getArrayLength(obj);
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-    // Add each argument
     for (args) |arg| {
-        // Set element at index
-        const idx_atom = ctx.atoms.intern(std.fmt.allocPrint(ctx.allocator, "{d}", .{len}) catch return value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
-        obj.setProperty(ctx.allocator, idx_atom, arg) catch return value.JSValue.undefined_val;
-        len += 1;
+        obj.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
     }
 
-    setArrayLength(obj, ctx.allocator, len);
-    return value.JSValue.fromInt(len);
+    return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
 }
 
 /// Array.prototype.pop() - Remove and return last element
 pub fn arrayPop(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    var len = getArrayLength(obj);
+    _ = ctx;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-    if (len <= 0) return value.JSValue.undefined_val;
+    const len = obj.getArrayLength();
+    if (len == 0) return value.JSValue.undefined_val;
 
-    len -= 1;
-    // Get last element (in full impl, would use numeric index)
-    const idx_atom = ctx.atoms.intern(std.fmt.allocPrint(ctx.allocator, "{d}", .{len}) catch return value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
-    const result = obj.getOwnProperty(idx_atom) orelse value.JSValue.undefined_val;
-
-    // Delete and update length
-    _ = obj.deleteProperty(idx_atom);
-    setArrayLength(obj, ctx.allocator, len);
-
+    const last_idx: u32 = len - 1;
+    const result = obj.getIndex(last_idx) orelse value.JSValue.undefined_val;
+    obj.setArrayLength(last_idx);
     return result;
 }
 
@@ -1922,49 +1923,138 @@ pub fn arrayPop(ctx: *context.Context, this: value.JSValue, args: []const value.
 pub fn arrayShift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    const len = getArrayLength(obj);
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-    if (len <= 0) return value.JSValue.undefined_val;
+    const len = obj.getArrayLength();
+    if (len == 0) return value.JSValue.undefined_val;
 
-    // Get first element
-    const zero_atom = ctx.atoms.intern("0") catch return value.JSValue.undefined_val;
-    const result = obj.getOwnProperty(zero_atom) orelse value.JSValue.undefined_val;
-
-    // Shift all elements down (simplified - full impl would iterate)
-    setArrayLength(obj, ctx.allocator, len - 1);
-
+    const result = obj.getIndex(0) orelse value.JSValue.undefined_val;
+    if (len > 1) {
+        var i: u32 = 1;
+        while (i < len) : (i += 1) {
+            const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+            obj.setIndex(ctx.allocator, i - 1, val) catch return value.JSValue.undefined_val;
+        }
+    }
+    obj.setArrayLength(len - 1);
     return result;
 }
 
 /// Array.prototype.unshift(...items) - Add elements to beginning
 pub fn arrayUnshift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    const len = getArrayLength(obj);
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-    // In full implementation, would shift existing elements first
-    const new_len = len + @as(i32, @intCast(args.len));
-    setArrayLength(obj, ctx.allocator, new_len);
+    const len = obj.getArrayLength();
+    const insert_count: u32 = @intCast(args.len);
+    if (insert_count == 0) return value.JSValue.fromInt(@intCast(len));
 
-    return value.JSValue.fromInt(new_len);
+    var i: u32 = len;
+    while (i > 0) : (i -= 1) {
+        const from_idx = i - 1;
+        const val = obj.getIndex(from_idx) orelse value.JSValue.undefined_val;
+        obj.setIndex(ctx.allocator, from_idx + insert_count, val) catch return value.JSValue.undefined_val;
+    }
+    for (args, 0..) |arg, idx| {
+        obj.setIndex(ctx.allocator, @intCast(idx), arg) catch return value.JSValue.undefined_val;
+    }
+    obj.setArrayLength(len + insert_count);
+    return value.JSValue.fromInt(@intCast(len + insert_count));
+}
+
+/// Array.prototype.splice(start, deleteCount?, ...items) - Remove/insert elements
+pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+
+    const len = obj.getArrayLength();
+    if (len == 0) {
+        const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+        const removed = object.JSObject.createArray(ctx.allocator, root_class) catch return value.JSValue.undefined_val;
+        removed.prototype = ctx.array_prototype;
+        return removed.toValue();
+    }
+
+    var start: i32 = 0;
+    if (args.len > 0 and args[0].isInt()) {
+        start = args[0].getInt();
+        if (start < 0) start = @max(0, @as(i32, @intCast(len)) + start);
+    }
+    if (start > @as(i32, @intCast(len))) start = @intCast(len);
+
+    var delete_count: i32 = @as(i32, @intCast(len)) - start;
+    if (args.len > 1 and args[1].isInt()) {
+        delete_count = args[1].getInt();
+    }
+    if (delete_count < 0) delete_count = 0;
+    if (delete_count > (@as(i32, @intCast(len)) - start)) {
+        delete_count = @as(i32, @intCast(len)) - start;
+    }
+
+    const insert_count: u32 = if (args.len > 2) @intCast(args.len - 2) else 0;
+
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+    const removed = object.JSObject.createArray(ctx.allocator, root_class) catch return value.JSValue.undefined_val;
+    removed.prototype = ctx.array_prototype;
+
+    const start_u32: u32 = @intCast(start);
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(delete_count))) : (i += 1) {
+        const val = obj.getIndex(start_u32 + i) orelse value.JSValue.undefined_val;
+        removed.setIndex(ctx.allocator, i, val) catch return value.JSValue.undefined_val;
+    }
+
+    if (insert_count < @as(u32, @intCast(delete_count))) {
+        var from: u32 = @intCast(start + delete_count);
+        while (from < len) : (from += 1) {
+            const val = obj.getIndex(from) orelse value.JSValue.undefined_val;
+            obj.setIndex(ctx.allocator, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
+        }
+    } else if (insert_count > @as(u32, @intCast(delete_count))) {
+        var from: u32 = len;
+        while (from > @as(u32, @intCast(start + delete_count))) {
+            from -= 1;
+            const val = obj.getIndex(from) orelse value.JSValue.undefined_val;
+            obj.setIndex(ctx.allocator, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
+        }
+    }
+
+    if (insert_count > 0) {
+        var j: u32 = 0;
+        while (j < insert_count) : (j += 1) {
+            obj.setIndex(ctx.allocator, start_u32 + j, args[2 + j]) catch return value.JSValue.undefined_val;
+        }
+    }
+
+    const new_len = @as(i32, @intCast(len)) - delete_count + @as(i32, @intCast(insert_count));
+    obj.setArrayLength(@intCast(@max(new_len, 0)));
+
+    return removed.toValue();
 }
 
 /// Array.prototype.indexOf(searchElement, fromIndex?) - Find first index of element
 pub fn arrayIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     const obj = getObject(this) orelse return value.JSValue.fromInt(-1);
-    const len = getArrayLength(obj);
+    if (obj.class_id != .array) return value.JSValue.fromInt(-1);
 
-    if (args.len == 0 or len <= 0) return value.JSValue.fromInt(-1);
+    const len = obj.getArrayLength();
+    if (args.len == 0 or len == 0) return value.JSValue.fromInt(-1);
 
     const search_elem = args[0];
     var from_idx: i32 = 0;
     if (args.len > 1 and args[1].isInt()) {
         from_idx = args[1].getInt();
-        if (from_idx < 0) from_idx = @max(0, len + from_idx);
+        if (from_idx < 0) from_idx = @max(0, @as(i32, @intCast(len)) + from_idx);
     }
 
-    // Linear search (simplified)
-    _ = search_elem;
+    var i: u32 = @intCast(@max(from_idx, 0));
+    while (i < len) : (i += 1) {
+        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        if (val.strictEquals(search_elem)) {
+            return value.JSValue.fromInt(@intCast(i));
+        }
+    }
     return value.JSValue.fromInt(-1);
 }
 
@@ -1979,13 +2069,34 @@ pub fn arrayIncludes(ctx: *context.Context, this: value.JSValue, args: []const v
 
 /// Array.prototype.join(separator?) - Join elements into string
 pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = args;
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    const len = getArrayLength(obj);
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-    // Return length for now (proper string creation requires more infrastructure)
-    return value.JSValue.fromInt(len);
+    const len = obj.getArrayLength();
+    var separator: []const u8 = ",";
+    if (args.len > 0 and !args[0].isUndefined()) {
+        const sep_str = valueToStringSimple(ctx.allocator, args[0]) catch return value.JSValue.undefined_val;
+        separator = sep_str.data();
+    }
+
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
+
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        if (i > 0) {
+            buffer.appendSlice(ctx.allocator, separator) catch return value.JSValue.undefined_val;
+        }
+        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        if (val.isUndefined() or val.isNull()) {
+            continue;
+        }
+        const elem_str = valueToStringSimple(ctx.allocator, val) catch return value.JSValue.undefined_val;
+        buffer.appendSlice(ctx.allocator, elem_str.data()) catch return value.JSValue.undefined_val;
+    }
+
+    const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
 }
 
 /// Array.prototype.reverse() - Reverse array in place
@@ -2265,30 +2376,58 @@ pub fn stringIncludes(ctx: *context.Context, this: value.JSValue, args: []const 
 
 /// String.prototype.slice(start, end?) - Extract substring
 pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
     if (getJSString(this)) |str| {
+        const data = str.data();
         var start: i32 = 0;
-        var end: i32 = @intCast(str.len);
+        var end: i32 = @intCast(data.len);
 
         if (args.len > 0 and args[0].isInt()) {
             start = args[0].getInt();
-            if (start < 0) start = @max(0, @as(i32, @intCast(str.len)) + start);
+            if (start < 0) start = @max(0, @as(i32, @intCast(data.len)) + start);
         }
         if (args.len > 1 and args[1].isInt()) {
             end = args[1].getInt();
-            if (end < 0) end = @max(0, @as(i32, @intCast(str.len)) + end);
+            if (end < 0) end = @max(0, @as(i32, @intCast(data.len)) + end);
         }
 
-        // Return slice length for now
-        return value.JSValue.fromInt(@max(0, end - start));
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+        if (start > @as(i32, @intCast(data.len))) start = @intCast(data.len);
+        if (end > @as(i32, @intCast(data.len))) end = @intCast(data.len);
+        if (end < start) end = start;
+
+        const slice = data[@intCast(start)..@intCast(end)];
+        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
     }
     return value.JSValue.undefined_val;
 }
 
 /// String.prototype.substring(start, end?) - Extract substring
 pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // substring is similar to slice but doesn't support negative indices
-    return stringSlice(ctx, this, args);
+    if (getJSString(this)) |str| {
+        const data = str.data();
+        var start: i32 = 0;
+        var end: i32 = @intCast(data.len);
+
+        if (args.len > 0 and args[0].isInt()) start = args[0].getInt();
+        if (args.len > 1 and args[1].isInt()) end = args[1].getInt();
+
+        if (start < 0) start = 0;
+        if (end < 0) end = 0;
+        if (start > @as(i32, @intCast(data.len))) start = @intCast(data.len);
+        if (end > @as(i32, @intCast(data.len))) end = @intCast(data.len);
+        if (start > end) {
+            const tmp = start;
+            start = end;
+            end = tmp;
+        }
+
+        const slice = data[@intCast(start)..@intCast(end)];
+        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
+    }
+    return value.JSValue.undefined_val;
 }
 
 /// String.prototype.toLowerCase() - Convert to lowercase
@@ -2309,32 +2448,100 @@ pub fn stringToUpperCase(ctx: *context.Context, this: value.JSValue, args: []con
 
 /// String.prototype.trim() - Remove whitespace from both ends
 pub fn stringTrim(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
     _ = args;
+    if (getJSString(this)) |str| {
+        const data = str.data();
+        var start: usize = 0;
+        var end: usize = data.len;
+        while (start < end and std.ascii.isWhitespace(data[start])) : (start += 1) {}
+        while (end > start and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
+        const slice = data[start..end];
+        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
+    }
     return this;
 }
 
 /// String.prototype.trimStart() - Remove whitespace from start
 pub fn stringTrimStart(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
     _ = args;
+    if (getJSString(this)) |str| {
+        const data = str.data();
+        var start: usize = 0;
+        while (start < data.len and std.ascii.isWhitespace(data[start])) : (start += 1) {}
+        const slice = data[start..];
+        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
+    }
     return this;
 }
 
 /// String.prototype.trimEnd() - Remove whitespace from end
 pub fn stringTrimEnd(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
     _ = args;
+    if (getJSString(this)) |str| {
+        const data = str.data();
+        var end: usize = data.len;
+        while (end > 0 and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
+        const slice = data[0..end];
+        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
+    }
     return this;
 }
 
 /// String.prototype.split(separator, limit?) - Split into array
 pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
-    // Return count (proper array creation requires more infrastructure)
-    return value.JSValue.fromInt(1);
+    if (!this.isString()) return value.JSValue.undefined_val;
+    const str = this.toPtr(string.JSString);
+    const data = str.data();
+
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+    const result = object.JSObject.createArray(ctx.allocator, root_class) catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
+
+    var limit: ?u32 = null;
+    if (args.len > 1 and args[1].isInt()) {
+        const lim = args[1].getInt();
+        if (lim <= 0) {
+            result.setArrayLength(0);
+            return result.toValue();
+        }
+        limit = @intCast(lim);
+    }
+
+    if (args.len == 0 or args[0].isUndefined()) {
+        const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
+        result.setIndex(ctx.allocator, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
+        result.setArrayLength(1);
+        return result.toValue();
+    }
+
+    const sep_val = args[0];
+    const sep_str = getJSString(sep_val) orelse {
+        return value.JSValue.undefined_val;
+    };
+    const sep = sep_str.data();
+    if (sep.len == 0) {
+        // Simple fallback: return whole string
+        const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
+        result.setIndex(ctx.allocator, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
+        result.setArrayLength(1);
+        return result.toValue();
+    }
+
+    var iter = std.mem.splitSequence(u8, data, sep);
+    var count: u32 = 0;
+    while (iter.next()) |part| {
+        if (limit) |lim| {
+            if (count >= lim) break;
+        }
+        const part_str = string.createString(ctx.allocator, part) catch return value.JSValue.undefined_val;
+        result.setIndex(ctx.allocator, count, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
+        count += 1;
+    }
+    result.setArrayLength(count);
+    return result.toValue();
 }
 
 /// String.prototype.repeat(count) - Repeat string
@@ -2425,30 +2632,32 @@ pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const v
 
                 if (flags.global) {
                     // Replace all matches
-                    var result = std.ArrayList(u8).init(allocator);
+                    var result = std.ArrayList(u8).empty;
+                    defer result.deinit(allocator);
                     var pos: usize = 0;
                     while (pos <= input.len) {
                         if (compiled.exec(input[pos..])) |match| {
-                            result.appendSlice(input[pos .. pos + match.start]) catch return this;
-                            result.appendSlice(replacement) catch return this;
+                            result.appendSlice(allocator, input[pos .. pos + match.start]) catch return this;
+                            result.appendSlice(allocator, replacement) catch return this;
                             pos = pos + match.end;
                             if (match.end == match.start) pos += 1; // Avoid infinite loop
                         } else {
                             break;
                         }
                     }
-                    result.appendSlice(input[pos..]) catch return this;
+                    result.appendSlice(allocator, input[pos..]) catch return this;
                     const new_str = string.createString(allocator, result.items) catch return this;
-                    return new_str.toValue();
+                    return value.JSValue.fromPtr(new_str);
                 } else {
                     // Replace first match
                     if (compiled.exec(input)) |match| {
-                        var result = std.ArrayList(u8).init(allocator);
-                        result.appendSlice(input[0..match.start]) catch return this;
-                        result.appendSlice(replacement) catch return this;
-                        result.appendSlice(input[match.end..]) catch return this;
+                        var result = std.ArrayList(u8).empty;
+                        defer result.deinit(allocator);
+                        result.appendSlice(allocator, input[0..match.start]) catch return this;
+                        result.appendSlice(allocator, replacement) catch return this;
+                        result.appendSlice(allocator, input[match.end..]) catch return this;
                         const new_str = string.createString(allocator, result.items) catch return this;
-                        return new_str.toValue();
+                        return value.JSValue.fromPtr(new_str);
                     }
                 }
                 return this;
@@ -2460,12 +2669,13 @@ pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const v
     if (args[0].isString()) {
         const search = args[0].toPtr(string.JSString).data();
         if (std.mem.indexOf(u8, input, search)) |idx| {
-            var result = std.ArrayList(u8).init(allocator);
-            result.appendSlice(input[0..idx]) catch return this;
-            result.appendSlice(replacement) catch return this;
-            result.appendSlice(input[idx + search.len ..]) catch return this;
+            var result = std.ArrayList(u8).empty;
+            defer result.deinit(allocator);
+            result.appendSlice(allocator, input[0..idx]) catch return this;
+            result.appendSlice(allocator, replacement) catch return this;
+            result.appendSlice(allocator, input[idx + search.len ..]) catch return this;
             const new_str = string.createString(allocator, result.items) catch return this;
-            return new_str.toValue();
+            return value.JSValue.fromPtr(new_str);
         }
     }
 
@@ -2487,16 +2697,17 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
         const search = args[0].toPtr(string.JSString).data();
         if (search.len == 0) return this;
 
-        var result = std.ArrayList(u8).init(allocator);
+        var result = std.ArrayList(u8).empty;
+        defer result.deinit(allocator);
         var pos: usize = 0;
         while (std.mem.indexOfPos(u8, input, pos, search)) |idx| {
-            result.appendSlice(input[pos..idx]) catch return this;
-            result.appendSlice(replacement) catch return this;
+            result.appendSlice(allocator, input[pos..idx]) catch return this;
+            result.appendSlice(allocator, replacement) catch return this;
             pos = idx + search.len;
         }
-        result.appendSlice(input[pos..]) catch return this;
+        result.appendSlice(allocator, input[pos..]) catch return this;
         const new_str = string.createString(allocator, result.items) catch return this;
-        return new_str.toValue();
+        return value.JSValue.fromPtr(new_str);
     }
 
     return this;
@@ -2780,7 +2991,20 @@ pub fn mathRandom(ctx: *context.Context, this: value.JSValue, args: []const valu
     _ = this;
     _ = args;
     if (prng == null) {
-        prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
+        const now = std.time.Instant.now() catch {
+            prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
+            const r = prng.?.random().float(f64);
+            return allocFloat(ctx, r);
+        };
+        const seed: u64 = switch (builtin.os.tag) {
+            .windows, .uefi, .wasi => @as(u64, now.timestamp),
+            else => blk: {
+                const sec: u64 = @intCast(now.timestamp.sec);
+                const nsec: u64 = @intCast(now.timestamp.nsec);
+                break :blk (sec * std.time.ns_per_s) + nsec;
+            },
+        };
+        prng = std.Random.DefaultPrng.init(seed);
     }
     const r = prng.?.random().float(f64);
     return allocFloat(ctx, r);
@@ -2835,12 +3059,15 @@ pub fn consoleLog(ctx: *context.Context, this: value.JSValue, args: []const valu
     _ = ctx;
     _ = this;
     const stdout = std.fs.File.stdout();
-    const writer = stdout.deprecatedWriter();
+    var buffer: [1024]u8 = undefined;
+    var file_writer = stdout.writer(&buffer);
+    const writer = &file_writer.interface;
     for (args, 0..) |arg, i| {
         if (i > 0) writer.writeAll(" ") catch {};
         printValue(writer, arg) catch {};
     }
     writer.writeAll("\n") catch {};
+    writer.flush() catch {};
     return value.JSValue.undefined_val;
 }
 
@@ -2848,13 +3075,16 @@ pub fn consoleWarn(ctx: *context.Context, this: value.JSValue, args: []const val
     _ = ctx;
     _ = this;
     const stderr = std.fs.File.stderr();
-    const writer = stderr.deprecatedWriter();
+    var buffer: [1024]u8 = undefined;
+    var file_writer = stderr.writer(&buffer);
+    const writer = &file_writer.interface;
     writer.writeAll("[WARN] ") catch {};
     for (args, 0..) |arg, i| {
         if (i > 0) writer.writeAll(" ") catch {};
         printValue(writer, arg) catch {};
     }
     writer.writeAll("\n") catch {};
+    writer.flush() catch {};
     return value.JSValue.undefined_val;
 }
 
@@ -2862,13 +3092,16 @@ pub fn consoleError(ctx: *context.Context, this: value.JSValue, args: []const va
     _ = ctx;
     _ = this;
     const stderr = std.fs.File.stderr();
-    const writer = stderr.deprecatedWriter();
+    var buffer: [1024]u8 = undefined;
+    var file_writer = stderr.writer(&buffer);
+    const writer = &file_writer.interface;
     writer.writeAll("[ERROR] ") catch {};
     for (args, 0..) |arg, i| {
         if (i > 0) writer.writeAll(" ") catch {};
         printValue(writer, arg) catch {};
     }
     writer.writeAll("\n") catch {};
+    writer.flush() catch {};
     return value.JSValue.undefined_val;
 }
 
@@ -3021,6 +3254,11 @@ fn wrapArrayShift(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.
 fn wrapArrayUnshift(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
     return arrayUnshift(ctx, this, args);
+}
+
+fn wrapArraySplice(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    return arraySplice(ctx, this, args);
 }
 
 fn wrapArrayIndexOf(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
@@ -3227,6 +3465,11 @@ fn addMethodDynamic(
 ) !void {
     const allocator = ctx.allocator;
     const root_class = ctx.root_class orelse return error.NoRootClass;
+    if (object.lookupPredefinedAtom(name)) |atom| {
+        const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, atom, arg_count);
+        try obj.setProperty(allocator, atom, func_obj.toValue());
+        return;
+    }
     const atom = try ctx.atoms.intern(name);
     const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, atom, arg_count);
     try obj.setProperty(allocator, atom, func_obj.toValue());
@@ -3429,10 +3672,10 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Create Response object with static methods
     const response_obj = try object.JSObject.create(allocator, root_class, null);
 
-    // Register Response static methods using dynamic atoms
-    const json_atom = try ctx.atoms.intern("json");
-    const text_atom = try ctx.atoms.intern("text");
-    const html_atom = try ctx.atoms.intern("html");
+    // Register Response static methods
+    const json_atom: object.Atom = .json;
+    const text_atom: object.Atom = .text;
+    const html_atom: object.Atom = .html;
     const redirect_atom = try ctx.atoms.intern("redirect");
 
     const json_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseJson, json_atom, 1);
@@ -3447,22 +3690,21 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const redirect_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseRedirect, redirect_atom, 1);
     try response_obj.setProperty(allocator, redirect_atom, redirect_func.toValue());
 
-    // Register Response on global (dynamic atom since "Response" isn't predefined)
-    const response_atom = try ctx.atoms.intern("Response");
-    try ctx.setGlobal(response_atom, response_obj.toValue());
+    // Register Response on global (predefined atom)
+    try ctx.setGlobal(.Response, response_obj.toValue());
 
     // Register h() - hyperscript function for JSX
-    const h_atom = try ctx.atoms.intern("h");
+    const h_atom: object.Atom = .h;
     const h_func = try object.JSObject.createNativeFunction(allocator, root_class, http.h, h_atom, 2);
     try ctx.setGlobal(h_atom, h_func.toValue());
 
     // Register renderToString() for SSR
-    const render_atom = try ctx.atoms.intern("renderToString");
+    const render_atom: object.Atom = .renderToString;
     const render_func = try object.JSObject.createNativeFunction(allocator, root_class, http.renderToString, render_atom, 1);
     try ctx.setGlobal(render_atom, render_func.toValue());
 
     // Register Fragment constant for JSX
-    const fragment_atom = try ctx.atoms.intern("Fragment");
+    const fragment_atom: object.Atom = .Fragment;
     const fragment_str = try string.createString(allocator, http.FRAGMENT_MARKER);
     try ctx.setGlobal(fragment_atom, value.JSValue.fromPtr(fragment_str));
 
@@ -3479,6 +3721,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_proto, "join", wrapArrayJoin, 1);
     try addMethodDynamic(ctx, array_proto, "reverse", wrapArrayReverse, 0);
     try addMethodDynamic(ctx, array_proto, "slice", wrapArraySlice, 2);
+    try addMethodDynamic(ctx, array_proto, "splice", wrapArraySplice, 2);
     try addMethodDynamic(ctx, array_proto, "concat", wrapArrayConcat, 1);
     try addMethodDynamic(ctx, array_proto, "map", wrapArrayMap, 1);
     try addMethodDynamic(ctx, array_proto, "filter", wrapArrayFilter, 1);
@@ -3597,8 +3840,8 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     const source_js = string.createString(allocator, pattern) catch return value.JSValue.undefined_val;
     const flags_js = string.createString(allocator, flags_str) catch return value.JSValue.undefined_val;
 
-    regexp_obj.setProperty(allocator, source_atom, source_js.toValue()) catch return value.JSValue.undefined_val;
-    regexp_obj.setProperty(allocator, flags_atom, flags_js.toValue()) catch return value.JSValue.undefined_val;
+    regexp_obj.setProperty(allocator, source_atom, value.JSValue.fromPtr(source_js)) catch return value.JSValue.undefined_val;
+    regexp_obj.setProperty(allocator, flags_atom, value.JSValue.fromPtr(flags_js)) catch return value.JSValue.undefined_val;
 
     // Parse flags
     const flags = regex.parseFlags(flags_str);
@@ -3609,7 +3852,12 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
 
     // Store compiled regex as internal property
     // For now we just store the pattern and flags separately, compile on demand
-    regexp_obj.setProperty(allocator, _regex_atom, value.JSValue.fromInt(@as(i32, @intCast(@intFromEnum(flags.global) | (@as(u8, @intFromEnum(flags.ignore_case)) << 1) | (@as(u8, @intFromEnum(flags.multiline)) << 2) | (@as(u8, @intFromEnum(flags.dot_all)) << 3))))) catch return value.JSValue.undefined_val;
+    const flags_bits: u8 =
+        (if (flags.global) @as(u8, 1) else 0) |
+        (if (flags.ignore_case) @as(u8, 1) else 0) << 1 |
+        (if (flags.multiline) @as(u8, 1) else 0) << 2 |
+        (if (flags.dot_all) @as(u8, 1) else 0) << 3;
+    regexp_obj.setProperty(allocator, _regex_atom, value.JSValue.fromInt(@as(i32, @intCast(flags_bits)))) catch return value.JSValue.undefined_val;
 
     return regexp_obj.toValue();
 }
@@ -3696,7 +3944,7 @@ pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const valu
 
         // Set matched string as index 0
         const matched_str = string.createString(allocator, match.slice()) catch return value.JSValue.null_val;
-        result_arr.setSlot(0, matched_str.toValue());
+        result_arr.setSlot(0, value.JSValue.fromPtr(matched_str));
         result_arr.setProperty(allocator, .length, value.JSValue.fromInt(1)) catch return value.JSValue.null_val;
 
         // Set index property
@@ -3736,8 +3984,8 @@ pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []con
     const source_js = try string.createString(allocator, pattern);
     const flags_js = try string.createString(allocator, flags_str);
 
-    try regexp_obj.setProperty(allocator, source_atom, source_js.toValue());
-    try regexp_obj.setProperty(allocator, flags_atom, flags_js.toValue());
+    try regexp_obj.setProperty(allocator, source_atom, value.JSValue.fromPtr(source_js));
+    try regexp_obj.setProperty(allocator, flags_atom, value.JSValue.fromPtr(flags_js));
 
     const flags = regex.parseFlags(flags_str);
     try regexp_obj.setProperty(allocator, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val);
@@ -3773,7 +4021,8 @@ pub fn generatorNext(ctx: *context.Context, this: value.JSValue, _: []const valu
     const result = interp.runGenerator(gen_obj) catch {
         // Return {value: undefined, done: true} on error
         const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-        result_obj.setProperty(allocator, .value, value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
+        const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
+        result_obj.setProperty(allocator, value_atom, value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
         const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
         result_obj.setProperty(allocator, done_atom, value.JSValue.true_val) catch return value.JSValue.undefined_val;
         return result_obj.toValue();
@@ -3781,7 +4030,8 @@ pub fn generatorNext(ctx: *context.Context, this: value.JSValue, _: []const valu
 
     // Create iterator result object {value, done}
     const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, .value, result.value) catch return value.JSValue.undefined_val;
+    const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
+    result_obj.setProperty(allocator, value_atom, result.value) catch return value.JSValue.undefined_val;
     const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
     result_obj.setProperty(allocator, done_atom, if (result.done) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
 
@@ -3810,7 +4060,8 @@ pub fn generatorReturn(ctx: *context.Context, this: value.JSValue, args: []const
     // Return {value, done: true}
     const return_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
     const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, .value, return_val) catch return value.JSValue.undefined_val;
+    const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
+    result_obj.setProperty(allocator, value_atom, return_val) catch return value.JSValue.undefined_val;
     const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
     result_obj.setProperty(allocator, done_atom, value.JSValue.true_val) catch return value.JSValue.undefined_val;
 
@@ -3838,7 +4089,8 @@ pub fn generatorThrow(ctx: *context.Context, this: value.JSValue, _: []const val
 
     // Return {value: undefined, done: true}
     const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, .value, value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
+    const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
+    result_obj.setProperty(allocator, value_atom, value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
     const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
     result_obj.setProperty(allocator, done_atom, value.JSValue.true_val) catch return value.JSValue.undefined_val;
 
@@ -4593,18 +4845,20 @@ test "String.slice" {
 
     const str_val = value.JSValue.fromPtr(str);
 
-    // slice(0, 5) = "hello" (length 5)
+    // slice(0, 5) = "hello"
     const result = stringSlice(ctx, str_val, &[_]value.JSValue{
         value.JSValue.fromInt(0),
         value.JSValue.fromInt(5),
     });
-    try std.testing.expectEqual(@as(i32, 5), result.getInt());
+    try std.testing.expect(result.isString());
+    try std.testing.expect(std.mem.eql(u8, result.toPtr(string.JSString).data(), "hello"));
 
-    // slice(6) = "world" (length 5)
+    // slice(6) = "world"
     const from_6 = stringSlice(ctx, str_val, &[_]value.JSValue{
         value.JSValue.fromInt(6),
     });
-    try std.testing.expectEqual(@as(i32, 5), from_6.getInt());
+    try std.testing.expect(from_6.isString());
+    try std.testing.expect(std.mem.eql(u8, from_6.toPtr(string.JSString).data(), "world"));
 }
 
 test "String.charCodeAt" {
@@ -4689,33 +4943,28 @@ test "initBuiltins registers console and Math" {
     try std.testing.expect(abs_val.?.isCallable());
 
     // Check Response is registered
-    const response_atom = try ctx.atoms.intern("Response");
-    const response_val = ctx.getGlobal(response_atom);
+    const response_val = ctx.getGlobal(.Response);
     try std.testing.expect(response_val != null);
     try std.testing.expect(response_val.?.isObject());
 
     // Check Response.json exists
     const response_obj = object.JSObject.fromValue(response_val.?);
-    const json_atom = try ctx.atoms.intern("json");
-    const json_method = response_obj.getProperty(json_atom);
+    const json_method = response_obj.getProperty(.json);
     try std.testing.expect(json_method != null);
     try std.testing.expect(json_method.?.isCallable());
 
     // Check h() is registered
-    const h_atom = try ctx.atoms.intern("h");
-    const h_val = ctx.getGlobal(h_atom);
+    const h_val = ctx.getGlobal(.h);
     try std.testing.expect(h_val != null);
     try std.testing.expect(h_val.?.isCallable());
 
     // Check renderToString is registered
-    const render_atom = try ctx.atoms.intern("renderToString");
-    const render_val = ctx.getGlobal(render_atom);
+    const render_val = ctx.getGlobal(.renderToString);
     try std.testing.expect(render_val != null);
     try std.testing.expect(render_val.?.isCallable());
 
     // Check Fragment is registered
-    const fragment_atom = try ctx.atoms.intern("Fragment");
-    const fragment_val = ctx.getGlobal(fragment_atom);
+    const fragment_val = ctx.getGlobal(.Fragment);
     try std.testing.expect(fragment_val != null);
     try std.testing.expect(fragment_val.?.isString());
 }

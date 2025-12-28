@@ -49,6 +49,7 @@ const Transformer = struct {
     source: []const u8,
     pos: usize,
     output: std.ArrayList(u8),
+    expect_expr: bool,
 
     const Self = @This();
 
@@ -58,17 +59,17 @@ const Transformer = struct {
             .source = source,
             .pos = 0,
             .output = .empty,
+            .expect_expr = true,
         };
     }
 
     pub fn transform(self: *Self) TransformError!TransformResult {
         while (self.pos < self.source.len) {
-            // Look for JSX start
-            if (self.looksLikeJsxStart()) {
+            if (self.shouldStartJsx()) {
                 try self.transformJsxElement();
+                self.expect_expr = false;
             } else {
-                // Pass through JS code
-                try self.passJsCode();
+                try self.consumeTokenAndAppend();
             }
         }
 
@@ -97,44 +98,222 @@ const Transformer = struct {
         return false;
     }
 
-    /// Pass through JavaScript code until we hit potential JSX
-    fn passJsCode(self: *Self) TransformError!void {
-        const start = self.pos;
+    fn shouldStartJsx(self: *Self) bool {
+        return self.expect_expr and self.looksLikeJsxStart();
+    }
 
+    /// Consume the next JS token/trivia and append it to output.
+    fn consumeTokenAndAppend(self: *Self) TransformError!void {
+        if (self.pos >= self.source.len) return;
+
+        const start = self.pos;
+        const c = self.source[self.pos];
+
+        // Whitespace
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
+            self.pos += 1;
+            self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+            return;
+        }
+
+        // Comments
+        if (c == '/' and self.pos + 1 < self.source.len) {
+            const next_char = self.source[self.pos + 1];
+            if (next_char == '/') {
+                self.skipLineComment();
+                self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+                return;
+            }
+            if (next_char == '*') {
+                self.skipBlockComment();
+                self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+                return;
+            }
+        }
+
+        // Strings and template literals
+        if (c == '"' or c == '\'' or c == '`') {
+            try self.skipString(c);
+            self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+            self.expect_expr = false;
+            return;
+        }
+
+        // Numbers
+        if (std.ascii.isDigit(c) or (c == '.' and self.pos + 1 < self.source.len and std.ascii.isDigit(self.source[self.pos + 1]))) {
+            self.scanNumber();
+            self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+            self.expect_expr = false;
+            return;
+        }
+
+        // Identifiers / keywords
+        if (isIdentifierStart(c)) {
+            const ident = self.scanIdentifier();
+            self.output.appendSlice(self.allocator, ident) catch return TransformError.OutOfMemory;
+            self.updateExpectExprForKeyword(ident);
+            return;
+        }
+
+        // Regex literal
+        if (c == '/' and self.expect_expr) {
+            self.scanRegex();
+            self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+            self.expect_expr = false;
+            return;
+        }
+
+        // Punctuators/operators
+        const punct_len = self.scanPunctuator();
+        self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+        self.updateExpectExprForPunctuator(self.source[start .. start + punct_len]);
+    }
+
+    fn updateExpectExprForKeyword(self: *Self, ident: []const u8) void {
+        if (std.mem.eql(u8, ident, "true") or std.mem.eql(u8, ident, "false") or
+            std.mem.eql(u8, ident, "null") or std.mem.eql(u8, ident, "this") or
+            std.mem.eql(u8, ident, "super"))
+        {
+            self.expect_expr = false;
+            return;
+        }
+
+        if (std.mem.eql(u8, ident, "return") or std.mem.eql(u8, ident, "throw") or
+            std.mem.eql(u8, ident, "case") or std.mem.eql(u8, ident, "new") or
+            std.mem.eql(u8, ident, "delete") or std.mem.eql(u8, ident, "void") or
+            std.mem.eql(u8, ident, "typeof") or std.mem.eql(u8, ident, "await") or
+            std.mem.eql(u8, ident, "yield") or std.mem.eql(u8, ident, "import") or
+            std.mem.eql(u8, ident, "export"))
+        {
+            self.expect_expr = true;
+            return;
+        }
+
+        if (std.mem.eql(u8, ident, "in") or std.mem.eql(u8, ident, "instanceof") or std.mem.eql(u8, ident, "of")) {
+            self.expect_expr = true;
+            return;
+        }
+
+        // Default: identifiers end expressions.
+        self.expect_expr = false;
+    }
+
+    fn updateExpectExprForPunctuator(self: *Self, punct: []const u8) void {
+        if (punct.len == 1) {
+            switch (punct[0]) {
+                ';', ',' => self.expect_expr = true,
+                '(', '[', '{' => self.expect_expr = true,
+                ')', ']', '}' => self.expect_expr = false,
+                '.' => self.expect_expr = false,
+                '?', ':', '=', '+', '-', '*', '/', '%', '!', '~', '<', '>' => self.expect_expr = true,
+                else => {},
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, punct, "++") or std.mem.eql(u8, punct, "--")) {
+            // Postfix if previous token ended expression, prefix otherwise.
+            self.expect_expr = self.expect_expr;
+            return;
+        }
+
+        // Most multi-char operators expect an expression after.
+        self.expect_expr = true;
+    }
+
+    fn scanNumber(self: *Self) void {
+        if (self.pos >= self.source.len) return;
+        if (self.source[self.pos] == '0' and self.pos + 1 < self.source.len) {
+            const next = self.source[self.pos + 1];
+            if (next == 'x' or next == 'X') {
+                self.pos += 2;
+                while (self.pos < self.source.len and std.ascii.isHex(self.source[self.pos])) self.pos += 1;
+                return;
+            }
+            if (next == 'b' or next == 'B') {
+                self.pos += 2;
+                while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1')) self.pos += 1;
+                return;
+            }
+            if (next == 'o' or next == 'O') {
+                self.pos += 2;
+                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '7') self.pos += 1;
+                return;
+            }
+        }
+
+        // Decimal / float / exponent
+        if (self.source[self.pos] == '.') {
+            self.pos += 1;
+        }
+        while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
+        if (self.pos < self.source.len and self.source[self.pos] == '.') {
+            self.pos += 1;
+            while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
+        }
+        if (self.pos + 1 < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
+            self.pos += 1;
+            if (self.source[self.pos] == '+' or self.source[self.pos] == '-') self.pos += 1;
+            while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
+        }
+    }
+
+    fn scanIdentifier(self: *Self) []const u8 {
+        const start = self.pos;
+        self.pos += 1;
+        while (self.pos < self.source.len and isIdentifierContinue(self.source[self.pos])) {
+            self.pos += 1;
+        }
+        return self.source[start..self.pos];
+    }
+
+    fn scanRegex(self: *Self) void {
+        self.pos += 1; // skip '/'
+        var in_class = false;
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
-
-            // Skip string literals
-            if (c == '"' or c == '\'' or c == '`') {
-                try self.skipString(c);
+            if (c == '\\' and self.pos + 1 < self.source.len) {
+                self.pos += 2;
                 continue;
             }
-
-            // Skip comments
-            if (c == '/' and self.pos + 1 < self.source.len) {
-                const next_char = self.source[self.pos + 1];
-                if (next_char == '/') {
-                    self.skipLineComment();
-                    continue;
-                }
-                if (next_char == '*') {
-                    self.skipBlockComment();
-                    continue;
-                }
-            }
-
-            // Check for JSX start
-            if (self.looksLikeJsxStart()) {
+            if (c == '[') in_class = true;
+            if (c == ']' and in_class) in_class = false;
+            if (c == '/' and !in_class) {
+                self.pos += 1;
                 break;
             }
-
+            if (c == '\n' or c == '\r') break;
             self.pos += 1;
         }
 
-        // Append passed JS code
-        if (self.pos > start) {
-            self.output.appendSlice(self.allocator, self.source[start..self.pos]) catch return TransformError.OutOfMemory;
+        // Flags
+        while (self.pos < self.source.len and std.ascii.isAlphabetic(self.source[self.pos])) {
+            self.pos += 1;
         }
+    }
+
+    fn scanPunctuator(self: *Self) usize {
+        const start = self.pos;
+        const remaining = self.source.len - self.pos;
+        const puncts = [_][]const u8{
+            ">>>=", "===", "!==", ">>=", "<<=", ">>>", "&&", "||", "==", "!=", "<=", ">=", "=>", "++", "--", "**", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "??", "?.", "...", ">>", "<<",
+        };
+        for (puncts) |p| {
+            if (remaining >= p.len and std.mem.eql(u8, self.source[start .. start + p.len], p)) {
+                self.pos += p.len;
+                return p.len;
+            }
+        }
+        self.pos += 1;
+        return 1;
+    }
+
+    fn isIdentifierStart(c: u8) bool {
+        return std.ascii.isAlphabetic(c) or c == '_' or c == '$';
+    }
+
+    fn isIdentifierContinue(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
     }
 
     /// Skip a string literal (handles escape sequences)
@@ -687,6 +866,12 @@ test "comparison not treated as jsx" {
     const result = try transform(std.testing.allocator, "if (a < b) { x = 1; }");
     defer @constCast(&result).deinit();
     try std.testing.expectEqualStrings("if (a < b) { x = 1; }", result.code);
+}
+
+test "comparison without spaces not treated as jsx" {
+    const result = try transform(std.testing.allocator, "if (a<b) { x = 1; }");
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings("if (a<b) { x = 1; }", result.code);
 }
 
 test "string with angle brackets not treated as jsx" {
