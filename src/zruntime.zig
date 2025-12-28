@@ -40,6 +40,9 @@ pub const RuntimeConfig = struct {
     /// Enable JSX runtime (h, renderToString, Fragment)
     enable_jsx: bool = true,
 
+    /// Clear user-defined globals between requests (builtins always preserved)
+    reset_user_globals: bool = false,
+
     // Internal zquickjs settings
     /// GC nursery size
     nursery_size: usize = 64 * 1024,
@@ -103,6 +106,14 @@ pub const HttpResponse = struct {
         try self.headers.put(key_dup, value_dup);
     }
 };
+
+// ============================================================================
+// Thread-local Runtime for native function callbacks
+// ============================================================================
+
+/// Thread-local reference to current runtime for use in native function callbacks
+/// (e.g., renderToString needs to call component functions)
+threadlocal var current_runtime: ?*Runtime = null;
 
 // ============================================================================
 // Runtime Instance
@@ -186,7 +197,7 @@ pub const Runtime = struct {
         const console_obj = try zq.JSObject.create(self.allocator, root_class, null);
 
         // Add console.log
-        const log_atom = try self.ctx.atoms.intern("log");
+        const log_atom: zq.Atom = .log;
         const log_func = try zq.JSObject.createNativeFunction(
             self.allocator,
             root_class,
@@ -208,8 +219,7 @@ pub const Runtime = struct {
         try console_obj.setProperty(self.allocator, error_atom, error_func.toValue());
 
         // Register on global
-        const console_atom = try self.ctx.atoms.intern("console");
-        try self.ctx.setGlobal(console_atom, console_obj.toValue());
+        try self.ctx.setGlobal(.console, console_obj.toValue());
     }
 
     fn installResponseHelpers(self: *Self) !void {
@@ -303,16 +313,6 @@ pub const Runtime = struct {
             .source_map = null,
         };
 
-        std.log.debug("loadCode: bytecode length={}, bytes: {x} {x} {x} {x} {x} {x}", .{
-            bytecode_data.len,
-            if (bytecode_data.len > 0) bytecode_data[0] else 0,
-            if (bytecode_data.len > 1) bytecode_data[1] else 0,
-            if (bytecode_data.len > 2) bytecode_data[2] else 0,
-            if (bytecode_data.len > 3) bytecode_data[3] else 0,
-            if (bytecode_data.len > 4) bytecode_data[4] else 0,
-            if (bytecode_data.len > 5) bytecode_data[5] else 0,
-        });
-
         // Execute the compiled code to define functions
         _ = try self.interpreter.run(&func);
     }
@@ -326,19 +326,18 @@ pub const Runtime = struct {
     pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
         const handler_atom = self.handler_atom orelse return error.NoHandler;
 
-        std.log.debug("executeHandler: looking for handler_atom={}", .{@intFromEnum(handler_atom)});
-
         // Get handler function from globals
         const handler_val = self.ctx.getGlobal(handler_atom) orelse {
-            std.log.debug("executeHandler: handler not found in globals!", .{});
             return error.NoHandler;
         };
-
-        std.log.debug("executeHandler: got handler_val, isCallable={}, raw=0x{x}", .{ handler_val.isCallable(), @as(u64, @bitCast(handler_val)) });
 
         if (!handler_val.isCallable()) {
             return error.HandlerNotCallable;
         }
+
+        // Set thread-local runtime for native function callbacks (e.g., renderToString)
+        current_runtime = self;
+        defer current_runtime = null;
 
         // Create Request object from HttpRequest
         const request_obj = try self.createRequestObject(request);
@@ -394,32 +393,20 @@ pub const Runtime = struct {
     }
 
     fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {
-        std.log.debug("callFunction: class_id={}, is_callable={}", .{ @intFromEnum(func_obj.class_id), func_obj.flags.is_callable });
-        std.log.debug("callFunction: slot0={x}, slot1={x}", .{ @as(u64, @bitCast(func_obj.inline_slots[0])), @as(u64, @bitCast(func_obj.inline_slots[1])) });
-
         // Get bytecode function data
         const bc_data = func_obj.getBytecodeFunctionData() orelse {
-            std.log.debug("callFunction: no bytecode data, trying native", .{});
             // Try native function
             const native_data = func_obj.getNativeFunctionData() orelse return error.NotCallable;
             return native_data.func(self.ctx, zq.JSValue.undefined_val, args);
         };
 
-        std.log.debug("callFunction: got bc_data, pushing {} args", .{args.len});
-
-        // Push arguments onto stack
-        for (args) |arg| {
-            try self.ctx.push(arg);
-        }
-
-        // Execute bytecode
-        std.log.debug("callFunction: running bytecode", .{});
-        const result = self.interpreter.run(bc_data.bytecode) catch |err| {
-            std.log.debug("callFunction: bytecode execution failed: {}", .{err});
-            return err;
-        };
-        std.log.debug("callFunction: success", .{});
-        return result;
+        const func_bc = bc_data.bytecode;
+        return try self.interpreter.callBytecodeFunction(
+            func_obj.toValue(),
+            func_bc,
+            zq.JSValue.undefined_val,
+            args,
+        );
     }
 
     fn extractResponse(self: *Self, result: zq.JSValue) !HttpResponse {
@@ -482,30 +469,12 @@ pub const Runtime = struct {
         if (self.gc_state.nursery.used() > self.gc_state.config.nursery_size / 2) {
             self.gc_state.minorGC();
         }
-        self.clearUserGlobals() catch |err| {
-            std.log.warn("Failed to clear user globals: {}", .{err});
-        };
-    }
 
-    fn clearUserGlobals(self: *Self) !void {
-        const global_obj = self.ctx.global_obj orelse return;
-        const keys = try global_obj.getOwnEnumerableKeys(self.allocator);
-        defer self.allocator.free(keys);
-
-        for (keys) |atom| {
-            if (isProtectedGlobal(atom, self.handler_atom)) continue;
-            _ = global_obj.deleteProperty(atom);
-        }
-    }
-
-    fn isProtectedGlobal(atom: zq.Atom, handler_atom: ?zq.Atom) bool {
-        if (handler_atom) |h| {
-            if (atom == h) return true;
-        }
-        return switch (atom) {
-            .handler, .Response, .console, .h, .renderToString, .Fragment => true,
-            else => false,
-        };
+        // Note: We do NOT clear user globals here. The handler code and all its
+        // dependencies (functions, constants, component definitions) are loaded
+        // once per runtime and must persist across requests. Request isolation
+        // is achieved through the RuntimePool (each request gets a pooled runtime)
+        // and stack/exception clearing above.
     }
 };
 
@@ -726,9 +695,38 @@ fn renderNode(ctx: *zq.Context, allocator: std.mem.Allocator, node: zq.JSValue, 
             return;
         }
 
-        // Virtual DOM node: { tag, props, children }
         // Virtual DOM node: { tag, props, children } - use predefined atoms
         const tag_val = obj.getOwnProperty(zq.Atom.tag) orelse return;
+
+        // Handle component functions (tag is callable)
+        if (tag_val.isCallable()) {
+            const runtime = current_runtime orelse return error.NoRuntime;
+
+            // Get props (or null if not present)
+            const props_val = obj.getOwnProperty(zq.Atom.props) orelse zq.JSValue.null_val;
+
+            // Get children and add to props if present
+            const call_props = props_val;
+            if (obj.getOwnProperty(zq.Atom.children)) |children_val| {
+                // If props is an object, add children to it
+                if (props_val.isObject()) {
+                    const props_obj = props_val.toPtr(zq.JSObject);
+                    props_obj.setProperty(allocator, zq.Atom.children, children_val) catch {};
+                }
+            }
+
+            // Call the component function with props
+            const func_obj = tag_val.toPtr(zq.JSObject);
+            const call_args = [_]zq.JSValue{call_props};
+            const component_result = runtime.callFunction(func_obj, &call_args) catch |err| {
+                std.log.err("Component function call failed: {}", .{err});
+                return;
+            };
+
+            // Recursively render the result
+            try renderNode(ctx, allocator, component_result, buffer);
+            return;
+        }
 
         // Check for Fragment
         if (tag_val.isString()) {

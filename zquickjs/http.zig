@@ -549,7 +549,9 @@ fn writeJson(val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
 
 test "createResponse" {
     const gc = @import("gc.zig");
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
     defer gc_state.deinit();
@@ -568,11 +570,11 @@ test "createResponse" {
 }
 
 test "escapeHtml" {
-    var buffer = std.ArrayList(u8).init(std.testing.allocator);
-    defer buffer.deinit();
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
 
-    try escapeHtml("<script>alert('xss')</script>", buffer.writer());
-    try std.testing.expectEqualStrings("&lt;script&gt;alert('xss')&lt;/script&gt;", buffer.items);
+    try escapeHtml("<script>alert('xss')</script>", &writer.writer);
+    try std.testing.expectEqualStrings("&lt;script&gt;alert('xss')&lt;/script&gt;", writer.written());
 }
 
 test "isVoidElement" {

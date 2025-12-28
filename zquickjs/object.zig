@@ -1045,7 +1045,7 @@ pub const InlineCache = struct {
 test "Atom predefined check" {
     try std.testing.expect(Atom.length.isPredefined());
     try std.testing.expect(Atom.prototype.isPredefined());
-    try std.testing.expect(!(@as(Atom, @enumFromInt(200)).isPredefined()));
+    try std.testing.expect(!(@as(Atom, @enumFromInt(Atom.FIRST_DYNAMIC)).isPredefined()));
 }
 
 test "HiddenClass property transitions" {

@@ -271,7 +271,7 @@ pub const JSValue = packed struct {
 
     /// Strict equality (===)
     pub inline fn strictEquals(self: JSValue, other: JSValue) bool {
-        // Fast path: same raw value
+        // Fast path: same raw value (covers same pointer, same int, same special)
         if (self.raw == other.raw) return true;
 
         // Float comparison (handle NaN)
@@ -281,6 +281,13 @@ pub const JSValue = packed struct {
             // NaN !== NaN
             if (std.math.isNan(a) or std.math.isNan(b)) return false;
             return a == b;
+        }
+
+        // String comparison (compare by value, not pointer)
+        if (self.isString() and other.isString()) {
+            const str_a = self.toPtr(@import("string.zig").JSString);
+            const str_b = other.toPtr(@import("string.zig").JSString);
+            return std.mem.eql(u8, str_a.data(), str_b.data());
         }
 
         return false;
@@ -315,7 +322,7 @@ pub const JSValue = packed struct {
     // ========================================================================
 
     /// Format value for debug output
-    pub fn format(self: JSValue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: JSValue, comptime _: []const u8, _: std.fmt.Options, writer: anytype) !void {
         if (self.isNull()) {
             try writer.writeAll("null");
         } else if (self.isUndefined()) {
@@ -436,13 +443,11 @@ test "JSValue pointer encoding" {
 
 test "JSValue format" {
     var buf: [64]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const writer = fbs.writer();
+    var writer: std.Io.Writer = .fixed(&buf);
+    JSValue.null_val.format("", .{}, &writer) catch unreachable;
+    try std.testing.expectEqualStrings("null", writer.buffer[0..writer.end]);
 
-    JSValue.null_val.format("", .{}, writer) catch unreachable;
-    try std.testing.expectEqualStrings("null", fbs.getWritten());
-
-    fbs.reset();
-    JSValue.fromInt(42).format("", .{}, writer) catch unreachable;
-    try std.testing.expectEqualStrings("42", fbs.getWritten());
+    writer = .fixed(&buf);
+    JSValue.fromInt(42).format("", .{}, &writer) catch unreachable;
+    try std.testing.expectEqualStrings("42", writer.buffer[0..writer.end]);
 }

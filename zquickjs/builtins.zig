@@ -589,6 +589,7 @@ pub fn numberIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JS
     if (args.len == 0) return value.JSValue.fromBool(false);
     const val = args[0];
 
+    if (val.raw == value.JSValue.nan_val.raw) return value.JSValue.fromBool(true);
     if (!val.isFloat()) return value.JSValue.fromBool(false);
     return value.JSValue.fromBool(std.math.isNan(val.getFloat64()));
 }
@@ -3620,9 +3621,8 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const neg_inf_box = try ctx.gc_state.allocFloat(-std.math.inf(f64));
     try number_obj.setProperty(allocator, neg_inf_atom, value.JSValue.fromPtr(neg_inf_box));
 
-    // Register Number on global (dynamic atom since "Number" isn't predefined)
-    const number_global_atom = try ctx.atoms.intern("Number");
-    try ctx.setGlobal(number_global_atom, number_obj.toValue());
+    // Register Number on global (predefined atom)
+    try ctx.setGlobal(.Number, number_obj.toValue());
 
     // Also register parseFloat and parseInt globally (JS convention)
     const global_parse_float_atom = try ctx.atoms.intern("parseFloat");
@@ -3651,10 +3651,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, map_proto, "clear", wrapMapClear, 0);
 
     // Create Map constructor
-    const map_atom = try ctx.atoms.intern("Map");
-    const map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapMapConstructor, map_atom, 0);
+    const map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapMapConstructor, .Map, 0);
     try map_ctor.setProperty(allocator, .prototype, map_proto.toValue());
-    try ctx.setGlobal(map_atom, map_ctor.toValue());
+    try ctx.setGlobal(.Map, map_ctor.toValue());
 
     // Create Set prototype with methods
     const set_proto = try object.JSObject.create(allocator, root_class, null);
@@ -3664,10 +3663,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, set_proto, "clear", wrapSetClear, 0);
 
     // Create Set constructor
-    const set_atom = try ctx.atoms.intern("Set");
-    const set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSetConstructor, set_atom, 0);
+    const set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSetConstructor, .Set, 0);
     try set_ctor.setProperty(allocator, .prototype, set_proto.toValue());
-    try ctx.setGlobal(set_atom, set_ctor.toValue());
+    try ctx.setGlobal(.Set, set_ctor.toValue());
 
     // Create Response object with static methods
     const response_obj = try object.JSObject.create(allocator, root_class, null);
@@ -3736,13 +3734,12 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     ctx.array_prototype = array_proto;
 
     // Create Array constructor function on global
-    const array_atom = try ctx.atoms.intern("Array");
     const array_ctor = try object.JSObject.create(allocator, root_class, null);
     // Array static methods
     try addMethodDynamic(ctx, array_ctor, "isArray", wrapArrayIsArray, 1);
     try addMethodDynamic(ctx, array_ctor, "from", wrapArrayFrom, 1);
     try addMethodDynamic(ctx, array_ctor, "of", wrapArrayOf, 0);
-    try ctx.setGlobal(array_atom, array_ctor.toValue());
+    try ctx.setGlobal(.Array, array_ctor.toValue());
 
     // ========================================================================
     // String.prototype
@@ -3772,11 +3769,10 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     ctx.string_prototype = string_proto;
 
     // Create String constructor function on global
-    const string_atom = try ctx.atoms.intern("String");
     const string_ctor = try object.JSObject.create(allocator, root_class, null);
     // String.fromCharCode static method
     try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrapStringFromCharCode, 1);
-    try ctx.setGlobal(string_atom, string_ctor.toValue());
+    try ctx.setGlobal(.String, string_ctor.toValue());
 
     // Create RegExp prototype with test/exec methods
     const regexp_proto = try object.JSObject.create(allocator, root_class, null);
@@ -3784,10 +3780,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, regexp_proto, "exec", wrapRegExpExec, 1);
 
     // Create RegExp constructor
-    const regexp_atom = try ctx.atoms.intern("RegExp");
-    const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapRegExpConstructor, regexp_atom, 2);
+    const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapRegExpConstructor, .RegExp, 2);
     try regexp_ctor.setProperty(allocator, .prototype, regexp_proto.toValue());
-    try ctx.setGlobal(regexp_atom, regexp_ctor.toValue());
+    try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
 
     // Create Generator prototype with next/return/throw methods
     const generator_proto = try object.JSObject.create(allocator, root_class, null);
@@ -4538,10 +4533,9 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, weak_map_proto, "delete", wrapWeakMapDelete, 1);
 
     // Create WeakMap constructor
-    const weak_map_atom = try ctx.atoms.intern("WeakMap");
-    const weak_map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakMapConstructor, weak_map_atom, 0);
+    const weak_map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakMapConstructor, .WeakMap, 0);
     try weak_map_ctor.setProperty(allocator, .prototype, weak_map_proto.toValue());
-    try ctx.setGlobal(weak_map_atom, weak_map_ctor.toValue());
+    try ctx.setGlobal(.WeakMap, weak_map_ctor.toValue());
 
     // Create WeakSet prototype
     const weak_set_proto = try object.JSObject.create(allocator, root_class, null);
@@ -4550,10 +4544,9 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, weak_set_proto, "delete", wrapWeakSetDelete, 1);
 
     // Create WeakSet constructor
-    const weak_set_atom = try ctx.atoms.intern("WeakSet");
-    const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakSetConstructor, weak_set_atom, 0);
+    const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapWeakSetConstructor, .WeakSet, 0);
     try weak_set_ctor.setProperty(allocator, .prototype, weak_set_proto.toValue());
-    try ctx.setGlobal(weak_set_atom, weak_set_ctor.toValue());
+    try ctx.setGlobal(.WeakSet, weak_set_ctor.toValue());
 }
 
 /// Initialize Symbol built-in and well-known symbols
@@ -4567,8 +4560,7 @@ pub fn initSymbol(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, symbol_proto, "valueOf", wrapSymbolDescription, 0);
 
     // Create Symbol constructor
-    const symbol_atom = try ctx.atoms.intern("Symbol");
-    const symbol_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSymbolConstructor, symbol_atom, 1);
+    const symbol_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrapSymbolConstructor, .Symbol, 1);
     try symbol_ctor.setProperty(allocator, .prototype, symbol_proto.toValue());
 
     // Add static methods
@@ -4594,7 +4586,7 @@ pub fn initSymbol(ctx: *context.Context) !void {
     try symbol_ctor.setProperty(allocator, to_primitive_atom, to_primitive_sym);
     try symbol_ctor.setProperty(allocator, has_instance_atom, has_instance_sym);
 
-    try ctx.setGlobal(symbol_atom, symbol_ctor.toValue());
+    try ctx.setGlobal(.Symbol, symbol_ctor.toValue());
 }
 
 test "Math.abs" {
@@ -4831,7 +4823,9 @@ test "Array.slice" {
 
 test "String.slice" {
     const gc = @import("gc.zig");
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
     defer gc_state.deinit();
@@ -4915,7 +4909,9 @@ test "String.repeat" {
 
 test "initBuiltins registers console and Math" {
     const gc = @import("gc.zig");
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
     defer gc_state.deinit();

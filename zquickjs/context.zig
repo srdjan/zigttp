@@ -113,8 +113,14 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        // Note: global_obj and root_class are managed by GC in a full implementation
-        // For now, we don't free them to avoid double-free with hidden class transitions
+        if (self.array_prototype) |proto| proto.destroy(self.allocator);
+        if (self.string_prototype) |proto| proto.destroy(self.allocator);
+        if (self.object_prototype) |proto| proto.destroy(self.allocator);
+        if (self.function_prototype) |proto| proto.destroy(self.allocator);
+        if (self.generator_prototype) |proto| proto.destroy(self.allocator);
+        if (self.global_obj) |g| g.destroy(self.allocator);
+        if (self.root_class) |root| root.deinitRecursive(self.allocator);
+
         self.atoms.deinit();
         self.allocator.free(self.call_stack);
         self.allocator.free(self.stack);

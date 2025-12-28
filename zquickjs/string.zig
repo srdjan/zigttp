@@ -446,7 +446,7 @@ pub fn createString(allocator: std.mem.Allocator, s: []const u8) !*JSString {
 /// Free a non-interned string
 pub fn freeString(allocator: std.mem.Allocator, str: *JSString) void {
     const total_size = @sizeOf(JSString) + str.len;
-    const ptr: [*]u8 = @ptrCast(str);
+    const ptr: [*]align(@alignOf(JSString)) u8 = @ptrCast(@alignCast(str));
     allocator.free(ptr[0..total_size]);
 }
 
@@ -454,7 +454,7 @@ pub fn freeString(allocator: std.mem.Allocator, str: *JSString) void {
 pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
     const total_len = a.len + b.len;
     const total_size = @sizeOf(JSString) + total_len;
-    const mem = try allocator.alloc(u8, total_size);
+    const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
     const str: *JSString = @ptrCast(@alignCast(mem.ptr));
     const data_a = a.data();

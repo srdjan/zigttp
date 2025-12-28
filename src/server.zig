@@ -364,9 +364,9 @@ pub const Server = struct {
             };
         }
 
-        // Read body if Content-Length present
+        // Read body if Content-Length present (case-insensitive)
         var body: ?[]u8 = null;
-        if (headers.get("Content-Length")) |len_str| {
+        if (findHeader(&headers, "Content-Length")) |len_str| {
             const content_length = std.fmt.parseInt(usize, len_str, 10) catch 0;
             if (content_length > 0 and content_length <= self.config.max_body_size) {
                 body = try self.allocator.alloc(u8, content_length);
@@ -536,6 +536,16 @@ const BufferedReader = struct {
         try self.reader.interface.readSliceAll(out);
     }
 };
+
+fn findHeader(headers: *std.StringHashMap([]const u8), name: []const u8) ?[]const u8 {
+    var it = headers.iterator();
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) {
+            return entry.value_ptr.*;
+        }
+    }
+    return null;
+}
 
 fn getStatusText(status: u16) []const u8 {
     return switch (status) {

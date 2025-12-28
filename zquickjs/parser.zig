@@ -720,6 +720,8 @@ pub const Parser = struct {
     // String table for interning
     strings: *string.StringTable,
     atoms: ?*context.AtomTable,
+    dynamic_atoms: std.StringHashMap(u16),
+    next_dynamic_atom: u16,
 
     // Generator/async state
     in_generator: bool,
@@ -733,6 +735,9 @@ pub const Parser = struct {
     // Error state
     had_error: bool,
     panic_mode: bool,
+
+    // Method call tracking (obj.method(...) or obj[expr](...))
+    pending_method_call: bool,
 
     pub const Error = error{
         OutOfMemory,
@@ -779,6 +784,8 @@ pub const Parser = struct {
             .break_depth = 0,
             .strings = strings,
             .atoms = atoms,
+            .dynamic_atoms = std.StringHashMap(u16).init(allocator),
+            .next_dynamic_atom = @intCast(object.Atom.FIRST_DYNAMIC),
             .in_generator = false,
             .in_async = false,
             .is_module = false,
@@ -786,6 +793,7 @@ pub const Parser = struct {
             .imports = .empty,
             .had_error = false,
             .panic_mode = false,
+            .pending_method_call = false,
         };
         // Initialize locals
         for (&parser.locals) |*local| {
@@ -801,6 +809,7 @@ pub const Parser = struct {
         self.constants.deinit();
         self.exports.deinit(self.allocator);
         self.imports.deinit(self.allocator);
+        self.dynamic_atoms.deinit();
     }
 
     /// Parse a complete script
@@ -1249,7 +1258,7 @@ pub const Parser = struct {
             try self.consume(.identifier, "Expected variable name.");
             const name = self.previous.text(self.tokenizer.source);
 
-            if (self.match(.eq)) {
+            if (self.match(.assign)) {
                 try self.expression();
             } else {
                 try self.emitOp(.push_undefined);
@@ -1712,12 +1721,10 @@ pub const Parser = struct {
         try self.consume(.rparen, "Expected ')' after condition.");
 
         const then_jump = try self.emitJump(.if_false);
-        try self.emitOp(.drop);
         try self.statement();
 
         const else_jump = try self.emitJump(.goto);
         self.patchJump(then_jump);
-        try self.emitOp(.drop);
 
         if (self.match(.kw_else)) {
             try self.statement();
@@ -1733,7 +1740,6 @@ pub const Parser = struct {
         try self.consume(.rparen, "Expected ')' after condition.");
 
         const exit_jump = try self.emitJump(.if_false);
-        try self.emitOp(.drop);
         try self.pushBreakContext(.loop, self.scope_depth, .backward, loop_start);
         try self.statement();
         try self.emitLoop(loop_start);
@@ -1743,7 +1749,6 @@ pub const Parser = struct {
             self.patchJump(jump);
         }
         self.patchJump(exit_jump);
-        try self.emitOp(.drop);
     }
 
     fn forStatement(self: *Parser) Error!void {
@@ -1802,7 +1807,6 @@ pub const Parser = struct {
         if (!self.check(.semicolon)) {
             try self.expression();
             exit_jump = try self.emitJump(.if_false);
-            try self.emitOp(.drop);
         }
         try self.consume(.semicolon, "Expected ';' after loop condition.");
 
@@ -1811,7 +1815,6 @@ pub const Parser = struct {
             const body_jump = try self.emitJump(.goto);
             const increment_start = @as(u32, @intCast(self.code.items.len));
             try self.expression();
-            try self.emitOp(.drop);
             try self.emitLoop(loop_start);
             loop_start = increment_start;
             self.patchJump(body_jump);
@@ -1829,7 +1832,6 @@ pub const Parser = struct {
         }
         if (exit_jump) |jump| {
             self.patchJump(jump);
-            try self.emitOp(.drop);
         }
 
         try self.endScope();
@@ -1868,7 +1870,6 @@ pub const Parser = struct {
         try self.emitU16(@intFromEnum(object.Atom.length));
         try self.emitOp(.lt);
         const exit_jump = try self.emitJump(.if_false);
-        try self.emitOp(.drop);
 
         // Get element: arr[idx]
         try self.emitOp(.get_loc);
@@ -1912,7 +1913,6 @@ pub const Parser = struct {
         }
         // Patch exit jump
         self.patchJump(exit_jump);
-        try self.emitOp(.drop);
 
         try self.endScope();
     }
@@ -2947,7 +2947,6 @@ pub const Parser = struct {
     fn ternary(self: *Parser, _: bool) !void {
         // Condition is already on stack
         const else_jump = try self.emitJump(.if_false);
-        try self.emitOp(.drop); // Drop condition value
 
         // Parse 'then' branch
         try self.expression();
@@ -2955,7 +2954,6 @@ pub const Parser = struct {
 
         // Parse 'else' branch
         self.patchJump(else_jump);
-        try self.emitOp(.drop); // Drop condition value
         try self.consume(.colon, "Expected ':' in ternary expression.");
         try self.parsePrecedence(.ternary);
 
@@ -3047,6 +3045,8 @@ pub const Parser = struct {
     }
 
     fn andOp(self: *Parser, _: bool) !void {
+        // a && b: evaluate a, if falsy keep a, else evaluate b
+        try self.emitOp(.dup);
         const end_jump = try self.emitJump(.if_false);
         try self.emitOp(.drop);
         try self.parsePrecedence(.and_prec);
@@ -3054,9 +3054,11 @@ pub const Parser = struct {
     }
 
     fn orOp(self: *Parser, _: bool) !void {
-        const else_jump = try self.emitJump(.if_false);
+        // a || b: evaluate a, if truthy keep a, else evaluate b
+        try self.emitOp(.dup);
+        const rhs_jump = try self.emitJump(.if_false);
         const end_jump = try self.emitJump(.goto);
-        self.patchJump(else_jump);
+        self.patchJump(rhs_jump);
         try self.emitOp(.drop);
         try self.parsePrecedence(.or_prec);
         self.patchJump(end_jump);
@@ -3092,6 +3094,8 @@ pub const Parser = struct {
     }
 
     fn call(self: *Parser, _: bool) !void {
+        const is_method = self.pending_method_call;
+        self.pending_method_call = false;
         var arg_count: u8 = 0;
         if (!self.check(.rparen)) {
             while (true) {
@@ -3101,7 +3105,7 @@ pub const Parser = struct {
             }
         }
         try self.consume(.rparen, "Expected ')' after arguments.");
-        try self.emitOp(.call);
+        try self.emitOp(if (is_method) .call_method else .call);
         try self.emitByte(arg_count);
     }
 
@@ -3111,10 +3115,12 @@ pub const Parser = struct {
 
         // Check if this is a method call: obj.method(...)
         if (self.check(.lparen)) {
-            // Method call - emit call_method instead of get_field + call
+            // Method call - keep object as 'this'
+            try self.emitOp(.dup);
             const name_atom = try self.getOrCreateAtom(name);
             try self.emitOp(.get_field);
             try self.emitU16(name_atom);
+            self.pending_method_call = true;
             // The call will be handled by the call infix parser
         } else if (can_assign and self.match(.assign)) {
             try self.expression();
@@ -3173,6 +3179,13 @@ pub const Parser = struct {
         if (can_assign and self.match(.assign)) {
             try self.expression();
             try self.emitOp(.put_elem);
+        } else if (self.check(.lparen)) {
+            // Method call on computed property: obj[expr](...)
+            try self.emitOp(.swap);
+            try self.emitOp(.dup);
+            try self.emitOp(.rot3);
+            try self.emitOp(.get_elem);
+            self.pending_method_call = true;
         } else {
             try self.emitOp(.get_elem);
         }
@@ -3296,9 +3309,16 @@ pub const Parser = struct {
             const atom = try atoms.intern(name);
             return @truncate(@intFromEnum(atom));
         }
-        // Fallback: constant pool index + offset for dynamic atoms
-        const const_idx = try self.addStringConstant(name);
-        return @truncate(@as(u32, object.Atom.FIRST_DYNAMIC) + @as(u32, const_idx));
+        if (self.dynamic_atoms.get(name)) |atom| {
+            return atom;
+        }
+        if (self.next_dynamic_atom == std.math.maxInt(u16)) {
+            return error.TooManyConstants;
+        }
+        const atom = self.next_dynamic_atom;
+        self.next_dynamic_atom += 1;
+        try self.dynamic_atoms.put(name, atom);
+        return atom;
     }
 
     // ========================================================================
@@ -3495,7 +3515,9 @@ test "Parser variable declaration" {
 }
 
 test "Parser generator function" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
@@ -3513,7 +3535,9 @@ test "Parser generator function" {
 }
 
 test "Parser yield expression" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
@@ -3531,7 +3555,9 @@ test "Parser yield expression" {
 }
 
 test "Parser async function" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
@@ -3549,7 +3575,9 @@ test "Parser async function" {
 }
 
 test "Parser await expression" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
@@ -3567,7 +3595,9 @@ test "Parser await expression" {
 }
 
 test "Parser async function expression" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
@@ -3657,7 +3687,9 @@ test "Parser export default" {
 }
 
 test "Parser export function" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
@@ -3675,7 +3707,9 @@ test "Parser export function" {
 }
 
 test "Parser export const" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();

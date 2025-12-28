@@ -98,7 +98,10 @@ test "version" {
 }
 
 test "create and destroy context" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
     const ctx = try createContext(allocator, .{ .nursery_size = 4096 });
     defer destroyContext(ctx);
 

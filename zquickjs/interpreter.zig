@@ -11,21 +11,40 @@ const heap = @import("heap.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
 
+const empty_code: [0]u8 = .{};
+
 /// Interpreter state
 pub const Interpreter = struct {
+    const MAX_STATE_DEPTH = 1024;
+    const SavedState = struct {
+        pc: [*]const u8,
+        code_end: [*]const u8,
+        constants: []const value.JSValue,
+        current_func: ?*const bytecode.FunctionBytecode,
+        sp: usize,
+        fp: usize,
+        call_depth: usize,
+        catch_depth: usize,
+        exception: value.JSValue,
+    };
+
     ctx: *context.Context,
     pc: [*]const u8, // Program counter
     code_end: [*]const u8,
     constants: []const value.JSValue, // Constant pool (direct JSValue array)
     current_func: ?*const bytecode.FunctionBytecode,
+    state_stack: [MAX_STATE_DEPTH]SavedState,
+    state_depth: usize,
 
     pub fn init(ctx: *context.Context) Interpreter {
         return .{
             .ctx = ctx,
-            .pc = undefined,
-            .code_end = undefined,
+            .pc = @ptrCast(&empty_code),
+            .code_end = @ptrCast(&empty_code),
             .constants = &.{},
             .current_func = null,
+            .state_stack = undefined,
+            .state_depth = 0,
         };
     }
 
@@ -46,6 +65,81 @@ pub const Interpreter = struct {
         return self.dispatch();
     }
 
+    fn pushState(self: *Interpreter) InterpreterError!void {
+        if (self.state_depth >= MAX_STATE_DEPTH) {
+            return error.CallStackOverflow;
+        }
+        self.state_stack[self.state_depth] = .{
+            .pc = self.pc,
+            .code_end = self.code_end,
+            .constants = self.constants,
+            .current_func = self.current_func,
+            .sp = self.ctx.sp,
+            .fp = self.ctx.fp,
+            .call_depth = self.ctx.call_depth,
+            .catch_depth = self.ctx.catch_depth,
+            .exception = self.ctx.exception,
+        };
+        self.state_depth += 1;
+    }
+
+    fn popState(self: *Interpreter) void {
+        std.debug.assert(self.state_depth > 0);
+        self.state_depth -= 1;
+        const state = self.state_stack[self.state_depth];
+        self.pc = state.pc;
+        self.code_end = state.code_end;
+        self.constants = state.constants;
+        self.current_func = state.current_func;
+        self.ctx.sp = state.sp;
+        self.ctx.fp = state.fp;
+        self.ctx.call_depth = state.call_depth;
+        self.ctx.catch_depth = state.catch_depth;
+        self.ctx.exception = state.exception;
+    }
+
+    pub fn callBytecodeFunction(
+        self: *Interpreter,
+        func_val: value.JSValue,
+        func_bc: *const bytecode.FunctionBytecode,
+        this_val: value.JSValue,
+        args: []const value.JSValue,
+    ) InterpreterError!value.JSValue {
+        try self.pushState();
+        defer self.popState();
+
+        // Push call frame
+        try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
+        errdefer _ = self.ctx.popFrame();
+
+        // Set up new function's locals with arguments
+        const local_count = func_bc.local_count;
+        try self.ctx.ensureStack(local_count);
+
+        var local_idx: usize = 0;
+        while (local_idx < local_count) : (local_idx += 1) {
+            if (local_idx < args.len) {
+                try self.ctx.push(args[local_idx]);
+            } else {
+                try self.ctx.push(value.JSValue.undefined_val);
+            }
+        }
+
+        // Execute the function bytecode
+        self.pc = func_bc.code.ptr;
+        self.code_end = func_bc.code.ptr + func_bc.code.len;
+        self.constants = func_bc.constants;
+        self.current_func = func_bc;
+
+        const result = self.dispatch() catch |err| {
+            _ = self.ctx.popFrame();
+            return err;
+        };
+
+        _ = self.ctx.popFrame();
+        return result;
+    }
+
     /// Error set for interpreter operations
     pub const InterpreterError = error{
         StackOverflow,
@@ -63,8 +157,8 @@ pub const Interpreter = struct {
         NoRootClass,
     };
 
-    /// Main dispatch loop
-    fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
+    /// Main dispatch loop (public for use by native function callbacks that need to call JS functions)
+    pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
         dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
             const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
             self.pc += 1;
@@ -348,6 +442,7 @@ pub const Interpreter = struct {
                 // ========================================
                 .goto => {
                     const offset = readI16(self.pc);
+                    self.pc += 2;
                     self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                 },
 
@@ -356,7 +451,7 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (cond.toBoolean()) {
-                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                     }
                 },
 
@@ -365,7 +460,7 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (!cond.toBoolean()) {
-                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                     }
                 },
 
@@ -423,11 +518,6 @@ pub const Interpreter = struct {
                         if (obj.getProperty(atom)) |prop_val| {
                             try self.ctx.push(prop_val);
                         } else {
-                            const name = if (atom.isPredefined())
-                                (atom.toPredefinedName() orelse "<predef>")
-                            else
-                                (self.ctx.atoms.getName(atom) orelse "<dynamic>");
-                            std.log.err("get_field miss: atom={} name={s} class_id={}", .{ @intFromEnum(atom), name, obj.class_id });
                             try self.ctx.push(value.JSValue.undefined_val);
                         }
                     } else if (obj_val.isString()) {
@@ -473,8 +563,12 @@ pub const Interpreter = struct {
                         const idx = index_val.getInt();
                         if (idx >= 0) {
                             if (obj.class_id == .array) {
-                                const val = obj.getIndex(@intCast(idx)) orelse value.JSValue.undefined_val;
-                                try self.ctx.push(val);
+                                const idx_u: u32 = @intCast(idx);
+                                if (obj.getIndex(idx_u)) |val| {
+                                    try self.ctx.push(val);
+                                } else {
+                                    try self.ctx.push(value.JSValue.undefined_val);
+                                }
                             } else {
                                 var idx_buf: [32]u8 = undefined;
                                 const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
@@ -848,7 +942,7 @@ pub const Interpreter = struct {
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (!cond.toBoolean()) {
-                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                        self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                     }
                 },
 
@@ -1013,7 +1107,9 @@ pub const Interpreter = struct {
         const this_val = if (is_method) self.ctx.pop() else value.JSValue.undefined_val;
 
         // Check if callable
-        if (!func_val.isCallable()) return error.NotCallable;
+        if (!func_val.isCallable()) {
+            return error.NotCallable;
+        }
 
         // Get the function object
         const func_obj = object.JSObject.fromValue(func_val);
@@ -1062,52 +1158,7 @@ pub const Interpreter = struct {
                 // Execute async function synchronously and wrap result in Promise-like object
                 // For full async support, we'd need an event loop and proper Promise integration
                 // This simplified version executes synchronously and returns a resolved Promise
-
-                // Save current interpreter state
-                const saved_pc = self.pc;
-                const saved_code_end = self.code_end;
-                const saved_constants = self.constants;
-                const saved_func = self.current_func;
-                const saved_fp = self.ctx.fp;
-
-                // Push call frame
-                try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
-
-                // Set up new function's locals with arguments
-                const local_count = func_bc.local_count;
-                try self.ctx.ensureStack(local_count);
-                var local_idx: usize = 0;
-                while (local_idx < local_count) : (local_idx += 1) {
-                    if (local_idx < argc) {
-                        try self.ctx.push(args[local_idx]);
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                    }
-                }
-
-                // Execute the async function bytecode
-                self.pc = func_bc.code.ptr;
-                self.code_end = func_bc.code.ptr + func_bc.code.len;
-                self.constants = func_bc.constants;
-                self.current_func = func_bc;
-
-                const result = self.dispatch() catch |err| {
-                    // Restore state on error
-                    self.pc = saved_pc;
-                    self.code_end = saved_code_end;
-                    self.constants = saved_constants;
-                    self.current_func = saved_func;
-                    _ = self.ctx.popFrame();
-                    return err;
-                };
-
-                // Restore interpreter state
-                self.pc = saved_pc;
-                self.code_end = saved_code_end;
-                self.constants = saved_constants;
-                self.current_func = saved_func;
-                _ = self.ctx.popFrame();
-                self.ctx.fp = saved_fp;
+                const result = try self.callBytecodeFunction(func_val, func_bc, this_val, args[0..argc]);
 
                 // Create a resolved Promise-like object {then: fn, value: result}
                 const root_class = self.ctx.root_class orelse return error.NoRootClass;
@@ -1130,57 +1181,7 @@ pub const Interpreter = struct {
                 return;
             }
 
-            // Save current interpreter state
-            const saved_pc = self.pc;
-            const saved_code_end = self.code_end;
-            const saved_constants = self.constants;
-            const saved_func = self.current_func;
-            const saved_fp = self.ctx.fp;
-
-            // Push call frame
-            try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
-
-            // Set up new function's locals with arguments
-            const local_count = func_bc.local_count;
-            try self.ctx.ensureStack(local_count);
-
-            // Initialize locals: first N are arguments, rest are undefined
-            var local_idx: usize = 0;
-            while (local_idx < local_count) : (local_idx += 1) {
-                if (local_idx < argc) {
-                    try self.ctx.push(args[local_idx]);
-                } else {
-                    try self.ctx.push(value.JSValue.undefined_val);
-                }
-            }
-
-            // Execute the function bytecode
-            self.pc = func_bc.code.ptr;
-            self.code_end = func_bc.code.ptr + func_bc.code.len;
-            self.constants = func_bc.constants;
-            self.current_func = func_bc;
-
-            const result = self.dispatch() catch |err| {
-                // Restore state on error
-                self.pc = saved_pc;
-                self.code_end = saved_code_end;
-                self.constants = saved_constants;
-                self.current_func = saved_func;
-                _ = self.ctx.popFrame();
-                return err;
-            };
-
-            // Restore interpreter state
-            self.pc = saved_pc;
-            self.code_end = saved_code_end;
-            self.constants = saved_constants;
-            self.current_func = saved_func;
-
-            // Pop call frame and restore stack
-            _ = self.ctx.popFrame();
-            self.ctx.fp = saved_fp;
-
-            // Push result
+            const result = try self.callBytecodeFunction(func_val, func_bc, this_val, args[0..argc]);
             try self.ctx.push(result);
             return;
         }
@@ -1249,56 +1250,7 @@ pub const Interpreter = struct {
         // Check for bytecode function constructor
         if (ctor_obj.getBytecodeFunctionData()) |bc_data| {
             const func_bc = bc_data.bytecode;
-
-            // Save current interpreter state
-            const saved_pc = self.pc;
-            const saved_code_end = self.code_end;
-            const saved_constants = self.constants;
-            const saved_func = self.current_func;
-            const saved_fp = self.ctx.fp;
-
-            // Push call frame with the new object as 'this'
-            try self.ctx.pushFrame(ctor_val, this_val, @intFromPtr(self.pc));
-
-            // Set up new function's locals with arguments
-            const local_count = func_bc.local_count;
-            try self.ctx.ensureStack(local_count);
-
-            // Initialize locals: first N are arguments, rest are undefined
-            var local_idx: usize = 0;
-            while (local_idx < local_count) : (local_idx += 1) {
-                if (local_idx < argc) {
-                    try self.ctx.push(args[local_idx]);
-                } else {
-                    try self.ctx.push(value.JSValue.undefined_val);
-                }
-            }
-
-            // Execute the constructor bytecode
-            self.pc = func_bc.code.ptr;
-            self.code_end = func_bc.code.ptr + func_bc.code.len;
-            self.constants = func_bc.constants;
-            self.current_func = func_bc;
-
-            const result = self.dispatch() catch |err| {
-                // Restore state on error
-                self.pc = saved_pc;
-                self.code_end = saved_code_end;
-                self.constants = saved_constants;
-                self.current_func = saved_func;
-                _ = self.ctx.popFrame();
-                return err;
-            };
-
-            // Restore interpreter state
-            self.pc = saved_pc;
-            self.code_end = saved_code_end;
-            self.constants = saved_constants;
-            self.current_func = saved_func;
-
-            // Pop call frame and restore stack
-            _ = self.ctx.popFrame();
-            self.ctx.fp = saved_fp;
+            const result = try self.callBytecodeFunction(ctor_val, func_bc, this_val, args[0..argc]);
 
             // If constructor returns an object, use that; otherwise use 'this'
             if (result.isObject()) {
@@ -1554,7 +1506,7 @@ pub const Interpreter = struct {
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (cond.toBoolean()) {
-                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                 }
                 return error.NoTransition;
             },
@@ -1563,18 +1515,20 @@ pub const Interpreter = struct {
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (!cond.toBoolean()) {
-                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc) - 2)) + offset)));
+                    self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                 }
                 return error.NoTransition;
             },
             .goto => {
                 const offset = readI16(self.pc);
+                self.pc += 2;
                 self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
                 return error.NoTransition;
             },
             .loop => {
                 const offset = readI16(self.pc);
-                self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) + offset)));
+                self.pc += 2;
+                self.pc = @ptrFromInt(@as(usize, @intCast(@as(isize, @intCast(@intFromPtr(self.pc))) - offset)));
                 return error.NoTransition;
             },
             .inc => {
@@ -1909,7 +1863,7 @@ test "Interpreter conditional jump" {
     // Code: if (true) { return 42 } else { return 0 }
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_true),
-        @intFromEnum(bytecode.Opcode.if_false), 5,                                 0, // jump +5 if false
+        @intFromEnum(bytecode.Opcode.if_false), 3,                                 0, // jump +3 if false
         @intFromEnum(bytecode.Opcode.push_i8),  42,                                @intFromEnum(bytecode.Opcode.ret),
         @intFromEnum(bytecode.Opcode.push_0),   @intFromEnum(bytecode.Opcode.ret),
     };
@@ -2114,7 +2068,9 @@ test "End-to-end: parse and execute JS" {
 }
 
 test "Interpreter property access" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
@@ -2200,7 +2156,9 @@ test "Interpreter global access" {
 }
 
 test "Interpreter native function call" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
@@ -2249,7 +2207,9 @@ test "Interpreter native function call" {
 }
 
 test "Interpreter native function with arguments" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
@@ -2305,7 +2265,9 @@ test "Interpreter native function with arguments" {
 }
 
 test "Interpreter bytecode function call" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
@@ -2376,7 +2338,9 @@ test "Interpreter bytecode function call" {
 }
 
 test "End-to-end: function declaration" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
     const parser_mod = @import("parser.zig");
     const string_mod = @import("string.zig");
@@ -2512,7 +2476,9 @@ test "Interpreter typeof" {
 }
 
 test "End-to-end: default parameters" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
     const parser_mod = @import("parser.zig");
     const string_mod = @import("string.zig");
@@ -2525,7 +2491,6 @@ test "End-to-end: default parameters" {
 
     // Test: function with default parameter
     var strings = string_mod.StringTable.init(allocator);
-    defer strings.deinit();
 
     var p = parser_mod.Parser.init(allocator, "function greet(name = 'World') { return name; } greet()", &strings, null);
     defer p.deinit();
