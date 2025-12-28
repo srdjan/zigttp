@@ -39,6 +39,7 @@ pub const builtins = @import("builtins.zig");
 pub const parser = @import("parser.zig");
 pub const pool = @import("pool.zig");
 pub const c_abi = @import("c_abi.zig");
+pub const http = @import("http.zig");
 
 // Re-export main types for convenience
 pub const JSValue = value.JSValue;

@@ -3134,29 +3134,29 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try set_ctor.setProperty(allocator, .prototype, set_proto.toValue());
     try ctx.setGlobal(.Set, set_ctor.toValue());
 
-    // Create Response object with static methods
-    const response_obj = try object.JSObject.create(allocator, root_class, null);
+    // Create Response constructor with static methods
+    const response_ctor = try object.JSObject.createNativeFunction(allocator, root_class, http.responseConstructor, .Response, 2);
 
-    // Register Response static methods
+    // Register Response static methods on the constructor
     const json_atom: object.Atom = .json;
     const text_atom: object.Atom = .text;
     const html_atom: object.Atom = .html;
     const redirect_atom = try ctx.atoms.intern("redirect");
 
     const json_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseJson, json_atom, 1);
-    try response_obj.setProperty(allocator, json_atom, json_func.toValue());
+    try response_ctor.setProperty(allocator, json_atom, json_func.toValue());
 
     const text_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseText, text_atom, 1);
-    try response_obj.setProperty(allocator, text_atom, text_func.toValue());
+    try response_ctor.setProperty(allocator, text_atom, text_func.toValue());
 
     const html_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseHtml, html_atom, 1);
-    try response_obj.setProperty(allocator, html_atom, html_func.toValue());
+    try response_ctor.setProperty(allocator, html_atom, html_func.toValue());
 
     const redirect_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseRedirect, redirect_atom, 1);
-    try response_obj.setProperty(allocator, redirect_atom, redirect_func.toValue());
+    try response_ctor.setProperty(allocator, redirect_atom, redirect_func.toValue());
 
     // Register Response on global (predefined atom)
-    try ctx.setGlobal(.Response, response_obj.toValue());
+    try ctx.setGlobal(.Response, response_ctor.toValue());
 
     // Register h() - hyperscript function for JSX
     const h_atom: object.Atom = .h;
@@ -4325,10 +4325,11 @@ test "initBuiltins registers console and Math" {
     try std.testing.expect(abs_val != null);
     try std.testing.expect(abs_val.?.isCallable());
 
-    // Check Response is registered
+    // Check Response is registered and callable (it's a constructor)
     const response_val = ctx.getGlobal(.Response);
     try std.testing.expect(response_val != null);
     try std.testing.expect(response_val.?.isObject());
+    try std.testing.expect(response_val.?.isCallable());
 
     // Check Response.json exists
     const response_obj = object.JSObject.fromValue(response_val.?);

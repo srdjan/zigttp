@@ -13,6 +13,25 @@ const context = @import("context.zig");
 const string = @import("string.zig");
 
 // ============================================================================
+// Function Component Callback
+// ============================================================================
+
+/// Callback for calling JS function components during SSR
+/// Set by the runtime before executing handlers
+pub const CallFunctionFn = *const fn (func: *object.JSObject, args: []const value.JSValue) anyerror!value.JSValue;
+pub threadlocal var call_function_callback: ?CallFunctionFn = null;
+
+/// Set the function calling callback (called by runtime before handler execution)
+pub fn setCallFunctionCallback(callback: CallFunctionFn) void {
+    call_function_callback = callback;
+}
+
+/// Clear the callback (called by runtime after handler execution)
+pub fn clearCallFunctionCallback() void {
+    call_function_callback = null;
+}
+
+// ============================================================================
 // Request Object
 // ============================================================================
 
@@ -77,14 +96,12 @@ pub fn createResponse(
 
     const resp_obj = try object.JSObject.create(allocator, root_class, null);
 
-    // Set _body
-    const body_atom = try ctx.atoms.intern("_body");
+    // Set body (using predefined atom for efficiency)
     const body_str = try string.createString(allocator, body);
-    try resp_obj.setProperty(allocator, body_atom, value.JSValue.fromPtr(body_str));
+    try resp_obj.setProperty(allocator, object.Atom.body, value.JSValue.fromPtr(body_str));
 
-    // Set status
-    const status_atom = try ctx.atoms.intern("status");
-    try resp_obj.setProperty(allocator, status_atom, value.JSValue.fromInt(@intCast(status)));
+    // Set status (using predefined atom)
+    try resp_obj.setProperty(allocator, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
 
     // Set statusText
     const status_text_atom = try ctx.atoms.intern("statusText");
@@ -108,13 +125,12 @@ pub fn createResponse(
     const ok_atom = try ctx.atoms.intern("ok");
     try resp_obj.setProperty(allocator, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
 
-    // Set headers
-    const headers_atom = try ctx.atoms.intern("headers");
+    // Set headers (using predefined atom)
     const headers_obj = try object.JSObject.create(allocator, root_class, null);
     const ct_atom = try ctx.atoms.intern("Content-Type");
     const ct_str = try string.createString(allocator, content_type);
     try headers_obj.setProperty(allocator, ct_atom, value.JSValue.fromPtr(ct_str));
-    try resp_obj.setProperty(allocator, headers_atom, headers_obj.toValue());
+    try resp_obj.setProperty(allocator, object.Atom.headers, headers_obj.toValue());
 
     return resp_obj.toValue();
 }
@@ -222,6 +238,48 @@ pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
     return resp_obj.toValue();
 }
 
+/// new Response(body, init) - Response constructor (Web API compatible)
+pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+
+    // Default to empty text response
+    var body: []const u8 = "";
+    var status: u16 = 200;
+    var content_type: []const u8 = "text/plain; charset=utf-8";
+
+    // Get body from first argument
+    if (args.len > 0 and args[0].isString()) {
+        body = try getStringArg(args[0]);
+    }
+
+    // Get init options from second argument
+    if (args.len > 1 and args[1].isObject()) {
+        const init = object.JSObject.fromValue(args[1]);
+
+        // Get status
+        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, body, status, content_type);
+        if (init.getProperty(status_atom)) |s| {
+            if (s.isInt()) status = @intCast(s.getInt());
+        }
+
+        // Get headers for content-type
+        const headers_atom = ctx.atoms.intern("headers") catch return createResponse(ctx, body, status, content_type);
+        if (init.getProperty(headers_atom)) |hdr| {
+            if (hdr.isObject()) {
+                const headers_obj = object.JSObject.fromValue(hdr);
+                const ct_atom = ctx.atoms.intern("Content-Type") catch return createResponse(ctx, body, status, content_type);
+                if (headers_obj.getProperty(ct_atom)) |ct| {
+                    if (ct.isString()) {
+                        content_type = try getStringArg(ct);
+                    }
+                }
+            }
+        }
+    }
+
+    return createResponse(ctx, body, status, content_type);
+}
+
 // ============================================================================
 // JSX Runtime
 // ============================================================================
@@ -319,12 +377,61 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
     // Handle boolean (don't render)
     if (node.isBool()) return;
 
-    // Handle object (virtual DOM node)
+    // Handle object (virtual DOM node or array)
     if (node.isObject()) {
         const obj = object.JSObject.fromValue(node);
 
-        // Check for tag property
+        // Check if it's an array (nested children from {props.children})
+        if (obj.class_id == .array) {
+            const len = obj.getArrayLength();
+            var i: u32 = 0;
+            while (i < len) : (i += 1) {
+                if (obj.getIndex(i)) |child| {
+                    try renderNode(ctx, child, writer);
+                }
+            }
+            return;
+        }
+
+        // Check for tag property (vnode)
         const tag_val = obj.getProperty(.tag) orelse return;
+
+        // Handle function components (tag is a callable function)
+        if (tag_val.isCallable()) {
+            const call_fn = call_function_callback orelse return;
+
+            // Get props (or create empty object if not present but children exist)
+            var props_val = obj.getProperty(.props) orelse value.JSValue.null_val;
+            const children_val = obj.getProperty(.children);
+
+            // Add children to props if present
+            if (children_val) |cv| {
+                if (props_val.isObject()) {
+                    // Add children to existing props
+                    const props_obj = object.JSObject.fromValue(props_val);
+                    props_obj.setProperty(ctx.allocator, .children, cv) catch {};
+                } else if (ctx.root_class) |root_class| {
+                    // Create new props object with children
+                    const new_props = object.JSObject.create(ctx.allocator, root_class, null) catch null;
+                    if (new_props) |np| {
+                        np.setProperty(ctx.allocator, .children, cv) catch {};
+                        props_val = value.JSValue.fromPtr(np);
+                    }
+                }
+            }
+
+            // Call the component function with props
+            const func_obj = object.JSObject.fromValue(tag_val);
+            const call_args = [_]value.JSValue{props_val};
+            const component_result = call_fn(func_obj, &call_args) catch |err| {
+                std.log.err("Component function call failed: {}", .{err});
+                return;
+            };
+
+            // Recursively render the result
+            try renderNode(ctx, component_result, writer);
+            return;
+        }
 
         // Fragment: just render children
         if (tag_val.isString()) {
@@ -365,37 +472,65 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             try writer.writeAll(tag_data);
             try writer.writeByte('>');
         }
-        // TODO: Handle function components
     }
 }
 
-/// Render array of children
+/// Render array of children or single child
 fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: anytype) !void {
+    // Handle null/undefined
+    if (children.isNull() or children.isUndefined()) return;
+
+    // Handle string children
+    if (children.isString()) {
+        const str = children.toPtr(string.JSString);
+        try escapeHtml(str.data(), writer);
+        return;
+    }
+
+    // Handle number children
+    if (children.isInt()) {
+        try writer.print("{d}", .{children.getInt()});
+        return;
+    }
+
+    // Handle object (array or single vnode)
     if (!children.isObject()) return;
 
     const children_obj = object.JSObject.fromValue(children);
-    if (children_obj.class_id != .array) return;
 
-    const len = children_obj.getArrayLength();
-    var i: u32 = 0;
-    while (i < len) : (i += 1) {
-        if (children_obj.getIndex(i)) |child| {
-            try renderNode(ctx, child, writer);
+    // If it's an array, iterate
+    if (children_obj.class_id == .array) {
+        const len = children_obj.getArrayLength();
+        var i: u32 = 0;
+        while (i < len) : (i += 1) {
+            if (children_obj.getIndex(i)) |child| {
+                try renderNode(ctx, child, writer);
+            }
         }
+    } else {
+        // Single child vnode - render it directly
+        try renderNode(ctx, children, writer);
     }
 }
 
 /// Render HTML attributes from props object
-fn renderAttributes(_: *context.Context, props: value.JSValue, writer: anytype) !void {
+fn renderAttributes(ctx: *context.Context, props: value.JSValue, writer: anytype) !void {
     if (!props.isObject()) return;
 
     const props_obj = object.JSObject.fromValue(props);
 
     // Iterate through properties (simplified - uses hidden class properties)
     for (props_obj.hidden_class.properties) |prop| {
-        // Skip internal properties and event handlers
-        const name = @tagName(prop.name);
-        if (name.len > 2 and name[0] == 'o' and name[1] == 'n') continue;
+        // Skip reserved slots (used by native functions)
+        const atom_int = @intFromEnum(prop.name);
+        if (atom_int >= 0xFFFE) continue;
+
+        // Get the property name string
+        const name = ctx.atoms.getName(prop.name) orelse continue;
+
+        // Skip internal properties (children) and event handlers (onClick, etc)
+        if (std.mem.eql(u8, name, "children")) continue;
+        if (name.len >= 2 and name[0] == 'o' and name[1] == 'n') continue;
 
         const val = props_obj.getSlot(prop.offset);
         if (val.isNull() or val.isUndefined()) continue;
@@ -404,7 +539,7 @@ fn renderAttributes(_: *context.Context, props: value.JSValue, writer: anytype) 
         try writer.writeByte(' ');
 
         // Handle className -> class
-        if (prop.name == .constructor) { // Would need proper className atom
+        if (std.mem.eql(u8, name, "className")) {
             try writer.writeAll("class");
         } else {
             try writer.writeAll(name);

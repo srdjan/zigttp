@@ -173,7 +173,8 @@ pub const Runtime = struct {
         self.allocator.destroy(self);
     }
 
-    /// Install native API bindings (console, Response helpers, etc.)
+    /// Install native API bindings (console, etc.)
+    /// Note: Response is already set up by initBuiltins() with constructor and static methods
     fn installBindings(self: *Self) !void {
         // Use predefined handler atom
         self.handler_atom = zq.Atom.handler;
@@ -181,13 +182,8 @@ pub const Runtime = struct {
         // Install console object
         try self.installConsole();
 
-        // Install Response helpers
-        try self.installResponseHelpers();
-
-        // Install JSX runtime (h, renderToString, Fragment)
-        if (self.config.enable_jsx) {
-            try self.installJsxRuntime();
-        }
+        // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
+        // Don't re-register them here as it would overwrite the proper constructor
     }
 
     fn installConsole(self: *Self) !void {
@@ -222,73 +218,7 @@ pub const Runtime = struct {
         try self.ctx.setGlobal(.console, console_obj.toValue());
     }
 
-    fn installResponseHelpers(self: *Self) !void {
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
-
-        // Create Response object with static methods
-        const response_obj = try zq.JSObject.create(self.allocator, root_class, null);
-
-        // Response.json() - use predefined atoms
-        const json_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            root_class,
-            responseJson,
-            zq.Atom.json,
-            2,
-        );
-        try response_obj.setProperty(self.allocator, zq.Atom.json, json_func.toValue());
-
-        // Response.text() - use predefined atoms
-        const text_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            root_class,
-            responseText,
-            zq.Atom.text,
-            2,
-        );
-        try response_obj.setProperty(self.allocator, zq.Atom.text, text_func.toValue());
-
-        // Response.html() - use predefined atoms
-        const html_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            root_class,
-            responseHtml,
-            zq.Atom.html,
-            2,
-        );
-        try response_obj.setProperty(self.allocator, zq.Atom.html, html_func.toValue());
-
-        // Register on global using predefined Response atom
-        try self.ctx.setGlobal(zq.Atom.Response, response_obj.toValue());
-    }
-
-    fn installJsxRuntime(self: *Self) !void {
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
-
-        // h(tag, props, ...children) - creates virtual DOM node using predefined atom
-        const h_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            root_class,
-            jsxH,
-            zq.Atom.h,
-            2,
-        );
-        try self.ctx.setGlobal(zq.Atom.h, h_func.toValue());
-
-        // renderToString(node) - renders virtual DOM to HTML using predefined atom
-        const render_func = try zq.JSObject.createNativeFunction(
-            self.allocator,
-            root_class,
-            jsxRenderToString,
-            zq.Atom.renderToString,
-            1,
-        );
-        try self.ctx.setGlobal(zq.Atom.renderToString, render_func.toValue());
-
-        // Fragment constant using predefined atom
-        const fragment_str = try zq.createString(self.allocator, "__fragment__");
-        try self.ctx.setGlobal(zq.Atom.Fragment, zq.JSValue.fromPtr(fragment_str));
-    }
+    // Note: installResponseHelpers and installJsxRuntime removed - these are now handled by initBuiltins()
 
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
@@ -338,6 +268,10 @@ pub const Runtime = struct {
         // Set thread-local runtime for native function callbacks (e.g., renderToString)
         current_runtime = self;
         defer current_runtime = null;
+
+        // Set callback for JSX function component rendering
+        zq.http.setCallFunctionCallback(callFunctionWrapper);
+        defer zq.http.clearCallFunctionCallback();
 
         // Create Request object from HttpRequest
         const request_obj = try self.createRequestObject(request);
@@ -407,6 +341,12 @@ pub const Runtime = struct {
             zq.JSValue.undefined_val,
             args,
         );
+    }
+
+    /// Wrapper for calling JS functions from http.zig (used for JSX function components)
+    fn callFunctionWrapper(func_obj: *zq.JSObject, args: []const zq.JSValue) anyerror!zq.JSValue {
+        const runtime = current_runtime orelse return error.NoRuntime;
+        return runtime.callFunction(func_obj, args);
     }
 
     fn extractResponse(self: *Self, result: zq.JSValue) !HttpResponse {
@@ -523,319 +463,6 @@ fn printValue(val: zq.JSValue, file: std.fs.File) !void {
         try file.writeAll("[Object]");
     } else {
         try file.writeAll("[unknown]");
-    }
-}
-
-fn responseJson(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-
-    if (args.len == 0) return zq.JSValue.undefined_val;
-
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const resp_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
-
-    // Set status 200 using predefined atom
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.status, zq.JSValue.fromInt(200));
-
-    // Set Content-Type header
-    const headers_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
-    const ct_atom = try ctx.atoms.intern("Content-Type");
-    const ct_val = try zq.createString(ctx.allocator, "application/json");
-    try headers_obj.setProperty(ctx.allocator, ct_atom, zq.JSValue.fromPtr(ct_val));
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.headers, headers_obj.toValue());
-
-    // Stringify body (simplified - just store the value for now)
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.body, args[0]);
-
-    return resp_obj.toValue();
-}
-
-fn responseText(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-
-    if (args.len == 0) return zq.JSValue.undefined_val;
-
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const resp_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
-
-    // Set status 200 using predefined atom
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.status, zq.JSValue.fromInt(200));
-
-    // Set Content-Type header
-    const headers_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
-    const ct_atom = try ctx.atoms.intern("Content-Type");
-    const ct_val = try zq.createString(ctx.allocator, "text/plain");
-    try headers_obj.setProperty(ctx.allocator, ct_atom, zq.JSValue.fromPtr(ct_val));
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.headers, headers_obj.toValue());
-
-    // Set body using predefined atom
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.body, args[0]);
-
-    return resp_obj.toValue();
-}
-
-fn responseHtml(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-
-    if (args.len == 0) return zq.JSValue.undefined_val;
-
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const resp_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
-
-    // Set status 200 using predefined atom
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.status, zq.JSValue.fromInt(200));
-
-    // Set Content-Type header
-    const headers_obj = try zq.JSObject.create(ctx.allocator, root_class, null);
-    const ct_atom = try ctx.atoms.intern("Content-Type");
-    const ct_val = try zq.createString(ctx.allocator, "text/html");
-    try headers_obj.setProperty(ctx.allocator, ct_atom, zq.JSValue.fromPtr(ct_val));
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.headers, headers_obj.toValue());
-
-    // Set body using predefined atom
-    try resp_obj.setProperty(ctx.allocator, zq.Atom.body, args[0]);
-
-    return resp_obj.toValue();
-}
-
-// ============================================================================
-// JSX Runtime Functions
-// ============================================================================
-
-/// h(tag, props, ...children) - creates a virtual DOM node
-/// Returns: { tag: string, props: object, children: array }
-fn jsxH(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-
-    // Create the virtual DOM node object
-    const node = try zq.JSObject.create(ctx.allocator, root_class, null);
-
-    // Set tag (first argument) using predefined atom
-    if (args.len > 0) {
-        try node.setProperty(ctx.allocator, zq.Atom.tag, args[0]);
-    } else {
-        try node.setProperty(ctx.allocator, zq.Atom.tag, zq.JSValue.null_val);
-    }
-
-    // Set props (second argument, default to empty object) using predefined atom
-    if (args.len > 1 and !args[1].isNull() and !args[1].isUndefined()) {
-        try node.setProperty(ctx.allocator, zq.Atom.props, args[1]);
-    } else {
-        const empty_props = try zq.JSObject.create(ctx.allocator, root_class, null);
-        try node.setProperty(ctx.allocator, zq.Atom.props, empty_props.toValue());
-    }
-
-    // Set children (remaining arguments as array) using predefined atom
-    const children_arr = try zq.JSObject.createArray(ctx.allocator, root_class);
-    var child_idx: u32 = 0;
-    for (args[2..]) |child| {
-        if (!child.isNull() and !child.isUndefined()) {
-            try children_arr.setIndex(ctx.allocator, child_idx, child);
-            child_idx += 1;
-        }
-    }
-    try node.setProperty(ctx.allocator, zq.Atom.children, children_arr.toValue());
-
-    return node.toValue();
-}
-
-/// renderToString(node) - renders virtual DOM to HTML string
-fn jsxRenderToString(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-
-    if (args.len == 0) {
-        const empty = try zq.createString(ctx.allocator, "");
-        return zq.JSValue.fromPtr(empty);
-    }
-
-    var buffer: std.ArrayList(u8) = .empty;
-    defer buffer.deinit(ctx.allocator);
-
-    try renderNode(ctx, ctx.allocator, args[0], &buffer);
-
-    const result = try zq.createString(ctx.allocator, buffer.items);
-    return zq.JSValue.fromPtr(result);
-}
-
-fn renderNode(ctx: *zq.Context, allocator: std.mem.Allocator, node: zq.JSValue, buffer: *std.ArrayList(u8)) !void {
-    // null/undefined -> empty string
-    if (node.isNull() or node.isUndefined()) return;
-
-    // String -> escape and append
-    if (node.isString()) {
-        const str = node.toPtr(zq.JSString);
-        try escapeHtml(allocator, buffer, str.data());
-        return;
-    }
-
-    // Number -> convert to string
-    if (node.isInt()) {
-        var num_buf: [32]u8 = undefined;
-        const s = std.fmt.bufPrint(&num_buf, "{d}", .{node.getInt()}) catch return;
-        try buffer.appendSlice(allocator, s);
-        return;
-    }
-
-    // Boolean -> empty string
-    if (node.isTrue() or node.isFalse()) return;
-
-    // Object (virtual DOM node or array)
-    if (node.isObject()) {
-        const obj = node.toPtr(zq.JSObject);
-
-        // Check if it's an array (render each element)
-        if (obj.isArray()) {
-            const len = obj.getArrayLength();
-            for (0..len) |i| {
-                if (obj.getIndex(@intCast(i))) |child| {
-                    try renderNode(ctx, allocator, child, buffer);
-                }
-            }
-            return;
-        }
-
-        // Virtual DOM node: { tag, props, children } - use predefined atoms
-        const tag_val = obj.getOwnProperty(zq.Atom.tag) orelse return;
-
-        // Handle component functions (tag is callable)
-        if (tag_val.isCallable()) {
-            const runtime = current_runtime orelse return error.NoRuntime;
-
-            // Get props (or null if not present)
-            const props_val = obj.getOwnProperty(zq.Atom.props) orelse zq.JSValue.null_val;
-
-            // Get children and add to props if present
-            const call_props = props_val;
-            if (obj.getOwnProperty(zq.Atom.children)) |children_val| {
-                // If props is an object, add children to it
-                if (props_val.isObject()) {
-                    const props_obj = props_val.toPtr(zq.JSObject);
-                    props_obj.setProperty(allocator, zq.Atom.children, children_val) catch {};
-                }
-            }
-
-            // Call the component function with props
-            const func_obj = tag_val.toPtr(zq.JSObject);
-            const call_args = [_]zq.JSValue{call_props};
-            const component_result = runtime.callFunction(func_obj, &call_args) catch |err| {
-                std.log.err("Component function call failed: {}", .{err});
-                return;
-            };
-
-            // Recursively render the result
-            try renderNode(ctx, allocator, component_result, buffer);
-            return;
-        }
-
-        // Check for Fragment
-        if (tag_val.isString()) {
-            const tag_str = tag_val.toPtr(zq.JSString);
-            if (std.mem.eql(u8, tag_str.data(), "__fragment__")) {
-                // Fragment: just render children
-                if (obj.getOwnProperty(zq.Atom.children)) |children| {
-                    try renderNode(ctx, allocator, children, buffer);
-                }
-                return;
-            }
-
-            // Regular HTML tag
-            const tag = tag_str.data();
-            try buffer.appendSlice(allocator, "<");
-            try buffer.appendSlice(allocator, tag);
-
-            // Render props/attributes
-            if (obj.getOwnProperty(zq.Atom.props)) |props_val| {
-                if (props_val.isObject()) {
-                    try renderProps(ctx, allocator, props_val.toPtr(zq.JSObject), buffer);
-                }
-            }
-
-            // Void elements
-            const void_elements = [_][]const u8{
-                "area",  "base", "br",   "col",   "embed",  "hr",    "img",
-                "input", "link", "meta", "param", "source", "track", "wbr",
-            };
-            for (void_elements) |ve| {
-                if (std.mem.eql(u8, tag, ve)) {
-                    try buffer.appendSlice(allocator, " />");
-                    return;
-                }
-            }
-
-            try buffer.appendSlice(allocator, ">");
-
-            // Render children
-            if (obj.getOwnProperty(zq.Atom.children)) |children| {
-                try renderNode(ctx, allocator, children, buffer);
-            }
-
-            try buffer.appendSlice(allocator, "</");
-            try buffer.appendSlice(allocator, tag);
-            try buffer.appendSlice(allocator, ">");
-        }
-    }
-}
-
-fn renderProps(ctx: *zq.Context, allocator: std.mem.Allocator, props: *zq.JSObject, buffer: *std.ArrayList(u8)) !void {
-    // Iterate over properties
-    var iter = props.propertyIterator();
-    while (iter.next()) |entry| {
-        const name = ctx.atoms.getName(entry.atom) orelse continue;
-        const val = entry.value;
-
-        // Skip null/undefined/false values
-        if (val.isNull() or val.isUndefined() or val.isFalse()) continue;
-
-        // Skip event handlers (start with "on")
-        if (name.len >= 2 and name[0] == 'o' and name[1] == 'n') continue;
-
-        // Boolean true -> just attribute name
-        if (val.isTrue()) {
-            try buffer.appendSlice(allocator, " ");
-            try buffer.appendSlice(allocator, name);
-            continue;
-        }
-
-        // className -> class
-        const attr_name = if (std.mem.eql(u8, name, "className")) "class" else name;
-
-        try buffer.appendSlice(allocator, " ");
-        try buffer.appendSlice(allocator, attr_name);
-        try buffer.appendSlice(allocator, "=\"");
-
-        // Value as string
-        if (val.isString()) {
-            const str = val.toPtr(zq.JSString);
-            try escapeAttr(allocator, buffer, str.data());
-        } else if (val.isInt()) {
-            var num_buf: [32]u8 = undefined;
-            const s = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch continue;
-            try buffer.appendSlice(allocator, s);
-        }
-
-        try buffer.appendSlice(allocator, "\"");
-    }
-}
-
-fn escapeHtml(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), str: []const u8) !void {
-    for (str) |c| {
-        switch (c) {
-            '&' => try buffer.appendSlice(allocator, "&amp;"),
-            '<' => try buffer.appendSlice(allocator, "&lt;"),
-            '>' => try buffer.appendSlice(allocator, "&gt;"),
-            else => try buffer.append(allocator, c),
-        }
-    }
-}
-
-fn escapeAttr(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), str: []const u8) !void {
-    for (str) |c| {
-        switch (c) {
-            '&' => try buffer.appendSlice(allocator, "&amp;"),
-            '"' => try buffer.appendSlice(allocator, "&quot;"),
-            else => try buffer.append(allocator, c),
-        }
     }
 }
 

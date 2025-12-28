@@ -3124,8 +3124,9 @@ pub const Parser = struct {
 
     /// Parse 'new' expression: new Constructor(args)
     fn newExpr(self: *Parser, _: bool) !void {
-        // Parse the constructor expression (high precedence, stops before call)
-        try self.parsePrecedence(.call);
+        // Parse the constructor as a member expression (allows . and [] but not ())
+        // Examples: new Response(), new foo.Bar(), new arr[0]()
+        try self.parseMemberExpression();
 
         // Parse arguments if present
         var arg_count: u8 = 0;
@@ -3142,6 +3143,36 @@ pub const Parser = struct {
 
         try self.emitOp(.call_constructor);
         try self.emitByte(arg_count);
+    }
+
+    /// Parse a member expression (property access) without call expressions
+    /// Used by 'new' to parse the constructor
+    fn parseMemberExpression(self: *Parser) !void {
+        // Parse the base expression (identifier, this, grouping, etc.)
+        self.advance();
+        const prefix_rule = getRule(self.previous.type).prefix;
+        if (prefix_rule) |rule| {
+            try rule(self, false);
+        } else {
+            return self.errorAtPrevious("Expected expression.");
+        }
+
+        // Parse member access chains (. and []) but NOT call expressions (())
+        while (true) {
+            if (self.match(.dot)) {
+                try self.consume(.identifier, "Expected property name after '.'.");
+                const name = self.previous.text(self.tokenizer.source);
+                const name_atom = try self.getOrCreateAtom(name);
+                try self.emitOp(.get_field);
+                try self.emitU16(name_atom);
+            } else if (self.match(.lbracket)) {
+                try self.expression();
+                try self.consume(.rbracket, "Expected ']' after subscript.");
+                try self.emitOp(.get_elem);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Parse 'delete' expression: delete obj.prop or delete obj[key]

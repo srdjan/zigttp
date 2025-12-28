@@ -565,6 +565,41 @@ pub const HiddenClass = struct {
         }
         return null;
     }
+
+    /// Get or create a hidden class for functions with 2 reserved slots
+    /// This prevents property additions from overwriting internal function data
+    /// stored in inline_slots[0] and inline_slots[1]
+    pub fn getOrCreateFunctionClass(self: *HiddenClass, allocator: std.mem.Allocator) !*HiddenClass {
+        // Use special atom for function class transition (slot 0 reserved)
+        const reserved0: Atom = @enumFromInt(0xFFFE);
+        const reserved1: Atom = @enumFromInt(0xFFFF);
+
+        // Check for cached transition
+        if (self.transitions.get(reserved0)) |existing| {
+            return existing;
+        }
+
+        // Create function class with 2 reserved slots
+        const func_class = try allocator.create(HiddenClass);
+        errdefer allocator.destroy(func_class);
+
+        // Allocate properties array with 2 reserved entries
+        var props = try allocator.alloc(PropertySlot, 2);
+        props[0] = .{ .name = reserved0, .offset = 0, .flags = .{} };
+        props[1] = .{ .name = reserved1, .offset = 1, .flags = .{} };
+
+        func_class.* = .{
+            .properties = props,
+            .property_count = 2, // Start new properties at offset 2
+            .prototype = self,
+            .transitions = TransitionMap.init(allocator),
+        };
+
+        // Cache this transition
+        try self.transitions.put(reserved0, func_class);
+
+        return func_class;
+    }
 };
 
 /// Object class ID for built-in types
@@ -655,11 +690,15 @@ pub const JSObject = extern struct {
             .arg_count = arg_count,
         };
 
+        // Create a hidden class that reserves slots 0-1 for internal function data
+        // This prevents setProperty from overwriting the native function data
+        const func_class = try class.getOrCreateFunctionClass(allocator);
+
         // Create function object
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class = func_class,
             .prototype = null,
             .class_id = .function,
             .flags = .{ .is_callable = true },
