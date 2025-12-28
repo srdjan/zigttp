@@ -566,6 +566,22 @@ pub const Interpreter = struct {
                     // Non-object assignment silently fails in non-strict mode
                 },
 
+                .put_field_keep => {
+                    // Same as put_field but keeps the value on the stack
+                    const atom_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const val = self.ctx.pop();
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        try obj.setProperty(self.ctx.allocator, atom, val);
+                    }
+                    // Push value back as assignment expression result
+                    try self.ctx.push(val);
+                },
+
                 .get_elem => {
                     const index_val = self.ctx.pop();
                     const obj_val = self.ctx.pop();

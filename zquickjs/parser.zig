@@ -3305,7 +3305,7 @@ pub const Parser = struct {
         } else if (can_assign and self.match(.assign)) {
             try self.expression();
             const name_atom = try self.getOrCreateAtom(name);
-            try self.emitOp(.put_field);
+            try self.emitOp(.put_field_keep); // Set property and keep value on stack
             try self.emitU16(name_atom);
         } else {
             const name_atom = try self.getOrCreateAtom(name);
