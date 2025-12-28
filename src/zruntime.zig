@@ -393,10 +393,25 @@ pub const Runtime = struct {
     }
 
     fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {
+        // Debug logging
+        std.log.debug("callFunction: class_id={} is_callable={} slot0_isPtr={} slot1_isUndefined={}", .{
+            @intFromEnum(func_obj.class_id),
+            func_obj.flags.is_callable,
+            func_obj.inline_slots[0].isPtr(),
+            func_obj.inline_slots[1].isUndefined(),
+        });
+
         // Get bytecode function data
         const bc_data = func_obj.getBytecodeFunctionData() orelse {
             // Try native function
-            const native_data = func_obj.getNativeFunctionData() orelse return error.NotCallable;
+            std.log.debug("callFunction: no bytecode data, trying native", .{});
+            const native_data = func_obj.getNativeFunctionData() orelse {
+                std.log.err("callFunction: no native data either, NotCallable. slot0_raw={x} slot1_raw={x}", .{
+                    func_obj.inline_slots[0].raw,
+                    func_obj.inline_slots[1].raw,
+                });
+                return error.NotCallable;
+            };
             return native_data.func(self.ctx, zq.JSValue.undefined_val, args);
         };
 
@@ -702,6 +717,13 @@ fn renderNode(ctx: *zq.Context, allocator: std.mem.Allocator, node: zq.JSValue, 
         if (tag_val.isCallable()) {
             const runtime = current_runtime orelse return error.NoRuntime;
 
+            // Debug: log tag value details
+            const func_obj = tag_val.toPtr(zq.JSObject);
+            std.log.debug("renderNode: component tag is callable, class_id={} is_callable={}", .{
+                @intFromEnum(func_obj.class_id),
+                func_obj.flags.is_callable,
+            });
+
             // Get props (or null if not present)
             const props_val = obj.getOwnProperty(zq.Atom.props) orelse zq.JSValue.null_val;
 
@@ -716,7 +738,6 @@ fn renderNode(ctx: *zq.Context, allocator: std.mem.Allocator, node: zq.JSValue, 
             }
 
             // Call the component function with props
-            const func_obj = tag_val.toPtr(zq.JSObject);
             const call_args = [_]zq.JSValue{call_props};
             const component_result = runtime.callFunction(func_obj, &call_args) catch |err| {
                 std.log.err("Component function call failed: {}", .{err});
