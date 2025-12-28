@@ -624,6 +624,9 @@ pub const Interpreter = struct {
                     if (self.ctx.getGlobal(atom)) |val| {
                         try self.ctx.push(val);
                     } else {
+                        // Debug: log when a global is not found
+                        const atom_name = self.ctx.atoms.getName(atom) orelse atom.toPredefinedName() orelse "<unknown>";
+                        std.log.warn("get_global: '{}' not found (atom_idx={})", .{ std.zig.fmtId(atom_name), atom_idx });
                         try self.ctx.push(value.JSValue.undefined_val);
                     }
                 },
@@ -1114,6 +1117,18 @@ pub const Interpreter = struct {
 
         // Check if callable
         if (!func_val.isCallable()) {
+            // Debug: log the non-callable value's type
+            if (func_val.isUndefined()) {
+                std.log.err("doCall: NotCallable - function is undefined (argc={})", .{argc});
+            } else if (func_val.isNull()) {
+                std.log.err("doCall: NotCallable - function is null (argc={})", .{argc});
+            } else if (func_val.isInt()) {
+                std.log.err("doCall: NotCallable - function is int {} (argc={})", .{ func_val.getInt(), argc });
+            } else if (func_val.isPtr()) {
+                std.log.err("doCall: NotCallable - function is ptr 0x{x} (argc={})", .{ func_val.raw, argc });
+            } else {
+                std.log.err("doCall: NotCallable - function raw=0x{x} (argc={})", .{ func_val.raw, argc });
+            }
             return error.NotCallable;
         }
 
