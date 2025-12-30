@@ -435,6 +435,61 @@ pub const BytecodeFunctionData = struct {
     name: Atom,
 };
 
+/// Upvalue - captures a variable from an enclosing scope
+/// Can be "open" (pointing to a stack slot) or "closed" (value copied to heap)
+pub const Upvalue = struct {
+    /// When open, points to a stack location
+    /// When closed, contains the value directly
+    location: union(enum) {
+        open: *value.JSValue, // Points to stack slot
+        closed: value.JSValue, // Value copied here when closed
+    },
+    /// Next upvalue in the linked list of open upvalues (for closing on scope exit)
+    next: ?*Upvalue,
+
+    pub fn init(slot: *value.JSValue) Upvalue {
+        return .{
+            .location = .{ .open = slot },
+            .next = null,
+        };
+    }
+
+    pub fn get(self: *const Upvalue) value.JSValue {
+        return switch (self.location) {
+            .open => |ptr| ptr.*,
+            .closed => |val| val,
+        };
+    }
+
+    pub fn set(self: *Upvalue, val: value.JSValue) void {
+        switch (self.location) {
+            .open => |ptr| ptr.* = val,
+            .closed => self.location = .{ .closed = val },
+        }
+    }
+
+    /// Close the upvalue - copy the value and stop referencing the stack
+    pub fn close(self: *Upvalue) void {
+        switch (self.location) {
+            .open => |ptr| {
+                self.location = .{ .closed = ptr.* };
+            },
+            .closed => {}, // Already closed
+        }
+    }
+};
+
+/// Closure data - a function with captured upvalues
+pub const ClosureData = struct {
+    bytecode: *const @import("bytecode.zig").FunctionBytecode,
+    name: Atom,
+    upvalues: []*Upvalue, // Array of pointers to upvalues
+
+    pub fn deinit(self: *ClosureData, allocator: std.mem.Allocator) void {
+        allocator.free(self.upvalues);
+    }
+};
+
 /// Generator state - stores suspended execution state
 pub const GeneratorState = enum(u8) {
     suspended_start, // Initial state, not yet started
@@ -769,6 +824,54 @@ pub const JSObject = extern struct {
         }
         std.log.debug("getBytecodeFunc success!", .{});
         return slot.toPtr(BytecodeFunctionData);
+    }
+
+    /// Create a closure (function with captured upvalues)
+    pub fn createClosure(
+        allocator: std.mem.Allocator,
+        class: *HiddenClass,
+        bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode,
+        name: Atom,
+        upvalues: []*Upvalue,
+    ) !*JSObject {
+        // Allocate closure data
+        const data = try allocator.create(ClosureData);
+        errdefer allocator.destroy(data);
+        data.* = .{
+            .bytecode = bytecode_ptr,
+            .name = name,
+            .upvalues = upvalues,
+        };
+
+        // Create function object
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .function,
+            .flags = .{ .is_callable = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+        };
+        // Store closure data in first slot
+        // Use slot 1 = true for bytecode function marker
+        // Use slot 4 = true to mark this as a closure (has upvalues)
+        obj.inline_slots[0] = value.JSValue.fromPtr(data);
+        obj.inline_slots[1] = value.JSValue.true_val; // Marker for bytecode function
+        obj.inline_slots[4] = value.JSValue.true_val; // Marker for closure
+        return obj;
+    }
+
+    /// Get closure data (if this is a closure)
+    pub fn getClosureData(self: *const JSObject) ?*ClosureData {
+        if (self.class_id != .function or !self.flags.is_callable) return null;
+        // Check if it's a closure (slot 4 is true)
+        if (!self.inline_slots[4].isTrue()) return null;
+        const slot = self.inline_slots[0];
+        if (!slot.isPtr()) return null;
+        return slot.toPtr(ClosureData);
     }
 
     /// Create a generator object from bytecode function

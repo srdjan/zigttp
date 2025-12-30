@@ -33,6 +33,8 @@ pub const Interpreter = struct {
     code_end: [*]const u8,
     constants: []const value.JSValue, // Constant pool (direct JSValue array)
     current_func: ?*const bytecode.FunctionBytecode,
+    current_closure: ?*object.ClosureData, // Current closure (if executing closure)
+    open_upvalues: ?*object.Upvalue, // Linked list of open upvalues
     state_stack: [MAX_STATE_DEPTH]SavedState,
     state_depth: usize,
 
@@ -43,6 +45,8 @@ pub const Interpreter = struct {
             .code_end = @ptrCast(&empty_code),
             .constants = &.{},
             .current_func = null,
+            .current_closure = null,
+            .open_upvalues = null,
             .state_stack = undefined,
             .state_depth = 0,
         };
@@ -102,6 +106,73 @@ pub const Interpreter = struct {
         self.ctx.call_depth = state.call_depth;
         self.ctx.catch_depth = state.catch_depth;
         self.ctx.exception = state.exception;
+    }
+
+    /// Capture a local variable as an upvalue
+    /// Reuses existing open upvalue if one exists, otherwise creates new one
+    fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
+        // Get pointer to the local slot
+        const local_ptr = self.ctx.getLocalPtr(local_idx);
+
+        // Search for existing open upvalue pointing to this slot
+        var prev: ?*object.Upvalue = null;
+        var current = self.open_upvalues;
+        while (current) |uv| {
+            switch (uv.location) {
+                .open => |ptr| {
+                    if (ptr == local_ptr) {
+                        // Found existing upvalue for this slot
+                        return uv;
+                    }
+                    // Upvalues are ordered by slot address (higher addresses first)
+                    // If we've passed the slot, we need to insert here
+                    if (@intFromPtr(ptr) < @intFromPtr(local_ptr)) {
+                        break;
+                    }
+                },
+                .closed => {},
+            }
+            prev = uv;
+            current = uv.next;
+        }
+
+        // Create new open upvalue
+        const new_uv = try self.ctx.allocator.create(object.Upvalue);
+        new_uv.* = object.Upvalue.init(local_ptr);
+
+        // Insert into linked list
+        if (prev) |p| {
+            new_uv.next = p.next;
+            p.next = new_uv;
+        } else {
+            new_uv.next = self.open_upvalues;
+            self.open_upvalues = new_uv;
+        }
+
+        return new_uv;
+    }
+
+    /// Close all open upvalues that reference slots at or above the given index
+    fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
+        const threshold = self.ctx.getLocalPtr(local_idx);
+
+        while (self.open_upvalues) |uv| {
+            switch (uv.location) {
+                .open => |ptr| {
+                    if (@intFromPtr(ptr) < @intFromPtr(threshold)) {
+                        // This upvalue is below the threshold, stop
+                        break;
+                    }
+                    // Close this upvalue
+                    uv.close();
+                    self.open_upvalues = uv.next;
+                },
+                .closed => {
+                    // Already closed, remove from list
+                    self.open_upvalues = uv.next;
+                },
+            }
+        }
     }
 
     pub fn callBytecodeFunction(
@@ -972,6 +1043,93 @@ pub const Interpreter = struct {
                     if (!cond.toBoolean()) {
                         self.offsetPc(offset);
                     }
+                },
+
+                // ========================================
+                // Closure Operations
+                // ========================================
+                .get_upvalue => {
+                    const idx = self.pc[0];
+                    self.pc += 1;
+                    // Get the upvalue from the current closure
+                    if (self.current_closure) |closure| {
+                        if (idx < closure.upvalues.len) {
+                            const uv = closure.upvalues[idx];
+                            try self.ctx.push(uv.get());
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                },
+
+                .put_upvalue => {
+                    const idx = self.pc[0];
+                    self.pc += 1;
+                    const val = self.ctx.pop();
+                    // Set the upvalue in the current closure
+                    if (self.current_closure) |closure| {
+                        if (idx < closure.upvalues.len) {
+                            closure.upvalues[idx].set(val);
+                        }
+                    }
+                },
+
+                .close_upvalue => {
+                    const local_idx = self.pc[0];
+                    self.pc += 1;
+                    // Close any open upvalues pointing to this local slot
+                    self.closeUpvaluesAbove(local_idx);
+                },
+
+                .make_closure => {
+                    const const_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const upvalue_count: u8 = self.pc[0];
+                    self.pc += 1;
+
+                    // Get bytecode pointer from constant pool
+                    const bc_val = try self.getConstant(const_idx);
+                    if (!bc_val.isPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+
+                    // Allocate upvalue array
+                    const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
+                    errdefer self.ctx.allocator.free(upvalues);
+
+                    // Capture upvalues based on bytecode info
+                    for (0..upvalue_count) |i| {
+                        const info = bc_ptr.upvalue_info[i];
+                        if (info.is_local) {
+                            // Capture from current function's locals
+                            upvalues[i] = try self.captureUpvalue(info.index);
+                        } else {
+                            // Capture from current closure's upvalues
+                            if (self.current_closure) |closure| {
+                                upvalues[i] = closure.upvalues[info.index];
+                            } else {
+                                // Create a new closed upvalue with undefined
+                                const uv = try self.ctx.allocator.create(object.Upvalue);
+                                uv.* = .{
+                                    .location = .{ .closed = value.JSValue.undefined_val },
+                                    .next = null,
+                                };
+                                upvalues[i] = uv;
+                            }
+                        }
+                    }
+
+                    // Create closure object
+                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const closure_obj = try object.JSObject.createClosure(
+                        self.ctx.allocator,
+                        root_class,
+                        bc_ptr,
+                        @enumFromInt(bc_ptr.name_atom),
+                        upvalues,
+                    );
+                    try self.ctx.push(closure_obj.toValue());
                 },
 
                 else => {

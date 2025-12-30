@@ -270,6 +270,11 @@ pub const Context = struct {
         return self.stack[self.fp + idx];
     }
 
+    /// Get pointer to local variable slot (for upvalue capture)
+    pub inline fn getLocalPtr(self: *Context, idx: usize) *value.JSValue {
+        return &self.stack[self.fp + idx];
+    }
+
     /// Set local variable by index
     pub inline fn setLocal(self: *Context, idx: usize, val: value.JSValue) void {
         self.stack[self.fp + idx] = val;

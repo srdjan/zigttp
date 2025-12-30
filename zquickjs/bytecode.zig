@@ -170,6 +170,12 @@ pub const Opcode = enum(u8) {
     put_field_ic = 0xB1, // +u16 atom_idx +u16 cache_idx
     call_ic = 0xB2, // +u8 argc +u16 cache_idx
 
+    // Closure operations
+    get_upvalue = 0xC0, // +u8 upvalue_idx
+    put_upvalue = 0xC1, // +u8 upvalue_idx
+    close_upvalue = 0xC2, // +u8 local_idx (close when leaving scope)
+    make_closure = 0xC3, // +u16 func_idx +u8 upvalue_count
+
     // Reserved for future
     _,
 };
@@ -218,6 +224,12 @@ pub const ConstType = enum(u8) {
     regexp = 5,
 };
 
+/// Upvalue info for closures
+pub const UpvalueInfo = struct {
+    is_local: bool, // true: from parent's locals, false: from parent's upvalues
+    index: u8, // Index in parent's locals or upvalues array
+};
+
 /// Function bytecode structure
 pub const FunctionBytecode = struct {
     header: BytecodeHeader,
@@ -226,6 +238,8 @@ pub const FunctionBytecode = struct {
     local_count: u16,
     stack_size: u16,
     flags: FunctionFlags,
+    upvalue_count: u8 = 0, // Number of upvalues this function captures
+    upvalue_info: []const UpvalueInfo = &.{}, // Info for each upvalue
     code: []const u8,
     constants: []const value.JSValue,
     source_map: ?[]const u8,
