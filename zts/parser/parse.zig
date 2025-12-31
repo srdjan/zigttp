@@ -168,16 +168,44 @@ pub const Parser = struct {
             .kw_var, .kw_let, .kw_const => self.parseVarDeclaration(),
             .kw_function => self.parseFunctionDeclaration(),
             .kw_if => self.parseIfStatement(),
-            .kw_while => self.parseWhileStatement(),
-            .kw_do => self.parseDoWhileStatement(),
+            .kw_while => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'while' is not supported; use 'for-of' with a finite collection instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .kw_do => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'do-while' is not supported; use 'for-of' with a finite collection instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
             .kw_for => self.parseForStatement(),
             .kw_return => self.parseReturnStatement(),
-            .kw_break => self.parseBreakStatement(),
-            .kw_continue => self.parseContinueStatement(),
-            .kw_throw => self.parseThrowStatement(),
-            .kw_try => self.parseTryStatement(),
+            .kw_break => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'break' is not supported; use early return or filter instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .kw_continue => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'continue' is not supported; use filter or conditional logic instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .kw_throw => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'throw' is not supported; use Result types for error handling");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .kw_try => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'try/catch' is not supported; use Result types for error handling");
+                self.had_error = true;
+                return error.ParseError;
+            },
             .kw_switch => self.parseSwitchStatement(),
-            .kw_class => self.parseClassDeclaration(),
+            .kw_class => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
             .lbrace => self.parseBlock(),
             .semicolon => self.parseEmptyStatement(),
             .kw_debugger => self.parseDebuggerStatement(),
@@ -768,7 +796,6 @@ pub const Parser = struct {
 
         // Parse initializer
         var init_node: NodeIndex = null_node;
-        var is_for_in = false;
         var is_for_of = false;
         var is_const = false;
 
@@ -800,30 +827,11 @@ pub const Parser = struct {
 
                 // Check for for-in/for-of
                 if (self.check(.kw_in)) {
-                    is_for_in = true;
-                    self.advance();
-                    const iterable = try self.parseExpression(.none);
-                    try self.expect(.rparen, "')'");
-
-                    const was_in_loop = self.in_loop;
-                    self.in_loop = true;
-                    const body = try self.parseStatement();
-                    self.in_loop = was_in_loop;
-
+                    // for-in is not supported - only for-of
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "'for-in' is not supported; use 'for-of' to iterate over values instead");
+                    self.had_error = true;
                     self.scopes.popScope();
-
-                    return try self.nodes.add(.{
-                        .tag = .for_in_stmt,
-                        .loc = loc,
-                        .data = .{ .for_iter = .{
-                            .is_for_in = true,
-                            .binding = binding,
-                            .pattern = null_node,
-                            .iterable = iterable,
-                            .body = body,
-                            .is_const = is_const,
-                        } },
-                    });
+                    return error.ParseError;
                 } else if (self.check(.kw_of)) {
                     is_for_of = true;
                     self.advance();
@@ -872,7 +880,7 @@ pub const Parser = struct {
             }
         }
 
-        if (!is_for_in and !is_for_of) {
+        if (!is_for_of) {
             try self.expect(.semicolon, "';'");
 
             // Condition
@@ -1348,13 +1356,33 @@ pub const Parser = struct {
 
             // Identifiers and keywords
             .identifier => self.parseIdentifier(),
-            .kw_this => self.parseThis(),
-            .kw_super => self.parseSuper(),
-            .kw_new => self.parseNewExpression(),
+            .kw_this => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'this' is not supported; pass context explicitly as a parameter");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .kw_super => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'super' is not supported; use explicit function calls instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .kw_new => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'new' is not supported; use factory functions instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
             .kw_function => self.parseFunctionExpression(),
-            .kw_class => self.parseClassExpression(),
+            .kw_class => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
             .kw_async => self.parseAsyncExpression(),
-            .kw_yield => self.parseYieldExpression(),
+            .kw_yield => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'yield' is not supported; generators are not available");
+                self.had_error = true;
+                return error.ParseError;
+            },
             .kw_await => self.parseAwaitExpression(),
             .kw_typeof => self.parseUnaryKeyword(.typeof_op),
             .kw_void => self.parseUnaryKeyword(.void_op),
@@ -1433,54 +1461,96 @@ pub const Parser = struct {
                 return try self.nodes.add(Node.binaryOp(loc, self.tokenToBinaryOp(op_tok.type), left, right));
             },
 
-            // Assignment
-            .assign,
-            .plus_assign,
-            .minus_assign,
-            .star_assign,
-            .slash_assign,
-            .percent_assign,
-            .ampersand_assign,
-            .pipe_assign,
-            .caret_assign,
-            .lt_lt_assign,
-            .gt_gt_assign,
-            .gt_gt_gt_assign,
-            .star_star_assign,
-            .ampersand_ampersand_assign,
-            .pipe_pipe_assign,
-            .question_question_assign,
-            => {
+            // Simple assignment only
+            .assign => {
                 self.advance();
                 const right = try self.parseExpression(@enumFromInt(@intFromEnum(prec) - 1));
-                const op: ?BinaryOp = switch (op_tok.type) {
-                    .assign => null,
-                    .plus_assign => .add,
-                    .minus_assign => .sub,
-                    .star_assign => .mul,
-                    .slash_assign => .div,
-                    .percent_assign => .mod,
-                    .ampersand_assign => .bit_and,
-                    .pipe_assign => .bit_or,
-                    .caret_assign => .bit_xor,
-                    .lt_lt_assign => .shl,
-                    .gt_gt_assign => .shr,
-                    .gt_gt_gt_assign => .ushr,
-                    .star_star_assign => .pow,
-                    .ampersand_ampersand_assign => .and_op,
-                    .pipe_pipe_assign => .or_op,
-                    .question_question_assign => .nullish,
-                    else => unreachable,
-                };
                 return try self.nodes.add(.{
                     .tag = .assignment,
                     .loc = loc,
                     .data = .{ .assignment = .{
                         .target = left,
                         .value = right,
-                        .op = op,
+                        .op = null,
                     } },
                 });
+            },
+
+            // Compound assignments are not supported
+            .plus_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'+=' is not supported; use 'x = x + value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .minus_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'-=' is not supported; use 'x = x - value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .star_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'*=' is not supported; use 'x = x * value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .slash_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'/=' is not supported; use 'x = x / value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .percent_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'%=' is not supported; use 'x = x % value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .ampersand_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'&=' is not supported; use 'x = x & value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .pipe_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'|=' is not supported; use 'x = x | value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .caret_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'^=' is not supported; use 'x = x ^ value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .lt_lt_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'<<=' is not supported; use 'x = x << value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .gt_gt_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'>>=' is not supported; use 'x = x >> value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .gt_gt_gt_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'>>>=' is not supported; use 'x = x >>> value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .star_star_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'**=' is not supported; use 'x = x ** value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .ampersand_ampersand_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'&&=' is not supported; use 'x = x && value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .pipe_pipe_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'||=' is not supported; use 'x = x || value' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .question_question_assign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'??=' is not supported; use 'x = x ?? value' instead");
+                self.had_error = true;
+                return error.ParseError;
             },
 
             // Ternary
@@ -3127,26 +3197,20 @@ test "parse object literal" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "parse class" {
+test "parse class rejected" {
     var parser = Parser.init(std.testing.allocator,
-        \\class Foo {
-        \\  constructor(x) {
-        \\    this.x = x;
-        \\  }
-        \\  getX() {
-        \\    return this.x;
-        \\  }
-        \\}
+        \\class Foo {}
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
+    _ = parser.parse() catch {
+        // Expected: class is not supported
+        try std.testing.expect(parser.hasErrors());
         return;
     };
 
-    try std.testing.expect(result != null_node);
-    try std.testing.expect(!parser.hasErrors());
+    // Should have errored
+    try std.testing.expect(false);
 }
 
 test "parse closure creates upvalue" {

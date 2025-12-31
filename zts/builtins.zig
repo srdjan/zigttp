@@ -3282,13 +3282,6 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(regExpConstructor), .RegExp, 2);
     try regexp_ctor.setProperty(allocator, .prototype, regexp_proto.toValue());
     try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
-
-    // Create Generator prototype with next/return/throw methods
-    const generator_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethodDynamic(ctx, generator_proto, "next", wrap(generatorNext), 1);
-    try addMethodDynamic(ctx, generator_proto, "return", wrap(generatorReturn), 1);
-    try addMethodDynamic(ctx, generator_proto, "throw", wrap(generatorThrow), 1);
-    ctx.generator_prototype = generator_proto;
 }
 
 // ============================================================================
@@ -3482,96 +3475,6 @@ pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []con
 }
 
 // ============================================================================
-// Generator implementation
-// ============================================================================
-
-const interpreter = @import("interpreter.zig");
-
-/// Generator.prototype.next(value) - Advance generator to next yield
-pub fn generatorNext(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
-    if (!this.isObject()) return value.JSValue.undefined_val;
-
-    const gen_obj = object.JSObject.fromValue(this);
-    if (gen_obj.class_id != .generator) return value.JSValue.undefined_val;
-
-    // Create an interpreter instance for running the generator
-    var interp = interpreter.Interpreter.init(ctx);
-
-    const result = interp.runGenerator(gen_obj) catch {
-        // Return {value: undefined, done: true} on error
-        const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-        const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
-        result_obj.setProperty(allocator, value_atom, value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
-        const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
-        result_obj.setProperty(allocator, done_atom, value.JSValue.true_val) catch return value.JSValue.undefined_val;
-        return result_obj.toValue();
-    };
-
-    // Create iterator result object {value, done}
-    const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, value_atom, result.value) catch return value.JSValue.undefined_val;
-    const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, done_atom, if (result.done) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-
-    return result_obj.toValue();
-}
-
-
-/// Generator.prototype.return(value) - Force generator to return
-pub fn generatorReturn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
-    if (!this.isObject()) return value.JSValue.undefined_val;
-
-    const gen_obj = object.JSObject.fromValue(this);
-    if (gen_obj.class_id != .generator) return value.JSValue.undefined_val;
-
-    // Mark generator as completed
-    const gen_data = gen_obj.getGeneratorData() orelse return value.JSValue.undefined_val;
-    gen_data.state = .completed;
-
-    // Return {value, done: true}
-    const return_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
-    const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, value_atom, return_val) catch return value.JSValue.undefined_val;
-    const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, done_atom, value.JSValue.true_val) catch return value.JSValue.undefined_val;
-
-    return result_obj.toValue();
-}
-
-
-/// Generator.prototype.throw(error) - Throw error into generator
-pub fn generatorThrow(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
-    if (!this.isObject()) return value.JSValue.undefined_val;
-
-    const gen_obj = object.JSObject.fromValue(this);
-    if (gen_obj.class_id != .generator) return value.JSValue.undefined_val;
-
-    // Mark generator as completed (simple implementation - doesn't handle try/catch in generator)
-    const gen_data = gen_obj.getGeneratorData() orelse return value.JSValue.undefined_val;
-    gen_data.state = .completed;
-
-    // Return {value: undefined, done: true}
-    const result_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    const value_atom = ctx.atoms.intern("value") catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, value_atom, value.JSValue.undefined_val) catch return value.JSValue.undefined_val;
-    const done_atom = ctx.atoms.intern("done") catch return value.JSValue.undefined_val;
-    result_obj.setProperty(allocator, done_atom, value.JSValue.true_val) catch return value.JSValue.undefined_val;
-
-    return result_obj.toValue();
-}
-
-
 // ============================================================================
 // Symbol implementation
 // ============================================================================

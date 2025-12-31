@@ -206,14 +206,12 @@ pub const CodeGen = struct {
 
             // Identifiers
             .identifier => try self.emitIdentifier(node.data.binding),
-            .this_expr => try self.emit(.push_this),
 
             // Expressions
             .binary_op => try self.emitBinaryOp(node.data.binary),
             .unary_op => try self.emitUnaryOp(node.data.unary),
             .ternary => try self.emitTernary(node.data.ternary),
             .call, .optional_call => try self.emitCall(node.data.call),
-            .new_expr => try self.emitNewExpr(node.data.call),
             .member_access, .optional_chain => try self.emitMemberAccess(node.data.member),
             .computed_access => try self.emitComputedAccess(node.data.member),
             .assignment => try self.emitAssignment(node.data.assignment),
@@ -231,15 +229,9 @@ pub const CodeGen = struct {
             },
             .var_decl, .function_decl => try self.emitVarDecl(node.data.var_decl),
             .if_stmt => try self.emitIfStmt(node.data.if_stmt),
-            .while_stmt => try self.emitWhileLoop(node.data.loop),
-            .do_while_stmt => try self.emitDoWhileLoop(node.data.loop),
             .for_stmt => try self.emitForLoop(node.data.loop),
-            .for_of_stmt, .for_in_stmt => try self.emitForIterLoop(node.data.for_iter),
+            .for_of_stmt => try self.emitForIterLoop(node.data.for_iter),
             .return_stmt => try self.emitReturn(node.data.opt_value),
-            .break_stmt => try self.emitBreak(node.data.opt_label),
-            .continue_stmt => try self.emitContinue(node.data.opt_label),
-            .throw_stmt => try self.emitThrow(node.data.opt_value),
-            .try_stmt => try self.emitTryStmt(node.data.try_stmt),
             .switch_stmt => try self.emitSwitch(node.data.switch_stmt),
             .block, .program => try self.emitBlock(node.data.block),
             .empty_stmt, .debugger_stmt => {},
@@ -466,14 +458,6 @@ pub const CodeGen = struct {
     }
 
     fn emitUnaryOp(self: *CodeGen, unary: Node.UnaryExpr) !void {
-        switch (unary.op) {
-            .pre_inc, .pre_dec, .post_inc, .post_dec => {
-                // Handle increment/decrement
-                return self.emitUpdateOp(unary);
-            },
-            else => {},
-        }
-
         try self.emitNode(unary.operand);
 
         const opcode: Opcode = switch (unary.op) {
@@ -481,48 +465,11 @@ pub const CodeGen = struct {
             .not => .not,
             .bit_not => .bit_not,
             .typeof_op => .typeof,
-            else => .nop,
+            .void_op => .push_undefined,
+            .delete_op => .nop, // delete not fully supported
         };
 
         try self.emit(opcode);
-    }
-
-    fn emitUpdateOp(self: *CodeGen, unary: Node.UnaryExpr) !void {
-        const operand_node = self.nodes.get(unary.operand) orelse return;
-
-        if (operand_node.tag == .identifier) {
-            const binding = operand_node.data.binding;
-
-            // Get current value
-            try self.emitIdentifier(binding);
-
-            // For postfix, duplicate before modifying
-            const is_postfix = unary.op == .post_inc or unary.op == .post_dec;
-            if (is_postfix) {
-                try self.emit(.dup);
-                self.pushStack(1);
-            }
-
-            // Increment or decrement
-            if (unary.op == .pre_inc or unary.op == .post_inc) {
-                try self.emit(.inc);
-            } else {
-                try self.emit(.dec);
-            }
-
-            // Store back
-            if (!is_postfix) {
-                try self.emit(.dup);
-                self.pushStack(1);
-            }
-            try self.emitSetBinding(binding);
-
-            if (is_postfix) {
-                try self.emit(.swap);
-                try self.emit(.drop);
-                self.popStack(1);
-            }
-        }
     }
 
     fn emitTernary(self: *CodeGen, ternary: Node.TernaryExpr) !void {
@@ -594,21 +541,6 @@ pub const CodeGen = struct {
             const arg_idx = self.nodes.getListIndex(call.args_start, i);
             try self.emitNode(arg_idx);
         }
-    }
-
-    fn emitNewExpr(self: *CodeGen, call: Node.CallExpr) !void {
-        try self.emitNode(call.callee);
-
-        var i: u8 = 0;
-        while (i < call.args_count) : (i += 1) {
-            const arg_idx = self.nodes.getListIndex(call.args_start, i);
-            try self.emitNode(arg_idx);
-        }
-
-        try self.emit(.call_constructor);
-        try self.emitByte(call.args_count);
-
-        self.popStack(call.args_count);
     }
 
     fn emitMemberAccess(self: *CodeGen, member: Node.MemberExpr) !void {
@@ -1123,51 +1055,6 @@ pub const CodeGen = struct {
         }
     }
 
-    fn emitWhileLoop(self: *CodeGen, loop: Node.LoopStmt) !void {
-        const loop_start = try self.createLabel();
-        const loop_end = try self.createLabel();
-
-        try self.loop_stack.append(self.allocator, .{
-            .break_label = loop_end,
-            .continue_label = loop_start,
-        });
-
-        try self.placeLabel(loop_start);
-        try self.emitNode(loop.condition);
-        try self.emitJump(.if_false, loop_end);
-        self.popStack(1);
-
-        try self.emitNode(loop.body);
-        try self.emitJump(.goto, loop_start);
-
-        try self.placeLabel(loop_end);
-
-        _ = self.loop_stack.pop();
-    }
-
-    fn emitDoWhileLoop(self: *CodeGen, loop: Node.LoopStmt) !void {
-        const loop_start = try self.createLabel();
-        const loop_end = try self.createLabel();
-        const continue_label = try self.createLabel();
-
-        try self.loop_stack.append(self.allocator, .{
-            .break_label = loop_end,
-            .continue_label = continue_label,
-        });
-
-        try self.placeLabel(loop_start);
-        try self.emitNode(loop.body);
-
-        try self.placeLabel(continue_label);
-        try self.emitNode(loop.condition);
-        try self.emitJump(.if_true, loop_start);
-        self.popStack(1);
-
-        try self.placeLabel(loop_end);
-
-        _ = self.loop_stack.pop();
-    }
-
     fn emitForLoop(self: *CodeGen, loop: Node.LoopStmt) !void {
         // Init
         if (loop.init != null_node) {
@@ -1253,73 +1140,6 @@ pub const CodeGen = struct {
         } else {
             try self.emit(.ret_undefined);
         }
-    }
-
-    fn emitBreak(self: *CodeGen, label_opt: ?u16) !void {
-        _ = label_opt;
-        if (self.loop_stack.items.len > 0) {
-            const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
-            try self.emitJump(.goto, ctx.break_label);
-        }
-    }
-
-    fn emitContinue(self: *CodeGen, label_opt: ?u16) !void {
-        _ = label_opt;
-        if (self.loop_stack.items.len > 0) {
-            const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
-            try self.emitJump(.goto, ctx.continue_label);
-        }
-    }
-
-    fn emitThrow(self: *CodeGen, value_opt: ?NodeIndex) !void {
-        if (value_opt) |val| {
-            try self.emitNode(val);
-        } else {
-            try self.emit(.push_undefined);
-            self.pushStack(1);
-        }
-        try self.emit(.@"throw");
-        self.popStack(1);
-    }
-
-    fn emitTryStmt(self: *CodeGen, try_stmt: Node.TryStmt) !void {
-        const catch_label = try self.createLabel();
-        const finally_label = try self.createLabel();
-        const end_label = try self.createLabel();
-
-        // Push exception handler
-        try self.emit(.push_catch);
-        try self.emitI16Placeholder(catch_label);
-
-        // Try block
-        try self.emitNode(try_stmt.try_block);
-
-        // Normal exit from try
-        try self.emit(.pop_catch);
-        if (try_stmt.finally_block != null_node) {
-            try self.emitJump(.goto, finally_label);
-        } else {
-            try self.emitJump(.goto, end_label);
-        }
-
-        // Catch block
-        try self.placeLabel(catch_label);
-        if (try_stmt.catch_block != null_node) {
-            if (try_stmt.catch_binding.slot != 255) {
-                try self.emit(.get_exception);
-                self.pushStack(1);
-                try self.emitSetBinding(try_stmt.catch_binding);
-            }
-            try self.emitNode(try_stmt.catch_block);
-        }
-
-        // Finally block
-        if (try_stmt.finally_block != null_node) {
-            try self.placeLabel(finally_label);
-            try self.emitNode(try_stmt.finally_block);
-        }
-
-        try self.placeLabel(end_label);
     }
 
     fn emitSwitch(self: *CodeGen, switch_stmt: Node.SwitchStmt) !void {

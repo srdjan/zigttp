@@ -105,12 +105,10 @@ pub const Opcode = enum(u8) {
     if_false = 0x52, // +i16 offset
     ret = 0x53,
     ret_undefined = 0x54,
-    @"throw" = 0x55,
 
     // Function calls
     call = 0x60, // +u8 argc
     call_method = 0x61, // +u8 argc
-    call_constructor = 0x62, // +u8 argc
     tail_call = 0x63, // +u8 argc
 
     // Property access
@@ -125,7 +123,6 @@ pub const Opcode = enum(u8) {
     // Object operations
     new_object = 0x80,
     new_array = 0x81, // +u16 length
-    push_this = 0x82,
     get_global = 0x83, // +u16 atom_idx
     put_global = 0x84, // +u16 atom_idx
     define_global = 0x85, // +u16 atom_idx (declare global var)
@@ -137,17 +134,7 @@ pub const Opcode = enum(u8) {
     typeof = 0x90,
     instanceof = 0x91,
 
-    // Exception handling
-    push_catch = 0x92, // +i16 offset to catch block
-    pop_catch = 0x93, // Remove catch handler (normal exit from try)
-    get_exception = 0x94, // Push caught exception value
-
-    // Generator operations
-    yield_val = 0x95, // Yield value from generator, suspends execution
-    yield_star = 0x96, // Yield* delegation to another iterator
-    make_generator = 0x97, // Create generator object from function bytecode
-
-    // Async operations
+    // Async operations (kept for future implementation)
     await_val = 0x98, // Await a value/Promise, suspends execution
     make_async = 0x99, // Create async function from bytecode
 

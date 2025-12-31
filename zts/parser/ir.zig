@@ -89,10 +89,6 @@ pub const UnaryOp = enum(u4) {
     typeof_op,
     void_op,
     delete_op,
-    pre_inc,
-    pre_dec,
-    post_inc,
-    post_dec,
 };
 
 /// Function flags
@@ -120,7 +116,6 @@ pub const NodeTag = enum(u8) {
 
     // Identifiers and references
     identifier,
-    this_expr,
 
     // Expressions
     binary_op,
@@ -128,13 +123,11 @@ pub const NodeTag = enum(u8) {
     ternary,
     call,
     method_call,
-    new_expr,
     member_access,
     computed_access,
     optional_chain,
     optional_call,
     assignment,
-    compound_assign,
     array_literal,
     object_literal,
     object_property,
@@ -148,7 +141,6 @@ pub const NodeTag = enum(u8) {
     template_part_string,
     template_part_expr,
     spread,
-    yield_expr,
     await_expr,
     sequence_expr,
     comma_expr,
@@ -157,18 +149,11 @@ pub const NodeTag = enum(u8) {
     expr_stmt,
     var_decl,
     if_stmt,
-    while_stmt,
-    do_while_stmt,
     for_stmt,
     for_of_stmt,
-    for_in_stmt,
     switch_stmt,
     case_clause,
     return_stmt,
-    break_stmt,
-    continue_stmt,
-    throw_stmt,
-    try_stmt,
     block,
     empty_stmt,
     labeled_stmt,
@@ -176,9 +161,6 @@ pub const NodeTag = enum(u8) {
 
     // Declarations
     function_decl,
-    class_decl,
-    class_method,
-    class_field,
 
     // Patterns (for destructuring)
     array_pattern,

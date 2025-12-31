@@ -66,24 +66,18 @@ function handler(request) {
     if (url === '/api/json' && method === 'POST') {
         const body = request.body;
         if (!body) {
-            return new Response(
-                JSON.stringify({ error: 'No body provided' }),
-                { status: 400, headers: { 'Content-Type': 'application/json' } }
-            );
+            return Response.json({ error: 'No body provided' }, { status: 400 });
         }
 
-        try {
-            const data = JSON.parse(body);
-            return Response.json({
-                received: data,
-                processed: true
-            });
-        } catch (e) {
-            return new Response(
-                JSON.stringify({ error: 'Invalid JSON' }),
-                { status: 400, headers: { 'Content-Type': 'application/json' } }
-            );
+        // Parse JSON - returns null if invalid
+        const data = JSON.parse(body);
+        if (data === null) {
+            return Response.json({ error: 'Invalid JSON' }, { status: 400 });
         }
+        return Response.json({
+            received: data,
+            processed: true
+        });
     }
 
     // Compute example - Fibonacci
@@ -106,8 +100,5 @@ function handler(request) {
     }
 
     // 404 for everything else
-    return new Response(
-        JSON.stringify({ error: 'Not Found', url: url }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-    );
+    return Response.json({ error: 'Not Found', url: url }, { status: 404 });
 }

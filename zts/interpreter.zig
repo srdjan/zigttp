@@ -551,30 +551,9 @@ pub const Interpreter = struct {
 
                 .ret_undefined => return value.JSValue.undefined_val,
 
-                .throw => {
-                    const exception_val = self.ctx.pop();
-                    self.ctx.throwException(exception_val);
-
-                    // Check for catch handler
-                    if (self.ctx.getCatchHandler()) |handler| {
-                        // Restore stack state
-                        self.ctx.sp = handler.sp;
-                        self.ctx.fp = handler.fp;
-                        // Pop the catch handler
-                        self.ctx.popCatch();
-                        // Jump to catch block
-                        self.pc = @ptrFromInt(handler.catch_pc);
-                        continue :dispatch;
-                    }
-
-                    // No catch handler - propagate exception
-                    return value.JSValue.exception_val;
-                },
-
                 // ========================================
                 // Object Operations
                 // ========================================
-                .push_this => try self.ctx.push(self.ctx.getThis()),
 
                 .new_object => {
                     const obj = try self.createObject();
@@ -753,37 +732,6 @@ pub const Interpreter = struct {
                         @enumFromInt(bc_ptr.name_atom),
                     );
                     try self.ctx.push(func_obj.toValue());
-                },
-
-                .make_generator => {
-                    const const_idx = readU16(self.pc);
-                    self.pc += 2;
-                    // Get bytecode pointer from constant pool
-                    const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
-                    // Create generator function object (marked as generator via slot 2)
-                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
-                    const func_obj = try object.JSObject.createBytecodeFunction(
-                        self.ctx.allocator,
-                        root_class,
-                        bc_ptr,
-                        @enumFromInt(bc_ptr.name_atom),
-                    );
-                    // Mark as generator function using slot 2
-                    func_obj.inline_slots[2] = value.JSValue.true_val;
-                    try self.ctx.push(func_obj.toValue());
-                },
-
-                .yield_val => {
-                    // This is handled specially in runGenerator
-                    // If we reach it during normal execution, it's an error
-                    return error.UnimplementedOpcode;
-                },
-
-                .yield_star => {
-                    // Delegate to another iterator - complex, placeholder for now
-                    return error.UnimplementedOpcode;
                 },
 
                 .make_async => {
@@ -967,28 +915,6 @@ pub const Interpreter = struct {
                 },
 
                 // ========================================
-                // Exception Handling
-                // ========================================
-                .push_catch => {
-                    const offset = readI16(self.pc);
-                    self.pc += 2;
-                    // Calculate absolute address of catch block
-                    const catch_pc = @intFromPtr(self.pc) + @as(usize, @intCast(@as(i32, offset)));
-                    try self.ctx.pushCatch(catch_pc);
-                },
-
-                .pop_catch => {
-                    self.ctx.popCatch();
-                },
-
-                .get_exception => {
-                    // Push the exception value onto the stack
-                    try self.ctx.push(self.ctx.exception);
-                    // Clear the exception
-                    self.ctx.clearException();
-                },
-
-                // ========================================
                 // Function Calls
                 // ========================================
                 .call => {
@@ -1001,12 +927,6 @@ pub const Interpreter = struct {
                     const argc: u8 = self.pc[0];
                     self.pc += 1;
                     try self.doCall(argc, true);
-                },
-
-                .call_constructor => {
-                    const argc: u8 = self.pc[0];
-                    self.pc += 1;
-                    try self.doConstruct(argc);
                 },
 
                 .tail_call => {
@@ -1378,187 +1298,6 @@ pub const Interpreter = struct {
 
         // Unknown function type
         try self.ctx.push(value.JSValue.undefined_val);
-    }
-
-    /// Perform constructor call (new operator)
-    fn doConstruct(self: *Interpreter, argc: u8) InterpreterError!void {
-        // Stack layout: [constructor, arg0, arg1, ..., argN-1]
-
-        // Bounds check (same as doCall)
-        if (argc > MAX_STACK_ARGS) {
-            return error.TooManyArguments;
-        }
-
-        // Collect arguments (in reverse order from stack)
-        var args: [MAX_STACK_ARGS]value.JSValue = undefined;
-        var i: usize = argc;
-        while (i > 0) {
-            i -= 1;
-            args[i] = self.ctx.pop();
-        }
-
-        // Pop constructor function
-        const ctor_val = self.ctx.pop();
-
-        // Check if callable
-        if (!ctor_val.isCallable()) {
-            return error.NotCallable;
-        }
-
-        // Get the constructor object
-        const ctor_obj = object.JSObject.fromValue(ctor_val);
-
-        // Create a new object with the constructor's prototype (if available)
-        // Look for a "prototype" property on the constructor
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
-        var proto: ?*object.JSObject = null;
-
-        // Try to get constructor.prototype
-        const proto_atom = object.Atom.prototype;
-        if (ctor_obj.getProperty(proto_atom)) |proto_val| {
-            if (proto_val.isObject()) {
-                proto = object.JSObject.fromValue(proto_val);
-            }
-        }
-
-        // Create the new object
-        const new_obj = try object.JSObject.create(self.ctx.allocator, root_class, proto);
-        const this_val = new_obj.toValue();
-
-        // Check for native function constructor
-        if (ctor_obj.getNativeFunctionData()) |native_data| {
-            // Call native constructor
-            const result = native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
-                // Create error message with constructor name for better debugging
-                const ctor_name = if (native_data.name.toPredefinedName()) |name| name else "<constructor>";
-                std.log.err("Native constructor '{s}' error: {}", .{ ctor_name, err });
-                // Set exception on context for JS-level error handling
-                self.ctx.throwException(value.JSValue.exception_val);
-                return error.NativeFunctionError;
-            };
-
-            // If constructor returns an object, use that; otherwise use 'this'
-            if (result.isObject()) {
-                try self.ctx.push(result);
-            } else {
-                try self.ctx.push(this_val);
-            }
-            return;
-        }
-
-        // Check for bytecode function constructor
-        if (ctor_obj.getBytecodeFunctionData()) |bc_data| {
-            const func_bc = bc_data.bytecode;
-            const result = try self.callBytecodeFunction(ctor_val, func_bc, this_val, args[0..argc]);
-
-            // If constructor returns an object, use that; otherwise use 'this'
-            if (result.isObject()) {
-                try self.ctx.push(result);
-            } else {
-                try self.ctx.push(this_val);
-            }
-            return;
-        }
-
-        // Unknown constructor type - just return the new object
-        try self.ctx.push(this_val);
-    }
-
-    /// Generator result for next() calls
-    pub const GeneratorResult = struct {
-        value: value.JSValue,
-        done: bool,
-    };
-
-    /// Run generator until next yield or return
-    pub fn runGenerator(self: *Interpreter, gen_obj: *object.JSObject) InterpreterError!GeneratorResult {
-        const gen_data = gen_obj.getGeneratorData() orelse return error.TypeError;
-
-        // Check if generator is already completed
-        if (gen_data.state == .completed) {
-            return .{ .value = value.JSValue.undefined_val, .done = true };
-        }
-
-        // Mark as executing
-        gen_data.state = .executing;
-
-        const func_bc = gen_data.bytecode;
-
-        // Set up interpreter state
-        self.pc = func_bc.code.ptr + gen_data.pc_offset;
-        self.code_end = func_bc.code.ptr + func_bc.code.len;
-        self.constants = func_bc.constants;
-        self.current_func = func_bc;
-
-        // Restore locals to stack
-        try self.ctx.ensureStack(gen_data.locals.len + gen_data.stack_len);
-        for (gen_data.locals) |local| {
-            try self.ctx.push(local);
-        }
-        // Restore saved stack values
-        for (0..gen_data.stack_len) |i| {
-            try self.ctx.push(gen_data.stack[i]);
-        }
-
-        // Execute until yield or return
-        while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
-            const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
-            self.pc += 1;
-
-            switch (op) {
-                .yield_val => {
-                    // Pop the yielded value
-                    const yielded = self.ctx.pop();
-
-                    // Save current state
-                    gen_data.pc_offset = @intCast(@intFromPtr(self.pc) - @intFromPtr(func_bc.code.ptr));
-                    gen_data.state = .suspended_yield;
-
-                    // Save locals
-                    for (0..gen_data.locals.len) |i| {
-                        gen_data.locals[i] = self.ctx.getLocal(@intCast(i));
-                    }
-
-                    // Save remaining stack
-                    gen_data.stack_len = 0;
-                    while (self.ctx.sp > gen_data.locals.len) {
-                        if (gen_data.stack_len >= gen_data.stack.len) break;
-                        gen_data.stack[gen_data.stack_len] = self.ctx.pop();
-                        gen_data.stack_len += 1;
-                    }
-
-                    // Clean up stack
-                    self.ctx.sp = 0;
-
-                    return .{ .value = yielded, .done = false };
-                },
-                .ret, .ret_undefined => {
-                    const result = if (op == .ret) self.ctx.pop() else value.JSValue.undefined_val;
-                    gen_data.state = .completed;
-                    self.ctx.sp = 0;
-                    return .{ .value = result, .done = true };
-                },
-                else => {
-                    // Handle all other opcodes using main dispatch
-                    // This is a simplified approach - we inline critical opcodes
-                    self.pc -= 1; // Back up to re-read opcode
-                    const result = self.dispatchOne();
-                    if (result) |_| {
-                        // Should not happen in generator
-                        gen_data.state = .completed;
-                        self.ctx.sp = 0;
-                        return .{ .value = value.JSValue.undefined_val, .done = true };
-                    } else |_| {
-                        // Continue with next opcode
-                    }
-                },
-            }
-        }
-
-        // Reached end of bytecode without explicit return
-        gen_data.state = .completed;
-        self.ctx.sp = 0;
-        return .{ .value = value.JSValue.undefined_val, .done = true };
     }
 
     /// Dispatch a single opcode (returns result if halt/ret, error otherwise to continue)
