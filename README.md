@@ -1,4 +1,4 @@
-# zigttp - Serverless JavaScript Runtime
+# zigttp - Serverless JavaScript Runtime using Zig and zts
 
 > **Note**: This project is experimental and under active development.
 
