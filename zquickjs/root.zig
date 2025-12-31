@@ -38,8 +38,7 @@ pub const interpreter = @import("interpreter.zig");
 pub const builtins = @import("builtins.zig");
 // New two-pass parser with proper function compilation
 pub const parser = @import("parser/root.zig");
-// Old parser kept for reference
-pub const old_parser = @import("parser.zig");
+// Note: Old parser.zig kept for reference but no longer exported
 pub const pool = @import("pool.zig");
 pub const c_abi = @import("c_abi.zig");
 pub const http = @import("http.zig");

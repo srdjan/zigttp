@@ -9,7 +9,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const net = std.Io.net;
-const jsx = @import("jsx.zig");
 const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
 const RuntimePool = zruntime.RuntimePool;
@@ -51,9 +50,6 @@ pub const ServerConfig = struct {
 
     /// Static file directory (null = disabled)
     static_dir: ?[]const u8 = null,
-
-    /// Write transformed JSX to /tmp/transformed.js for debugging
-    debug_jsx_output: bool = false,
 };
 
 pub const HandlerSource = union(enum) {
@@ -76,6 +72,7 @@ pub const Server = struct {
     listener: ?net.Server,
     pool: ?RuntimePool,
     handler_code: []const u8,
+    handler_filename: []const u8,
     running: bool,
     request_count: std.atomic.Value(u64),
 
@@ -85,30 +82,12 @@ pub const Server = struct {
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
         // Load handler code
-        const handler_code = switch (config.handler) {
-            .inline_code => |code| code,
+        const handler_code, const handler_filename = switch (config.handler) {
+            .inline_code => |code| .{ code, "<inline>" },
             .file_path => |path| blk: {
                 const source = try std.fs.cwd().readFileAlloc(path, allocator, Io.Limit.limited(10 * 1024 * 1024));
-
-                // Transform JSX if .jsx extension
-                if (std.mem.endsWith(u8, path, ".jsx")) {
-                    const result = jsx.transform(allocator, source) catch |err| {
-                        std.log.err("JSX transform error: {}", .{err});
-                        allocator.free(source);
-                        return error.JsxTransformFailed;
-                    };
-                    allocator.free(source);
-                    if (config.debug_jsx_output) {
-                        const debug_file = std.fs.cwd().createFile("/tmp/transformed.js", .{}) catch null;
-                        if (debug_file) |f| {
-                            defer f.close();
-                            f.writeAll(result.code) catch {};
-                        }
-                    }
-                    break :blk result.code;
-                }
-
-                break :blk source;
+                // JSX transformation is now handled by the parser via filename detection
+                break :blk .{ source, path };
             },
         };
 
@@ -120,6 +99,7 @@ pub const Server = struct {
             .listener = null,
             .pool = null,
             .handler_code = handler_code,
+            .handler_filename = handler_filename,
             .running = false,
             .request_count = std.atomic.Value(u64).init(0),
         };
@@ -149,6 +129,7 @@ pub const Server = struct {
             self.allocator,
             self.config.runtime_config,
             self.handler_code,
+            self.handler_filename,
             self.config.pool_size,
         );
 

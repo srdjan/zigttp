@@ -9,7 +9,7 @@ const gc = @import("gc.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
 const heap = @import("heap.zig");
-const parser = @import("parser.zig");
+const parser = @import("parser/root.zig");
 const interpreter = @import("interpreter.zig");
 const bytecode = @import("bytecode.zig");
 

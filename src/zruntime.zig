@@ -222,11 +222,14 @@ pub const Runtime = struct {
 
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
-        _ = filename;
-
         // Parse the source code
         var p = zq.Parser.init(self.allocator, code, &self.strings, &self.ctx.atoms);
         defer p.deinit();
+
+        // Enable JSX mode for .jsx files
+        if (std.mem.endsWith(u8, filename, ".jsx")) {
+            p.enableJsx();
+        }
 
         const bytecode_data = try p.parse();
 
@@ -474,6 +477,7 @@ pub const RuntimePool = struct {
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
     handler_code: []const u8,
+    handler_filename: []const u8,
 
     /// Pool of pre-initialized runtimes
     available: std.ArrayList(*Runtime),
@@ -489,11 +493,12 @@ pub const RuntimePool = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig, handler_code: []const u8, max_size: usize) !Self {
+    pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig, handler_code: []const u8, handler_filename: []const u8, max_size: usize) !Self {
         var pool = Self{
             .allocator = allocator,
             .config = config,
             .handler_code = handler_code,
+            .handler_filename = handler_filename,
             .available = .empty,
             .in_use = .empty,
             .mutex = .{},
@@ -525,7 +530,7 @@ pub const RuntimePool = struct {
         const rt = try Runtime.init(self.allocator, self.config);
         errdefer rt.deinit();
 
-        try rt.loadHandler(self.handler_code, "<handler>");
+        try rt.loadHandler(self.handler_code, self.handler_filename);
         return rt;
     }
 
@@ -599,7 +604,7 @@ test "RuntimePool basic operations" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const handler_code = "function handler(req) { return { status: 200, body: 'ok' }; }";
-    var pool = try RuntimePool.init(allocator, .{}, handler_code, 2);
+    var pool = try RuntimePool.init(allocator, .{}, handler_code, "<handler>", 2);
     defer pool.deinit();
 
     const rt1 = try pool.acquire();

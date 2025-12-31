@@ -160,6 +160,11 @@ pub const Parser = struct {
         };
     }
 
+    /// Enable JSX parsing mode
+    pub fn enableJsx(self: *Parser) void {
+        self.js_parser.tokenizer.enableJsx();
+    }
+
     pub fn deinit(self: *Parser) void {
         if (self.code_gen) |*cg| {
             cg.deinit();
@@ -212,4 +217,18 @@ test "legacy Parser API" {
     try std.testing.expect(bytecode_data.len > 0);
     // Global variables don't need local slots - they use put_global
     // max_local_count is 0 for top-level code with only global vars
+}
+
+test "JSX parsing with enableJsx" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Simple JSX element
+    var p = Parser.init(allocator, "var x = <div>hello</div>;", &strings, null);
+    defer p.deinit();
+
+    p.enableJsx();
+    const bytecode_data = try p.parse();
+    try std.testing.expect(bytecode_data.len > 0);
 }
