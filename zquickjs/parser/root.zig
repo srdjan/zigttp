@@ -148,7 +148,7 @@ pub const Parser = struct {
         strings: *string.StringTable,
         atoms: ?*context.AtomTable,
     ) Parser {
-        return .{
+        var p = Parser{
             .allocator = allocator,
             .source = source,
             .js_parser = JsParser.init(allocator, source),
@@ -158,6 +158,10 @@ pub const Parser = struct {
             .strings = strings,
             .atoms = atoms,
         };
+        if (atoms) |atom_table| {
+            p.js_parser.setAtomTable(atom_table);
+        }
+        return p;
     }
 
     /// Enable JSX parsing mode
@@ -224,11 +228,82 @@ test "JSX parsing with enableJsx" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    // Simple JSX element
+    // Simple JSX element - use lowercase to avoid component detection
     var p = Parser.init(allocator, "var x = <div>hello</div>;", &strings, null);
     defer p.deinit();
 
     p.enableJsx();
     const bytecode_data = try p.parse();
     try std.testing.expect(bytecode_data.len > 0);
+
+    // Check constants contain the text - find by content
+    const p_constants = &p.js_parser.constants;
+    var found_div = false;
+    var found_hello = false;
+    for (p_constants.strings.items) |s| {
+        if (std.mem.eql(u8, s, "div")) found_div = true;
+        if (std.mem.eql(u8, s, "hello")) found_hello = true;
+    }
+    try std.testing.expect(found_div);
+    try std.testing.expect(found_hello);
+}
+
+test "JSX rendering integration" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Parse and compile JSX
+    var p = Parser.init(allocator, "var x = <div>hello</div>;", &strings, null);
+    defer p.deinit();
+
+    p.enableJsx();
+    const bytecode_data = try p.parse();
+
+    // Should not have parsing errors
+    try std.testing.expect(!p.js_parser.errors.hasErrors());
+
+    // Check that bytecode contains expected opcodes (not just ret_undefined)
+    try std.testing.expect(bytecode_data.len > 5);
+
+    // Check nodes include jsx_element
+    var found_jsx_element = false;
+    for (p.js_parser.nodes.nodes.items) |node| {
+        if (node.tag == .jsx_element) found_jsx_element = true;
+    }
+    try std.testing.expect(found_jsx_element);
+}
+
+test "JSX parsing preserves text with punctuation" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source = "var x = <div><span>GET /api/health</span> - ok</div>;";
+    var p = Parser.init(allocator, source, &strings, null);
+    defer p.deinit();
+    p.enableJsx();
+
+    _ = try p.parse();
+    try std.testing.expect(!p.js_parser.errors.hasErrors());
+
+    var found_text = false;
+    for (p.js_parser.constants.strings.items) |s| {
+        if (std.mem.eql(u8, s, "GET /api/health")) found_text = true;
+    }
+    try std.testing.expect(found_text);
+}
+
+test "JSX parsing reports malformed JSX" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source = "var x = <div><span></div>;";
+    var p = Parser.init(allocator, source, &strings, null);
+    defer p.deinit();
+    p.enableJsx();
+
+    _ = p.parse() catch {};
+    try std.testing.expect(p.js_parser.errors.hasErrors());
 }

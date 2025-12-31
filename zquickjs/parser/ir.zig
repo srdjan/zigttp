@@ -524,7 +524,8 @@ pub const Node = struct {
     pub const PatternElem = struct {
         kind: PatternKind,
         binding: BindingRef, // Final binding slot
-        key: NodeIndex, // For object pattern: property key
+        key: NodeIndex, // For nested patterns, points to the nested pattern
+        key_atom: u16, // For object pattern: property name atom (for get_field)
         default_value: NodeIndex, // null_node if no default
 
         pub const PatternKind = enum(u2) { simple, array, object, rest };

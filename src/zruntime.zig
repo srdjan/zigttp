@@ -760,3 +760,100 @@ test "for loop locals preserve numeric values" {
 
     try std.testing.expectEqualStrings("number", response.body);
 }
+
+test "object destructuring works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    // Test object destructuring: extract name from object
+    const handler_code =
+        \\function handler(req){
+        \\  var obj = { name: 'Alice', age: 30 };
+        \\  const { name, age } = obj;
+        \\  return Response.text(name + '-' + age);
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<test>");
+
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("Alice-30", response.body);
+}
+
+test "array destructuring works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req){
+        \\  var arr = [1, 2, 3];
+        \\  const [a, b, c] = arr;
+        \\  return Response.text(a + '-' + b + '-' + c);
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<test>");
+
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("1-2-3", response.body);
+}
+
+test "JSX rendering works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req){
+        \\  var elem = <div>Hello</div>;
+        \\  return Response.html(renderToString(elem));
+        \\}
+    ;
+    // Load as .jsx to enable JSX mode
+    try rt.loadHandler(handler_code, "test.jsx");
+
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request);
+    defer response.deinit();
+
+    try std.testing.expectEqualStrings("<div>Hello</div>", response.body);
+}

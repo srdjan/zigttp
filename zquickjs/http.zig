@@ -744,3 +744,47 @@ test "valueToJson basic" {
         try std.testing.expectEqualStrings("null", json);
     }
 }
+
+test "renderToString with attributes and nested elements" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse return error.NoRootClass;
+
+    // props = { href: "/api/health" }
+    const props = try object.JSObject.create(allocator, root_class, null);
+    const href_atom = try ctx.atoms.intern("href");
+    const href_str = try string.createString(allocator, "/api/health");
+    try props.setProperty(allocator, href_atom, value.JSValue.fromPtr(href_str));
+
+    // child text
+    const child_str = try string.createString(allocator, "GET /api/health");
+    const child_val = value.JSValue.fromPtr(child_str);
+
+    // tag "a"
+    const tag_str = try string.createString(allocator, "a");
+    const tag_val = value.JSValue.fromPtr(tag_str);
+
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+    const node = try h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        tag_val,
+        props.toValue(),
+        child_val,
+    });
+
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node});
+    const rendered_str = rendered.toPtr(string.JSString).data();
+
+    try std.testing.expectEqualStrings(
+        "<a href=\"/api/health\">GET /api/health</a>",
+        rendered_str,
+    );
+}

@@ -10,6 +10,7 @@ const scope_mod = @import("scope.zig");
 const error_mod = @import("error.zig");
 const token_mod = @import("token.zig");
 const object = @import("../object.zig");
+const context = @import("../context.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerState = tokenizer_mod.TokenizerState;
@@ -83,6 +84,9 @@ pub const Parser = struct {
     previous: Token,
     had_error: bool,
 
+    // Optional atom table for interning identifiers/properties
+    atoms: ?*context.AtomTable,
+
     // Context flags
     in_loop: bool,
     in_switch: bool,
@@ -100,6 +104,7 @@ pub const Parser = struct {
             .current = undefined,
             .previous = undefined,
             .had_error = false,
+            .atoms = null,
             .in_loop = false,
             .in_switch = false,
             .in_function = false,
@@ -114,6 +119,10 @@ pub const Parser = struct {
         self.constants.deinit();
         self.scopes.deinit();
         self.errors.deinit();
+    }
+
+    pub fn setAtomTable(self: *Parser, atoms: *context.AtomTable) void {
+        self.atoms = atoms;
     }
 
     /// Parse the entire program
@@ -176,7 +185,14 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance();
 
-        // Parse binding pattern or identifier
+        // Check for destructuring pattern
+        if (self.check(.lbrace)) {
+            return self.parseDestructuringDecl(loc, kind, .object);
+        } else if (self.check(.lbracket)) {
+            return self.parseDestructuringDecl(loc, kind, .array);
+        }
+
+        // Simple identifier binding
         const name = try self.expectIdentifier("variable name");
         const name_atom = try self.addAtom(name.text(self.source));
 
@@ -209,6 +225,307 @@ pub const Parser = struct {
                 .pattern = null_node,
                 .init = init_node,
                 .kind = kind,
+            } },
+        });
+    }
+
+    const PatternKind = enum { object, array };
+
+    fn parseDestructuringDecl(self: *Parser, loc: SourceLocation, kind: Node.VarDecl.VarKind, pattern_kind: PatternKind) anyerror!NodeIndex {
+        // Parse the pattern
+        const pattern = switch (pattern_kind) {
+            .object => try self.parseObjectPattern(),
+            .array => try self.parseArrayPattern(),
+        };
+
+        // Require initializer for destructuring
+        try self.expect(.assign, "'=' after destructuring pattern");
+        const init_node = try self.parseExpression(.assignment);
+
+        try self.expectSemicolon();
+
+        // Create a special binding for destructuring (slot 255 = pattern)
+        const dummy_binding = BindingRef{
+            .scope_id = 0,
+            .slot = 255,
+            .kind = .local,
+        };
+
+        return try self.nodes.add(.{
+            .tag = .var_decl,
+            .loc = loc,
+            .data = .{ .var_decl = .{
+                .binding = dummy_binding,
+                .pattern = pattern,
+                .init = init_node,
+                .kind = kind,
+            } },
+        });
+    }
+
+    fn parseObjectPattern(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume '{'
+
+        var elements = std.ArrayList(NodeIndex).empty;
+        defer elements.deinit(self.allocator);
+
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            const elem = try self.parseObjectPatternElement();
+            try elements.append(self.allocator, elem);
+
+            if (!self.match(.comma)) break;
+        }
+
+        try self.expect(.rbrace, "'}' to close object pattern");
+
+        const elements_start = try self.addNodeList(elements.items);
+
+        return try self.nodes.add(.{
+            .tag = .object_pattern,
+            .loc = loc,
+            .data = .{ .array = .{
+                .elements_start = elements_start,
+                .elements_count = @intCast(elements.items.len),
+                .has_spread = false,
+            } },
+        });
+    }
+
+    fn parseObjectPatternElement(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+
+        // Check for rest element: ...rest
+        if (self.match(.spread)) {
+            const name = try self.expectIdentifier("identifier after '...'");
+            const name_atom = try self.addAtom(name.text(self.source));
+
+            const binding = self.scopes.declareBinding(
+                name.text(self.source),
+                name_atom,
+                .variable,
+                false,
+            ) catch {
+                self.errorAtCurrent("too many local variables");
+                return error.TooManyLocals;
+            };
+
+            return try self.nodes.add(.{
+                .tag = .pattern_rest,
+                .loc = loc,
+                .data = .{ .pattern_elem = .{
+                    .kind = .rest,
+                    .binding = binding,
+                    .key = null_node,
+                    .key_atom = 0,
+                    .default_value = null_node,
+                } },
+            });
+        }
+
+        // Property name (could be renamed: { name: localName })
+        const key_name = try self.expectIdentifier("property name in object pattern");
+        // Use addString for consistency with object literals (which also use string constants for keys)
+        const key_str_idx = try self.addString(key_name.text(self.source));
+        const key_atom_for_binding = try self.addAtom(key_name.text(self.source));
+
+        var local_name = key_name;
+        var local_atom = key_atom_for_binding;
+
+        // Check for rename: { name: localName }
+        if (self.match(.colon)) {
+            // Check for nested pattern
+            if (self.check(.lbrace)) {
+                const nested = try self.parseObjectPattern();
+
+                return try self.nodes.add(.{
+                    .tag = .pattern_element,
+                    .loc = loc,
+                    .data = .{ .pattern_elem = .{
+                        .kind = .object,
+                        .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                        .key = nested, // Nested pattern
+                        .key_atom = key_str_idx, // Use string constant index for get_field
+                        .default_value = null_node,
+                    } },
+                });
+            } else if (self.check(.lbracket)) {
+                const nested = try self.parseArrayPattern();
+
+                return try self.nodes.add(.{
+                    .tag = .pattern_element,
+                    .loc = loc,
+                    .data = .{ .pattern_elem = .{
+                        .kind = .array,
+                        .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                        .key = nested, // Nested pattern
+                        .key_atom = key_str_idx, // Use string constant index for get_field
+                        .default_value = null_node,
+                    } },
+                });
+            }
+
+            // Simple rename
+            local_name = try self.expectIdentifier("local name after ':'");
+            local_atom = try self.addAtom(local_name.text(self.source));
+        }
+
+        // Declare the local binding
+        const binding = self.scopes.declareBinding(
+            local_name.text(self.source),
+            local_atom,
+            .variable,
+            false,
+        ) catch {
+            self.errorAtCurrent("too many local variables");
+            return error.TooManyLocals;
+        };
+
+        // Check for default value: { x = 10 }
+        var default_value: NodeIndex = null_node;
+        if (self.match(.assign)) {
+            default_value = try self.parseExpression(.assignment);
+        }
+
+        return try self.nodes.add(.{
+            .tag = .pattern_element,
+            .loc = loc,
+            .data = .{ .pattern_elem = .{
+                .kind = .simple,
+                .binding = binding,
+                .key = null_node,
+                .key_atom = key_str_idx, // Use string constant index for get_field
+                .default_value = default_value,
+            } },
+        });
+    }
+
+    fn parseArrayPattern(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume '['
+
+        var elements = std.ArrayList(NodeIndex).empty;
+        defer elements.deinit(self.allocator);
+
+        while (!self.check(.rbracket) and !self.check(.eof)) {
+            // Handle holes: [a, , b]
+            if (self.check(.comma)) {
+                // Hole - push null_node
+                try elements.append(self.allocator, null_node);
+                self.advance();
+                continue;
+            }
+
+            const elem = try self.parseArrayPatternElement();
+            try elements.append(self.allocator, elem);
+
+            if (!self.match(.comma)) break;
+        }
+
+        try self.expect(.rbracket, "']' to close array pattern");
+
+        const elements_start = try self.addNodeList(elements.items);
+
+        return try self.nodes.add(.{
+            .tag = .array_pattern,
+            .loc = loc,
+            .data = .{ .array = .{
+                .elements_start = elements_start,
+                .elements_count = @intCast(elements.items.len),
+                .has_spread = false,
+            } },
+        });
+    }
+
+    fn parseArrayPatternElement(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+
+        // Check for rest element: ...rest
+        if (self.match(.spread)) {
+            const name = try self.expectIdentifier("identifier after '...'");
+            const name_atom = try self.addAtom(name.text(self.source));
+
+            const binding = self.scopes.declareBinding(
+                name.text(self.source),
+                name_atom,
+                .variable,
+                false,
+            ) catch {
+                self.errorAtCurrent("too many local variables");
+                return error.TooManyLocals;
+            };
+
+            return try self.nodes.add(.{
+                .tag = .pattern_rest,
+                .loc = loc,
+                .data = .{ .pattern_elem = .{
+                    .kind = .rest,
+                    .binding = binding,
+                    .key = null_node,
+                    .key_atom = 0,
+                    .default_value = null_node,
+                } },
+            });
+        }
+
+        // Check for nested patterns
+        if (self.check(.lbrace)) {
+            const nested = try self.parseObjectPattern();
+            return try self.nodes.add(.{
+                .tag = .pattern_element,
+                .loc = loc,
+                .data = .{ .pattern_elem = .{
+                    .kind = .object,
+                    .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                    .key = nested,
+                    .key_atom = 0,
+                    .default_value = null_node,
+                } },
+            });
+        } else if (self.check(.lbracket)) {
+            const nested = try self.parseArrayPattern();
+            return try self.nodes.add(.{
+                .tag = .pattern_element,
+                .loc = loc,
+                .data = .{ .pattern_elem = .{
+                    .kind = .array,
+                    .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                    .key = nested,
+                    .key_atom = 0,
+                    .default_value = null_node,
+                } },
+            });
+        }
+
+        // Simple identifier
+        const name = try self.expectIdentifier("identifier in array pattern");
+        const name_atom = try self.addAtom(name.text(self.source));
+
+        const binding = self.scopes.declareBinding(
+            name.text(self.source),
+            name_atom,
+            .variable,
+            false,
+        ) catch {
+            self.errorAtCurrent("too many local variables");
+            return error.TooManyLocals;
+        };
+
+        // Check for default value: [x = 10]
+        var default_value: NodeIndex = null_node;
+        if (self.match(.assign)) {
+            default_value = try self.parseExpression(.assignment);
+        }
+
+        return try self.nodes.add(.{
+            .tag = .pattern_element,
+            .loc = loc,
+            .data = .{ .pattern_elem = .{
+                .kind = .simple,
+                .binding = binding,
+                .key = null_node,
+                .key_atom = 0,
+                .default_value = default_value,
             } },
         });
     }
@@ -304,6 +621,7 @@ pub const Parser = struct {
                         .kind = if (param_flags.has_rest_param) .rest else .simple,
                         .binding = param_binding,
                         .key = null_node,
+                        .key_atom = 0,
                         .default_value = default_value,
                     } },
                 });
@@ -2067,6 +2385,7 @@ pub const Parser = struct {
                     .kind = .simple,
                     .binding = param_binding,
                     .key = null_node,
+                    .key_atom = 0,
                     .default_value = null_node,
                 } },
             });
@@ -2103,6 +2422,7 @@ pub const Parser = struct {
                             .kind = if (flags.has_rest_param) .rest else .simple,
                             .binding = param_binding,
                             .key = null_node,
+                            .key_atom = 0,
                             .default_value = default_value,
                         } },
                     });
@@ -2156,6 +2476,19 @@ pub const Parser = struct {
 
     // ============ JSX Parsing ============
 
+    fn peekJsxClosingTag(self: *Parser) bool {
+        // Look ahead from the tokenizer position (right after '<') to see if this is a closing tag.
+        // Avoid tokenizer.next() here because it can misclassify `</` as a regex literal.
+        var i: usize = self.tokenizer.pos;
+        while (i < self.source.len) : (i += 1) {
+            switch (self.source[i]) {
+                ' ', '\t', '\r', '\n' => continue,
+                else => return self.source[i] == '/',
+            }
+        }
+        return false;
+    }
+
     fn parseJsxElement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance(); // consume '<'
@@ -2190,7 +2523,10 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
 
-        const tag_atom = try self.addAtom(tag_name);
+        const tag_atom = if (is_component)
+            try self.addAtom(tag_name)
+        else
+            try self.addString(tag_name);
 
         // Parse attributes
         var props = std.ArrayList(NodeIndex).empty;
@@ -2267,18 +2603,25 @@ pub const Parser = struct {
             while (!self.check(.eof)) {
                 // Check for closing tag
                 if (self.check(.lt)) {
-                    const state = self.tokenizer.saveState();
-                    _ = self.tokenizer.next(); // <
-                    const next = self.tokenizer.next();
-                    self.tokenizer.restoreState(state);
-
-                    if (next.type == .slash) {
+                    if (self.peekJsxClosingTag()) {
                         // Closing tag
+                        // Force slash tokenization (avoid regex literal)
+                        self.tokenizer.can_be_regex = false;
                         self.advance(); // <
-                        self.advance(); // /
+                        try self.expect(.slash, "'/'");
+
+                        var close_tok: ?Token = null;
                         if (self.check(.identifier)) {
+                            close_tok = self.current;
                             self.advance();
                         }
+                        if (close_tok) |tok| {
+                            const close_name = tok.text(self.source);
+                            if (!std.mem.eql(u8, close_name, tag_name)) {
+                                self.errors.addErrorAt(.mismatched_jsx_tag, tok, "mismatched JSX closing tag");
+                            }
+                        }
+
                         try self.expect(.gt, "'>'");
                         break;
                     }
@@ -2297,8 +2640,39 @@ pub const Parser = struct {
                     });
                     try children.append(self.allocator, child);
                 } else {
-                    // Text content (simplified - just skip for now)
-                    break;
+                    // Raw text content (may include punctuation/whitespace)
+                    const text_start: usize = @intCast(self.current.start);
+                    var text_end: usize = text_start + self.current.len;
+
+                    while (true) {
+                        const state = self.tokenizer.saveState();
+                        const next = self.tokenizer.next();
+                        self.tokenizer.restoreState(state);
+
+                        if (next.type == .lt or next.type == .lbrace or next.type == .eof) {
+                            text_end = @intCast(next.start);
+                            break;
+                        }
+
+                        // Consume the next token and extend the text range
+                        self.advance();
+                        text_end = @intCast(self.current.start + self.current.len);
+                    }
+
+                    const raw = self.source[text_start..@min(text_end, self.source.len)];
+                    const trimmed = std.mem.trim(u8, raw, " \t\n\r");
+                    if (trimmed.len > 0) {
+                        const text_idx = try self.addString(trimmed);
+                        const child = try self.nodes.add(.{
+                            .tag = .jsx_text,
+                            .loc = loc,
+                            .data = .{ .jsx_text = text_idx },
+                        });
+                        try children.append(self.allocator, child);
+                    }
+
+                    // Move to the next token (<, {, or eof) for the outer loop
+                    self.advance();
                 }
             }
         }
@@ -2335,14 +2709,10 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             // Check for closing fragment </>
             if (self.check(.lt)) {
-                const state = self.tokenizer.saveState();
-                _ = self.tokenizer.next(); // <
-                const next = self.tokenizer.next();
-                self.tokenizer.restoreState(state);
-
-                if (next.type == .slash) {
+                if (self.peekJsxClosingTag()) {
+                    self.tokenizer.can_be_regex = false;
                     self.advance(); // <
-                    self.advance(); // /
+                    try self.expect(.slash, "'/'");
                     try self.expect(.gt, "'>'");
                     break;
                 }
@@ -2359,7 +2729,37 @@ pub const Parser = struct {
                 });
                 try children.append(self.allocator, child);
             } else {
-                break;
+                // Raw text content
+                const text_start: usize = @intCast(self.current.start);
+                var text_end: usize = text_start + self.current.len;
+
+                while (true) {
+                    const state = self.tokenizer.saveState();
+                    const next = self.tokenizer.next();
+                    self.tokenizer.restoreState(state);
+
+                    if (next.type == .lt or next.type == .lbrace or next.type == .eof) {
+                        text_end = @intCast(next.start);
+                        break;
+                    }
+
+                    self.advance();
+                    text_end = @intCast(self.current.start + self.current.len);
+                }
+
+                const raw = self.source[text_start..@min(text_end, self.source.len)];
+                const trimmed = std.mem.trim(u8, raw, " \t\n\r");
+                if (trimmed.len > 0) {
+                    const text_idx = try self.addString(trimmed);
+                    const child = try self.nodes.add(.{
+                        .tag = .jsx_text,
+                        .loc = loc,
+                        .data = .{ .jsx_text = text_idx },
+                    });
+                    try children.append(self.allocator, child);
+                }
+
+                self.advance();
             }
         }
 
@@ -2417,13 +2817,13 @@ pub const Parser = struct {
         // For simplicity, just accept
     }
 
-    fn expectIdentifier(self: *Parser, context: []const u8) !Token {
+    fn expectIdentifier(self: *Parser, ctx_label: []const u8) !Token {
         if (self.check(.identifier)) {
             const tok = self.current;
             self.advance();
             return tok;
         }
-        self.errors.addExpectedError(self.current, context);
+        self.errors.addExpectedError(self.current, ctx_label);
         return error.UnexpectedToken;
     }
 
@@ -2543,7 +2943,12 @@ pub const Parser = struct {
         if (object.lookupPredefinedAtom(name)) |atom| {
             return @truncate(@intFromEnum(atom));
         }
-        // Fall back to string constant pool for dynamic atoms
+        // Intern dynamic atoms if atom table is available
+        if (self.atoms) |atoms| {
+            const atom = try atoms.intern(name);
+            return @truncate(@intFromEnum(atom));
+        }
+        // Fall back to string constant pool for dynamic atoms (standalone parser)
         return try self.constants.addString(name);
     }
 
@@ -2696,4 +3101,42 @@ test "parse closure creates upvalue" {
         }
     }
     try std.testing.expect(found_upvalue);
+}
+
+test "parse object destructuring" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const { name, age } = obj;
+        \\const { x: localX, y = 10 } = point;
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse array destructuring" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const [a, b, c] = arr;
+        \\let [x, , y] = [1, 2, 3];
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }

@@ -11,6 +11,7 @@ const bytecode = @import("../bytecode.zig");
 const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const string = @import("../string.zig");
+const js_object = @import("../object.zig");
 
 // Re-export types used by this module
 const JSValue = value.JSValue;
@@ -241,6 +242,14 @@ pub const CodeGen = struct {
 
             // JSX - emit as h() calls
             .jsx_element, .jsx_fragment => try self.emitJsxElement(node),
+
+            // JSX text content - emit as string constant
+            .jsx_text => {
+                const str = self.ir_constants.getString(node.data.jsx_text) orelse "";
+                const idx = try self.addStringConstant(str);
+                try self.emitPushConst(idx);
+                self.pushStack(1);
+            },
 
             else => {},
         }
@@ -669,15 +678,27 @@ pub const CodeGen = struct {
         var i: u16 = 0;
         while (i < array.elements_count) : (i += 1) {
             const elem_idx = self.nodes.getListIndex(array.elements_start, i);
+
+            // Duplicate array reference for put_elem
+            try self.emit(.dup);
+            self.pushStack(1);
+
+            // Push index
+            try self.emitSmallInt(@intCast(i));
+
+            // Push element value
             if (elem_idx != null_node) {
                 try self.emitNode(elem_idx);
             } else {
                 try self.emit(.push_undefined);
                 self.pushStack(1);
             }
-        }
 
-        self.popStack(array.elements_count);
+            // Store element: arr[i] = value
+            try self.emit(.put_elem);
+            self.popStack(3); // pop arr, index, value
+        }
+        // Array remains on stack
     }
 
     fn emitObjectLiteral(self: *CodeGen, object: Node.ObjectExpr) !void {
@@ -845,10 +866,209 @@ pub const CodeGen = struct {
     // ============ Statement Emission ============
 
     fn emitVarDecl(self: *CodeGen, decl: Node.VarDecl) !void {
-        if (decl.init != null_node) {
+        if (decl.init == null_node) return;
+
+        // Check for destructuring pattern
+        if (decl.pattern != null_node) {
+            // Emit the source value
+            try self.emitNode(decl.init);
+            // Emit destructuring
+            try self.emitDestructuringPattern(decl.pattern);
+            // Drop the source value
+            try self.emit(.drop);
+            self.popStack(1);
+        } else {
+            // Simple variable declaration
             try self.emitNode(decl.init);
             try self.emitSetBinding(decl.binding);
         }
+    }
+
+    fn emitDestructuringPattern(self: *CodeGen, pattern: NodeIndex) anyerror!void {
+        const pattern_node = self.nodes.get(pattern) orelse return;
+
+        switch (pattern_node.tag) {
+            .object_pattern => try self.emitObjectPattern(pattern_node.data.array),
+            .array_pattern => try self.emitArrayPattern(pattern_node.data.array),
+            else => {},
+        }
+    }
+
+    fn emitObjectPattern(self: *CodeGen, array_data: Node.ArrayExpr) anyerror!void {
+        // For each property in the pattern, extract from the source object
+        var i: u16 = 0;
+        while (i < array_data.elements_count) : (i += 1) {
+            const elem_idx = self.nodes.getListIndex(array_data.elements_start, i);
+            const elem_node = self.nodes.get(elem_idx) orelse continue;
+            if (elem_node.tag != .pattern_element) continue;
+
+            const elem = elem_node.data.pattern_elem;
+
+            switch (elem.kind) {
+                .simple => {
+                    // Stack: source_obj
+                    try self.emit(.dup); // Duplicate source for next property
+                    self.pushStack(1);
+
+                    // Get the property value using the atom
+                    try self.emit(.get_field);
+                    try self.emitU16(elem.key_atom);
+
+                    // Handle default value if present
+                    if (elem.default_value != null_node) {
+                        try self.emitDefaultValue(elem.default_value);
+                    }
+
+                    // Store to binding
+                    try self.emitSetBinding(elem.binding);
+                },
+                .object, .array => {
+                    // Nested destructuring
+                    try self.emit(.dup);
+                    self.pushStack(1);
+
+                    // Get the property value using the atom
+                    try self.emit(.get_field);
+                    try self.emitU16(elem.key_atom);
+
+                    // Handle default
+                    if (elem.default_value != null_node) {
+                        try self.emitDefaultValue(elem.default_value);
+                    }
+
+                    // Recursively destructure the nested pattern
+                    if (elem.key != null_node) {
+                        try self.emitDestructuringPattern(elem.key);
+                    }
+
+                    // Drop the nested value
+                    try self.emit(.drop);
+                    self.popStack(1);
+                },
+                .rest => {
+                    // TODO: Implement rest element for objects
+                    // Requires creating a new object with remaining properties
+                },
+            }
+        }
+    }
+
+    fn emitArrayPattern(self: *CodeGen, array_data: Node.ArrayExpr) anyerror!void {
+        // For each element in the pattern, extract by index from the source array
+        var i: u16 = 0;
+        var index: u8 = 0;
+        while (i < array_data.elements_count) : (i += 1) {
+            const elem_idx = self.nodes.getListIndex(array_data.elements_start, i);
+            const elem_node = self.nodes.get(elem_idx) orelse {
+                index += 1; // Skip hole
+                continue;
+            };
+            if (elem_node.tag != .pattern_element) {
+                index += 1;
+                continue;
+            }
+
+            const elem = elem_node.data.pattern_elem;
+
+            switch (elem.kind) {
+                .simple => {
+                    // Stack: source_arr
+                    try self.emit(.dup); // Duplicate source for next element
+                    self.pushStack(1);
+
+                    // Push array index
+                    try self.emitSmallInt(index);
+
+                    // Get element by index
+                    try self.emit(.get_elem);
+                    self.popStack(1); // get_elem pops index
+
+                    // Handle default value if present
+                    if (elem.default_value != null_node) {
+                        try self.emitDefaultValue(elem.default_value);
+                    }
+
+                    // Store to binding
+                    try self.emitSetBinding(elem.binding);
+                },
+                .object, .array => {
+                    // Nested destructuring
+                    try self.emit(.dup);
+                    self.pushStack(1);
+
+                    // Push array index
+                    try self.emitSmallInt(index);
+
+                    // Get element
+                    try self.emit(.get_elem);
+                    self.popStack(1);
+
+                    // Handle default
+                    if (elem.default_value != null_node) {
+                        try self.emitDefaultValue(elem.default_value);
+                    }
+
+                    // Find the nested pattern node
+                    // elem.key holds the nested pattern for arrays
+                    if (elem.key != null_node) {
+                        try self.emitDestructuringPattern(elem.key);
+                    }
+
+                    // Drop the nested value
+                    try self.emit(.drop);
+                    self.popStack(1);
+                },
+                .rest => {
+                    // TODO: Implement rest element for arrays
+                    // Requires slicing remaining elements into new array
+                },
+            }
+
+            index += 1;
+        }
+    }
+
+    fn emitSmallInt(self: *CodeGen, val: u8) !void {
+        switch (val) {
+            0 => try self.emit(.push_0),
+            1 => try self.emit(.push_1),
+            2 => try self.emit(.push_2),
+            3 => try self.emit(.push_3),
+            else => {
+                try self.emit(.push_i8);
+                try self.emitByte(val);
+            },
+        }
+        self.pushStack(1);
+    }
+
+    fn emitDefaultValue(self: *CodeGen, default_value: NodeIndex) !void {
+        // Pattern: if value === undefined, use default
+        // Stack: value
+        // After: value-or-default
+        try self.emit(.dup);
+        self.pushStack(1);
+        try self.emit(.push_undefined);
+        self.pushStack(1);
+        try self.emit(.strict_eq);
+        self.popStack(1);
+
+        const else_label = try self.createLabel();
+        const end_label = try self.createLabel();
+
+        try self.emitJump(.if_false, else_label);
+        self.popStack(1);
+
+        // Value was undefined, use default
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitNode(default_value);
+        try self.emitJump(.goto, end_label);
+
+        try self.placeLabel(else_label);
+        // Value was not undefined, keep it (already on stack)
+
+        try self.placeLabel(end_label);
     }
 
     fn emitIfStmt(self: *CodeGen, if_stmt: Node.IfStmt) !void {
@@ -1155,14 +1375,13 @@ pub const CodeGen = struct {
         // Emit JSX as h(tag, props, ...children) call
         const elem = node.data.jsx_element;
 
-        // Push h function reference
-        const h_atom = try self.addStringConstant("h");
+        // Push h function reference (predefined atom)
         try self.emit(.get_global);
-        try self.emitU16(h_atom);
+        try self.emitU16(@intFromEnum(js_object.Atom.h));
         self.pushStack(1);
 
         // Push tag name
-        if (elem.tag_atom == 0) {
+        if (node.tag == .jsx_fragment) {
             // Fragment - use null or Fragment symbol
             try self.emit(.push_null);
             self.pushStack(1);

@@ -2239,6 +2239,76 @@ test "End-to-end: parse and execute JS" {
     try std.testing.expect(result.isUndefined());
 }
 
+test "End-to-end: JSX parse, compile, and execute" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+    const builtins = @import("builtins.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try builtins.initBuiltins(ctx);
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\var result = renderToString(<div><span>Hi</span></div>);
+        \\var link = renderToString(<a href="/api/health">GET /api/health</a>);
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+    p.enableJsx();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const link_atom = try ctx.atoms.intern("link");
+
+    const result_opt = ctx.getGlobal(result_atom);
+    const link_opt = ctx.getGlobal(link_atom);
+    try std.testing.expect(result_opt != null);
+    try std.testing.expect(link_opt != null);
+
+    const result_val = result_opt.?;
+    const link_val = link_opt.?;
+
+    try std.testing.expect(result_val.isString());
+    try std.testing.expect(link_val.isString());
+
+    const result_str = result_val.toPtr(string.JSString).data();
+    const link_str = link_val.toPtr(string.JSString).data();
+
+    try std.testing.expectEqualStrings("<div><span>Hi</span></div>", result_str);
+    try std.testing.expectEqualStrings(
+        "<a href=\"/api/health\">GET /api/health</a>",
+        link_str,
+    );
+}
+
 test "Interpreter property access" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
