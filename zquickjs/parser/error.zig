@@ -59,6 +59,9 @@ pub const ErrorKind = enum {
     invalid_import,
     invalid_export,
     duplicate_export,
+
+    // Unsupported features
+    unsupported_feature,
 };
 
 /// A single parse error

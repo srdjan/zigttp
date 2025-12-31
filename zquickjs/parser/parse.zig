@@ -133,9 +133,19 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
-            } else |_| {
+            } else |err| {
+                // If there are recorded errors, fail immediately
+                if (self.errors.hasErrors()) {
+                    return err;
+                }
+                // Otherwise try to recover for better error messages
                 self.synchronize();
             }
+        }
+
+        // If any errors were recorded during parsing, fail
+        if (self.errors.hasErrors()) {
+            return error.ParseError;
         }
 
         // Create program node
@@ -1543,14 +1553,14 @@ pub const Parser = struct {
                 return self.parseCallArgs(left, loc, false);
             },
 
-            // Postfix operators
+            // Postfix operators - not supported (use prefix ++x or x = x + 1 instead)
             .plus_plus => {
-                self.advance();
-                return try self.nodes.add(Node.unaryOp(loc, .post_inc, left));
+                self.errors.addErrorAt(.unsupported_feature, self.current, "postfix increment (x++) is not supported; use prefix (++x) or (x = x + 1) instead");
+                return error.ParseError;
             },
             .minus_minus => {
-                self.advance();
-                return try self.nodes.add(Node.unaryOp(loc, .post_dec, left));
+                self.errors.addErrorAt(.unsupported_feature, self.current, "postfix decrement (x--) is not supported; use prefix (--x) or (x = x - 1) instead");
+                return error.ParseError;
             },
 
             else => left,
@@ -2244,6 +2254,13 @@ pub const Parser = struct {
                             text;
                         const key_idx = try self.addString(content);
                         key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
+                    } else if (self.isKeyword(self.current.type)) {
+                        // JavaScript allows reserved keywords as property names
+                        // e.g., {class: 'foo', if: 'bar'}
+                        const key = self.current;
+                        self.advance();
+                        const key_idx = try self.addString(key.text(self.source));
+                        key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
                     } else {
                         self.errorAtCurrent("expected property name");
                         break;
@@ -2557,11 +2574,32 @@ pub const Parser = struct {
                 continue;
             }
 
-            if (!self.check(.identifier)) break;
+            // JSX attribute names can be identifiers or keywords (like "class", "for")
+            // and can contain hyphens (like "hx-post", "data-value", "aria-label")
+            if (!self.check(.identifier) and !self.isKeyword(self.current.type)) break;
 
-            const attr_name = self.current;
+            // Build hyphenated attribute name: start with first identifier
+            const attr_name_start: u32 = self.current.start;
+            var attr_name_end: u32 = self.current.start + self.current.len;
             self.advance();
-            const attr_atom = try self.addAtom(attr_name.text(self.source));
+
+            // Continue consuming hyphens and identifiers (allows hx-on--after-request pattern)
+            // Handle both single minus (-) and minus_minus (--)
+            while (self.check(.minus) or self.check(.minus_minus)) {
+                // Include the hyphen(s) in the name
+                attr_name_end = self.current.start + self.current.len;
+                self.advance(); // consume - or --
+
+                // If followed by identifier/keyword, include it too
+                if (self.check(.identifier) or self.isKeyword(self.current.type)) {
+                    attr_name_end = self.current.start + self.current.len;
+                    self.advance();
+                }
+                // If not followed by identifier (e.g., another hyphen or =), loop continues
+            }
+
+            const attr_name_text = self.source[attr_name_start..attr_name_end];
+            const attr_atom = try self.addAtom(attr_name_text);
 
             var attr_value: NodeIndex = null_node;
             if (self.match(.assign)) {
@@ -2832,7 +2870,28 @@ pub const Parser = struct {
         const tok = self.tokenizer.next();
         self.tokenizer.restoreState(state);
         return tok.type == .identifier or tok.type == .string_literal or
-            tok.type == .number or tok.type == .lbracket;
+            tok.type == .number or tok.type == .lbracket or self.isKeyword(tok.type);
+    }
+
+    /// Check if token type is a keyword (can be used as property name)
+    fn isKeyword(self: *Parser, token_type: TokenType) bool {
+        _ = self;
+        return switch (token_type) {
+            // JavaScript keywords that can be used as property names
+            .kw_break, .kw_case, .kw_catch, .kw_continue, .kw_debugger,
+            .kw_default, .kw_delete, .kw_do, .kw_else, .kw_finally,
+            .kw_for, .kw_function, .kw_if, .kw_in, .kw_instanceof,
+            .kw_new, .kw_return, .kw_switch, .kw_this, .kw_throw,
+            .kw_try, .kw_typeof, .kw_var, .kw_void, .kw_while,
+            .kw_with, .kw_class, .kw_const, .kw_export, .kw_extends,
+            .kw_import, .kw_super, .kw_let, .kw_static, .kw_yield,
+            .kw_async, .kw_await, .kw_get, .kw_set, .kw_of, .kw_from,
+            .kw_as,
+            // Literals that look like keywords
+            .true_lit, .false_lit, .null_lit,
+            => true,
+            else => false,
+        };
     }
 
     fn getInfixPrecedence(self: *Parser, token_type: TokenType) Precedence {

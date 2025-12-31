@@ -195,13 +195,37 @@ pub const Atom = enum(u32) {
     tag = 172, // Virtual DOM tag property
     props = 173, // Virtual DOM props property
     children = 174, // Virtual DOM children property
+    // Common HTML attributes for JSX
+    class = 175, // class attribute
+    className = 176, // React-style class
+    id = 177,
+    style = 178,
+    type = 179,
+    value = 180,
+    href = 181,
+    src = 182,
+    alt = 183,
+    placeholder = 184,
+    disabled = 185,
+    checked = 186,
+    required = 187,
+    autocomplete = 188,
+    // HTMX attributes
+    @"hx-get" = 189,
+    @"hx-post" = 190,
+    @"hx-put" = 191,
+    @"hx-delete" = 192,
+    @"hx-target" = 193,
+    @"hx-swap" = 194,
+    @"hx-trigger" = 195,
+    @"hx-on--after-request" = 196,
     // Reserved for more builtins
-    __count__ = 200,
+    __count__ = 220,
 
-    // Dynamic atoms start at 201
+    // Dynamic atoms start at 221
     _,
 
-    pub const FIRST_DYNAMIC: u32 = 201;
+    pub const FIRST_DYNAMIC: u32 = 221;
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
@@ -247,6 +271,30 @@ pub const Atom = enum(u32) {
             .tag => "tag",
             .props => "props",
             .children => "children",
+            // HTML attributes
+            .class => "class",
+            .className => "className",
+            .id => "id",
+            .style => "style",
+            .type => "type",
+            .value => "value",
+            .href => "href",
+            .src => "src",
+            .alt => "alt",
+            .placeholder => "placeholder",
+            .disabled => "disabled",
+            .checked => "checked",
+            .required => "required",
+            .autocomplete => "autocomplete",
+            // HTMX
+            .@"hx-get" => "hx-get",
+            .@"hx-post" => "hx-post",
+            .@"hx-put" => "hx-put",
+            .@"hx-delete" => "hx-delete",
+            .@"hx-target" => "hx-target",
+            .@"hx-swap" => "hx-swap",
+            .@"hx-trigger" => "hx-trigger",
+            .@"hx-on--after-request" => "hx-on--after-request",
             else => null,
         };
     }
@@ -410,6 +458,30 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "tag", .tag },
     .{ "props", .props },
     .{ "children", .children },
+    // HTML attributes for JSX
+    .{ "class", .class },
+    .{ "className", .className },
+    .{ "id", .id },
+    .{ "style", .style },
+    .{ "type", .type },
+    .{ "value", .value },
+    .{ "href", .href },
+    .{ "src", .src },
+    .{ "alt", .alt },
+    .{ "placeholder", .placeholder },
+    .{ "disabled", .disabled },
+    .{ "checked", .checked },
+    .{ "required", .required },
+    .{ "autocomplete", .autocomplete },
+    // HTMX attributes
+    .{ "hx-get", .@"hx-get" },
+    .{ "hx-post", .@"hx-post" },
+    .{ "hx-put", .@"hx-put" },
+    .{ "hx-delete", .@"hx-delete" },
+    .{ "hx-target", .@"hx-target" },
+    .{ "hx-swap", .@"hx-swap" },
+    .{ "hx-trigger", .@"hx-trigger" },
+    .{ "hx-on--after-request", .@"hx-on--after-request" },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map

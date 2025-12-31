@@ -145,7 +145,7 @@ pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
     // Serialize the data to JSON
     const data = args[0];
-    const json_str = try valueToJson(ctx.allocator, data);
+    const json_str = try valueToJson(ctx, data);
     defer ctx.allocator.free(json_str);
 
     var status: u16 = 200;
@@ -605,17 +605,17 @@ fn getStringArg(val: value.JSValue) ![]const u8 {
 }
 
 /// Convert a JSValue to JSON string (simplified)
-fn valueToJson(allocator: std.mem.Allocator, val: value.JSValue) ![]u8 {
+fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
     var buffer = std.ArrayList(u8).empty;
-    errdefer buffer.deinit(allocator);
+    errdefer buffer.deinit(ctx.allocator);
 
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buffer);
-    try writeJson(val, &aw.writer);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(ctx.allocator, &buffer);
+    try writeJson(ctx, val, &aw.writer);
     buffer = aw.toArrayList();
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice(ctx.allocator);
 }
 
-fn writeJson(val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
+fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
     if (val.isNull()) {
         try writer.writeAll("null");
     } else if (val.isUndefined()) {
@@ -626,6 +626,14 @@ fn writeJson(val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
         try writer.writeAll("false");
     } else if (val.isInt()) {
         try writer.print("{d}", .{val.getInt()});
+    } else if (val.isFloat64()) {
+        const f = val.getFloat64();
+        // Handle special float values
+        if (std.math.isNan(f) or std.math.isInf(f)) {
+            try writer.writeAll("null");
+        } else {
+            try writer.print("{d}", .{f});
+        }
     } else if (val.isString()) {
         try writer.writeByte('"');
         const str = val.toPtr(string.JSString);
@@ -650,7 +658,7 @@ fn writeJson(val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
                 if (i > 0) try writer.writeByte(',');
                 const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)) + object.Atom.FIRST_DYNAMIC);
                 if (obj.getProperty(idx_atom)) |elem| {
-                    try writeJson(elem, writer);
+                    try writeJson(ctx, elem, writer);
                 } else {
                     try writer.writeAll("null");
                 }
@@ -663,13 +671,16 @@ fn writeJson(val: value.JSValue, writer: *std.Io.Writer) RenderError!void {
                 const v = obj.getSlot(prop.offset);
                 if (v.isUndefined()) continue;
 
+                // Get property name from atom table (handles both predefined and dynamic atoms)
+                const name = ctx.atoms.getName(prop.name) orelse continue;
+
                 if (!first) try writer.writeByte(',');
                 first = false;
 
                 try writer.writeByte('"');
-                try writer.writeAll(@tagName(prop.name));
+                try writer.writeAll(name);
                 try writer.writeAll("\":");
-                try writeJson(v, writer);
+                try writeJson(ctx, v, writer);
             }
             try writer.writeByte('}');
         }
@@ -721,25 +732,34 @@ test "isVoidElement" {
 }
 
 test "valueToJson basic" {
-    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
 
     // Integer
     {
-        const json = try valueToJson(allocator, value.JSValue.fromInt(42));
+        const json = try valueToJson(ctx, value.JSValue.fromInt(42));
         defer allocator.free(json);
         try std.testing.expectEqualStrings("42", json);
     }
 
     // Boolean
     {
-        const json = try valueToJson(allocator, value.JSValue.true_val);
+        const json = try valueToJson(ctx, value.JSValue.true_val);
         defer allocator.free(json);
         try std.testing.expectEqualStrings("true", json);
     }
 
     // Null
     {
-        const json = try valueToJson(allocator, value.JSValue.null_val);
+        const json = try valueToJson(ctx, value.JSValue.null_val);
         defer allocator.free(json);
         try std.testing.expectEqualStrings("null", json);
     }

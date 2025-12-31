@@ -181,13 +181,14 @@ pub const Parser = struct {
         // Parse to IR
         const root = try self.js_parser.parse();
 
-        // Generate bytecode with string table for proper string handling
+        // Generate bytecode with string table and atoms for proper string/property handling
         self.code_gen = CodeGen.initWithStrings(
             self.allocator,
             &self.js_parser.nodes,
             &self.js_parser.constants,
             &self.js_parser.scopes,
             self.strings,
+            self.atoms,
         );
 
         const func_bc = try self.code_gen.?.generate(root);

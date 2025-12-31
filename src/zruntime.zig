@@ -231,7 +231,21 @@ pub const Runtime = struct {
             p.enableJsx();
         }
 
-        const bytecode_data = try p.parse();
+        const bytecode_data = p.parse() catch |err| {
+            // Print parse errors
+            const errors = p.js_parser.getErrors();
+            if (errors.len > 0) {
+                for (errors) |parse_error| {
+                    std.log.err("Parse error at {s}:{}:{}: {s}", .{
+                        filename,
+                        parse_error.location.line,
+                        parse_error.location.column,
+                        parse_error.message,
+                    });
+                }
+            }
+            return err;
+        };
 
         // Create FunctionBytecode struct to wrap the parsed result
         const func = zq.FunctionBytecode{
@@ -743,7 +757,7 @@ test "for loop locals preserve numeric values" {
     defer rt.deinit();
 
     const handler_code =
-        "function handler(req){ for (var i=0; i<1; i++){ return Response.text(typeof i); } return Response.text('none'); }";
+        "function handler(req){ for (var i=0; i<1; i=i+1){ return Response.text(typeof i); } return Response.text('none'); }";
     try rt.loadHandler(handler_code, "<test>");
 
     const headers = std.StringHashMap([]const u8).init(allocator);

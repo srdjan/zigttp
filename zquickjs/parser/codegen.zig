@@ -12,6 +12,7 @@ const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const string = @import("../string.zig");
 const js_object = @import("../object.zig");
+const context = @import("../context.zig");
 
 // Re-export types used by this module
 const JSValue = value.JSValue;
@@ -59,6 +60,7 @@ pub const CodeGen = struct {
     ir_constants: *const ConstantPool,
     scopes: *ScopeAnalyzer,
     strings: ?*string.StringTable,
+    atoms: ?*context.AtomTable,
 
     // Output
     code: std.ArrayList(u8),
@@ -79,7 +81,7 @@ pub const CodeGen = struct {
         ir_constants: *const ConstantPool,
         scopes: *ScopeAnalyzer,
     ) CodeGen {
-        return initWithStrings(allocator, nodes, ir_constants, scopes, null);
+        return initWithStrings(allocator, nodes, ir_constants, scopes, null, null);
     }
 
     pub fn initWithStrings(
@@ -88,6 +90,7 @@ pub const CodeGen = struct {
         ir_constants: *const ConstantPool,
         scopes: *ScopeAnalyzer,
         strings_table: ?*string.StringTable,
+        atoms_table: ?*context.AtomTable,
     ) CodeGen {
         return .{
             .allocator = allocator,
@@ -95,6 +98,7 @@ pub const CodeGen = struct {
             .ir_constants = ir_constants,
             .scopes = scopes,
             .strings = strings_table,
+            .atoms = atoms_table,
             .code = std.ArrayList(u8).empty,
             .constants = std.ArrayList(JSValue).empty,
             .upvalue_info = std.ArrayList(UpvalueInfo).empty,
@@ -249,6 +253,15 @@ pub const CodeGen = struct {
                 const idx = try self.addStringConstant(str);
                 try self.emitPushConst(idx);
                 self.pushStack(1);
+            },
+
+            // JSX expression container - emit the inner expression
+            .jsx_expr_container => {
+                if (node.data.opt_value) |inner_expr| {
+                    if (inner_expr != null_node) {
+                        try self.emitNode(inner_expr);
+                    }
+                }
             },
 
             else => {},
@@ -719,10 +732,23 @@ pub const CodeGen = struct {
                 // Get property key
                 const key_node = self.nodes.get(prop.key) orelse continue;
                 if (key_node.tag == .lit_string) {
-                    // Key is a string constant, use put_field
+                    // Key is a string constant, use put_field with atom
                     try self.emitNode(prop.value);
                     try self.emit(.put_field);
-                    try self.emitU16(key_node.data.string_idx);
+                    // Get string from IR constant pool and look up/intern atom
+                    const key_str = self.ir_constants.getString(key_node.data.string_idx) orelse "";
+                    if (js_object.lookupPredefinedAtom(key_str)) |atom| {
+                        // Use predefined atom index
+                        try self.emitU16(@intCast(@intFromEnum(atom)));
+                    } else if (self.atoms) |atoms| {
+                        // Intern string as dynamic atom in the runtime's atom table
+                        const atom = try atoms.intern(key_str);
+                        try self.emitU16(@intCast(@intFromEnum(atom)));
+                    } else {
+                        // Fallback: use string index as dynamic atom (may not work correctly)
+                        const dynamic_atom: u16 = @intCast(js_object.Atom.FIRST_DYNAMIC + key_node.data.string_idx);
+                        try self.emitU16(dynamic_atom);
+                    }
                     self.popStack(2);
                 } else {
                     // Computed key
@@ -1509,8 +1535,9 @@ pub const CodeGen = struct {
             const offset: i16 = @intCast(@as(i32, @intCast(label.offset)) - @as(i32, @intCast(jump.instruction_offset)) - 2);
             const unsigned: u16 = @bitCast(offset);
 
-            self.code.items[jump.instruction_offset] = @truncate(unsigned >> 8);
-            self.code.items[jump.instruction_offset + 1] = @truncate(unsigned);
+            // Write in little-endian to match interpreter's readI16
+            self.code.items[jump.instruction_offset] = @truncate(unsigned);
+            self.code.items[jump.instruction_offset + 1] = @truncate(unsigned >> 8);
         }
     }
 

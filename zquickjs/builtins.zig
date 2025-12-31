@@ -154,6 +154,18 @@ pub fn objectIsFrozen(ctx: *context.Context, this: value.JSValue, args: []const 
     return value.JSValue.true_val;
 }
 
+/// Date.now() - Returns milliseconds since Unix epoch
+pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = this;
+    _ = args;
+    const ts = std.posix.clock_gettime(.REALTIME) catch {
+        return value.JSValue.undefined_val;
+    };
+    const ms: i64 = ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
+    // Return as float since timestamps exceed i32 range
+    return allocFloat(ctx, @floatFromInt(ms));
+}
+
 // ============================================================================
 // JSON methods
 // ============================================================================
@@ -185,7 +197,7 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(ctx.allocator);
 
-    stringifyValue(&buffer, ctx.allocator, val) catch return value.JSValue.undefined_val;
+    stringifyValue(&buffer, ctx, val) catch return value.JSValue.undefined_val;
 
     // Create JS string from result
     const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
@@ -1482,7 +1494,9 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
 }
 
 /// Stringify a JS value to JSON
-fn stringifyValue(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, val: value.JSValue) !void {
+fn stringifyValue(buffer: *std.ArrayList(u8), ctx: *context.Context, val: value.JSValue) !void {
+    const allocator = ctx.allocator;
+
     if (val.isNull()) {
         try buffer.appendSlice(allocator, "null");
         return;
@@ -1507,6 +1521,19 @@ fn stringifyValue(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, val:
         var num_buf: [32]u8 = undefined;
         const slice = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch return error.OutOfMemory;
         try buffer.appendSlice(allocator, slice);
+        return;
+    }
+
+    if (val.isFloat64()) {
+        const f = val.getFloat64();
+        // Handle special float values - NaN and Infinity become null in JSON
+        if (std.math.isNan(f) or std.math.isInf(f)) {
+            try buffer.appendSlice(allocator, "null");
+        } else {
+            var num_buf: [64]u8 = undefined;
+            const slice = std.fmt.bufPrint(&num_buf, "{d}", .{f}) catch return error.OutOfMemory;
+            try buffer.appendSlice(allocator, slice);
+        }
         return;
     }
 
@@ -1550,7 +1577,7 @@ fn stringifyValue(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, val:
             while (i < len) : (i += 1) {
                 if (i > 0) try buffer.append(allocator, ',');
                 const elem = obj.getSlot(@intCast(i));
-                try stringifyValue(buffer, allocator, elem);
+                try stringifyValue(buffer, ctx, elem);
             }
             try buffer.append(allocator, ']');
             return;
@@ -1563,19 +1590,19 @@ fn stringifyValue(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, val:
         // Get property slots
         const hidden_class = obj.hidden_class;
         for (hidden_class.properties) |prop| {
+            // Get property name from atom table (handles both predefined and dynamic atoms)
+            const atom_name = ctx.atoms.getName(prop.name) orelse continue;
+
             if (!first) try buffer.append(allocator, ',');
             first = false;
 
-            // Get property name from atom (simplified - just use index)
-            var atom_buf: [32]u8 = undefined;
-            const atom_name = std.fmt.bufPrint(&atom_buf, "{d}", .{@intFromEnum(prop.name)}) catch continue;
             try buffer.append(allocator, '"');
             try buffer.appendSlice(allocator, atom_name);
             try buffer.append(allocator, '"');
             try buffer.append(allocator, ':');
 
             if (obj.getProperty(prop.name)) |prop_val| {
-                try stringifyValue(buffer, allocator, prop_val);
+                try stringifyValue(buffer, ctx, prop_val);
             } else {
                 try buffer.appendSlice(allocator, "null");
             }
@@ -3172,6 +3199,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const fragment_atom: object.Atom = .Fragment;
     const fragment_str = try string.createString(allocator, http.FRAGMENT_MARKER);
     try ctx.setGlobal(fragment_atom, value.JSValue.fromPtr(fragment_str));
+
+    // Register Date object with Date.now()
+    const date_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, date_obj, "now", wrap(dateNow), 0);
+    try ctx.setGlobal(.Date, date_obj.toValue());
 
     // ========================================================================
     // Array.prototype
