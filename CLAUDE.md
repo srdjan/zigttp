@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-zigttp-server is a **serverless JavaScript runtime** for FaaS (Function-as-a-Service) use cases, powered by **zquickjs** - a pure Zig JavaScript engine. Target deployments: AWS Lambda, Azure Functions, Cloudflare Workers, edge computing.
+zigttp-server is a **serverless JavaScript runtime** for FaaS (Function-as-a-Service) use cases, powered by **zts** - a pure Zig JavaScript engine. Target deployments: AWS Lambda, Azure Functions, Cloudflare Workers, edge computing.
 
 **Design goals**: Instant cold starts, small deployment package, request isolation, zero external dependencies.
 
 **Trade-offs for FaaS optimization**: Single-threaded sequential processing (one request per instance), compile-time configuration, ES5 JavaScript subset (with some ES6).
 
-**Note**: mquickjs.zig is **legacy code retained only for benchmarking**. zquickjs is the active JavaScript engine.
+**Note**: mquickjs.zig is **legacy code retained only for benchmarking**. zts is the active JavaScript engine.
 
 ## Build Commands
 
@@ -27,7 +27,7 @@ zig build run -- examples/handler.js -p 3000
 
 # Test
 zig build test                      # All src/ tests
-zig build test-zquickjs             # zquickjs engine tests only
+zig build test-zts             # zts engine tests only
 zig build test-zruntime             # Native Zig runtime tests only
 ```
 
@@ -37,26 +37,26 @@ zig build test-zruntime             # Native Zig runtime tests only
 
 - **main.zig** - CLI argument parsing, creates ServerConfig, starts server
 - **server.zig** - HTTP listener, request parsing, connection handling, static file serving, JSX detection
-- **zruntime.zig** - Native Zig runtime: RuntimePool, JS context management, Request/Response conversion, JSX runtime (uses zquickjs)
+- **zruntime.zig** - Native Zig runtime: RuntimePool, JS context management, Request/Response conversion, JSX runtime (uses zts)
 - **runtime.zig** - Legacy runtime wrapper around mquickjs (C bindings) - retained for benchmarking only
 - **bindings.zig** - Native API implementations (console, fetch, Deno namespace, timers)
 - **event_loop.zig** - Async operation management, microtask queue, Promise resolution
 - **jsx.zig** - JSX-to-JavaScript transformer for SSR
 
-### zquickjs Engine (Pure Zig)
+### zts Engine (Pure Zig)
 
-- **zquickjs/root.zig** - Module entry point, re-exports main types
-- **zquickjs/parser.zig** - Tokenizer + direct bytecode emission (no AST)
-- **zquickjs/bytecode.zig** - Opcode definitions and FunctionBytecode struct
-- **zquickjs/interpreter.zig** - Stack-based bytecode VM
-- **zquickjs/value.zig** - NaN-boxing value representation
-- **zquickjs/object.zig** - Hidden classes, Atom interning, inline caching
-- **zquickjs/string.zig** - JSString and StringTable for string interning
-- **zquickjs/context.zig** - JS execution context (globals, stack, atoms)
-- **zquickjs/gc.zig** - Generational GC (nursery + tenured)
-- **zquickjs/heap.zig** - Size-class segregated allocator
-- **zquickjs/pool.zig** - Lock-free runtime pooling
-- **zquickjs/builtins.zig** - Built-in JavaScript functions
+- **zts/root.zig** - Module entry point, re-exports main types
+- **zts/parser.zig** - Tokenizer + direct bytecode emission (no AST)
+- **zts/bytecode.zig** - Opcode definitions and FunctionBytecode struct
+- **zts/interpreter.zig** - Stack-based bytecode VM
+- **zts/value.zig** - NaN-boxing value representation
+- **zts/object.zig** - Hidden classes, Atom interning, inline caching
+- **zts/string.zig** - JSString and StringTable for string interning
+- **zts/context.zig** - JS execution context (globals, stack, atoms)
+- **zts/gc.zig** - Generational GC (nursery + tenured)
+- **zts/heap.zig** - Size-class segregated allocator
+- **zts/pool.zig** - Lock-free runtime pooling
+- **zts/builtins.zig** - Built-in JavaScript functions
 
 ### Legacy (Benchmarking Only)
 
@@ -78,7 +78,7 @@ zig build test-zruntime             # Native Zig runtime tests only
 
 **Result Type**: Functional error handling throughout - `Result(T)` union with `ok`/`err` variants. Maps JS exceptions to Zig errors.
 
-**NaN-Boxing**: zquickjs uses NaN-boxing for efficient 64-bit tagged values. Allows storing integers, floats, and pointers in a single 64-bit word.
+**NaN-Boxing**: zts uses NaN-boxing for efficient 64-bit tagged values. Allows storing integers, floats, and pointers in a single 64-bit word.
 
 **Hidden Classes**: V8-style hidden class transitions for inline caching. Enables fast property access.
 

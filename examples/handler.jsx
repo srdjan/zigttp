@@ -47,7 +47,7 @@ function handler(request) {
     if (url === '/api/health') {
         return Response.json({
             status: 'ok',
-            runtime: 'mquickjs',
+            runtime: 'zts',
             timestamp: Date.now()
         });
     }

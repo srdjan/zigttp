@@ -4,24 +4,24 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // ZQuickJS module (Zig implementation - now the primary JS engine)
-    const zquickjs_mod = b.addModule("zquickjs", .{
-        .root_source_file = b.path("zquickjs/root.zig"),
+    // zts module (Zig TypeScript compiler - the primary JS engine)
+    const zts_mod = b.addModule("zts", .{
+        .root_source_file = b.path("zts/root.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    // ZQuickJS tests
-    const zquickjs_tests = b.addTest(.{
+    // zts tests
+    const zts_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zquickjs/root.zig"),
+            .root_source_file = b.path("zts/root.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    const run_zquickjs_tests = b.addRunArtifact(zquickjs_tests);
-    const zquickjs_test_step = b.step("test-zquickjs", "Run ZQuickJS unit tests");
-    zquickjs_test_step.dependOn(&run_zquickjs_tests.step);
+    const run_zts_tests = b.addRunArtifact(zts_tests);
+    const zts_test_step = b.step("test-zts", "Run zts unit tests");
+    zts_test_step.dependOn(&run_zts_tests.step);
 
     // Main server executable
     const exe = b.addExecutable(.{
@@ -33,8 +33,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add ZQuickJS module to main executable
-    exe.root_module.addImport("zquickjs", zquickjs_mod);
+    // Add zts module to main executable
+    exe.root_module.addImport("zts", zts_mod);
 
     b.installArtifact(exe);
 
@@ -58,8 +58,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add ZQuickJS module to tests
-    unit_tests.root_module.addImport("zquickjs", zquickjs_mod);
+    // Add zts module to tests
+    unit_tests.root_module.addImport("zts", zts_mod);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
@@ -73,7 +73,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    zruntime_tests.root_module.addImport("zquickjs", zquickjs_mod);
+    zruntime_tests.root_module.addImport("zts", zts_mod);
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);

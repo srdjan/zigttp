@@ -1,6 +1,6 @@
 # zigttp-server User Guide
 
-A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure Functions, Cloudflare Workers), powered by Zig and zquickjs.
+A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure Functions, Cloudflare Workers), powered by Zig and zts.
 
 ---
 
@@ -656,7 +656,7 @@ function handler(request) {
 
 ## JavaScript Subset Reference
 
-zquickjs implements ES5 with some ES6+ extensions. Here's what's available:
+zts implements ES5 with some ES6+ extensions. Here's what's available:
 
 ### Supported Features
 
@@ -717,7 +717,7 @@ new Number(1)                // No value boxing
 
 ### Strict Mode
 
-zquickjs always runs in strict mode:
+zts always runs in strict mode:
 
 ```javascript
 // These are errors:
@@ -877,14 +877,14 @@ function renderHomePage() {
     return layout('Home', [
         '<h1>Welcome to My Site</h1>',
         '<p>This is a simple web application powered by zigttp-server.</p>',
-        '<p>Built with Zig and zquickjs for serverless deployments.</p>'
+        '<p>Built with Zig and zts for serverless deployments.</p>'
     ].join('\n'));
 }
 
 function renderAboutPage() {
     return layout('About', [
         '<h1>About</h1>',
-        '<p>zigttp-server is a serverless JavaScript runtime powered by zquickjs.</p>',
+        '<p>zigttp-server is a serverless JavaScript runtime powered by zts.</p>',
         '<h2>Features</h2>',
         '<ul>',
         '  <li>Instant cold starts</li>',
@@ -955,7 +955,7 @@ function handler(request) {
             uptime_ms: uptime,
             uptime_seconds: Math.floor(uptime / 1000),
             total_requests: requestCount,
-            runtime: 'zquickjs'
+            runtime: 'zts'
         });
     }
     

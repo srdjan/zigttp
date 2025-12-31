@@ -2,7 +2,7 @@
 
 > **Note**: This project is experimental and under active development.
 
-A serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases, powered by **zquickjs** - a pure Zig JavaScript engine. Designed for AWS Lambda, Azure Functions, Cloudflare Workers, and edge computing deployments.
+A serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases, powered by **zts** - a pure Zig JavaScript engine. Designed for AWS Lambda, Azure Functions, Cloudflare Workers, and edge computing deployments.
 
 ## Features
 
@@ -191,7 +191,7 @@ function handler(request) {
 
 ## JavaScript Subset
 
-zquickjs implements ES5 with some ES6+ extensions. Key limitations:
+zts implements ES5 with some ES6+ extensions. Key limitations:
 
 - **Strict mode only**: No `with`, globals must be declared with `var`
 - **No array holes**: `[1,,3]` is a syntax error
@@ -219,7 +219,7 @@ Supported ES6+ features:
 │  │  (std.net)  │  │  (contexts) │  │ (console, Response) │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
-│                    zquickjs (Pure Zig)                      │
+│                    zts (Pure Zig)                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │   Parser    │──│  Bytecode   │──│  Generational GC    │  │
 │  │             │  │     VM      │  │ (Nursery + Tenured) │  │
@@ -229,7 +229,7 @@ Supported ES6+ features:
 
 ### Runtime Model
 
-zquickjs uses a **generational garbage collector** with:
+zts uses a **generational garbage collector** with:
 
 1. NaN-boxing for efficient value representation (64-bit tagged values)
 2. Hidden classes for inline caching (V8-style optimization)
@@ -242,7 +242,7 @@ The Result<T> pattern throughout makes error handling explicit and prevents sile
 ```
 zigttp-server/
 ├── build.zig              # Zig build configuration
-├── zquickjs/              # Pure Zig JavaScript engine
+├── zts/              # Pure Zig JavaScript engine
 │   ├── parser.zig         # Tokenizer + bytecode compiler
 │   ├── interpreter.zig    # Stack-based VM
 │   ├── value.zig          # NaN-boxing value representation
@@ -327,6 +327,6 @@ MIT licensed.
 
 ## Credits
 
-- **zquickjs** - Pure Zig JavaScript engine (part of this project)
+- **zts** - Pure Zig JavaScript engine (part of this project)
 - [Zig](https://ziglang.org/) programming language
 - [MicroQuickJS](https://github.com/bellard/mquickjs) by Fabrice Bellard (legacy benchmarking only)

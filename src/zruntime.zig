@@ -1,12 +1,12 @@
 //! Native Zig Runtime for zigttp
 //!
-//! Pure Zig implementation using zquickjs - no C dependencies.
+//! Pure Zig implementation using zts - no C dependencies.
 //! Designed for FaaS with per-request isolation and fast cold starts.
 
 const std = @import("std");
 
-// Import zquickjs module
-const zq = @import("zquickjs");
+// Import zts module
+const zq = @import("zts");
 
 // ============================================================================
 // Runtime Configuration
@@ -43,7 +43,7 @@ pub const RuntimeConfig = struct {
     /// Clear user-defined globals between requests (builtins always preserved)
     reset_user_globals: bool = false,
 
-    // Internal zquickjs settings
+    // Internal zts settings
     /// GC nursery size
     nursery_size: usize = 64 * 1024,
 };

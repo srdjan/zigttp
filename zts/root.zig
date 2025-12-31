@@ -1,4 +1,4 @@
-//! ZQuickJS - High-performance Zig port of MicroQuickJS
+//! zts - Zig TypeScript compiler
 //!
 //! A performance-oriented JavaScript engine featuring:
 //! - Generational GC with bump allocation
@@ -10,10 +10,10 @@
 //! ## Quick Start
 //!
 //! ```zig
-//! const zq = @import("zquickjs");
+//! const zts = @import("zts");
 //!
 //! // Create a runtime pool
-//! var pool = try zq.LockFreePool.init(allocator, .{});
+//! var pool = try zts.LockFreePool.init(allocator, .{});
 //! defer pool.deinit();
 //!
 //! // Acquire a runtime

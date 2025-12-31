@@ -1,4 +1,4 @@
-//! Simple regex engine for zquickjs
+//! Simple regex engine for zts
 //!
 //! Supports a useful subset of JavaScript regex:
 //! - Literal characters
