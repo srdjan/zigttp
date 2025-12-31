@@ -14,7 +14,7 @@ pub const BindingRef = ir.BindingRef;
 pub const Binding = struct {
     name: []const u8,
     name_atom: u16,
-    slot: u8,
+    slot: u16, // Changed from u8 to support atom indices > 255 for globals
     kind: BindingKind,
     is_const: bool,
     is_captured: bool, // Set when captured by an inner function
@@ -216,7 +216,7 @@ pub const ScopeAnalyzer = struct {
             try scope.bindings.append(self.allocator, .{
                 .name = name,
                 .name_atom = name_atom,
-                .slot = @truncate(name_atom), // Use atom for globals
+                .slot = name_atom, // Use atom for globals (no truncation)
                 .kind = kind,
                 .is_const = is_const,
                 .is_captured = false,
@@ -224,7 +224,7 @@ pub const ScopeAnalyzer = struct {
 
             return .{
                 .scope_id = self.current_scope,
-                .slot = @truncate(name_atom), // Atom index for global property lookup
+                .slot = name_atom, // Atom index for global property lookup (no truncation)
                 .kind = .global,
             };
         }
@@ -284,7 +284,7 @@ pub const ScopeAnalyzer = struct {
                     const upvalue_slot = self.createUpvalueChain(
                         current_function_scope,
                         scope_id,
-                        binding.slot,
+                        @truncate(binding.slot), // Local slots are u8 (checked at allocation)
                         name,
                     ) catch return .{ .scope_id = 0, .slot = 0, .kind = .global };
 
@@ -316,7 +316,7 @@ pub const ScopeAnalyzer = struct {
                 // Not found - it's a global
                 return .{
                     .scope_id = 0,
-                    .slot = @truncate(name_atom), // Atom index stored in slot (for globals)
+                    .slot = name_atom, // Atom index stored in slot (for globals)
                     .kind = .global,
                 };
             }

@@ -229,6 +229,8 @@ pub const Atom = enum(u32) {
     unwrapOr = 203,
     unwrapErr = 204,
     mapErr = 205,
+    // JSON methods
+    tryParse = 206,
     // Reserved for more builtins
     __count__ = 220,
 
@@ -315,6 +317,8 @@ pub const Atom = enum(u32) {
             .unwrapOr => "unwrapOr",
             .unwrapErr => "unwrapErr",
             .mapErr => "mapErr",
+            // JSON methods
+            .tryParse => "tryParse",
             else => null,
         };
     }
@@ -512,6 +516,8 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "unwrapOr", .unwrapOr },
     .{ "unwrapErr", .unwrapErr },
     .{ "mapErr", .mapErr },
+    // JSON methods
+    .{ "tryParse", .tryParse },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map

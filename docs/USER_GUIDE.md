@@ -199,10 +199,10 @@ function handler(request) {
 
 ```javascript
 function handler(request) {
-    var contentType = request.headers['Content-Type'] || '';
-    var auth = request.headers['Authorization'] || '';
-    var userAgent = request.headers['User-Agent'] || '';
-    var accept = request.headers['Accept'] || '';
+    let contentType = request.headers['Content-Type'] || '';
+    let auth = request.headers['Authorization'] || '';
+    let userAgent = request.headers['User-Agent'] || '';
+    let accept = request.headers['Accept'] || '';
     
     return Response.json({
         contentType: contentType,
@@ -303,8 +303,8 @@ Common status codes:
 
 ```javascript
 function handler(request) {
-    var path = request.path;
-    var method = request.method;
+    let path = request.path;
+    let method = request.method;
     
     // Exact match
     if (path === '/') {
@@ -327,8 +327,8 @@ function handler(request) {
 
 ```javascript
 function handler(request) {
-    var path = request.path;
-    var method = request.method;
+    let path = request.path;
+    let method = request.method;
     
     if (path === '/api/users') {
         if (method === 'GET') {
@@ -351,7 +351,7 @@ function getUsers() {
 }
 
 function createUser(request) {
-    var data = JSON.parse(request.body);
+    let data = JSON.parse(request.body);
     return Response.json({ id: 3, name: data.name }, { status: 201 });
 }
 ```
@@ -360,18 +360,18 @@ function createUser(request) {
 
 ```javascript
 function handler(request) {
-    var path = request.path;
+    let path = request.path;
     
     // Match /api/users/:id
     if (path.indexOf('/api/users/') === 0) {
-        var id = path.substring('/api/users/'.length);
+        let id = path.substring('/api/users/'.length);
         return getUserById(id);
     }
     
     // Match /api/posts/:id/comments
     if (path.indexOf('/api/posts/') === 0 && path.indexOf('/comments') > 0) {
-        var parts = path.split('/');
-        var postId = parts[3];  // ['', 'api', 'posts', 'id', 'comments']
+        let parts = path.split('/');
+        let postId = parts[3];  // ['', 'api', 'posts', 'id', 'comments']
         return getComments(postId);
     }
     
@@ -391,7 +391,7 @@ function getComments(postId) {
 
 ```javascript
 function handler(request) {
-    var path = request.path;
+    let path = request.path;
     
     // All /api/* routes
     if (path.indexOf('/api/') === 0) {
@@ -408,7 +408,7 @@ function handler(request) {
 }
 
 function handleApi(request) {
-    var subpath = request.path.substring(4);  // Remove '/api'
+    let subpath = request.path.substring(4);  // Remove '/api'
     return Response.json({ api: true, subpath: subpath });
 }
 
@@ -430,7 +430,7 @@ function handleStatic(request) {
 ```javascript
 // Simple router implementation
 function createRouter() {
-    var routes = [];
+    let routes = [];
     
     return {
         get: function(path, handler) {
@@ -446,8 +446,8 @@ function createRouter() {
             routes.push({ method: 'DELETE', path: path, handler: handler });
         },
         handle: function(request) {
-            for (var i = 0; i < routes.length; i++) {
-                var route = routes[i];
+            for (let i = 0; i < routes.length; i++) {
+                let route = routes[i];
                 if (route.method === request.method && route.path === request.path) {
                     return route.handler(request);
                 }
@@ -458,7 +458,7 @@ function createRouter() {
 }
 
 // Usage
-var router = createRouter();
+let router = createRouter();
 
 router.get('/', function(req) {
     return Response.html('<h1>Home</h1>');
@@ -469,7 +469,7 @@ router.get('/api/users', function(req) {
 });
 
 router.post('/api/users', function(req) {
-    var data = JSON.parse(req.body);
+    let data = JSON.parse(req.body);
     return Response.json(data, { status: 201 });
 });
 
@@ -491,7 +491,7 @@ function handler(request) {
     }
     
     // Check content type
-    var contentType = request.headers['Content-Type'] || '';
+    let contentType = request.headers['Content-Type'] || '';
     if (contentType.indexOf('application/json') === -1) {
         return Response.json({ error: 'Content-Type must be application/json' }, { status: 400 });
     }
@@ -503,7 +503,7 @@ function handler(request) {
     
     // Parse JSON
     try {
-        var data = JSON.parse(request.body);
+        let data = JSON.parse(request.body);
         return Response.json({ received: data, ok: true });
     } catch (e) {
         return Response.json({ error: 'Invalid JSON: ' + e.message }, { status: 400 });
@@ -516,7 +516,7 @@ function handler(request) {
 ```javascript
 function handler(request) {
     // Simple object
-    var user = {
+    let user = {
         id: 1,
         name: 'Alice',
         email: 'alice@example.com',
@@ -524,7 +524,7 @@ function handler(request) {
     };
     
     // Nested objects
-    var response = {
+    let response = {
         user: user,
         metadata: {
             timestamp: Date.now(),
@@ -533,7 +533,7 @@ function handler(request) {
     };
     
     // Arrays
-    var list = {
+    let list = {
         items: [
             { id: 1, name: 'Item 1' },
             { id: 2, name: 'Item 2' }
@@ -554,10 +554,10 @@ function validateJson(body, requiredFields) {
     }
     
     try {
-        var data = JSON.parse(body);
+        let data = JSON.parse(body);
         
-        for (var i = 0; i < requiredFields.length; i++) {
-            var field = requiredFields[i];
+        for (let i = 0; i < requiredFields.length; i++) {
+            let field = requiredFields[i];
             if (data[field] === undefined) {
                 return { valid: false, error: 'Missing field: ' + field };
             }
@@ -571,7 +571,7 @@ function validateJson(body, requiredFields) {
 
 function handler(request) {
     if (request.path === '/api/users' && request.method === 'POST') {
-        var result = validateJson(request.body, ['name', 'email']);
+        let result = validateJson(request.body, ['name', 'email']);
         
         if (!result.valid) {
             return Response.json({ error: result.error }, { status: 400 });
@@ -611,7 +611,7 @@ function handler(request) {
 function processRequest(request) {
     if (request.path === '/api/risky') {
         // This might throw
-        var data = JSON.parse(request.body);
+        let data = JSON.parse(request.body);
         return Response.json(data);
     }
     return Response.text('OK');
@@ -641,7 +641,7 @@ function handler(request) {
     }
     
     try {
-        var data = JSON.parse(request.body);
+        let data = JSON.parse(request.body);
         if (!data.name) {
             return errorResponse(400, 'Validation failed', { field: 'name', reason: 'required' });
         }
@@ -661,25 +661,25 @@ zts implements ES5 with some ES6+ extensions. Here's what's available:
 ### Supported Features
 
 ```javascript
-// Variables
-var x = 1;           // ✓ var keyword
+// letiables
+let x = 1;           // ✓ let keyword
 let y = 2;           // ✗ NOT supported
 const z = 3;         // ✗ NOT supported
 
 // Functions
 function foo() {}    // ✓ Function declarations
-var bar = function() {}; // ✓ Function expressions
-var arrow = () => {}; // ✗ NOT supported
+let bar = function() {}; // ✓ Function expressions
+let arrow = () => {}; // ✗ NOT supported
 
 // Objects and Arrays
-var obj = { a: 1, b: 2 };  // ✓ Object literals
-var arr = [1, 2, 3];       // ✓ Array literals
+let obj = { a: 1, b: 2 };  // ✓ Object literals
+let arr = [1, 2, 3];       // ✓ Array literals
 
 // Loops
-for (var i = 0; i < 10; i++) {}  // ✓ for loop
+for (let i = 0; i < 10; i++) {}  // ✓ for loop
 while (condition) {}              // ✓ while loop
-for (var item of array) {}        // ✓ for...of (arrays only)
-for (var key in obj) {}           // ✓ for...in (own properties only)
+for (let item of array) {}        // ✓ for...of (arrays only)
+for (let key in obj) {}           // ✓ for...in (own properties only)
 
 // Built-in Objects
 JSON.parse(), JSON.stringify()    // ✓ JSON
@@ -700,7 +700,7 @@ Math.trunc(), Math.log2()         // ✓
 
 ```javascript
 // ES6+ Syntax
-let, const                   // Use 'var' instead
+let, const                   // Use 'let' instead
 () => {}                     // Use 'function() {}' instead
 `template ${literals}`       // Use string concatenation
 { ...spread }                // Use Object.assign or manual copy
@@ -721,9 +721,9 @@ zts always runs in strict mode:
 
 ```javascript
 // These are errors:
-x = 1;                       // Error: must use 'var x = 1'
+x = 1;                       // Error: must use 'let x = 1'
 with (obj) {}                // Error: 'with' not allowed
-delete x;                    // Error: cannot delete variables
+delete x;                    // Error: cannot delete letiables
 ```
 
 ---
@@ -734,15 +734,15 @@ delete x;                    // Error: cannot delete variables
 
 ```javascript
 // In-memory data store
-var users = [
+let users = [
     { id: 1, name: 'Alice', email: 'alice@example.com' },
     { id: 2, name: 'Bob', email: 'bob@example.com' }
 ];
-var nextId = 3;
+let nextId = 3;
 
 function handler(request) {
-    var path = request.path;
-    var method = request.method;
+    let path = request.path;
+    let method = request.method;
     
     // GET /api/users - List all users
     if (path === '/api/users' && method === 'GET') {
@@ -752,11 +752,11 @@ function handler(request) {
     // POST /api/users - Create user
     if (path === '/api/users' && method === 'POST') {
         try {
-            var data = JSON.parse(request.body);
+            let data = JSON.parse(request.body);
             if (!data.name || !data.email) {
                 return Response.json({ error: 'name and email required' }, { status: 400 });
             }
-            var user = { id: nextId++, name: data.name, email: data.email };
+            let user = { id: nextId++, name: data.name, email: data.email };
             users.push(user);
             return Response.json(user, { status: 201 });
         } catch (e) {
@@ -766,8 +766,8 @@ function handler(request) {
     
     // GET /api/users/:id - Get single user
     if (path.indexOf('/api/users/') === 0 && method === 'GET') {
-        var id = parseInt(path.substring('/api/users/'.length), 10);
-        var user = findUser(id);
+        let id = parseInt(path.substring('/api/users/'.length), 10);
+        let user = findUser(id);
         if (!user) {
             return Response.json({ error: 'User not found' }, { status: 404 });
         }
@@ -776,13 +776,13 @@ function handler(request) {
     
     // PUT /api/users/:id - Update user
     if (path.indexOf('/api/users/') === 0 && method === 'PUT') {
-        var id = parseInt(path.substring('/api/users/'.length), 10);
-        var user = findUser(id);
+        let id = parseInt(path.substring('/api/users/'.length), 10);
+        let user = findUser(id);
         if (!user) {
             return Response.json({ error: 'User not found' }, { status: 404 });
         }
         try {
-            var data = JSON.parse(request.body);
+            let data = JSON.parse(request.body);
             if (data.name) user.name = data.name;
             if (data.email) user.email = data.email;
             return Response.json(user);
@@ -793,8 +793,8 @@ function handler(request) {
     
     // DELETE /api/users/:id - Delete user
     if (path.indexOf('/api/users/') === 0 && method === 'DELETE') {
-        var id = parseInt(path.substring('/api/users/'.length), 10);
-        var index = findUserIndex(id);
+        let id = parseInt(path.substring('/api/users/'.length), 10);
+        let index = findUserIndex(id);
         if (index === -1) {
             return Response.json({ error: 'User not found' }, { status: 404 });
         }
@@ -806,14 +806,14 @@ function handler(request) {
 }
 
 function findUser(id) {
-    for (var i = 0; i < users.length; i++) {
+    for (let i = 0; i < users.length; i++) {
         if (users[i].id === id) return users[i];
     }
     return null;
 }
 
 function findUserIndex(id) {
-    for (var i = 0; i < users.length; i++) {
+    for (let i = 0; i < users.length; i++) {
         if (users[i].id === id) return i;
     }
     return -1;
@@ -824,7 +824,7 @@ function findUserIndex(id) {
 
 ```javascript
 function handler(request) {
-    var path = request.path;
+    let path = request.path;
     
     if (path === '/') {
         return Response.html(renderHomePage());
@@ -914,7 +914,7 @@ function renderContactPage() {
 
 function handleContactForm(request) {
     // Parse form data (simplified - assumes URL-encoded)
-    var body = request.body || '';
+    let body = request.body || '';
     console.log('Contact form submitted:', body);
     
     return layout('Thank You', [
@@ -936,8 +936,8 @@ function render404Page() {
 ### Health Check / Metrics Endpoint
 
 ```javascript
-var startTime = Date.now();
-var requestCount = 0;
+let startTime = Date.now();
+let requestCount = 0;
 
 function handler(request) {
     requestCount++;
@@ -950,7 +950,7 @@ function handler(request) {
     }
     
     if (request.path === '/metrics') {
-        var uptime = Date.now() - startTime;
+        let uptime = Date.now() - startTime;
         return Response.json({
             uptime_ms: uptime,
             uptime_seconds: Math.floor(uptime / 1000),
@@ -999,7 +999,7 @@ zigttp-server is optimized for FaaS cold starts:
 
 ```javascript
 // GOOD: Reuse objects across requests
-var responseTemplate = { status: 'ok' };
+let responseTemplate = { status: 'ok' };
 
 function handler(request) {
     responseTemplate.timestamp = Date.now();
@@ -1009,8 +1009,8 @@ function handler(request) {
 // AVOID: Creating large objects per request
 function handler(request) {
     // This creates garbage every request
-    var bigArray = [];
-    for (var i = 0; i < 10000; i++) {
+    let bigArray = [];
+    for (let i = 0; i < 10000; i++) {
         bigArray.push({ index: i });
     }
     return Response.json(bigArray);
@@ -1089,9 +1089,9 @@ let y = 2;
 const fn = () => x + y;
 
 // Right: ES5 syntax
-var x = 1;
-var y = 2;
-var fn = function() { return x + y; };
+let x = 1;
+let y = 2;
+let fn = function() { return x + y; };
 ```
 
 **JSON parse errors**
@@ -1099,7 +1099,7 @@ var fn = function() { return x + y; };
 // Always wrap JSON.parse in try-catch
 function handler(request) {
     try {
-        var data = JSON.parse(request.body);
+        let data = JSON.parse(request.body);
         return Response.json(data);
     } catch (e) {
         return Response.json({ error: 'Invalid JSON' }, { status: 400 });
@@ -1126,7 +1126,7 @@ function handler(request) {
 If you see out-of-memory errors:
 1. Increase memory limit: `-m 512k` or `-m 1m`
 2. Reduce object creation in hot paths
-3. Avoid storing large amounts of data in variables
+3. Avoid storing large amounts of data in letiables
 
 ---
 
@@ -1153,12 +1153,12 @@ If you see out-of-memory errors:
 │   new Response(body, { status: 404, headers: {} })             │
 ├─────────────────────────────────────────────────────────────────┤
 │ COMMON PATTERNS                                                 │
-│   var data = JSON.parse(request.body);                         │
+│   let data = JSON.parse(request.body);                         │
 │   return Response.json({ error: "msg" }, { status: 400 });     │
 │   if (request.path.indexOf('/api/') === 0) { ... }             │
 ├─────────────────────────────────────────────────────────────────┤
 │ REMEMBER                                                        │
-│   • Use 'var' not 'let/const'                                  │
+│   • Use 'let' not 'let/const'                                  │
 │   • Use 'function(){}' not arrow functions                     │
 │   • Always try-catch JSON.parse                                │
 │   • Handler must return a Response                             │

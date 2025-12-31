@@ -26,7 +26,7 @@ function fibonacci(n) {
     if (n <= 1) return n;
     let a = 0;
     let b = 1;
-    for (let i = 2; i <= n; i = i + 1) {
+    for (let _ of range(2, n + 1)) {
         let temp = a + b;
         a = b;
         b = temp;
@@ -70,7 +70,7 @@ function handler(request) {
         }
 
         // Parse JSON - returns Result type
-        const result = JSON.parse(body);
+        const result = JSON.tryParse(body);
         if (result.isErr()) {
             return Response.json({ error: result.unwrapErr() }, { status: 400 });
         }

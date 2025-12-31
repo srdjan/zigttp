@@ -929,3 +929,49 @@ test "no jsx passthrough" {
     std.debug.print("\n=== No JSX ===\n{s}\n=== End ===\n", .{result.code});
     try std.testing.expectEqualStrings(source, result.code);
 }
+
+test "nested components" {
+    const source =
+        \\function Layout(props) {
+        \\    return <html>{props.children}</html>;
+        \\}
+        \\function TodoForm() {
+        \\    return <form></form>;
+        \\}
+        \\function index() {
+        \\    return <Layout>
+        \\        <TodoForm />
+        \\        <div id="x"></div>
+        \\    </Layout>;
+        \\}
+    ;
+    const result = try transform(std.testing.allocator, source);
+    defer @constCast(&result).deinit();
+    std.debug.print("\n=== Nested Components ===\n{s}\n=== End ===\n", .{result.code});
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "h(Layout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "h(TodoForm") != null);
+}
+
+test "failing case" {
+    const source =
+        \\let x = "test";
+        \\
+        \\function Layout() {
+        \\    return (
+        \\        <html lang="en">
+        \\            <head>
+        \\                <meta charset="UTF-8" />
+        \\                <meta name="viewport" content="x" />
+        \\            </head>
+        \\        </html>
+        \\    );
+        \\}
+        \\
+        \\function TodoForm() {
+        \\    return <form></form>;
+        \\}
+    ;
+    const result = try transform(std.testing.allocator, source);
+    defer @constCast(&result).deinit();
+    std.debug.print("\n=== Failing Case ===\n{s}\n=== End ===\n", .{result.code});
+}

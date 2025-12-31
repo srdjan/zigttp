@@ -23,7 +23,7 @@ pub const null_scope: ScopeId = std.math.maxInt(ScopeId);
 /// Reference to a variable binding
 pub const BindingRef = struct {
     scope_id: ScopeId,
-    slot: u8,
+    slot: u16, // Changed from u8 to support atom indices > 255
     kind: BindingKind,
 
     pub const BindingKind = enum(u2) {
@@ -37,7 +37,7 @@ pub const BindingRef = struct {
     pub fn global(atom_idx: u16) BindingRef {
         return .{
             .scope_id = 0,
-            .slot = @truncate(atom_idx),
+            .slot = atom_idx, // No truncation needed now
             .kind = .global,
         };
     }

@@ -318,13 +318,13 @@ pub const CodeGen = struct {
                     3 => try self.emit(.get_loc_3),
                     else => {
                         try self.emit(.get_loc);
-                        try self.emitByte(binding.slot);
+                        try self.emitByte(@truncate(binding.slot)); // Local slots are u8 (checked at allocation)
                     },
                 }
             },
             .upvalue => {
                 try self.emit(.get_upvalue);
-                try self.emitByte(binding.slot);
+                try self.emitByte(@truncate(binding.slot)); // Upvalue slots are u8
             },
             .global => {
                 try self.emit(.get_global);
@@ -344,13 +344,13 @@ pub const CodeGen = struct {
                     3 => try self.emit(.put_loc_3),
                     else => {
                         try self.emit(.put_loc);
-                        try self.emitByte(binding.slot);
+                        try self.emitByte(@truncate(binding.slot)); // Local slots are u8
                     },
                 }
             },
             .upvalue => {
                 try self.emit(.put_upvalue);
-                try self.emitByte(binding.slot);
+                try self.emitByte(@truncate(binding.slot)); // Upvalue slots are u8
             },
             .global => {
                 try self.emit(.put_global);
@@ -1104,30 +1104,84 @@ pub const CodeGen = struct {
     }
 
     fn emitForIterLoop(self: *CodeGen, for_iter: Node.ForIterStmt) !void {
-        // Simplified for-of/for-in loop
-        // Real implementation would use iterators
+        // For-of loop over arrays
+        // Uses stack layout: [array, index]
+        // The binding local is used for the current element
+
         const loop_start = try self.createLabel();
         const loop_end = try self.createLabel();
+        const continue_label = try self.createLabel();
 
         try self.loop_stack.append(self.allocator, .{
             .break_label = loop_end,
-            .continue_label = loop_start,
+            .continue_label = continue_label,
         });
 
-        // Get iterator from iterable
+        // Push array onto stack
         try self.emitNode(for_iter.iterable);
-        // Would need iterator protocol here
+        // Push initial index (0)
+        try self.emit(.push_0);
+        self.pushStack(1);
 
+        // Loop start
         try self.placeLabel(loop_start);
-        // Check iterator.next().done
-        // Bind value to loop variable
-        // Execute body
 
+        // Check: index < array.length
+        // Stack: [array, index]
+        try self.emit(.dup); // [array, index, index]
+        self.pushStack(1);
+        try self.emit(.rot3); // [index, index, array]
+        try self.emit(.dup); // [index, index, array, array]
+        self.pushStack(1);
+        try self.emit(.get_field); // [index, index, array, length]
+        try self.emitU16(@intFromEnum(js_object.Atom.length));
+        try self.emit(.rot3); // [index, array, length, index]
+        try self.emit(.swap); // [index, array, index, length]
+        try self.emit(.lt); // [index, array, (index < length)]
+        self.popStack(1);
+        try self.emitJump(.if_false, loop_end);
+        self.popStack(1);
+        // Stack: [index, array]
+
+        // Get current element: array[index]
+        try self.emit(.swap); // [array, index]
+        try self.emit(.dup); // [array, index, index]
+        self.pushStack(1);
+        try self.emit(.rot3); // [index, index, array]
+        try self.emit(.dup); // [index, index, array, array]
+        self.pushStack(1);
+        try self.emit(.rot3); // [index, array, array, index]
+        try self.emit(.swap); // [index, array, index, array]
+        try self.emit(.swap); // [index, array, array, index]
+        try self.emit(.get_elem); // [index, array, element]
+        self.popStack(1);
+
+        // Store element in loop binding
+        try self.emitSetBinding(for_iter.binding);
+        // Stack: [index, array]
+        try self.emit(.swap); // [array, index]
+
+        // Execute loop body
         try self.emitNode(for_iter.body);
+
+        // Continue label
+        try self.placeLabel(continue_label);
+
+        // Increment index: index = index + 1
+        // Stack: [array, index]
+        try self.emit(.inc);
+        // Stack: [array, index+1]
+
         try self.emitJump(.goto, loop_start);
 
+        // Loop end
         try self.placeLabel(loop_end);
-        try self.emit(.drop); // Drop iterator
+        // Stack: [index, array] (after the swap in condition check)
+        // or [array, index] if we jumped from condition
+        // Clean up both values
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emit(.drop);
         self.popStack(1);
 
         _ = self.loop_stack.pop();

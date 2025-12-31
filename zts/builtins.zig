@@ -170,25 +170,39 @@ pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.J
 // JSON methods
 // ============================================================================
 
-/// JSON.parse(text) - Parse JSON string to JS value, returns Result
+/// JSON.parse(text) - Parse JSON string to JS value (standard behavior)
+/// Returns parsed value or undefined on error
 pub fn jsonParse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
+    if (args.len == 0) return value.JSValue.undefined_val;
+
+    const str_val = args[0];
+    if (!str_val.isString()) return value.JSValue.undefined_val;
+
+    const js_str = str_val.toPtr(string.JSString);
+    const text = js_str.data();
+
+    return parseJsonValue(ctx, text) catch value.JSValue.undefined_val;
+}
+
+/// JSON.tryParse(text) - Parse JSON string to JS value, returns Result
+/// Returns Result.ok(value) on success, Result.err(message) on failure
+pub fn jsonTryParse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = this;
     if (args.len == 0) {
-        const err_msg = string.createString(ctx.allocator, "JSON.parse requires a string argument") catch return value.JSValue.undefined_val;
+        const err_msg = string.createString(ctx.allocator, "JSON.tryParse requires a string argument") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
     }
 
-    // Get the string content
     const str_val = args[0];
     if (!str_val.isString()) {
-        const err_msg = string.createString(ctx.allocator, "JSON.parse argument must be a string") catch return value.JSValue.undefined_val;
+        const err_msg = string.createString(ctx.allocator, "JSON.tryParse argument must be a string") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
     }
 
     const js_str = str_val.toPtr(string.JSString);
     const text = js_str.data();
 
-    // Parse the JSON
     const parsed = parseJsonValue(ctx, text) catch {
         const err_msg = string.createString(ctx.allocator, "Invalid JSON") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
@@ -225,14 +239,12 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
 
     const val = args[0];
 
-    // Build JSON string
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
-
-    stringifyValue(&buffer, ctx, val) catch return value.JSValue.undefined_val;
+    // Use shared JSON serialization from http module
+    const json_str = http.valueToJson(ctx, val) catch return value.JSValue.undefined_val;
+    defer ctx.allocator.free(json_str);
 
     // Create JS string from result
-    const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
+    const result = string.createString(ctx.allocator, json_str) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 // ============================================================================
@@ -833,7 +845,56 @@ pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value
     return value.JSValue.fromBool(false);
 }
 
+/// Global range(end) or range(start, end) or range(start, end, step)
+/// Returns an array of integers for use with for-of iteration
+pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
 
+    // Parse arguments
+    var start: i32 = 0;
+    var end: i32 = 0;
+    var step: i32 = 1;
+
+    if (args.len == 0) {
+        return value.JSValue.undefined_val;
+    } else if (args.len == 1) {
+        // range(end) - start defaults to 0
+        end = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 0;
+    } else if (args.len == 2) {
+        // range(start, end)
+        start = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 0;
+        end = if (args[1].isInt()) args[1].getInt() else if (args[1].isFloat()) @intFromFloat(args[1].getFloat64()) else 0;
+    } else {
+        // range(start, end, step)
+        start = if (args[0].isInt()) args[0].getInt() else if (args[0].isFloat()) @intFromFloat(args[0].getFloat64()) else 0;
+        end = if (args[1].isInt()) args[1].getInt() else if (args[1].isFloat()) @intFromFloat(args[1].getFloat64()) else 0;
+        step = if (args[2].isInt()) args[2].getInt() else if (args[2].isFloat()) @intFromFloat(args[2].getFloat64()) else 1;
+        if (step == 0) step = 1; // Prevent infinite loop
+    }
+
+    // Create result array
+    const result = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
+
+    // Fill array with values
+    var i: u32 = 0;
+    if (step > 0) {
+        var val = start;
+        while (val < end) : (val += step) {
+            result.setIndex(allocator, i, value.JSValue.fromInt(val)) catch return value.JSValue.undefined_val;
+            i += 1;
+        }
+    } else if (step < 0) {
+        var val = start;
+        while (val > end) : (val += step) {
+            result.setIndex(allocator, i, value.JSValue.fromInt(val)) catch return value.JSValue.undefined_val;
+            i += 1;
+        }
+    }
+
+    return result.toValue();
+}
 
 // ============================================================================
 // Map implementation
@@ -852,12 +913,9 @@ pub fn mapConstructor(ctx: *context.Context, _: value.JSValue, args: []const val
     const values_atom = ctx.atoms.intern("_values") catch return value.JSValue.undefined_val;
     const size_atom = ctx.atoms.intern("size") catch return value.JSValue.undefined_val;
 
-    // Create internal arrays
-    const keys_arr = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    keys_arr.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
-
-    const values_arr = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    values_arr.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
+    // Create internal arrays (proper arrays for efficient indexed access)
+    const keys_arr = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    const values_arr = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
 
     map_obj.setProperty(allocator, keys_atom, keys_arr.toValue()) catch return value.JSValue.undefined_val;
     map_obj.setProperty(allocator, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
@@ -892,29 +950,24 @@ pub fn mapSet(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     const keys_arr = object.JSObject.fromValue(keys_val);
     const values_arr = object.JSObject.fromValue(values_val);
 
-    const len_val = keys_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = keys_arr.getArrayLength();
 
     // Check if key already exists
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (keys_arr.getProperty(idx_atom)) |existing_key| {
+        if (keys_arr.getIndex(i)) |existing_key| {
             if (existing_key.strictEquals(key)) {
                 // Update existing value
-                values_arr.setProperty(allocator, idx_atom, val) catch return this;
+                values_arr.setIndex(allocator, i, val) catch return this;
                 return this;
             }
         }
     }
 
     // Add new entry
-    const new_idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(len)));
-    keys_arr.setProperty(allocator, new_idx_atom, key) catch return this;
-    values_arr.setProperty(allocator, new_idx_atom, val) catch return this;
-    keys_arr.setProperty(allocator, .length, value.JSValue.fromInt(len + 1)) catch return this;
-    values_arr.setProperty(allocator, .length, value.JSValue.fromInt(len + 1)) catch return this;
-    map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(len + 1)) catch return this;
+    keys_arr.setIndex(allocator, len, key) catch return this;
+    values_arr.setIndex(allocator, len, val) catch return this;
+    map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) + 1)) catch return this;
 
     return this;
 }
@@ -937,15 +990,13 @@ pub fn mapGet(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     const keys_arr = object.JSObject.fromValue(keys_val);
     const values_arr = object.JSObject.fromValue(values_val);
 
-    const len_val = keys_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = keys_arr.getArrayLength();
 
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (keys_arr.getProperty(idx_atom)) |existing_key| {
+        if (keys_arr.getIndex(i)) |existing_key| {
             if (existing_key.strictEquals(key)) {
-                return values_arr.getProperty(idx_atom) orelse value.JSValue.undefined_val;
+                return values_arr.getIndex(i) orelse value.JSValue.undefined_val;
             }
         }
     }
@@ -966,13 +1017,11 @@ pub fn mapHas(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     if (!keys_val.isObject()) return value.JSValue.fromBool(false);
 
     const keys_arr = object.JSObject.fromValue(keys_val);
-    const len_val = keys_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = keys_arr.getArrayLength();
 
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (keys_arr.getProperty(idx_atom)) |existing_key| {
+        if (keys_arr.getIndex(i)) |existing_key| {
             if (existing_key.strictEquals(key)) {
                 return value.JSValue.fromBool(true);
             }
@@ -1002,29 +1051,25 @@ pub fn mapDelete(ctx: *context.Context, this: value.JSValue, args: []const value
     const keys_arr = object.JSObject.fromValue(keys_val);
     const values_arr = object.JSObject.fromValue(values_val);
 
-    const len_val = keys_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = keys_arr.getArrayLength();
 
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (keys_arr.getProperty(idx_atom)) |existing_key| {
+        if (keys_arr.getIndex(i)) |existing_key| {
             if (existing_key.strictEquals(key)) {
                 // Shift remaining elements
                 var j = i;
                 while (j < len - 1) : (j += 1) {
-                    const curr_atom: object.Atom = @enumFromInt(@as(u32, @intCast(j)));
-                    const next_atom: object.Atom = @enumFromInt(@as(u32, @intCast(j + 1)));
-                    if (keys_arr.getProperty(next_atom)) |next_key| {
-                        keys_arr.setProperty(allocator, curr_atom, next_key) catch {};
+                    if (keys_arr.getIndex(j + 1)) |next_key| {
+                        keys_arr.setIndex(allocator, j, next_key) catch {};
                     }
-                    if (values_arr.getProperty(next_atom)) |next_val| {
-                        values_arr.setProperty(allocator, curr_atom, next_val) catch {};
+                    if (values_arr.getIndex(j + 1)) |next_val| {
+                        values_arr.setIndex(allocator, j, next_val) catch {};
                     }
                 }
-                keys_arr.setProperty(allocator, .length, value.JSValue.fromInt(len - 1)) catch {};
-                values_arr.setProperty(allocator, .length, value.JSValue.fromInt(len - 1)) catch {};
-                map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(len - 1)) catch {};
+                keys_arr.setArrayLength(len - 1);
+                values_arr.setArrayLength(len - 1);
+                map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) - 1)) catch {};
                 return value.JSValue.fromBool(true);
             }
         }
@@ -1052,15 +1097,12 @@ pub fn mapClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
     const keys_arr = object.JSObject.fromValue(keys_val);
     const values_arr = object.JSObject.fromValue(values_val);
 
-    keys_arr.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch {};
-    values_arr.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch {};
+    keys_arr.setArrayLength(0);
+    values_arr.setArrayLength(0);
     map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(0)) catch {};
 
     return value.JSValue.undefined_val;
 }
-
-
-
 
 
 
@@ -1081,9 +1123,8 @@ pub fn setConstructor(ctx: *context.Context, _: value.JSValue, args: []const val
     const values_atom = ctx.atoms.intern("_values") catch return value.JSValue.undefined_val;
     const size_atom = ctx.atoms.intern("size") catch return value.JSValue.undefined_val;
 
-    // Create internal array
-    const values_arr = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
-    values_arr.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
+    // Create internal array (proper array for efficient indexed access)
+    const values_arr = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
 
     set_obj.setProperty(allocator, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
     set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
@@ -1111,14 +1152,12 @@ pub fn setAdd(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     if (!values_val.isObject()) return this;
 
     const values_arr = object.JSObject.fromValue(values_val);
-    const len_val = values_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = values_arr.getArrayLength();
 
     // Check if value already exists
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (values_arr.getProperty(idx_atom)) |existing| {
+        if (values_arr.getIndex(i)) |existing| {
             if (existing.strictEquals(val)) {
                 return this; // Already exists
             }
@@ -1126,10 +1165,8 @@ pub fn setAdd(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     }
 
     // Add new value
-    const new_idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(len)));
-    values_arr.setProperty(allocator, new_idx_atom, val) catch return this;
-    values_arr.setProperty(allocator, .length, value.JSValue.fromInt(len + 1)) catch return this;
-    set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(len + 1)) catch return this;
+    values_arr.setIndex(allocator, len, val) catch return this;
+    set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) + 1)) catch return this;
 
     return this;
 }
@@ -1147,13 +1184,11 @@ pub fn setHas(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     if (!values_val.isObject()) return value.JSValue.fromBool(false);
 
     const values_arr = object.JSObject.fromValue(values_val);
-    const len_val = values_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = values_arr.getArrayLength();
 
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (values_arr.getProperty(idx_atom)) |existing| {
+        if (values_arr.getIndex(i)) |existing| {
             if (existing.strictEquals(val)) {
                 return value.JSValue.fromBool(true);
             }
@@ -1178,25 +1213,21 @@ pub fn setDelete(ctx: *context.Context, this: value.JSValue, args: []const value
     if (!values_val.isObject()) return value.JSValue.fromBool(false);
 
     const values_arr = object.JSObject.fromValue(values_val);
-    const len_val = values_arr.getProperty(.length) orelse value.JSValue.fromInt(0);
-    const len = if (len_val.isInt()) len_val.getInt() else 0;
+    const len = values_arr.getArrayLength();
 
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)));
-        if (values_arr.getProperty(idx_atom)) |existing| {
+        if (values_arr.getIndex(i)) |existing| {
             if (existing.strictEquals(val)) {
                 // Shift remaining elements
                 var j = i;
                 while (j < len - 1) : (j += 1) {
-                    const curr_atom: object.Atom = @enumFromInt(@as(u32, @intCast(j)));
-                    const next_atom: object.Atom = @enumFromInt(@as(u32, @intCast(j + 1)));
-                    if (values_arr.getProperty(next_atom)) |next_val| {
-                        values_arr.setProperty(allocator, curr_atom, next_val) catch {};
+                    if (values_arr.getIndex(j + 1)) |next_val| {
+                        values_arr.setIndex(allocator, j, next_val) catch {};
                     }
                 }
-                values_arr.setProperty(allocator, .length, value.JSValue.fromInt(len - 1)) catch {};
-                set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(len - 1)) catch {};
+                values_arr.setArrayLength(len - 1);
+                set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) - 1)) catch {};
                 return value.JSValue.fromBool(true);
             }
         }
@@ -1209,7 +1240,6 @@ pub fn setDelete(ctx: *context.Context, this: value.JSValue, args: []const value
 pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.undefined_val;
 
-    const allocator = ctx.allocator;
     const set_obj = object.JSObject.fromValue(this);
 
     const values_atom = ctx.atoms.intern("_values") catch return value.JSValue.undefined_val;
@@ -1219,8 +1249,8 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
     if (!values_val.isObject()) return value.JSValue.undefined_val;
 
     const values_arr = object.JSObject.fromValue(values_val);
-    values_arr.setProperty(allocator, .length, value.JSValue.fromInt(0)) catch {};
-    set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(0)) catch {};
+    values_arr.setArrayLength(0);
+    set_obj.setProperty(ctx.allocator, size_atom, value.JSValue.fromInt(0)) catch {};
 
     return value.JSValue.undefined_val;
 }
@@ -1232,6 +1262,16 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
 const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass };
 
+/// Skip JSON whitespace characters (space, newline, carriage return, tab)
+inline fn skipJsonWhitespace(text: []const u8, pos: *usize) void {
+    while (pos.* < text.len) {
+        switch (text[pos.*]) {
+            ' ', '\n', '\r', '\t' => pos.* += 1,
+            else => break,
+        }
+    }
+}
+
 /// Parse a JSON value from text
 fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSValue {
     var pos: usize = 0;
@@ -1240,10 +1280,7 @@ fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSVal
 
 /// Parse JSON value at position
 fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
-    // Skip whitespace
-    while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-        pos.* += 1;
-    }
+    skipJsonWhitespace(text, pos);
 
     if (pos.* >= text.len) return error.UnexpectedEof;
 
@@ -1297,10 +1334,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
     const root_class = ctx.root_class orelse return error.NoRootClass;
     const obj = try object.JSObject.create(ctx.allocator, root_class, null);
 
-    // Skip whitespace
-    while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-        pos.* += 1;
-    }
+    skipJsonWhitespace(text, pos);
 
     if (pos.* < text.len and text[pos.*] == '}') {
         pos.* += 1;
@@ -1308,20 +1342,14 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
     }
 
     while (pos.* < text.len) {
-        // Skip whitespace
-        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-            pos.* += 1;
-        }
+        skipJsonWhitespace(text, pos);
 
         // Parse key (must be string)
         if (pos.* >= text.len or text[pos.*] != '"') return error.InvalidJson;
         const key_val = try parseJsonString(ctx, text, pos);
         const key_str = key_val.toPtr(string.JSString);
 
-        // Skip whitespace
-        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-            pos.* += 1;
-        }
+        skipJsonWhitespace(text, pos);
 
         // Expect ':'
         if (pos.* >= text.len or text[pos.*] != ':') return error.InvalidJson;
@@ -1334,10 +1362,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
         const atom = try ctx.atoms.intern(key_str.data());
         try obj.setProperty(ctx.allocator, atom, val);
 
-        // Skip whitespace
-        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-            pos.* += 1;
-        }
+        skipJsonWhitespace(text, pos);
 
         // Check for ',' or '}'
         if (pos.* >= text.len) return error.InvalidJson;
@@ -1363,10 +1388,7 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonErro
     const arr = try object.JSObject.createArray(ctx.allocator, root_class);
     arr.prototype = ctx.array_prototype;
 
-    // Skip whitespace
-    while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-        pos.* += 1;
-    }
+    skipJsonWhitespace(text, pos);
 
     if (pos.* < text.len and text[pos.*] == ']') {
         pos.* += 1;
@@ -1381,10 +1403,7 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonErro
         try arr.setIndex(ctx.allocator, index, elem);
         index += 1;
 
-        // Skip whitespace
-        while (pos.* < text.len and (text[pos.*] == ' ' or text[pos.*] == '\n' or text[pos.*] == '\r' or text[pos.*] == '\t')) {
-            pos.* += 1;
-        }
+        skipJsonWhitespace(text, pos);
 
         // Check for ',' or ']'
         if (pos.* >= text.len) return error.InvalidJson;
@@ -1523,128 +1542,6 @@ fn parseJsonNumber(text: []const u8, pos: *usize) JsonError!value.JSValue {
         };
         return value.JSValue.fromInt(i);
     }
-}
-
-/// Stringify a JS value to JSON
-fn stringifyValue(buffer: *std.ArrayList(u8), ctx: *context.Context, val: value.JSValue) !void {
-    const allocator = ctx.allocator;
-
-    if (val.isNull()) {
-        try buffer.appendSlice(allocator, "null");
-        return;
-    }
-
-    if (val.isUndefined()) {
-        try buffer.appendSlice(allocator, "null"); // undefined becomes null in JSON
-        return;
-    }
-
-    if (val.isTrue()) {
-        try buffer.appendSlice(allocator, "true");
-        return;
-    }
-
-    if (val.isFalse()) {
-        try buffer.appendSlice(allocator, "false");
-        return;
-    }
-
-    if (val.isInt()) {
-        var num_buf: [32]u8 = undefined;
-        const slice = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch return error.OutOfMemory;
-        try buffer.appendSlice(allocator, slice);
-        return;
-    }
-
-    if (val.isFloat64()) {
-        const f = val.getFloat64();
-        // Handle special float values - NaN and Infinity become null in JSON
-        if (std.math.isNan(f) or std.math.isInf(f)) {
-            try buffer.appendSlice(allocator, "null");
-        } else {
-            var num_buf: [64]u8 = undefined;
-            const slice = std.fmt.bufPrint(&num_buf, "{d}", .{f}) catch return error.OutOfMemory;
-            try buffer.appendSlice(allocator, slice);
-        }
-        return;
-    }
-
-    if (val.isString()) {
-        const str = val.toPtr(string.JSString);
-        try buffer.append(allocator, '"');
-        for (str.data()) |c| {
-            switch (c) {
-                '"' => try buffer.appendSlice(allocator, "\\\""),
-                '\\' => try buffer.appendSlice(allocator, "\\\\"),
-                '\n' => try buffer.appendSlice(allocator, "\\n"),
-                '\r' => try buffer.appendSlice(allocator, "\\r"),
-                '\t' => try buffer.appendSlice(allocator, "\\t"),
-                0x08 => try buffer.appendSlice(allocator, "\\b"),
-                0x0C => try buffer.appendSlice(allocator, "\\f"),
-                else => {
-                    if (c < 0x20) {
-                        // Control characters
-                        try buffer.appendSlice(allocator, "\\u00");
-                        const hex = "0123456789abcdef";
-                        try buffer.append(allocator, hex[c >> 4]);
-                        try buffer.append(allocator, hex[c & 0xF]);
-                    } else {
-                        try buffer.append(allocator, c);
-                    }
-                },
-            }
-        }
-        try buffer.append(allocator, '"');
-        return;
-    }
-
-    if (val.isObject()) {
-        const obj = object.JSObject.fromValue(val);
-
-        // Check if it's an array
-        if (obj.class_id == .array) {
-            try buffer.append(allocator, '[');
-            const len = getArrayLength(obj);
-            var i: i32 = 0;
-            while (i < len) : (i += 1) {
-                if (i > 0) try buffer.append(allocator, ',');
-                const elem = obj.getSlot(@intCast(i));
-                try stringifyValue(buffer, ctx, elem);
-            }
-            try buffer.append(allocator, ']');
-            return;
-        }
-
-        // Regular object
-        try buffer.append(allocator, '{');
-        var first = true;
-
-        // Get property slots
-        const hidden_class = obj.hidden_class;
-        for (hidden_class.properties) |prop| {
-            // Get property name from atom table (handles both predefined and dynamic atoms)
-            const atom_name = ctx.atoms.getName(prop.name) orelse continue;
-
-            if (!first) try buffer.append(allocator, ',');
-            first = false;
-
-            try buffer.append(allocator, '"');
-            try buffer.appendSlice(allocator, atom_name);
-            try buffer.append(allocator, '"');
-            try buffer.append(allocator, ':');
-
-            if (obj.getProperty(prop.name)) |prop_val| {
-                try stringifyValue(buffer, ctx, prop_val);
-            } else {
-                try buffer.appendSlice(allocator, "null");
-            }
-        }
-        try buffer.append(allocator, '}');
-        return;
-    }
-
-    // Unknown type - output null
-    try buffer.appendSlice(allocator, "null");
 }
 
 // ============================================================================
@@ -3057,6 +2954,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Create JSON object
     const json_obj = try object.JSObject.create(allocator, root_class, null);
     try addMethod(allocator, json_obj, root_class, .parse, wrap(jsonParse), 1);
+    try addMethod(allocator, json_obj, root_class, .tryParse, wrap(jsonTryParse), 1);
     try addMethod(allocator, json_obj, root_class, .stringify, wrap(jsonStringify), 1);
 
     // Register JSON on global
@@ -3167,6 +3065,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const global_is_finite_atom = try ctx.atoms.intern("isFinite");
     const global_is_finite_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(globalIsFinite), global_is_finite_atom, 1);
     try ctx.setGlobal(global_is_finite_atom, global_is_finite_func.toValue());
+
+    // Register range() globally for iteration
+    const range_atom = try ctx.atoms.intern("range");
+    const range_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(globalRange), range_atom, 1);
+    try ctx.setGlobal(range_atom, range_func.toValue());
 
     // Create Map prototype with methods
     const map_proto = try object.JSObject.create(allocator, root_class, null);

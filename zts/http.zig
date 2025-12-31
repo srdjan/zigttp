@@ -293,6 +293,24 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
     const allocator = ctx.allocator;
     const root_class = ctx.root_class orelse return error.NoRootClass;
 
+    // Debug: log what h() receives
+    if (args.len > 0) {
+        const tag_arg = args[0];
+        if (tag_arg.isString()) {
+            std.log.debug("h() called with string tag: {s}", .{tag_arg.toPtr(string.JSString).data()});
+        } else if (tag_arg.isCallable()) {
+            std.log.debug("h() called with callable tag", .{});
+        } else if (tag_arg.isUndefined()) {
+            std.log.debug("h() called with UNDEFINED tag!", .{});
+        } else if (tag_arg.isNull()) {
+            std.log.debug("h() called with NULL tag!", .{});
+        } else {
+            std.log.debug("h() called with unknown tag type: {x}", .{tag_arg.raw});
+        }
+    } else {
+        std.log.debug("h() called with NO args!", .{});
+    }
+
     // Create node object with { tag, props, children }
     const node = try object.JSObject.create(allocator, root_class, null);
 
@@ -604,8 +622,8 @@ fn getStringArg(val: value.JSValue) ![]const u8 {
     return "";
 }
 
-/// Convert a JSValue to JSON string (simplified)
-fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
+/// Convert a JSValue to JSON string
+pub fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
     var buffer = std.ArrayList(u8).empty;
     errdefer buffer.deinit(ctx.allocator);
 
@@ -652,12 +670,11 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
         const obj = object.JSObject.fromValue(val);
         if (obj.class_id == .array) {
             try writer.writeByte('[');
-            const len_val = obj.getProperty(.length) orelse value.JSValue.fromInt(0);
-            const len: usize = if (len_val.isInt()) @intCast(len_val.getInt()) else 0;
+            const len = obj.getArrayLength();
             for (0..len) |i| {
                 if (i > 0) try writer.writeByte(',');
-                const idx_atom: object.Atom = @enumFromInt(@as(u32, @intCast(i)) + object.Atom.FIRST_DYNAMIC);
-                if (obj.getProperty(idx_atom)) |elem| {
+                // Use getIndex for array elements (stored in inline_slots[1..])
+                if (obj.getIndex(@intCast(i))) |elem| {
                     try writeJson(ctx, elem, writer);
                 } else {
                     try writer.writeAll("null");

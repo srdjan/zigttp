@@ -236,9 +236,16 @@ pub const Interpreter = struct {
 
     /// Main dispatch loop (public for use by native function callbacks that need to call JS functions)
     pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
+        var op_count: u32 = 0;
         dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
             const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
             self.pc += 1;
+            op_count += 1;
+
+            // Log first 100 ops at top level
+            if (self.ctx.call_depth == 0 and op_count <= 100) {
+                std.log.debug("Op[{}]: {s} (sp={})", .{ op_count, @tagName(op), self.ctx.sp });
+            }
 
             switch (op) {
                 // ========================================

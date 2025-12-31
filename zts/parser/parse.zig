@@ -869,40 +869,10 @@ pub const Parser = struct {
         }
 
         if (!is_for_of) {
-            try self.expect(.semicolon, "';'");
-
-            // Condition
-            var condition: NodeIndex = null_node;
-            if (!self.check(.semicolon)) {
-                condition = try self.parseExpression(.none);
-            }
-            try self.expect(.semicolon, "';'");
-
-            // Update
-            var update: NodeIndex = null_node;
-            if (!self.check(.rparen)) {
-                update = try self.parseExpression(.none);
-            }
-            try self.expect(.rparen, "')'");
-
-            const was_in_loop = self.in_loop;
-            self.in_loop = true;
-            const body = try self.parseStatement();
-            self.in_loop = was_in_loop;
-
+            // C-style for loops are not supported - only for-of
             self.scopes.popScope();
-
-            return try self.nodes.add(.{
-                .tag = .for_stmt,
-                .loc = loc,
-                .data = .{ .loop = .{
-                    .kind = .for_loop,
-                    .init = init_node,
-                    .condition = condition,
-                    .update = update,
-                    .body = body,
-                } },
-            });
+            self.errors.addErrorAt(.unsupported_feature, self.previous, "C-style 'for' loops are not supported; use 'for (let x of array)' or 'for (let i of range(n))' instead");
+            return error.ParseError;
         }
 
         self.scopes.popScope();
@@ -1356,7 +1326,10 @@ pub const Parser = struct {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'new' is not supported; use factory functions instead");
                 return error.ParseError;
             },
-            .kw_function => self.parseFunctionExpression(),
+            .kw_function => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "function expressions are not supported; use arrow functions '(x) => x * 2' or function declarations 'function name() { }' instead");
+                return error.ParseError;
+            },
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
                 return error.ParseError;
@@ -1406,6 +1379,16 @@ pub const Parser = struct {
         const loc = op_tok.location();
 
         return switch (op_tok.type) {
+            // Loose equality is not supported - use strict equality
+            .eq => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'==' is not supported; use '===' for strict equality instead");
+                return error.ParseError;
+            },
+            .ne => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'!=' is not supported; use '!==' for strict inequality instead");
+                return error.ParseError;
+            },
+
             // Binary operators
             .plus,
             .minus,
@@ -1413,8 +1396,6 @@ pub const Parser = struct {
             .slash,
             .percent,
             .star_star,
-            .eq,
-            .ne,
             .eq_eq,
             .ne_ne,
             .lt,
@@ -3049,15 +3030,21 @@ pub const Parser = struct {
     fn addAtom(self: *Parser, name: []const u8) !u16 {
         // Check predefined atoms first (e.g., "handler" -> 159)
         if (object.lookupPredefinedAtom(name)) |atom| {
-            return @truncate(@intFromEnum(atom));
+            const result = @intFromEnum(atom);
+            std.log.debug("addAtom('{s}') -> predefined {}", .{ name, result });
+            return @truncate(result);
         }
         // Intern dynamic atoms if atom table is available
         if (self.atoms) |atoms| {
             const atom = try atoms.intern(name);
-            return @truncate(@intFromEnum(atom));
+            const result = @intFromEnum(atom);
+            std.log.debug("addAtom('{s}') -> interned {}", .{ name, result });
+            return @truncate(result);
         }
         // Fall back to string constant pool for dynamic atoms (standalone parser)
-        return try self.constants.addString(name);
+        const result = try self.constants.addString(name);
+        std.log.debug("addAtom('{s}') -> constant {}", .{ name, result });
+        return result;
     }
 
     // ============ Public API ============
@@ -3178,9 +3165,7 @@ test "parse class rejected" {
 test "parse closure creates upvalue" {
     var parser = Parser.init(std.testing.allocator,
         \\function outer(x) {
-        \\  return function inner() {
-        \\    return x;
-        \\  };
+        \\  return () => x;
         \\}
     );
     defer parser.deinit();
@@ -3193,8 +3178,8 @@ test "parse closure creates upvalue" {
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
 
-    // Verify upvalue was created in one of the inner function scopes
-    // Scope 0 = global, scope 1 = outer function, scope 2 = outer block, scope 3 = inner function
+    // Verify upvalue was created in one of the scopes
+    // Scope 0 = global, scope 1 = outer function, scope 2 = outer block, scope 3 = arrow function
     var found_upvalue = false;
     for (parser.scopes.scopes.items) |scope| {
         if (scope.upvalues.items.len > 0) {

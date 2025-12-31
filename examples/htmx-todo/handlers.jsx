@@ -5,8 +5,8 @@
 // Open: http://localhost:8080
 
 // In-memory store (per-runtime instance)
-var todos = [];
-var nextId = 1;
+let todos = [];
+let nextId = 1;
 
 // ============================================================================
 // Components
@@ -40,10 +40,10 @@ function TodoForm() {
 }
 
 function TodoItem(props) {
-    var todo = props.todo;
-    var doneClass = todo.done ? 'todo-item done' : 'todo-item';
-    var toggleClass = todo.done ? 'btn-toggle undo' : 'btn-toggle';
-    var toggleText = todo.done ? 'Undo' : 'Done';
+    let todo = props.todo;
+    let doneClass = todo.done ? 'todo-item done' : 'todo-item';
+    let toggleClass = todo.done ? 'btn-toggle undo' : 'btn-toggle';
+    let toggleText = todo.done ? 'Undo' : 'Done';
 
     return (
         <div id={'todo-' + todo.id} class={doneClass}>
@@ -71,9 +71,9 @@ function TodoList() {
         return <div class="empty-state">No todos yet. Add one above!</div>;
     }
 
-    var items = [];
-    for (var i = 0; i < todos.length; i++) {
-        items.push(<TodoItem todo={todos[i]} />);
+    let items = [];
+    for (let todo of todos) {
+        items.push(<TodoItem todo={todo} />);
     }
     return <>{items}</>;
 }
@@ -82,7 +82,7 @@ function TodoList() {
 // Styles
 // ============================================================================
 
-var styles = [
+let styles = [
     '* { box-sizing: border-box; }',
     'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;',
     '       max-width: 600px; margin: 40px auto; padding: 0 20px; background: #f5f5f5; }',
@@ -128,19 +128,18 @@ function index() {
 }
 
 function addTodo(request) {
-    var text = '';
+    let text = '';
 
     // Parse form-encoded body: text=hello+world
     if (typeof request.body === 'string' && request.body.length > 0) {
-        var parts = request.body.split('&');
-        for (var i = 0; i < parts.length; i++) {
-            var eqIdx = parts[i].indexOf('=');
+        let parts = request.body.split('&');
+        for (let part of parts) {
+            let eqIdx = part.indexOf('=');
             if (eqIdx > 0) {
-                var key = parts[i].substring(0, eqIdx);
-                var val = parts[i].substring(eqIdx + 1);
+                let key = part.substring(0, eqIdx);
+                let val = part.substring(eqIdx + 1);
                 if (key === 'text' && val.length > 0) {
                     text = val.split('+').join(' ');
-                    break;
                 }
             }
         }
@@ -150,8 +149,10 @@ function addTodo(request) {
         return Response.html(renderToString(<div class="error">Text is required</div>));
     }
 
-    var todo = {
-        id: nextId++,
+    let todoId = nextId;
+    nextId = nextId + 1;
+    let todo = {
+        id: todoId,
         text: text.trim(),
         done: false
     };
@@ -161,30 +162,30 @@ function addTodo(request) {
 }
 
 function toggleTodo(id) {
-    for (var i = 0; i < todos.length; i++) {
+    for (let i of range(todos.length)) {
         if (todos[i].id === id) {
             todos[i].done = !todos[i].done;
             return Response.html(renderToString(<TodoItem todo={todos[i]} />));
         }
     }
 
-    return new Response('Todo not found', { status: 404 });
+    return Response.text('Todo not found', { status: 404 });
 }
 
 function deleteTodo(id) {
-    for (var i = 0; i < todos.length; i++) {
+    for (let i of range(todos.length)) {
         if (todos[i].id === id) {
             todos.splice(i, 1);
             return Response.html('');
         }
     }
 
-    return new Response('Todo not found', { status: 404 });
+    return Response.text('Todo not found', { status: 404 });
 }
 
 function extractId(url, prefix, suffix) {
-    var start = prefix.length;
-    var end = suffix ? url.indexOf(suffix) : url.length;
+    let start = prefix.length;
+    let end = suffix ? url.indexOf(suffix) : url.length;
     return parseInt(url.substring(start, end), 10);
 }
 
@@ -193,8 +194,8 @@ function extractId(url, prefix, suffix) {
 // ============================================================================
 
 function handler(request) {
-    var method = request.method;
-    var url = request.url;
+    let method = request.method;
+    let url = request.url;
 
     // GET /
     if (method === 'GET' && url === '/') {
@@ -208,16 +209,16 @@ function handler(request) {
 
     // POST /todos/:id/toggle
     if (method === 'POST' && url.indexOf('/todos/') === 0 && url.indexOf('/toggle') > 0) {
-        var id = extractId(url, '/todos/', '/toggle');
+        let id = extractId(url, '/todos/', '/toggle');
         return toggleTodo(id);
     }
 
     // DELETE /todos/:id
     if (method === 'DELETE' && url.indexOf('/todos/') === 0) {
-        var id = extractId(url, '/todos/', null);
+        let id = extractId(url, '/todos/', null);
         return deleteTodo(id);
     }
 
     // 404 Not Found
-    return new Response('Not Found', { status: 404 });
+    return Response.text('Not Found', { status: 404 });
 }
