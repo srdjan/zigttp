@@ -186,8 +186,14 @@ pub const Parser = struct {
     }
 
     fn parseVarDeclaration(self: *Parser) anyerror!NodeIndex {
+        // Reject 'var' - only 'let' and 'const' are supported
+        if (self.current.type == .kw_var) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'var' is not supported; use 'let' or 'const' instead");
+            self.had_error = true;
+            return error.ParseError;
+        }
+
         const kind: Node.VarDecl.VarKind = switch (self.current.type) {
-            .kw_var => .@"var",
             .kw_let => .let,
             .kw_const => .@"const",
             else => unreachable,
@@ -570,6 +576,7 @@ pub const Parser = struct {
         const func_node = try self.parseFunctionBody(name_atom, flags);
 
         // Create function declaration node
+        // Note: function declarations use .let for binding (no var support)
         return try self.nodes.add(.{
             .tag = .function_decl,
             .loc = loc,
@@ -577,7 +584,7 @@ pub const Parser = struct {
                 .binding = binding,
                 .pattern = null_node,
                 .init = func_node,
-                .kind = .@"var",
+                .kind = .let,
             } },
         });
     }
@@ -766,10 +773,16 @@ pub const Parser = struct {
         var is_const = false;
 
         if (!self.check(.semicolon)) {
-            if (self.check(.kw_var) or self.check(.kw_let) or self.check(.kw_const)) {
+            // Reject 'var' in for loops - only 'let' and 'const' are supported
+            if (self.check(.kw_var)) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'var' is not supported; use 'let' or 'const' instead");
+                self.had_error = true;
+                return error.ParseError;
+            }
+
+            if (self.check(.kw_let) or self.check(.kw_const)) {
                 is_const = self.current.type == .kw_const;
                 const kind: Node.VarDecl.VarKind = switch (self.current.type) {
-                    .kw_var => .@"var",
                     .kw_let => .let,
                     .kw_const => .@"const",
                     else => unreachable,
@@ -1357,8 +1370,17 @@ pub const Parser = struct {
             .tilde => self.parseUnaryOp(.bit_not),
             .plus => self.parseUnaryOp(.neg), // Actually +, but often optimized away
             .minus => self.parseUnaryOp(.neg),
-            .plus_plus => self.parseUpdatePrefix(.pre_inc),
-            .minus_minus => self.parseUpdatePrefix(.pre_dec),
+            // Prefix increment/decrement - not supported
+            .plus_plus => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'++x' is not supported; use 'x = x + 1' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
+            .minus_minus => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'--x' is not supported; use 'x = x - 1' instead");
+                self.had_error = true;
+                return error.ParseError;
+            },
 
             // JSX
             .lt => if (self.tokenizer.jsx_mode) self.parseJsxElement() else error.UnexpectedToken,
@@ -1553,13 +1575,15 @@ pub const Parser = struct {
                 return self.parseCallArgs(left, loc, false);
             },
 
-            // Postfix operators - not supported (use prefix ++x or x = x + 1 instead)
+            // Postfix operators - not supported
             .plus_plus => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "postfix increment (x++) is not supported; use prefix (++x) or (x = x + 1) instead");
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'x++' is not supported; use 'x = x + 1' instead");
+                self.had_error = true;
                 return error.ParseError;
             },
             .minus_minus => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "postfix decrement (x--) is not supported; use prefix (--x) or (x = x - 1) instead");
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'x--' is not supported; use 'x = x - 1' instead");
+                self.had_error = true;
                 return error.ParseError;
             },
 
@@ -1827,13 +1851,6 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance();
         const operand = try self.parseExpression(.unary);
-        return try self.nodes.add(Node.unaryOp(loc, op, operand));
-    }
-
-    fn parseUpdatePrefix(self: *Parser, op: UnaryOp) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance();
-        const operand = try self.parsePrefixExpr();
         return try self.nodes.add(Node.unaryOp(loc, op, operand));
     }
 

@@ -215,7 +215,7 @@ test "legacy Parser API" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = Parser.init(allocator, "var x = 1;", &strings, null);
+    var p = Parser.init(allocator, "let x = 1;", &strings, null);
     defer p.deinit();
 
     const bytecode_data = try p.parse();
@@ -230,7 +230,7 @@ test "JSX parsing with enableJsx" {
     defer strings.deinit();
 
     // Simple JSX element - use lowercase to avoid component detection
-    var p = Parser.init(allocator, "var x = <div>hello</div>;", &strings, null);
+    var p = Parser.init(allocator, "let x = <div>hello</div>;", &strings, null);
     defer p.deinit();
 
     p.enableJsx();
@@ -255,7 +255,7 @@ test "JSX rendering integration" {
     defer strings.deinit();
 
     // Parse and compile JSX
-    var p = Parser.init(allocator, "var x = <div>hello</div>;", &strings, null);
+    var p = Parser.init(allocator, "let x = <div>hello</div>;", &strings, null);
     defer p.deinit();
 
     p.enableJsx();
@@ -280,7 +280,7 @@ test "JSX parsing preserves text with punctuation" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    const source = "var x = <div><span>GET /api/health</span> - ok</div>;";
+    const source = "let x = <div><span>GET /api/health</span> - ok</div>;";
     var p = Parser.init(allocator, source, &strings, null);
     defer p.deinit();
     p.enableJsx();
@@ -300,11 +300,75 @@ test "JSX parsing reports malformed JSX" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    const source = "var x = <div><span></div>;";
+    const source = "let x = <div><span></div>;";
     var p = Parser.init(allocator, source, &strings, null);
     defer p.deinit();
     p.enableJsx();
 
     _ = p.parse() catch {};
     try std.testing.expect(p.js_parser.errors.hasErrors());
+}
+
+test "var keyword is rejected with helpful error" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source = "var x = 1;";
+    var p = Parser.init(allocator, source, &strings, null);
+    defer p.deinit();
+
+    _ = p.parse() catch {};
+
+    // Should have an error
+    try std.testing.expect(p.js_parser.errors.hasErrors());
+
+    // Error should mention 'var' and suggest 'let' or 'const'
+    const errors = p.js_parser.errors.getErrors();
+    try std.testing.expect(errors.len > 0);
+    const err = errors[0];
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "var") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "let") != null);
+}
+
+test "postfix increment is rejected with helpful error" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source = "let x = 0; x++;";
+    var p = Parser.init(allocator, source, &strings, null);
+    defer p.deinit();
+
+    _ = p.parse() catch {};
+
+    // Should have an error about postfix increment
+    try std.testing.expect(p.js_parser.errors.hasErrors());
+    const errors = p.js_parser.errors.getErrors();
+    try std.testing.expect(errors.len > 0);
+    const err = errors[0];
+    // Message should mention x++ and suggest x = x + 1
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "x++") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "x = x + 1") != null);
+}
+
+test "prefix increment is rejected with helpful error" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source = "let x = 0; ++x;";
+    var p = Parser.init(allocator, source, &strings, null);
+    defer p.deinit();
+
+    _ = p.parse() catch {};
+
+    // Should have an error about prefix increment
+    try std.testing.expect(p.js_parser.errors.hasErrors());
+    const errors = p.js_parser.errors.getErrors();
+    try std.testing.expect(errors.len > 0);
+    const err = errors[0];
+    // Message should mention ++x and suggest x = x + 1
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "++x") != null);
+    try std.testing.expect(std.mem.indexOf(u8, err.message, "x = x + 1") != null);
 }

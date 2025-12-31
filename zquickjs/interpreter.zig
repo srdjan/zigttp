@@ -2259,8 +2259,8 @@ test "End-to-end: JSX parse, compile, and execute" {
     defer strings.deinit();
 
     const source =
-        \\var result = renderToString(<div><span>Hi</span></div>);
-        \\var link = renderToString(<a href="/api/health">GET /api/health</a>);
+        \\let result = renderToString(<div><span>Hi</span></div>);
+        \\let link = renderToString(<a href="/api/health">GET /api/health</a>);
     ;
 
     var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);

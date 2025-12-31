@@ -24,10 +24,10 @@ function HomePage() {
 // Helper: Fibonacci (demonstrates compute capability)
 function fibonacci(n) {
     if (n <= 1) return n;
-    var a = 0;
-    var b = 1;
-    for (var i = 2; i <= n; i = i + 1) {
-        var temp = a + b;
+    let a = 0;
+    let b = 1;
+    for (let i = 2; i <= n; i = i + 1) {
+        let temp = a + b;
         a = b;
         b = temp;
     }
@@ -35,8 +35,8 @@ function fibonacci(n) {
 }
 
 function handler(request) {
-    var url = request.url;
-    var method = request.method;
+    const url = request.url;
+    const method = request.method;
 
     // Home page
     if (url === '/' && method === 'GET') {
@@ -64,7 +64,7 @@ function handler(request) {
 
     // JSON echo endpoint
     if (url === '/api/json' && method === 'POST') {
-        var body = request.body;
+        const body = request.body;
         if (!body) {
             return new Response(
                 JSON.stringify({ error: 'No body provided' }),
@@ -73,7 +73,7 @@ function handler(request) {
         }
 
         try {
-            var data = JSON.parse(body);
+            const data = JSON.parse(body);
             return Response.json({
                 received: data,
                 processed: true
@@ -88,8 +88,8 @@ function handler(request) {
 
     // Compute example - Fibonacci
     if (url === '/api/compute') {
-        var n = 30;
-        var result = fibonacci(n);
+        const n = 30;
+        const result = fibonacci(n);
         return Response.json({
             computation: 'fibonacci',
             n: n,
@@ -99,7 +99,7 @@ function handler(request) {
 
     // Greeting with path parameter simulation
     if (url.indexOf('/api/greet/') === 0) {
-        var name = url.substring('/api/greet/'.length);
+        const name = url.substring('/api/greet/'.length);
         return Response.json({
             greeting: 'Hello, ' + decodeURIComponent(name) + '!'
         });
