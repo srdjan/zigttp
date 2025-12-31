@@ -69,11 +69,12 @@ function handler(request) {
             return Response.json({ error: 'No body provided' }, { status: 400 });
         }
 
-        // Parse JSON - returns null if invalid
-        const data = JSON.parse(body);
-        if (data === null) {
-            return Response.json({ error: 'Invalid JSON' }, { status: 400 });
+        // Parse JSON - returns Result type
+        const result = JSON.parse(body);
+        if (result.isErr()) {
+            return Response.json({ error: result.unwrapErr() }, { status: 400 });
         }
+        const data = result.unwrap();
         return Response.json({
             received: data,
             processed: true

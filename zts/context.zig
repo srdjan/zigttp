@@ -58,6 +58,7 @@ pub const Context = struct {
     object_prototype: ?*object.JSObject,
     function_prototype: ?*object.JSObject,
     generator_prototype: ?*object.JSObject,
+    result_prototype: ?*object.JSObject,
     /// Atom table for dynamic atoms
     atoms: AtomTable,
     /// Exception value (if any)
@@ -102,6 +103,7 @@ pub const Context = struct {
             .object_prototype = null,
             .function_prototype = null,
             .generator_prototype = null,
+            .result_prototype = null,
             .atoms = AtomTable.init(allocator),
             .exception = value.JSValue.undefined_val,
             .catch_stack = undefined,
@@ -118,6 +120,7 @@ pub const Context = struct {
         if (self.object_prototype) |proto| proto.destroy(self.allocator);
         if (self.function_prototype) |proto| proto.destroy(self.allocator);
         if (self.generator_prototype) |proto| proto.destroy(self.allocator);
+        if (self.result_prototype) |proto| proto.destroy(self.allocator);
         if (self.global_obj) |g| g.destroy(self.allocator);
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
 

@@ -219,6 +219,16 @@ pub const Atom = enum(u32) {
     @"hx-swap" = 194,
     @"hx-trigger" = 195,
     @"hx-on--after-request" = 196,
+    // Result type atoms
+    Result = 197,
+    ok = 198,
+    err = 199,
+    isOk = 200,
+    isErr = 201,
+    unwrap = 202,
+    unwrapOr = 203,
+    unwrapErr = 204,
+    mapErr = 205,
     // Reserved for more builtins
     __count__ = 220,
 
@@ -295,6 +305,16 @@ pub const Atom = enum(u32) {
             .@"hx-swap" => "hx-swap",
             .@"hx-trigger" => "hx-trigger",
             .@"hx-on--after-request" => "hx-on--after-request",
+            // Result type
+            .Result => "Result",
+            .ok => "ok",
+            .err => "err",
+            .isOk => "isOk",
+            .isErr => "isErr",
+            .unwrap => "unwrap",
+            .unwrapOr => "unwrapOr",
+            .unwrapErr => "unwrapErr",
+            .mapErr => "mapErr",
             else => null,
         };
     }
@@ -482,6 +502,16 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "hx-swap", .@"hx-swap" },
     .{ "hx-trigger", .@"hx-trigger" },
     .{ "hx-on--after-request", .@"hx-on--after-request" },
+    // Result type
+    .{ "Result", .Result },
+    .{ "ok", .ok },
+    .{ "err", .err },
+    .{ "isOk", .isOk },
+    .{ "isErr", .isErr },
+    .{ "unwrap", .unwrap },
+    .{ "unwrapOr", .unwrapOr },
+    .{ "unwrapErr", .unwrapErr },
+    .{ "mapErr", .mapErr },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map
@@ -753,6 +783,7 @@ pub const ClassId = enum(u8) {
     boolean_object = 19,
     symbol_object = 20,
     arguments = 21,
+    result = 22, // Result type for functional error handling
     // Custom class IDs start here
     _,
 

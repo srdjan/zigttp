@@ -170,20 +170,52 @@ pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.J
 // JSON methods
 // ============================================================================
 
-/// JSON.parse(text) - Parse JSON string to JS value
+/// JSON.parse(text) - Parse JSON string to JS value, returns Result
 pub fn jsonParse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
-    if (args.len == 0) return value.JSValue.undefined_val;
+    if (args.len == 0) {
+        const err_msg = string.createString(ctx.allocator, "JSON.parse requires a string argument") catch return value.JSValue.undefined_val;
+        return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
+    }
 
     // Get the string content
     const str_val = args[0];
-    if (!str_val.isString()) return value.JSValue.undefined_val;
+    if (!str_val.isString()) {
+        const err_msg = string.createString(ctx.allocator, "JSON.parse argument must be a string") catch return value.JSValue.undefined_val;
+        return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
+    }
 
     const js_str = str_val.toPtr(string.JSString);
     const text = js_str.data();
 
     // Parse the JSON
-    return parseJsonValue(ctx, text) catch value.JSValue.undefined_val;
+    const parsed = parseJsonValue(ctx, text) catch {
+        const err_msg = string.createString(ctx.allocator, "Invalid JSON") catch return value.JSValue.undefined_val;
+        return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
+    };
+    return createResultOk(ctx, parsed);
+}
+
+/// Helper to create Result.ok(value)
+fn createResultOk(ctx: *context.Context, val: value.JSValue) value.JSValue {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+    const result_obj = object.JSObject.create(allocator, root_class, ctx.result_prototype) catch return value.JSValue.undefined_val;
+    result_obj.class_id = .result;
+    result_obj.inline_slots[0] = value.JSValue.true_val; // isOk = true
+    result_obj.inline_slots[1] = val;
+    return result_obj.toValue();
+}
+
+/// Helper to create Result.err(error)
+fn createResultErr(ctx: *context.Context, err_val: value.JSValue) value.JSValue {
+    const allocator = ctx.allocator;
+    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
+    const result_obj = object.JSObject.create(allocator, root_class, ctx.result_prototype) catch return value.JSValue.undefined_val;
+    result_obj.class_id = .result;
+    result_obj.inline_slots[0] = value.JSValue.false_val; // isOk = false
+    result_obj.inline_slots[1] = err_val;
+    return result_obj.toValue();
 }
 
 /// JSON.stringify(value) - Convert JS value to JSON string
@@ -3282,6 +3314,27 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(regExpConstructor), .RegExp, 2);
     try regexp_ctor.setProperty(allocator, .prototype, regexp_proto.toValue());
     try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
+
+    // Create Result prototype with instance methods
+    const result_proto = try object.JSObject.create(allocator, root_class, null);
+    try addMethod(allocator, result_proto, root_class, .isOk, wrap(resultIsOk), 0);
+    try addMethod(allocator, result_proto, root_class, .isErr, wrap(resultIsErr), 0);
+    try addMethod(allocator, result_proto, root_class, .unwrap, wrap(resultUnwrap), 0);
+    try addMethod(allocator, result_proto, root_class, .unwrapOr, wrap(resultUnwrapOr), 1);
+    try addMethod(allocator, result_proto, root_class, .unwrapErr, wrap(resultUnwrapErr), 0);
+    try addMethod(allocator, result_proto, root_class, .map, wrap(resultMap), 1);
+    try addMethod(allocator, result_proto, root_class, .mapErr, wrap(resultMapErr), 1);
+    try addMethodDynamic(ctx, result_proto, "match", wrap(resultMatch), 1);
+
+    // Create Result object with static methods ok/err
+    const result_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethod(allocator, result_obj, root_class, .ok, wrap(resultOk), 1);
+    try addMethod(allocator, result_obj, root_class, .err, wrap(resultErr), 1);
+    try result_obj.setProperty(allocator, .prototype, result_proto.toValue());
+    try ctx.setGlobal(.Result, result_obj.toValue());
+
+    // Store Result prototype on context for creating Result instances
+    ctx.result_prototype = result_proto;
 }
 
 // ============================================================================
@@ -3475,6 +3528,107 @@ pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []con
 }
 
 // ============================================================================
+// Result type implementation - functional error handling
+// ============================================================================
+
+/// Result slot layout:
+/// slot[0] = isOk (boolean)
+/// slot[1] = value (the ok or err value)
+
+/// Create a Result.ok(value)
+pub fn resultOk(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
+    return createResultOk(ctx, val);
+}
+
+/// Create a Result.err(error)
+pub fn resultErr(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const err_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
+    return createResultErr(ctx, err_val);
+}
+
+/// Result.prototype.isOk() - returns true if result is ok
+pub fn resultIsOk(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.false_val;
+    const obj = object.JSObject.fromValue(this);
+    if (obj.class_id != .result) return value.JSValue.false_val;
+    return obj.inline_slots[0]; // isOk boolean
+}
+
+/// Result.prototype.isErr() - returns true if result is err
+pub fn resultIsErr(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.true_val;
+    const obj = object.JSObject.fromValue(this);
+    if (obj.class_id != .result) return value.JSValue.true_val;
+    // Return opposite of isOk
+    return if (obj.inline_slots[0].isTrue()) value.JSValue.false_val else value.JSValue.true_val;
+}
+
+/// Result.prototype.unwrap() - returns value if ok, undefined if err
+pub fn resultUnwrap(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.undefined_val;
+    const obj = object.JSObject.fromValue(this);
+    if (obj.class_id != .result) return value.JSValue.undefined_val;
+
+    if (obj.inline_slots[0].isTrue()) {
+        return obj.inline_slots[1]; // ok value
+    }
+    return value.JSValue.undefined_val;
+}
+
+/// Result.prototype.unwrapOr(default) - returns value if ok, default if err
+pub fn resultUnwrapOr(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) {
+        return if (args.len > 0) args[0] else value.JSValue.undefined_val;
+    }
+    const obj = object.JSObject.fromValue(this);
+    if (obj.class_id != .result) {
+        return if (args.len > 0) args[0] else value.JSValue.undefined_val;
+    }
+
+    if (obj.inline_slots[0].isTrue()) {
+        return obj.inline_slots[1]; // ok value
+    }
+    return if (args.len > 0) args[0] else value.JSValue.undefined_val;
+}
+
+/// Result.prototype.unwrapErr() - returns error if err, undefined if ok
+pub fn resultUnwrapErr(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.undefined_val;
+    const obj = object.JSObject.fromValue(this);
+    if (obj.class_id != .result) return value.JSValue.undefined_val;
+
+    if (!obj.inline_slots[0].isTrue()) {
+        return obj.inline_slots[1]; // err value
+    }
+    return value.JSValue.undefined_val;
+}
+
+/// Result.prototype.map(fn) - transform ok value, pass through err
+/// Note: Requires callback infrastructure - returns self for now
+pub fn resultMap(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    // TODO: Implement when callback infrastructure is available
+    return this;
+}
+
+/// Result.prototype.mapErr(fn) - transform err value, pass through ok
+/// Note: Requires callback infrastructure - returns self for now
+pub fn resultMapErr(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    // TODO: Implement when callback infrastructure is available
+    return this;
+}
+
+/// Result.prototype.match({ok: fn, err: fn}) - pattern match on result
+/// Note: Requires callback infrastructure - returns value for now
+pub fn resultMatch(_: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
+    if (!this.isObject()) return value.JSValue.undefined_val;
+    const obj = object.JSObject.fromValue(this);
+    if (obj.class_id != .result) return value.JSValue.undefined_val;
+    // TODO: Implement when callback infrastructure is available
+    // For now just return the inner value
+    return obj.inline_slots[1];
+}
+
 // ============================================================================
 // Symbol implementation
 // ============================================================================
