@@ -9,6 +9,7 @@ const ir = @import("ir.zig");
 const scope_mod = @import("scope.zig");
 const error_mod = @import("error.zig");
 const token_mod = @import("token.zig");
+const object = @import("../object.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerState = tokenizer_mod.TokenizerState;
@@ -2524,10 +2525,9 @@ pub const Parser = struct {
 
     // ============ Node List Helpers ============
 
-    fn addNodeList(_: *Parser, indices: []const NodeIndex) anyerror!NodeIndex {
-        if (indices.len == 0) return null_node;
-        // The first index in the array serves as the start
-        return indices[0];
+    fn addNodeList(self: *Parser, indices: []const NodeIndex) anyerror!NodeIndex {
+        // Store the list of indices in the node list's index storage
+        return try self.nodes.addIndexList(indices);
     }
 
     fn addStmtList(self: *Parser, stmts: []const NodeIndex) anyerror!NodeIndex {
@@ -2539,7 +2539,11 @@ pub const Parser = struct {
     }
 
     fn addAtom(self: *Parser, name: []const u8) !u16 {
-        // For now, atoms are just string indices
+        // Check predefined atoms first (e.g., "handler" -> 159)
+        if (object.lookupPredefinedAtom(name)) |atom| {
+            return @truncate(@intFromEnum(atom));
+        }
+        // Fall back to string constant pool for dynamic atoms
         return try self.constants.addString(name);
     }
 

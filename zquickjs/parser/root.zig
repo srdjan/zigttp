@@ -9,19 +9,24 @@
 //! Usage:
 //!   const parser = @import("parser/root.zig");
 //!
-//!   // Parse source code
+//!   // Parse source code (new API)
 //!   var p = parser.JsParser.init(allocator, source);
 //!   defer p.deinit();
-//!
 //!   const ast = try p.parse();
 //!
-//!   // Generate bytecode
-//!   var gen = parser.CodeGen.init(allocator, &ast.nodes, &ast.constants, &ast.scopes);
-//!   defer gen.deinit();
-//!
-//!   const bytecode = try gen.generate(ast.root);
+//!   // Or use legacy API for compatibility with zruntime.zig:
+//!   var p = parser.Parser.init(allocator, source, &strings, &atoms);
+//!   defer p.deinit();
+//!   const bytecode = try p.parse();
+//!   // Access: p.max_local_count, p.constants.items
 
 const std = @import("std");
+
+// Import from parent for compatibility types
+const bytecode = @import("../bytecode.zig");
+const value = @import("../value.zig");
+const string = @import("../string.zig");
+const context = @import("../context.zig");
 
 // Re-export all parser components
 pub const Token = @import("token.zig").Token;
@@ -87,7 +92,7 @@ pub fn parse(
     _ = options; // TODO: Use options
 
     var p = JsParser.init(allocator, source);
-    const root = p.parseProgram() catch {
+    const root = p.parse() catch {
         return ParseResult{
             .nodes = p.nodes,
             .constants = p.constants,
@@ -106,6 +111,86 @@ pub fn parse(
     };
 }
 
+// ============================================================================
+// Legacy Parser API - Compatible with zruntime.zig
+// ============================================================================
+
+/// Legacy Parser wrapper that provides the old API for zruntime.zig compatibility
+/// Usage:
+///   var p = Parser.init(allocator, source, &strings, &atoms);
+///   defer p.deinit();
+///   const bytecode = try p.parse();
+///   // Access: p.max_local_count, p.constants.items
+pub const Parser = struct {
+    allocator: std.mem.Allocator,
+    source: []const u8,
+
+    // Internal parser and codegen state
+    js_parser: JsParser,
+    code_gen: ?CodeGen,
+
+    // Output fields for zruntime.zig compatibility
+    max_local_count: u8,
+    constants: ConstantsList,
+
+    // Strings/atoms kept for API compatibility (not used by new parser)
+    strings: *string.StringTable,
+    atoms: ?*context.AtomTable,
+
+    /// Wrapper for constants to provide .items interface
+    pub const ConstantsList = struct {
+        items: []const value.JSValue,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        strings: *string.StringTable,
+        atoms: ?*context.AtomTable,
+    ) Parser {
+        return .{
+            .allocator = allocator,
+            .source = source,
+            .js_parser = JsParser.init(allocator, source),
+            .code_gen = null,
+            .max_local_count = 0,
+            .constants = .{ .items = &.{} },
+            .strings = strings,
+            .atoms = atoms,
+        };
+    }
+
+    pub fn deinit(self: *Parser) void {
+        if (self.code_gen) |*cg| {
+            cg.deinit();
+        }
+        self.js_parser.deinit();
+    }
+
+    /// Parse and generate bytecode, returns bytecode slice
+    pub fn parse(self: *Parser) ![]const u8 {
+        // Parse to IR
+        const root = try self.js_parser.parse();
+
+        // Generate bytecode with string table for proper string handling
+        self.code_gen = CodeGen.initWithStrings(
+            self.allocator,
+            &self.js_parser.nodes,
+            &self.js_parser.constants,
+            &self.js_parser.scopes,
+            self.strings,
+        );
+
+        const func_bc = try self.code_gen.?.generate(root);
+
+        // Update compatibility fields
+        self.max_local_count = @intCast(func_bc.local_count);
+        self.constants = .{ .items = func_bc.constants };
+
+        return func_bc.code;
+    }
+};
+
 test "root module imports" {
     // Just verify imports work
     _ = Token;
@@ -113,4 +198,18 @@ test "root module imports" {
     _ = Node;
     _ = JsParser;
     _ = CodeGen;
+}
+
+test "legacy Parser API" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = Parser.init(allocator, "var x = 1;", &strings, null);
+    defer p.deinit();
+
+    const bytecode_data = try p.parse();
+    try std.testing.expect(bytecode_data.len > 0);
+    // Global variables don't need local slots - they use put_global
+    // max_local_count is 0 for top-level code with only global vars
 }

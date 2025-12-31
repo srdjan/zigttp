@@ -36,7 +36,10 @@ pub const context = @import("context.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const builtins = @import("builtins.zig");
-pub const parser = @import("parser.zig");
+// New two-pass parser with proper function compilation
+pub const parser = @import("parser/root.zig");
+// Old parser kept for reference
+pub const old_parser = @import("parser.zig");
 pub const pool = @import("pool.zig");
 pub const c_abi = @import("c_abi.zig");
 pub const http = @import("http.zig");

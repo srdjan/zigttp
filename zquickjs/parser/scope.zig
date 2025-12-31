@@ -210,6 +210,26 @@ pub const ScopeAnalyzer = struct {
         is_const: bool,
     ) !BindingRef {
         const scope = &self.scopes.items[self.current_scope];
+
+        // Global scope - use atom index as slot, no local allocation
+        if (scope.kind == .global) {
+            try scope.bindings.append(self.allocator, .{
+                .name = name,
+                .name_atom = name_atom,
+                .slot = @truncate(name_atom), // Use atom for globals
+                .kind = kind,
+                .is_const = is_const,
+                .is_captured = false,
+            });
+
+            return .{
+                .scope_id = self.current_scope,
+                .slot = @truncate(name_atom), // Atom index for global property lookup
+                .kind = .global,
+            };
+        }
+
+        // Local scope - allocate local slot
         const slot = scope.current_local_slot;
 
         // Check for 255 local limit
@@ -249,6 +269,15 @@ pub const ScopeAnalyzer = struct {
 
             // Look for binding in current scope
             if (scope.findLocalMut(name)) |binding| {
+                // Check if this is a global scope binding
+                if (scope.kind == .global) {
+                    return .{
+                        .scope_id = scope_id,
+                        .slot = binding.slot, // Already stores atom index for globals
+                        .kind = .global,
+                    };
+                }
+
                 if (crossed_function) {
                     // We need to create an upvalue chain
                     binding.is_captured = true;
@@ -402,17 +431,17 @@ test "basic scope and binding" {
     var analyzer = ScopeAnalyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
-    // Declare in global scope
+    // Declare in global scope - returns .global kind (not .local)
     const x_ref = try analyzer.declareBinding("x", 1, .variable, false);
-    try std.testing.expectEqual(BindingRef.BindingKind.local, x_ref.kind);
-    try std.testing.expectEqual(@as(u8, 0), x_ref.slot);
+    try std.testing.expectEqual(BindingRef.BindingKind.global, x_ref.kind);
+    try std.testing.expectEqual(@as(u8, 1), x_ref.slot); // Atom index stored in slot
 
-    // Resolve x - should find it
+    // Resolve x - should find it as global
     const resolved = analyzer.resolveBinding("x", 1);
-    try std.testing.expectEqual(BindingRef.BindingKind.local, resolved.kind);
-    try std.testing.expectEqual(@as(u8, 0), resolved.slot);
+    try std.testing.expectEqual(BindingRef.BindingKind.global, resolved.kind);
+    try std.testing.expectEqual(@as(u8, 1), resolved.slot);
 
-    // Resolve undefined - should be global
+    // Resolve undefined - should be global (not found in any scope)
     const undefined_ref = analyzer.resolveBinding("undefined", 2);
     try std.testing.expectEqual(BindingRef.BindingKind.global, undefined_ref.kind);
 }

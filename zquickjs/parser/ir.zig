@@ -621,16 +621,21 @@ pub const Node = struct {
 pub const NodeList = struct {
     nodes: std.ArrayList(Node),
     allocator: std.mem.Allocator,
+    // Storage for node index lists (statements, arguments, etc.)
+    // Lists are stored contiguously, start position is returned when adding
+    index_lists: std.ArrayList(NodeIndex),
 
     pub fn init(allocator: std.mem.Allocator) NodeList {
         return .{
             .nodes = .empty,
             .allocator = allocator,
+            .index_lists = .empty,
         };
     }
 
     pub fn deinit(self: *NodeList) void {
         self.nodes.deinit(self.allocator);
+        self.index_lists.deinit(self.allocator);
     }
 
     /// Add a node and return its index
@@ -662,6 +667,21 @@ pub const NodeList = struct {
     /// Get slice of nodes
     pub fn slice(self: *const NodeList) []const Node {
         return self.nodes.items;
+    }
+
+    /// Add a list of indices and return the starting position
+    pub fn addIndexList(self: *NodeList, indices: []const NodeIndex) !NodeIndex {
+        if (indices.len == 0) return null_node;
+        const start = @as(NodeIndex, @intCast(self.index_lists.items.len));
+        try self.index_lists.appendSlice(self.allocator, indices);
+        return start;
+    }
+
+    /// Get an index from the index list storage
+    pub fn getListIndex(self: *const NodeList, list_start: NodeIndex, offset: u16) NodeIndex {
+        const pos = list_start + offset;
+        if (pos >= self.index_lists.items.len) return null_node;
+        return self.index_lists.items[pos];
     }
 };
 

@@ -6,142 +6,17 @@ const std = @import("std");
 const ir = @import("ir.zig");
 const scope_mod = @import("scope.zig");
 
-// When used as part of the full module, these will be imported from parent
-// For standalone testing, we define stubs
+// Import real types from parent module for integration
+const bytecode = @import("../bytecode.zig");
+const value = @import("../value.zig");
+const heap = @import("../heap.zig");
+const string = @import("../string.zig");
 
-const bytecode = struct {
-    // JSValue stub - must be inside bytecode struct to avoid ambiguity
-    pub const JSValue = struct {
-        data: u64,
-
-        pub fn initInt(val: i32) JSValue {
-            return .{ .data = @bitCast(@as(i64, val)) };
-        }
-
-        pub fn initFloat(val: f64) JSValue {
-            return .{ .data = @bitCast(val) };
-        }
-
-        pub fn initUndefined() JSValue {
-            return .{ .data = 0 };
-        }
-    };
-    pub const Opcode = enum(u8) {
-        nop = 0x00,
-        push_const = 0x01,
-        push_0 = 0x02,
-        push_1 = 0x03,
-        push_2 = 0x04,
-        push_3 = 0x05,
-        push_i8 = 0x06,
-        push_i16 = 0x07,
-        push_null = 0x08,
-        push_undefined = 0x09,
-        push_true = 0x0A,
-        push_false = 0x0B,
-        dup = 0x0C,
-        drop = 0x0D,
-        swap = 0x0E,
-        rot3 = 0x0F,
-        get_loc = 0x10,
-        put_loc = 0x11,
-        get_loc_0 = 0x12,
-        get_loc_1 = 0x13,
-        get_loc_2 = 0x14,
-        get_loc_3 = 0x15,
-        put_loc_0 = 0x16,
-        put_loc_1 = 0x17,
-        put_loc_2 = 0x18,
-        put_loc_3 = 0x19,
-        halt = 0x1A,
-        loop = 0x1B,
-        add = 0x20,
-        sub = 0x21,
-        mul = 0x22,
-        div = 0x23,
-        mod = 0x24,
-        pow = 0x25,
-        neg = 0x26,
-        inc = 0x27,
-        dec = 0x28,
-        bit_and = 0x30,
-        bit_or = 0x31,
-        bit_xor = 0x32,
-        bit_not = 0x33,
-        shl = 0x34,
-        shr = 0x35,
-        ushr = 0x36,
-        lt = 0x40,
-        lte = 0x41,
-        gt = 0x42,
-        gte = 0x43,
-        eq = 0x44,
-        neq = 0x45,
-        strict_eq = 0x46,
-        strict_neq = 0x47,
-        not = 0x48,
-        goto = 0x50,
-        if_true = 0x51,
-        if_false = 0x52,
-        ret = 0x53,
-        ret_undefined = 0x54,
-        @"throw" = 0x55,
-        call = 0x60,
-        call_method = 0x61,
-        call_constructor = 0x62,
-        get_field = 0x70,
-        put_field = 0x71,
-        get_elem = 0x72,
-        put_elem = 0x73,
-        put_field_keep = 0x76,
-        new_object = 0x80,
-        new_array = 0x81,
-        push_this = 0x82,
-        get_global = 0x83,
-        put_global = 0x84,
-        make_function = 0x86,
-        typeof = 0x90,
-        instanceof = 0x91,
-        push_catch = 0x92,
-        pop_catch = 0x93,
-        get_exception = 0x94,
-        get_upvalue = 0xC0,
-        put_upvalue = 0xC1,
-        close_upvalue = 0xC2,
-        make_closure = 0xC3,
-        _,
-    };
-
-    pub const UpvalueInfo = struct {
-        is_local: bool,
-        index: u8,
-    };
-
-    pub const BytecodeHeader = struct {};
-
-    pub const FunctionFlags = packed struct {
-        is_strict: bool = true,
-        is_generator: bool = false,
-        is_async: bool = false,
-        has_arguments: bool = false,
-        has_rest: bool = false,
-        _reserved: u3 = 0,
-    };
-
-    pub const FunctionBytecode = struct {
-        header: BytecodeHeader,
-        name_atom: u32,
-        arg_count: u16,
-        local_count: u8,
-        stack_size: u16,
-        flags: FunctionFlags,
-        upvalue_count: u8,
-        upvalue_info: []const UpvalueInfo,
-        code: []const u8,
-        constants: []const JSValue,
-        source_map: ?[]const u8,
-    };
-};
+// Re-export types used by this module
+const JSValue = value.JSValue;
+const Opcode = bytecode.Opcode;
+const FunctionBytecode = bytecode.FunctionBytecode;
+const UpvalueInfo = bytecode.UpvalueInfo;
 
 const Node = ir.Node;
 const NodeTag = ir.NodeTag;
@@ -157,9 +32,6 @@ const ScopeAnalyzer = scope_mod.ScopeAnalyzer;
 const Scope = scope_mod.Scope;
 const ScopeId = scope_mod.ScopeId;
 const Upvalue = scope_mod.Upvalue;
-
-const Opcode = bytecode.Opcode;
-const FunctionBytecode = bytecode.FunctionBytecode;
 
 /// Label for jump patching
 const Label = struct {
@@ -185,11 +57,12 @@ pub const CodeGen = struct {
     nodes: *const NodeList,
     ir_constants: *const ConstantPool,
     scopes: *ScopeAnalyzer,
+    strings: ?*string.StringTable,
 
     // Output
     code: std.ArrayList(u8),
-    constants: std.ArrayList(bytecode.JSValue),
-    upvalue_info: std.ArrayList(bytecode.UpvalueInfo),
+    constants: std.ArrayList(JSValue),
+    upvalue_info: std.ArrayList(UpvalueInfo),
 
     // State
     labels: std.ArrayList(Label),
@@ -205,14 +78,25 @@ pub const CodeGen = struct {
         ir_constants: *const ConstantPool,
         scopes: *ScopeAnalyzer,
     ) CodeGen {
+        return initWithStrings(allocator, nodes, ir_constants, scopes, null);
+    }
+
+    pub fn initWithStrings(
+        allocator: std.mem.Allocator,
+        nodes: *const NodeList,
+        ir_constants: *const ConstantPool,
+        scopes: *ScopeAnalyzer,
+        strings_table: ?*string.StringTable,
+    ) CodeGen {
         return .{
             .allocator = allocator,
             .nodes = nodes,
             .ir_constants = ir_constants,
             .scopes = scopes,
+            .strings = strings_table,
             .code = std.ArrayList(u8).empty,
-            .constants = std.ArrayList(bytecode.JSValue).empty,
-            .upvalue_info = std.ArrayList(bytecode.UpvalueInfo).empty,
+            .constants = std.ArrayList(JSValue).empty,
+            .upvalue_info = std.ArrayList(UpvalueInfo).empty,
             .labels = std.ArrayList(Label).empty,
             .pending_jumps = std.ArrayList(PendingJump).empty,
             .loop_stack = std.ArrayList(LoopContext).empty,
@@ -270,7 +154,7 @@ pub const CodeGen = struct {
 
         // Get upvalue info from scope
         const scope = self.scopes.getScope(scope_id);
-        var upvalue_info_list: std.ArrayList(bytecode.UpvalueInfo) = .empty;
+        var upvalue_info_list: std.ArrayList(UpvalueInfo) = .empty;
         defer upvalue_info_list.deinit(self.allocator);
 
         for (scope.upvalues.items) |uv| {
@@ -375,7 +259,7 @@ pub const CodeGen = struct {
                 try self.emitByte(@bitCast(@as(i8, @intCast(val))));
             },
             else => {
-                const idx = try self.addConstant(bytecode.JSValue.initInt(val));
+                const idx = try self.addConstant(JSValue.fromInt(val));
                 try self.emitPushConst(idx);
             },
         }
@@ -384,7 +268,14 @@ pub const CodeGen = struct {
 
     fn emitFloat(self: *CodeGen, float_idx: u16) !void {
         const f = self.ir_constants.getFloat(float_idx) orelse 0.0;
-        const idx = try self.addConstant(bytecode.JSValue.initFloat(f));
+        // Float64 needs heap allocation via Float64Box
+        const float_box = try self.allocator.create(JSValue.Float64Box);
+        float_box.* = .{
+            .header = heap.MemBlockHeader.init(.float64, @sizeOf(JSValue.Float64Box)),
+            ._pad = 0,
+            .value = f,
+        };
+        const idx = try self.addConstant(JSValue.fromPtr(float_box));
         try self.emitPushConst(idx);
         self.pushStack(1);
     }
@@ -631,31 +522,65 @@ pub const CodeGen = struct {
     }
 
     fn emitCall(self: *CodeGen, call: Node.CallExpr) !void {
-        try self.emitNode(call.callee);
+        // Check if this is a method call (callee is member access)
+        const callee_node = self.nodes.get(call.callee) orelse {
+            try self.emitNode(call.callee);
+            try self.emitCallArgs(call);
+            try self.emit(.call);
+            try self.emitByte(call.args_count);
+            self.popStack(call.args_count);
+            return;
+        };
 
-        // Emit arguments
-        var i: u8 = 0;
-        var arg_idx = call.args_start;
-        while (i < call.args_count) : (i += 1) {
-            try self.emitNode(arg_idx);
-            arg_idx += 1;
+        const is_method = callee_node.tag == .member_access or callee_node.tag == .optional_chain;
+
+        if (is_method) {
+            // Method call: obj.method(args)
+            // Stack: [obj] -> [obj, obj] -> [obj, method] -> [obj, method, args...] -> [result]
+            try self.emitNode(callee_node.data.member.object);
+            try self.emit(.dup); // Keep object as 'this'
+            self.pushStack(1);
+            try self.emit(.get_field);
+            try self.emitU16(callee_node.data.member.property);
+
+            // Emit arguments
+            try self.emitCallArgs(call);
+
+            try self.emit(.call_method);
+            try self.emitByte(call.args_count);
+
+            // Pop object + method + args, push result (method call pops 'this' too)
+            self.popStack(call.args_count + 1);
+        } else {
+            // Regular function call
+            try self.emitNode(call.callee);
+
+            // Emit arguments
+            try self.emitCallArgs(call);
+
+            try self.emit(.call);
+            try self.emitByte(call.args_count);
+
+            // Pop callee + args, push result
+            self.popStack(call.args_count);
         }
+    }
 
-        try self.emit(.call);
-        try self.emitByte(call.args_count);
-
-        // Pop callee + args, push result
-        self.popStack(call.args_count);
+    fn emitCallArgs(self: *CodeGen, call: Node.CallExpr) !void {
+        var i: u8 = 0;
+        while (i < call.args_count) : (i += 1) {
+            const arg_idx = self.nodes.getListIndex(call.args_start, i);
+            try self.emitNode(arg_idx);
+        }
     }
 
     fn emitNewExpr(self: *CodeGen, call: Node.CallExpr) !void {
         try self.emitNode(call.callee);
 
         var i: u8 = 0;
-        var arg_idx = call.args_start;
         while (i < call.args_count) : (i += 1) {
+            const arg_idx = self.nodes.getListIndex(call.args_start, i);
             try self.emitNode(arg_idx);
-            arg_idx += 1;
         }
 
         try self.emit(.call_constructor);
@@ -742,15 +667,14 @@ pub const CodeGen = struct {
         self.pushStack(1);
 
         var i: u16 = 0;
-        var elem_idx = array.elements_start;
         while (i < array.elements_count) : (i += 1) {
+            const elem_idx = self.nodes.getListIndex(array.elements_start, i);
             if (elem_idx != null_node) {
                 try self.emitNode(elem_idx);
             } else {
                 try self.emit(.push_undefined);
                 self.pushStack(1);
             }
-            elem_idx += 1;
         }
 
         self.popStack(array.elements_count);
@@ -761,12 +685,9 @@ pub const CodeGen = struct {
         self.pushStack(1);
 
         var i: u16 = 0;
-        var prop_idx = object.properties_start;
         while (i < object.properties_count) : (i += 1) {
-            const prop_node = self.nodes.get(prop_idx) orelse {
-                prop_idx += 1;
-                continue;
-            };
+            const prop_idx = self.nodes.getListIndex(object.properties_start, i);
+            const prop_node = self.nodes.get(prop_idx) orelse continue;
 
             if (prop_node.tag == .object_property) {
                 const prop = prop_node.data.property;
@@ -775,10 +696,7 @@ pub const CodeGen = struct {
                 self.pushStack(1);
 
                 // Get property key
-                const key_node = self.nodes.get(prop.key) orelse {
-                    prop_idx += 1;
-                    continue;
-                };
+                const key_node = self.nodes.get(prop.key) orelse continue;
                 if (key_node.tag == .lit_string) {
                     // Key is a string constant, use put_field
                     try self.emitNode(prop.value);
@@ -793,16 +711,95 @@ pub const CodeGen = struct {
                     self.popStack(3);
                 }
             }
-
-            prop_idx += 1;
         }
     }
 
     fn emitFunctionExpr(self: *CodeGen, node_idx: NodeIndex, func: Node.FunctionExpr) !void {
-        // Add function bytecode to constants and emit make_closure
-        const func_idx = try self.addFunctionConstant(node_idx);
+        _ = node_idx;
 
+        // Save current codegen state
+        const saved_code = self.code;
+        const saved_constants = self.constants;
+        const saved_upvalue_info = self.upvalue_info;
+        const saved_labels = self.labels;
+        const saved_pending_jumps = self.pending_jumps;
+        const saved_loop_stack = self.loop_stack;
+        const saved_scope = self.current_scope;
+        const saved_max_stack = self.max_stack_depth;
+        const saved_current_stack = self.current_stack_depth;
+
+        // Reset for function compilation
+        self.code = std.ArrayList(u8).empty;
+        self.constants = std.ArrayList(JSValue).empty;
+        self.upvalue_info = std.ArrayList(UpvalueInfo).empty;
+        self.labels = std.ArrayList(Label).empty;
+        self.pending_jumps = std.ArrayList(PendingJump).empty;
+        self.loop_stack = std.ArrayList(LoopContext).empty;
+        self.current_scope = func.scope_id;
+        self.max_stack_depth = 0;
+        self.current_stack_depth = 0;
+
+        // Compile function body
+        try self.emitNode(func.body);
+        try self.emit(.ret_undefined);
+        try self.resolveJumps();
+
+        // Get upvalue info from scope
         const scope = self.scopes.getScope(func.scope_id);
+        var upvalue_info_list: std.ArrayList(UpvalueInfo) = .empty;
+        for (scope.upvalues.items) |uv| {
+            try upvalue_info_list.append(self.allocator, .{
+                .is_local = uv.is_direct,
+                .index = uv.outer_slot,
+            });
+        }
+
+        // Create FunctionBytecode on heap
+        const func_bc = try self.allocator.create(FunctionBytecode);
+        const code_copy = try self.allocator.dupe(u8, self.code.items);
+        const consts_copy = try self.allocator.dupe(JSValue, self.constants.items);
+        const upvalue_copy = try self.allocator.dupe(UpvalueInfo, upvalue_info_list.items);
+
+        func_bc.* = .{
+            .header = .{},
+            .name_atom = func.name_atom,
+            .arg_count = func.params_count,
+            .local_count = self.scopes.getLocalCount(func.scope_id),
+            .stack_size = self.max_stack_depth,
+            .flags = .{
+                .is_generator = func.flags.is_generator,
+                .is_async = func.flags.is_async,
+                .has_rest = func.flags.has_rest_param,
+            },
+            .upvalue_count = @intCast(scope.upvalues.items.len),
+            .upvalue_info = upvalue_copy,
+            .code = code_copy,
+            .constants = consts_copy,
+            .source_map = null,
+        };
+
+        // Clean up function-local state (code/constants are now owned by func_bc copies)
+        self.code.deinit(self.allocator);
+        self.constants.deinit(self.allocator);
+        self.upvalue_info.deinit(self.allocator);
+        self.labels.deinit(self.allocator);
+        self.pending_jumps.deinit(self.allocator);
+        self.loop_stack.deinit(self.allocator);
+        upvalue_info_list.deinit(self.allocator);
+
+        // Restore parent state
+        self.code = saved_code;
+        self.constants = saved_constants;
+        self.upvalue_info = saved_upvalue_info;
+        self.labels = saved_labels;
+        self.pending_jumps = saved_pending_jumps;
+        self.loop_stack = saved_loop_stack;
+        self.current_scope = saved_scope;
+        self.max_stack_depth = saved_max_stack;
+        self.current_stack_depth = saved_current_stack;
+
+        // Add function bytecode to parent constants and emit opcode
+        const func_idx = try self.addConstant(JSValue.fromPtr(func_bc));
         const upvalue_count: u8 = @intCast(scope.upvalues.items.len);
 
         if (upvalue_count > 0) {
@@ -819,13 +816,10 @@ pub const CodeGen = struct {
     fn emitTemplateLiteral(self: *CodeGen, template: Node.TemplateExpr) !void {
         // Emit first string part
         var i: u8 = 0;
-        var part_idx = template.parts_start;
 
         while (i < template.parts_count) : (i += 1) {
-            const part = self.nodes.get(part_idx) orelse {
-                part_idx += 1;
-                continue;
-            };
+            const part_idx = self.nodes.getListIndex(template.parts_start, i);
+            const part = self.nodes.get(part_idx) orelse continue;
 
             if (part.tag == .template_part_string) {
                 try self.emitString(part.data.string_idx);
@@ -841,8 +835,6 @@ pub const CodeGen = struct {
                 try self.emit(.add);
                 self.popStack(1);
             }
-
-            part_idx += 1;
         }
 
         if (template.parts_count == 0) {
@@ -1094,29 +1086,22 @@ pub const CodeGen = struct {
 
         // Create labels for each case
         var i: u8 = 0;
-        var case_idx = switch_stmt.cases_start;
         while (i < switch_stmt.cases_count) : (i += 1) {
+            const case_idx = self.nodes.getListIndex(switch_stmt.cases_start, i);
             const label = try self.createLabel();
             try case_labels.append(self.allocator, label);
 
-            const case_node = self.nodes.get(case_idx) orelse {
-                case_idx += 1;
-                continue;
-            };
+            const case_node = self.nodes.get(case_idx) orelse continue;
             if (case_node.data.case_clause.test_expr == null_node) {
                 default_label = label;
             }
-            case_idx += 1;
         }
 
         // Emit comparisons
         i = 0;
-        case_idx = switch_stmt.cases_start;
         while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_node = self.nodes.get(case_idx) orelse {
-                case_idx += 1;
-                continue;
-            };
+            const case_idx = self.nodes.getListIndex(switch_stmt.cases_start, i);
+            const case_node = self.nodes.get(case_idx) orelse continue;
 
             if (case_node.data.case_clause.test_expr != null_node) {
                 try self.emit(.dup);
@@ -1127,8 +1112,6 @@ pub const CodeGen = struct {
                 try self.emitJump(.if_true, case_labels.items[i]);
                 self.popStack(1);
             }
-
-            case_idx += 1;
         }
 
         // Jump to default or end
@@ -1144,23 +1127,17 @@ pub const CodeGen = struct {
 
         // Emit case bodies
         i = 0;
-        case_idx = switch_stmt.cases_start;
         while (i < switch_stmt.cases_count) : (i += 1) {
+            const case_idx = self.nodes.getListIndex(switch_stmt.cases_start, i);
             try self.placeLabel(case_labels.items[i]);
 
-            const case_node = self.nodes.get(case_idx) orelse {
-                case_idx += 1;
-                continue;
-            };
+            const case_node = self.nodes.get(case_idx) orelse continue;
 
-            var body_idx = case_node.data.case_clause.body_start;
             var j: u16 = 0;
             while (j < case_node.data.case_clause.body_count) : (j += 1) {
+                const body_idx = self.nodes.getListIndex(case_node.data.case_clause.body_start, j);
                 try self.emitNode(body_idx);
-                body_idx += 1;
             }
-
-            case_idx += 1;
         }
 
         try self.placeLabel(end_label);
@@ -1168,10 +1145,9 @@ pub const CodeGen = struct {
 
     fn emitBlock(self: *CodeGen, block: Node.BlockData) !void {
         var i: u16 = 0;
-        var stmt_idx = block.stmts_start;
         while (i < block.stmts_count) : (i += 1) {
+            const stmt_idx = self.nodes.getListIndex(block.stmts_start, i);
             try self.emitNode(stmt_idx);
-            stmt_idx += 1;
         }
     }
 
@@ -1208,12 +1184,9 @@ pub const CodeGen = struct {
             self.pushStack(1);
             // Add props
             var i: u8 = 0;
-            var prop_idx = elem.props_start;
             while (i < elem.props_count) : (i += 1) {
-                const prop_node = self.nodes.get(prop_idx) orelse {
-                    prop_idx += 1;
-                    continue;
-                };
+                const prop_idx = self.nodes.getListIndex(elem.props_start, i);
+                const prop_node = self.nodes.get(prop_idx) orelse continue;
                 if (prop_node.tag == .jsx_attribute) {
                     try self.emit(.dup);
                     self.pushStack(1);
@@ -1227,7 +1200,6 @@ pub const CodeGen = struct {
                     try self.emitU16(prop_node.data.jsx_attr.name_atom);
                     self.popStack(2);
                 }
-                prop_idx += 1;
             }
         } else {
             try self.emit(.push_null);
@@ -1238,11 +1210,10 @@ pub const CodeGen = struct {
         var child_count: u8 = 0;
         if (elem.children_count > 0) {
             var i: u8 = 0;
-            var child_idx = elem.children_start;
             while (i < elem.children_count) : (i += 1) {
+                const child_idx = self.nodes.getListIndex(elem.children_start, i);
                 try self.emitNode(child_idx);
                 child_count += 1;
-                child_idx += 1;
             }
         }
 
@@ -1263,8 +1234,9 @@ pub const CodeGen = struct {
     }
 
     fn emitU16(self: *CodeGen, val: u16) !void {
-        try self.code.append(self.allocator, @truncate(val >> 8));
+        // Little-endian: low byte first, then high byte
         try self.code.append(self.allocator, @truncate(val));
+        try self.code.append(self.allocator, @truncate(val >> 8));
     }
 
     fn emitI16(self: *CodeGen, val: i16) !void {
@@ -1325,22 +1297,28 @@ pub const CodeGen = struct {
 
     // ============ Constant Pool ============
 
-    fn addConstant(self: *CodeGen, val: bytecode.JSValue) !u16 {
+    fn addConstant(self: *CodeGen, val: JSValue) !u16 {
         const idx = @as(u16, @intCast(self.constants.items.len));
         try self.constants.append(self.allocator, val);
         return idx;
     }
 
     fn addStringConstant(self: *CodeGen, str: []const u8) !u16 {
-        // Simplified - would need proper string table integration
-        _ = str;
-        return try self.addConstant(bytecode.JSValue.initUndefined());
+        if (self.strings) |strings| {
+            // Use string table to create interned string
+            const js_str = try strings.intern(str);
+            return try self.addConstant(JSValue.fromPtr(js_str));
+        } else {
+            // Fallback: create string directly (for standalone testing)
+            const js_str = try string.createString(self.allocator, str);
+            return try self.addConstant(JSValue.fromPtr(js_str));
+        }
     }
 
     fn addFunctionConstant(self: *CodeGen, node_idx: NodeIndex) !u16 {
         // Would compile function and add bytecode to constants
         _ = node_idx;
-        return try self.addConstant(bytecode.JSValue.initUndefined());
+        return try self.addConstant(JSValue.undefined_val);
     }
 
     // ============ Stack Tracking ============
