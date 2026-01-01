@@ -6,6 +6,7 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 const value = @import("value.zig");
+const object = @import("object.zig");
 
 /// GC configuration with FUGC-inspired techniques
 pub const GCConfig = struct {
@@ -321,6 +322,10 @@ pub const GC = struct {
     config: GCConfig,
     allocator: std.mem.Allocator,
 
+    /// Optional heap reference for proper memory deallocation during major GC
+    /// When set, majorGC() will properly free swept objects via heap.free()
+    heap_ptr: ?*heap.Heap = null,
+
     /// Forwarding pointers for evacuation (maps old ptr address -> new ptr)
     forwarding_pointers: std.AutoHashMap(usize, *anyopaque),
 
@@ -329,6 +334,9 @@ pub const GC = struct {
     major_gc_count: u64 = 0,
     total_bytes_allocated: usize = 0,
     total_bytes_freed: usize = 0,
+
+    /// Threshold for automatic major GC (number of tenured objects)
+    major_gc_threshold: usize = 10000,
 
     /// Current GC phase (for incremental GC, future)
     phase: GCPhase = .idle,
@@ -355,7 +363,13 @@ pub const GC = struct {
             .forwarding_pointers = std.AutoHashMap(usize, *anyopaque).init(allocator),
             .config = config,
             .allocator = allocator,
+            .heap_ptr = null,
         };
+    }
+
+    /// Set the heap reference for proper memory deallocation during major GC
+    pub fn setHeap(self: *GC, h: *heap.Heap) void {
+        self.heap_ptr = h;
     }
 
     pub fn deinit(self: *GC) void {
@@ -443,6 +457,9 @@ pub const GC = struct {
 
         // Clear forwarding pointers map for next GC cycle
         self.forwarding_pointers.clearRetainingCapacity();
+
+        // 5. Check if major GC is needed to prevent unbounded tenured growth
+        self.maybeDoMajorGC();
     }
 
     /// Forwarding pointer tracking for evacuation
@@ -530,20 +547,102 @@ pub const GC = struct {
         }
     }
 
-    /// Update pointers within a single object
+    /// Update pointers within a single object to point to new locations
     fn updateObjectPointers(self: *GC, ptr: *anyopaque) void {
-        // In a real implementation, we'd need object layout information
-        // to know which fields are pointers. For now, this is a placeholder.
-        // The actual implementation would iterate object slots and update
-        // any pointers that have forwarding addresses.
-        _ = self;
-        _ = ptr;
+        // Get object type from header
+        const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
+
+        switch (header.tag) {
+            .object => self.updateJSObjectPointers(ptr),
+            .value_array => self.updateValueArrayPointers(ptr, header.sizeBytes()),
+            .varref => self.updateVarRefPointers(ptr),
+            else => {}, // Other types don't contain updateable pointers
+        }
+    }
+
+    /// Update pointers within a JSObject
+    fn updateJSObjectPointers(self: *GC, ptr: *anyopaque) void {
+        const obj: *object.JSObject = @ptrCast(@alignCast(ptr));
+
+        // Update prototype pointer
+        if (obj.prototype) |proto| {
+            if (self.getForwardingPointer(@ptrCast(proto))) |new_ptr| {
+                obj.prototype = @ptrCast(@alignCast(new_ptr));
+            }
+        }
+
+        // Update inline slots
+        for (&obj.inline_slots) |*slot| {
+            if (slot.isPtr()) {
+                const old_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
+                if (self.getForwardingPointer(old_ptr)) |new_ptr| {
+                    slot.* = value.JSValue.fromPtr(new_ptr);
+                }
+            }
+        }
+
+        // Update overflow slots
+        if (obj.overflow_slots) |slots| {
+            for (slots[0..obj.overflow_capacity]) |*slot| {
+                if (slot.isPtr()) {
+                    const old_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
+                    if (self.getForwardingPointer(old_ptr)) |new_ptr| {
+                        slot.* = value.JSValue.fromPtr(new_ptr);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update pointers within a value array
+    fn updateValueArrayPointers(self: *GC, ptr: *anyopaque, size_bytes: usize) void {
+        const header_size = @sizeOf(heap.MemBlockHeader);
+        const data_size = size_bytes - header_size;
+        const num_values = data_size / @sizeOf(value.JSValue);
+
+        if (num_values == 0) return;
+
+        const values_ptr: [*]value.JSValue = @ptrCast(@alignCast(@as([*]u8, @ptrCast(ptr)) + header_size));
+
+        for (values_ptr[0..num_values]) |*val| {
+            if (val.isPtr()) {
+                const old_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+                if (self.getForwardingPointer(old_ptr)) |new_ptr| {
+                    val.* = value.JSValue.fromPtr(new_ptr);
+                }
+            }
+        }
+    }
+
+    /// Update pointers within an upvalue
+    fn updateVarRefPointers(self: *GC, ptr: *anyopaque) void {
+        const upvalue: *object.Upvalue = @ptrCast(@alignCast(ptr));
+
+        switch (upvalue.location) {
+            .closed => |*val| {
+                if (val.isPtr()) {
+                    const old_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+                    if (self.getForwardingPointer(old_ptr)) |new_ptr| {
+                        val.* = value.JSValue.fromPtr(new_ptr);
+                    }
+                }
+            },
+            .open => {},
+        }
     }
 
     /// Major GC: mark-sweep on tenured generation
-    /// Optionally accepts a heap pointer for proper memory deallocation
+    /// Uses the stored heap_ptr for proper memory deallocation
     pub fn majorGC(self: *GC) void {
-        self.majorGCWithHeap(null);
+        self.majorGCWithHeap(self.heap_ptr);
+    }
+
+    /// Check if major GC should be triggered based on tenured heap size
+    /// Call this after minor GC to prevent unbounded tenured growth
+    pub fn maybeDoMajorGC(self: *GC) void {
+        if (self.tenured.objects.items.len > self.major_gc_threshold) {
+            self.majorGC();
+        }
     }
 
     /// Major GC with explicit heap reference for memory deallocation
@@ -603,15 +702,86 @@ pub const GC = struct {
         }
     }
 
-    /// Scan an object's children (placeholder - needs object layout info)
+    /// Scan an object's children based on its type tag
+    /// Traverses all pointer fields and marks child values
     fn scanObject(self: *GC, ptr: *anyopaque) void {
-        // In a real implementation, we'd:
-        // 1. Get the object's type/layout from its header
-        // 2. Iterate all pointer fields
-        // 3. Mark each child value
-        // 4. Mark this object as black (fully scanned)
-        _ = self;
-        _ = ptr;
+        // Get object type from header
+        const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
+
+        switch (header.tag) {
+            .object => self.scanJSObject(ptr),
+            .value_array => self.scanValueArray(ptr, header.sizeBytes()),
+            .string => {}, // Strings don't contain pointers to other objects
+            .float64 => {}, // Float boxes don't contain pointers
+            .symbol => {}, // Symbols don't contain GC-managed pointers
+            .function_bytecode => {}, // Bytecode is static, constants are in constant pool
+            .varref => self.scanVarRef(ptr),
+            .byte_array => {}, // Raw bytes don't contain pointers
+            .free => {}, // Should not encounter free blocks during marking
+        }
+    }
+
+    /// Scan a JSObject's slots and prototype chain
+    fn scanJSObject(self: *GC, ptr: *anyopaque) void {
+        const obj: *object.JSObject = @ptrCast(@alignCast(ptr));
+
+        // Mark prototype (if present)
+        if (obj.prototype) |proto| {
+            self.gray_stack.push(@ptrCast(proto)) catch {};
+        }
+
+        // Scan inline slots - each may contain pointer values
+        for (&obj.inline_slots) |slot| {
+            if (slot.isPtr()) {
+                const child_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
+                self.gray_stack.push(child_ptr) catch {};
+            }
+        }
+
+        // Scan overflow slots (if present)
+        if (obj.overflow_slots) |slots| {
+            for (slots[0..obj.overflow_capacity]) |slot| {
+                if (slot.isPtr()) {
+                    const child_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
+                    self.gray_stack.push(child_ptr) catch {};
+                }
+            }
+        }
+    }
+
+    /// Scan a value array (array of JSValues)
+    fn scanValueArray(self: *GC, ptr: *anyopaque, size_bytes: usize) void {
+        // Value array: header followed by JSValue elements
+        const header_size = @sizeOf(heap.MemBlockHeader);
+        const data_size = size_bytes - header_size;
+        const num_values = data_size / @sizeOf(value.JSValue);
+
+        if (num_values == 0) return;
+
+        const values_ptr: [*]value.JSValue = @ptrCast(@alignCast(@as([*]u8, @ptrCast(ptr)) + header_size));
+
+        for (values_ptr[0..num_values]) |val| {
+            if (val.isPtr()) {
+                const child_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+                self.gray_stack.push(child_ptr) catch {};
+            }
+        }
+    }
+
+    /// Scan a variable reference (upvalue)
+    fn scanVarRef(self: *GC, ptr: *anyopaque) void {
+        const upvalue: *object.Upvalue = @ptrCast(@alignCast(ptr));
+
+        // If closed, the value is stored inline
+        switch (upvalue.location) {
+            .closed => |val| {
+                if (val.isPtr()) {
+                    const child_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+                    self.gray_stack.push(child_ptr) catch {};
+                }
+            },
+            .open => {}, // Open upvalues point to stack, not heap
+        }
     }
 
     /// Write barrier for cross-generation pointers
