@@ -43,6 +43,10 @@ pub const ConstantPool = @import("ir.zig").ConstantPool;
 pub const BinaryOp = @import("ir.zig").BinaryOp;
 pub const UnaryOp = @import("ir.zig").UnaryOp;
 
+// Phase 3: Optimized IR storage (SoA pattern)
+pub const IRStore = @import("ir.zig").IRStore;
+pub const DataPayload = @import("ir.zig").DataPayload;
+
 pub const ScopeAnalyzer = @import("scope.zig").ScopeAnalyzer;
 pub const Scope = @import("scope.zig").Scope;
 pub const Binding = @import("scope.zig").Binding;

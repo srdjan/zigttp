@@ -52,6 +52,10 @@ pub const Context = struct {
     global_obj: ?*object.JSObject,
     /// Root hidden class for new objects
     root_class: ?*object.HiddenClass,
+    /// Index-based hidden class pool (Phase 1 migration)
+    hidden_class_pool: ?*object.HiddenClassPool,
+    /// Root class index in the pool
+    root_class_idx: object.HiddenClassIndex,
     /// Built-in prototypes
     array_prototype: ?*object.JSObject,
     string_prototype: ?*object.JSObject,
@@ -83,6 +87,10 @@ pub const Context = struct {
         const root_class = try object.HiddenClass.init(allocator);
         errdefer root_class.deinit(allocator);
 
+        // Create index-based hidden class pool (Phase 1 migration)
+        const hidden_class_pool = try object.HiddenClassPool.init(allocator);
+        errdefer hidden_class_pool.deinit();
+
         // Create global object
         const global_obj = try object.JSObject.create(allocator, root_class, null);
         errdefer global_obj.destroy(allocator);
@@ -98,6 +106,8 @@ pub const Context = struct {
             .global = global_obj.toValue(),
             .global_obj = global_obj,
             .root_class = root_class,
+            .hidden_class_pool = hidden_class_pool,
+            .root_class_idx = hidden_class_pool.getEmptyClass(),
             .array_prototype = null,
             .string_prototype = null,
             .object_prototype = null,
@@ -123,6 +133,7 @@ pub const Context = struct {
         if (self.result_prototype) |proto| proto.destroy(self.allocator);
         if (self.global_obj) |g| g.destroy(self.allocator);
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
+        if (self.hidden_class_pool) |pool| pool.deinit();
 
         self.atoms.deinit();
         self.allocator.free(self.call_stack);
@@ -159,6 +170,30 @@ pub const Context = struct {
         const root_class = self.root_class orelse return error.NoRootClass;
         const func_obj = try object.JSObject.createNativeFunction(self.allocator, root_class, func, name, arg_count);
         try self.setGlobal(name, func_obj.toValue());
+    }
+
+    // ========================================================================
+    // Index-Based Hidden Class Operations (Phase 1)
+    // ========================================================================
+
+    /// Get a hidden class with an additional property
+    /// Returns the transitioned class index (cached if already exists)
+    pub fn getClassWithProperty(self: *Context, from: object.HiddenClassIndex, name: object.Atom) !object.HiddenClassIndex {
+        const pool = self.hidden_class_pool orelse return error.NoHiddenClassPool;
+        return pool.addProperty(from, name);
+    }
+
+    /// Look up property offset in a hidden class
+    /// Returns null if property not found
+    pub fn getPropertyOffset(self: *const Context, class_idx: object.HiddenClassIndex, name: object.Atom) ?u16 {
+        const pool = self.hidden_class_pool orelse return null;
+        return pool.findProperty(class_idx, name);
+    }
+
+    /// Get property count for a hidden class
+    pub fn getClassPropertyCount(self: *const Context, class_idx: object.HiddenClassIndex) u16 {
+        const pool = self.hidden_class_pool orelse return 0;
+        return pool.getPropertyCount(class_idx);
     }
 
     // ========================================================================
@@ -646,4 +681,49 @@ test "Context popFrame on empty returns null" {
 
     // No frames pushed
     try std.testing.expect(ctx.popFrame() == null);
+}
+
+test "Context index-based hidden class pool" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Pool should be initialized
+    try std.testing.expect(ctx.hidden_class_pool != null);
+
+    // Root class index should be the empty class
+    try std.testing.expectEqual(object.HiddenClassIndex.empty, ctx.root_class_idx);
+    try std.testing.expectEqual(@as(u16, 0), ctx.getClassPropertyCount(ctx.root_class_idx));
+}
+
+test "Context getClassWithProperty transitions" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Add property 'x' to empty class
+    const class_x = try ctx.getClassWithProperty(ctx.root_class_idx, .length);
+    try std.testing.expectEqual(@as(u16, 1), ctx.getClassPropertyCount(class_x));
+
+    // Property offset should be 0
+    const offset = ctx.getPropertyOffset(class_x, .length);
+    try std.testing.expect(offset != null);
+    try std.testing.expectEqual(@as(u16, 0), offset.?);
+
+    // Add another property 'y'
+    const class_xy = try ctx.getClassWithProperty(class_x, .name);
+    try std.testing.expectEqual(@as(u16, 2), ctx.getClassPropertyCount(class_xy));
+
+    // First property should still be at offset 0
+    try std.testing.expectEqual(@as(u16, 0), ctx.getPropertyOffset(class_xy, .length).?);
+    // Second property at offset 1
+    try std.testing.expectEqual(@as(u16, 1), ctx.getPropertyOffset(class_xy, .name).?);
 }

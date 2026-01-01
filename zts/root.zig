@@ -43,6 +43,8 @@ pub const pool = @import("pool.zig");
 pub const c_abi = @import("c_abi.zig");
 pub const http = @import("http.zig");
 pub const stripper = @import("stripper.zig");
+pub const intern_pool = @import("intern_pool.zig");
+pub const bytecode_cache = @import("bytecode_cache.zig");
 
 // Re-export main types for convenience
 pub const JSValue = value.JSValue;
@@ -54,8 +56,11 @@ pub const Runtime = pool.LockFreePool.Runtime;
 pub const Interpreter = interpreter.Interpreter;
 pub const Opcode = bytecode.Opcode;
 pub const FunctionBytecode = bytecode.FunctionBytecode;
+pub const FunctionBytecodeCompact = bytecode.FunctionBytecodeCompact;
 pub const Atom = object.Atom;
 pub const HiddenClass = object.HiddenClass;
+pub const HiddenClassIndex = object.HiddenClassIndex;
+pub const HiddenClassPool = object.HiddenClassPool;
 pub const JSObject = object.JSObject;
 pub const NativeFn = object.NativeFn;
 pub const InlineCache = object.InlineCache;
@@ -66,6 +71,9 @@ pub const Parser = parser.Parser;
 pub const StripResult = stripper.StripResult;
 pub const StripOptions = stripper.StripOptions;
 pub const strip = stripper.strip;
+pub const InternPool = intern_pool.InternPool;
+pub const InternPoolIndex = intern_pool.Index;
+pub const BytecodeCache = bytecode_cache.BytecodeCache;
 
 /// Version information
 pub const version = struct {

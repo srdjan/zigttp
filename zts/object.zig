@@ -632,6 +632,223 @@ pub const PropertySlot = struct {
     flags: PropertyFlags,
 };
 
+// ============================================================================
+// Index-Based Hidden Class System (Zig Compiler Pattern)
+// ============================================================================
+
+/// Index into HiddenClassPool - uses u32 for 50% memory savings vs pointers
+pub const HiddenClassIndex = enum(u32) {
+    /// Empty/root hidden class (no properties)
+    empty = 0,
+    /// Sentinel for null/invalid
+    none = std.math.maxInt(u32),
+    /// Dynamic indices
+    _,
+
+    pub fn isNone(self: HiddenClassIndex) bool {
+        return self == .none;
+    }
+
+    pub fn toInt(self: HiddenClassIndex) u32 {
+        return @intFromEnum(self);
+    }
+
+    pub fn fromInt(val: u32) HiddenClassIndex {
+        return @enumFromInt(val);
+    }
+};
+
+/// Pooled hidden class storage using MultiArrayList pattern
+/// All hidden classes share a single pool for memory efficiency and serialization
+pub const HiddenClassPool = struct {
+    allocator: std.mem.Allocator,
+
+    /// Core data stored as structure-of-arrays for cache efficiency
+    /// Each array index corresponds to a HiddenClassIndex
+    property_counts: std.ArrayListUnmanaged(u16),
+    properties_starts: std.ArrayListUnmanaged(u32),
+    prototype_indices: std.ArrayListUnmanaged(HiddenClassIndex),
+
+    /// Shared property storage using true structure-of-arrays (Phase 2 optimization)
+    /// 7 bytes per property vs 8 bytes in AoS format (12.5% memory savings)
+    /// Better cache locality for name lookups (most common operation)
+    property_names: std.ArrayListUnmanaged(Atom),
+    property_offsets: std.ArrayListUnmanaged(u16),
+    property_flags: std.ArrayListUnmanaged(PropertyFlags),
+
+    /// Transition table: flat array with entries [from_class: u32, atom: u32, to_class: u32]
+    /// Looked up via linear scan (small number of transitions per class)
+    transitions: std.ArrayListUnmanaged(u32),
+
+    /// Number of allocated classes
+    count: u32,
+
+    const TRANSITION_ENTRY_SIZE = 3; // from, atom, to
+
+    pub fn init(allocator: std.mem.Allocator) !*HiddenClassPool {
+        const pool = try allocator.create(HiddenClassPool);
+        errdefer allocator.destroy(pool);
+
+        pool.* = .{
+            .allocator = allocator,
+            .property_counts = .empty,
+            .properties_starts = .empty,
+            .prototype_indices = .empty,
+            .property_names = .empty,
+            .property_offsets = .empty,
+            .property_flags = .empty,
+            .transitions = .empty,
+            .count = 0,
+        };
+
+        // Allocate the empty root class at index 0
+        _ = try pool.allocClass(0, .none);
+
+        return pool;
+    }
+
+    pub fn deinit(self: *HiddenClassPool) void {
+        self.property_counts.deinit(self.allocator);
+        self.properties_starts.deinit(self.allocator);
+        self.prototype_indices.deinit(self.allocator);
+        self.property_names.deinit(self.allocator);
+        self.property_offsets.deinit(self.allocator);
+        self.property_flags.deinit(self.allocator);
+        self.transitions.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+
+    /// Allocate a new hidden class with given property count
+    fn allocClass(self: *HiddenClassPool, prop_count: u16, prototype: HiddenClassIndex) !HiddenClassIndex {
+        const idx = self.count;
+        self.count += 1;
+
+        try self.property_counts.append(self.allocator, prop_count);
+        try self.properties_starts.append(self.allocator, @intCast(self.property_names.items.len));
+        try self.prototype_indices.append(self.allocator, prototype);
+
+        return HiddenClassIndex.fromInt(idx);
+    }
+
+    /// Get property count for a class
+    pub fn getPropertyCount(self: *const HiddenClassPool, idx: HiddenClassIndex) u16 {
+        if (idx.isNone()) return 0;
+        const i = idx.toInt();
+        if (i >= self.count) return 0;
+        return self.property_counts.items[i];
+    }
+
+    /// Get prototype index for a class
+    pub fn getPrototype(self: *const HiddenClassPool, idx: HiddenClassIndex) HiddenClassIndex {
+        if (idx.isNone()) return .none;
+        const i = idx.toInt();
+        if (i >= self.count) return .none;
+        return self.prototype_indices.items[i];
+    }
+
+    /// Find property by name in a class, returns slot offset or null
+    /// Uses SoA layout for cache-efficient name comparison
+    pub fn findProperty(self: *const HiddenClassPool, idx: HiddenClassIndex, name: Atom) ?u16 {
+        if (idx.isNone()) return null;
+        const i = idx.toInt();
+        if (i >= self.count) return null;
+
+        const prop_count = self.property_counts.items[i];
+        if (prop_count == 0) return null;
+
+        const start = self.properties_starts.items[i];
+        const names = self.property_names.items[start..][0..prop_count];
+
+        // Linear scan over contiguous name array (cache-friendly)
+        for (names, 0..) |n, slot_idx| {
+            if (n == name) {
+                return self.property_offsets.items[start + slot_idx];
+            }
+        }
+        return null;
+    }
+
+    /// Get or create transition to new class with added property
+    pub fn addProperty(self: *HiddenClassPool, from_idx: HiddenClassIndex, name: Atom) !HiddenClassIndex {
+        const from = from_idx.toInt();
+
+        // Check for existing transition
+        const trans = self.transitions.items;
+        var i: usize = 0;
+        while (i + TRANSITION_ENTRY_SIZE <= trans.len) : (i += TRANSITION_ENTRY_SIZE) {
+            if (trans[i] == from and trans[i + 1] == @intFromEnum(name)) {
+                return HiddenClassIndex.fromInt(trans[i + 2]);
+            }
+        }
+
+        // Create new class
+        const old_prop_count = self.getPropertyCount(from_idx);
+        const new_prop_count = old_prop_count + 1;
+        const prototype = self.getPrototype(from_idx);
+
+        const new_idx = try self.allocClass(new_prop_count, prototype);
+
+        // Copy old properties to new location (SoA format)
+        if (old_prop_count > 0) {
+            const old_start = self.properties_starts.items[from];
+            try self.property_names.appendSlice(self.allocator, self.property_names.items[old_start..][0..old_prop_count]);
+            try self.property_offsets.appendSlice(self.allocator, self.property_offsets.items[old_start..][0..old_prop_count]);
+            try self.property_flags.appendSlice(self.allocator, self.property_flags.items[old_start..][0..old_prop_count]);
+        }
+
+        // Add new property using SoA arrays
+        try self.property_names.append(self.allocator, name);
+        try self.property_offsets.append(self.allocator, old_prop_count); // offset = old count
+        try self.property_flags.append(self.allocator, .{}); // default flags
+
+        // Record transition
+        try self.transitions.append(self.allocator, from);
+        try self.transitions.append(self.allocator, @intFromEnum(name));
+        try self.transitions.append(self.allocator, new_idx.toInt());
+
+        return new_idx;
+    }
+
+    /// Get empty root class index
+    pub fn getEmptyClass(self: *const HiddenClassPool) HiddenClassIndex {
+        _ = self;
+        return .empty;
+    }
+
+    /// Get property flags by name
+    pub fn getPropertyFlags(self: *const HiddenClassPool, idx: HiddenClassIndex, name: Atom) ?PropertyFlags {
+        if (idx.isNone()) return null;
+        const i = idx.toInt();
+        if (i >= self.count) return null;
+
+        const prop_count = self.property_counts.items[i];
+        if (prop_count == 0) return null;
+
+        const start = self.properties_starts.items[i];
+        const names = self.property_names.items[start..][0..prop_count];
+
+        for (names, 0..) |n, slot_idx| {
+            if (n == name) {
+                return self.property_flags.items[start + slot_idx];
+            }
+        }
+        return null;
+    }
+
+    /// Iterator for property names in a class
+    pub fn propertyNames(self: *const HiddenClassPool, idx: HiddenClassIndex) []const Atom {
+        if (idx.isNone()) return &.{};
+        const i = idx.toInt();
+        if (i >= self.count) return &.{};
+
+        const prop_count = self.property_counts.items[i];
+        if (prop_count == 0) return &.{};
+
+        const start = self.properties_starts.items[i];
+        return self.property_names.items[start..][0..prop_count];
+    }
+};
+
 /// Hidden class (shape) for objects
 pub const HiddenClass = struct {
     properties: []const PropertySlot,
@@ -1879,4 +2096,114 @@ test "PropertyIterator" {
     }
 
     try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+// ============================================================================
+// HiddenClassPool Tests (Index-Based System)
+// ============================================================================
+
+test "HiddenClassPool init and empty class" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    // Empty class at index 0
+    const empty = pool.getEmptyClass();
+    try std.testing.expectEqual(HiddenClassIndex.empty, empty);
+    try std.testing.expectEqual(@as(u16, 0), pool.getPropertyCount(empty));
+    try std.testing.expect(pool.getPrototype(empty).isNone());
+}
+
+test "HiddenClassPool addProperty transitions" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    const empty = pool.getEmptyClass();
+
+    // Add 'length' property
+    const class1 = try pool.addProperty(empty, .length);
+    try std.testing.expectEqual(@as(u16, 1), pool.getPropertyCount(class1));
+
+    // Find property
+    const slot = pool.findProperty(class1, .length);
+    try std.testing.expect(slot != null);
+    try std.testing.expectEqual(@as(u16, 0), slot.?);
+
+    // Property not found in empty class
+    try std.testing.expect(pool.findProperty(empty, .length) == null);
+}
+
+test "HiddenClassPool transition caching" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    const empty = pool.getEmptyClass();
+
+    // Add same property twice should return same class
+    const class1 = try pool.addProperty(empty, .length);
+    const class2 = try pool.addProperty(empty, .length);
+    try std.testing.expectEqual(class1, class2);
+}
+
+test "HiddenClassPool multiple properties" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    const empty = pool.getEmptyClass();
+
+    // Add length, then prototype
+    const class1 = try pool.addProperty(empty, .length);
+    const class2 = try pool.addProperty(class1, .prototype);
+
+    try std.testing.expectEqual(@as(u16, 2), pool.getPropertyCount(class2));
+
+    // Both properties should be findable
+    const length_slot = pool.findProperty(class2, .length);
+    const proto_slot = pool.findProperty(class2, .prototype);
+    try std.testing.expect(length_slot != null);
+    try std.testing.expect(proto_slot != null);
+    try std.testing.expectEqual(@as(u16, 0), length_slot.?);
+    try std.testing.expectEqual(@as(u16, 1), proto_slot.?);
+}
+
+test "HiddenClassIndex none check" {
+    try std.testing.expect(HiddenClassIndex.none.isNone());
+    try std.testing.expect(!HiddenClassIndex.empty.isNone());
+    try std.testing.expect(!HiddenClassIndex.fromInt(5).isNone());
+}
+
+test "HiddenClassPool propertyNames SoA access" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    const empty = pool.getEmptyClass();
+
+    // Empty class has no properties
+    try std.testing.expectEqual(@as(usize, 0), pool.propertyNames(empty).len);
+
+    // Add three properties
+    const class1 = try pool.addProperty(empty, .length);
+    const class2 = try pool.addProperty(class1, .name);
+    const class3 = try pool.addProperty(class2, .message);
+
+    // Verify propertyNames returns correct slice
+    const names = pool.propertyNames(class3);
+    try std.testing.expectEqual(@as(usize, 3), names.len);
+    try std.testing.expectEqual(Atom.length, names[0]);
+    try std.testing.expectEqual(Atom.name, names[1]);
+    try std.testing.expectEqual(Atom.message, names[2]);
+
+    // Verify getPropertyFlags works
+    const flags = pool.getPropertyFlags(class3, .name);
+    try std.testing.expect(flags != null);
+    try std.testing.expect(flags.?.enumerable == true); // default is true
 }

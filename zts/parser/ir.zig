@@ -718,6 +718,245 @@ pub const ConstantPool = struct {
     }
 };
 
+// ============================================================================
+// Phase 3: Optimized IR Storage using MultiArrayList (Zig Compiler Pattern)
+// ============================================================================
+
+/// Compact 8-byte data payload for IR nodes
+/// Larger data is stored in extra[] and referenced by index
+pub const DataPayload = extern struct {
+    /// First 4 bytes - primary data
+    a: u32,
+    /// Second 4 bytes - secondary data or extra index
+    b: u32,
+
+    pub const Tag = enum(u4) {
+        /// Direct integer value (a = value, b unused)
+        int_direct,
+        /// Index references: a = index, b = count or secondary index
+        index_pair,
+        /// Extra data reference: a = extra_start, b = extra_len
+        extra_ref,
+        /// Binding reference packed
+        binding,
+        /// Binary op packed: a[0:8] = op, a[8:32] = left, b = right
+        binary_packed,
+        /// Flags and indices
+        flags_index,
+    };
+
+    /// Pack an integer directly
+    pub fn fromInt(val: i32) DataPayload {
+        return .{ .a = @bitCast(val), .b = 0 };
+    }
+
+    /// Pack two indices
+    pub fn fromIndices(idx1: NodeIndex, idx2: NodeIndex) DataPayload {
+        return .{ .a = idx1, .b = idx2 };
+    }
+
+    /// Pack index and count
+    pub fn fromIndexCount(start: NodeIndex, count: u16) DataPayload {
+        return .{ .a = start, .b = count };
+    }
+
+    /// Pack binary expression
+    pub fn fromBinary(op: BinaryOp, left: NodeIndex, right: NodeIndex) DataPayload {
+        return .{
+            .a = (@as(u32, @intFromEnum(op)) << 24) | (left & 0xFFFFFF),
+            .b = right,
+        };
+    }
+
+    /// Unpack binary expression
+    pub fn toBinary(self: DataPayload) struct { op: BinaryOp, left: NodeIndex, right: NodeIndex } {
+        return .{
+            .op = @enumFromInt(@as(u8, @truncate(self.a >> 24))),
+            .left = self.a & 0xFFFFFF,
+            .right = self.b,
+        };
+    }
+
+    /// Get as signed integer
+    pub fn toInt(self: DataPayload) i32 {
+        return @bitCast(self.a);
+    }
+
+    /// Get first index
+    pub fn getIndex(self: DataPayload) NodeIndex {
+        return self.a;
+    }
+
+    /// Get count (from b)
+    pub fn getCount(self: DataPayload) u16 {
+        return @truncate(self.b);
+    }
+
+    /// Get second index
+    pub fn getIndex2(self: DataPayload) NodeIndex {
+        return self.b;
+    }
+};
+
+/// Optimized IR storage using Structure-of-Arrays pattern
+/// ~47% memory reduction compared to Array-of-Structs Node
+///
+/// Memory layout comparison (per node):
+///   AoS (Node struct):  tag(1) + pad(3) + loc(12) + data(~24) = ~40 bytes
+///   SoA (IRStore):      tag(1) + loc(10) + data(8) = 19 bytes
+pub const IRStore = struct {
+    allocator: std.mem.Allocator,
+
+    /// Node tags - 1 byte each, contiguous for fast dispatch
+    tags: std.ArrayListUnmanaged(NodeTag),
+
+    /// Source locations - 10 bytes each (packed)
+    locs: std.ArrayListUnmanaged(SourceLocation),
+
+    /// Compact data payloads - 8 bytes each
+    data: std.ArrayListUnmanaged(DataPayload),
+
+    /// Extra data for variable-length content
+    /// Used for: function params, object properties, switch cases, etc.
+    extra: std.ArrayListUnmanaged(u32),
+
+    /// Storage for node index lists (statements, arguments, etc.)
+    index_lists: std.ArrayListUnmanaged(NodeIndex),
+
+    pub fn init(allocator: std.mem.Allocator) IRStore {
+        return .{
+            .allocator = allocator,
+            .tags = .empty,
+            .locs = .empty,
+            .data = .empty,
+            .extra = .empty,
+            .index_lists = .empty,
+        };
+    }
+
+    pub fn deinit(self: *IRStore) void {
+        self.tags.deinit(self.allocator);
+        self.locs.deinit(self.allocator);
+        self.data.deinit(self.allocator);
+        self.extra.deinit(self.allocator);
+        self.index_lists.deinit(self.allocator);
+    }
+
+    /// Add a node and return its index
+    pub fn addNode(self: *IRStore, tag: NodeTag, loc: SourceLocation, payload: DataPayload) !NodeIndex {
+        const idx = @as(NodeIndex, @intCast(self.tags.items.len));
+        try self.tags.append(self.allocator, tag);
+        try self.locs.append(self.allocator, loc);
+        try self.data.append(self.allocator, payload);
+        return idx;
+    }
+
+    /// Add extra data and return starting index
+    pub fn addExtra(self: *IRStore, values: []const u32) !u32 {
+        const start = @as(u32, @intCast(self.extra.items.len));
+        try self.extra.appendSlice(self.allocator, values);
+        return start;
+    }
+
+    /// Add a single extra value
+    pub fn addExtraValue(self: *IRStore, value: u32) !u32 {
+        const idx = @as(u32, @intCast(self.extra.items.len));
+        try self.extra.append(self.allocator, value);
+        return idx;
+    }
+
+    /// Get node tag
+    pub fn getTag(self: *const IRStore, idx: NodeIndex) NodeTag {
+        return self.tags.items[idx];
+    }
+
+    /// Get node location
+    pub fn getLoc(self: *const IRStore, idx: NodeIndex) SourceLocation {
+        return self.locs.items[idx];
+    }
+
+    /// Get node data payload
+    pub fn getData(self: *const IRStore, idx: NodeIndex) DataPayload {
+        return self.data.items[idx];
+    }
+
+    /// Get extra data slice
+    pub fn getExtra(self: *const IRStore, start: u32, count: u32) []const u32 {
+        return self.extra.items[start..][0..count];
+    }
+
+    /// Get single extra value
+    pub fn getExtraValue(self: *const IRStore, idx: u32) u32 {
+        return self.extra.items[idx];
+    }
+
+    /// Add index list and return start position
+    pub fn addIndexList(self: *IRStore, indices: []const NodeIndex) !NodeIndex {
+        if (indices.len == 0) return null_node;
+        const start = @as(NodeIndex, @intCast(self.index_lists.items.len));
+        try self.index_lists.appendSlice(self.allocator, indices);
+        return start;
+    }
+
+    /// Get index from list
+    pub fn getListIndex(self: *const IRStore, list_start: NodeIndex, offset: u16) NodeIndex {
+        const pos = list_start + offset;
+        if (pos >= self.index_lists.items.len) return null_node;
+        return self.index_lists.items[pos];
+    }
+
+    /// Node count
+    pub fn len(self: *const IRStore) usize {
+        return self.tags.items.len;
+    }
+
+    // --- Convenience methods for common node types ---
+
+    /// Add integer literal
+    pub fn addLitInt(self: *IRStore, loc: SourceLocation, value: i32) !NodeIndex {
+        return self.addNode(.lit_int, loc, DataPayload.fromInt(value));
+    }
+
+    /// Add float literal (idx into constant pool)
+    pub fn addLitFloat(self: *IRStore, loc: SourceLocation, pool_idx: u16) !NodeIndex {
+        return self.addNode(.lit_float, loc, .{ .a = pool_idx, .b = 0 });
+    }
+
+    /// Add string literal (idx into constant pool)
+    pub fn addLitString(self: *IRStore, loc: SourceLocation, pool_idx: u16) !NodeIndex {
+        return self.addNode(.lit_string, loc, .{ .a = pool_idx, .b = 0 });
+    }
+
+    /// Add binary expression
+    pub fn addBinary(self: *IRStore, loc: SourceLocation, op: BinaryOp, left: NodeIndex, right: NodeIndex) !NodeIndex {
+        return self.addNode(.binary_op, loc, DataPayload.fromBinary(op, left, right));
+    }
+
+    /// Add unary expression
+    pub fn addUnary(self: *IRStore, loc: SourceLocation, op: UnaryOp, operand: NodeIndex) !NodeIndex {
+        return self.addNode(.unary_op, loc, .{ .a = @intFromEnum(op), .b = operand });
+    }
+
+    /// Add identifier reference
+    pub fn addIdentifier(self: *IRStore, loc: SourceLocation, binding: BindingRef) !NodeIndex {
+        // Pack binding: scope_id(16) | slot(16) in a, kind(8) in b
+        return self.addNode(.identifier, loc, .{
+            .a = (@as(u32, binding.scope_id) << 16) | binding.slot,
+            .b = @intFromEnum(binding.kind),
+        });
+    }
+
+    /// Unpack identifier binding
+    pub fn getBinding(self: *const IRStore, idx: NodeIndex) BindingRef {
+        const d = self.getData(idx);
+        return .{
+            .scope_id = @truncate(d.a >> 16),
+            .slot = @truncate(d.a),
+            .kind = @enumFromInt(@as(u2, @truncate(d.b))),
+        };
+    }
+};
+
 test "node creation" {
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
@@ -760,4 +999,72 @@ test "constant pool" {
 
     try std.testing.expectEqualStrings("hello", pool.getString(0).?);
     try std.testing.expectEqualStrings("world", pool.getString(1).?);
+}
+
+test "IRStore basic operations" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+
+    // Add integer literal
+    const idx1 = try store.addLitInt(loc, 42);
+    try std.testing.expectEqual(@as(NodeIndex, 0), idx1);
+    try std.testing.expectEqual(NodeTag.lit_int, store.getTag(idx1));
+    try std.testing.expectEqual(@as(i32, 42), store.getData(idx1).toInt());
+
+    // Add binary expression
+    const idx2 = try store.addLitInt(loc, 10);
+    const idx3 = try store.addBinary(loc, .add, idx1, idx2);
+
+    try std.testing.expectEqual(NodeTag.binary_op, store.getTag(idx3));
+    const bin = store.getData(idx3).toBinary();
+    try std.testing.expectEqual(BinaryOp.add, bin.op);
+    try std.testing.expectEqual(idx1, bin.left);
+    try std.testing.expectEqual(idx2, bin.right);
+}
+
+test "IRStore identifier binding" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+
+    const binding = BindingRef{
+        .scope_id = 5,
+        .slot = 3,
+        .kind = .upvalue,
+    };
+
+    const idx = try store.addIdentifier(loc, binding);
+    const unpacked = store.getBinding(idx);
+
+    try std.testing.expectEqual(@as(ScopeId, 5), unpacked.scope_id);
+    try std.testing.expectEqual(@as(u16, 3), unpacked.slot);
+    try std.testing.expectEqual(BindingRef.BindingKind.upvalue, unpacked.kind);
+}
+
+test "IRStore extra data" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    // Add some extra data (e.g., for function parameters)
+    const extra_data = [_]u32{ 10, 20, 30, 40 };
+    const start = try store.addExtra(&extra_data);
+
+    try std.testing.expectEqual(@as(u32, 0), start);
+
+    const retrieved = store.getExtra(start, 4);
+    try std.testing.expectEqual(@as(u32, 10), retrieved[0]);
+    try std.testing.expectEqual(@as(u32, 20), retrieved[1]);
+    try std.testing.expectEqual(@as(u32, 30), retrieved[2]);
+    try std.testing.expectEqual(@as(u32, 40), retrieved[3]);
+}
+
+test "IRStore memory efficiency" {
+    // Verify DataPayload is exactly 8 bytes
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(DataPayload));
+
+    // NodeTag should be 1 byte
+    try std.testing.expectEqual(@as(usize, 1), @sizeOf(NodeTag));
 }

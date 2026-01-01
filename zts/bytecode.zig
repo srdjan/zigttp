@@ -243,6 +243,142 @@ pub const FunctionFlags = packed struct {
     _reserved: u3 = 0,
 };
 
+// ============================================================================
+// Phase 4: Compact Bytecode with Extra Data Pattern
+// ============================================================================
+
+/// Compact function bytecode with single allocation
+/// All variable-length data is stored inline after the header
+/// Memory layout: [Header | code bytes | constant indices | upvalue info]
+pub const FunctionBytecodeCompact = struct {
+    /// Fixed header (always present)
+    header: BytecodeHeader,
+    name_atom: u32,
+    arg_count: u16,
+    local_count: u16,
+    stack_size: u16,
+    flags: FunctionFlags,
+    upvalue_count: u8,
+    _pad: u8 = 0,
+
+    /// Inline data sizes (used to calculate offsets)
+    code_len: u32,
+    const_count: u16,
+    _pad2: u16 = 0,
+
+    // Variable-length data follows in memory:
+    // - code: [code_len]u8
+    // - constants: [const_count]u32 (indices into InternPool or raw values)
+    // - upvalue_info: [upvalue_count]UpvalueInfo
+
+    pub const HEADER_SIZE = @sizeOf(FunctionBytecodeCompact);
+
+    /// Calculate total size needed for allocation
+    pub fn calcSize(code_len: u32, const_count: u16, upvalue_count: u8) usize {
+        var size: usize = HEADER_SIZE;
+        size += code_len; // code bytes
+        size = std.mem.alignForward(usize, size, @alignOf(u32)); // align for constants
+        size += @as(usize, const_count) * @sizeOf(u32);
+        size = std.mem.alignForward(usize, size, @alignOf(UpvalueInfo)); // align for upvalue info
+        size += @as(usize, upvalue_count) * @sizeOf(UpvalueInfo);
+        return size;
+    }
+
+    /// Get code bytes slice
+    pub fn getCode(self: *const FunctionBytecodeCompact) []const u8 {
+        const base = @as([*]const u8, @ptrCast(self));
+        return base[HEADER_SIZE..][0..self.code_len];
+    }
+
+    /// Get constants as u32 indices
+    pub fn getConstants(self: *const FunctionBytecodeCompact) []const u32 {
+        const base = @as([*]const u8, @ptrCast(self));
+        const code_end = HEADER_SIZE + self.code_len;
+        const const_start = std.mem.alignForward(usize, code_end, @alignOf(u32));
+        const const_ptr: [*]const u32 = @ptrCast(@alignCast(base + const_start));
+        return const_ptr[0..self.const_count];
+    }
+
+    /// Get upvalue info slice
+    pub fn getUpvalues(self: *const FunctionBytecodeCompact) []const UpvalueInfo {
+        const base = @as([*]const u8, @ptrCast(self));
+        const code_end = HEADER_SIZE + self.code_len;
+        const const_start = std.mem.alignForward(usize, code_end, @alignOf(u32));
+        const const_end = const_start + @as(usize, self.const_count) * @sizeOf(u32);
+        const upval_start = std.mem.alignForward(usize, const_end, @alignOf(UpvalueInfo));
+        const upval_ptr: [*]const UpvalueInfo = @ptrCast(@alignCast(base + upval_start));
+        return upval_ptr[0..self.upvalue_count];
+    }
+
+    /// Create a compact bytecode from components
+    pub fn create(
+        allocator: std.mem.Allocator,
+        header: BytecodeHeader,
+        name_atom: u32,
+        arg_count: u16,
+        local_count: u16,
+        stack_size: u16,
+        flags: FunctionFlags,
+        code: []const u8,
+        constants: []const u32,
+        upvalues: []const UpvalueInfo,
+    ) !*FunctionBytecodeCompact {
+        const upvalue_count: u8 = @intCast(@min(upvalues.len, 255));
+        const code_len: u32 = @intCast(code.len);
+        const const_count: u16 = @intCast(@min(constants.len, 65535));
+
+        const total_size = calcSize(code_len, const_count, upvalue_count);
+        const bytes = try allocator.alignedAlloc(u8, .@"8", total_size);
+        errdefer allocator.free(bytes);
+
+        // Initialize header
+        const self: *FunctionBytecodeCompact = @ptrCast(@alignCast(bytes.ptr));
+        self.* = .{
+            .header = header,
+            .name_atom = name_atom,
+            .arg_count = arg_count,
+            .local_count = local_count,
+            .stack_size = stack_size,
+            .flags = flags,
+            .upvalue_count = upvalue_count,
+            .code_len = code_len,
+            .const_count = const_count,
+        };
+
+        // Copy code
+        const code_dest = bytes[HEADER_SIZE..][0..code_len];
+        @memcpy(code_dest, code);
+
+        // Copy constants
+        const code_end = HEADER_SIZE + code_len;
+        const const_start = std.mem.alignForward(usize, code_end, @alignOf(u32));
+        const const_dest: [*]u32 = @ptrCast(@alignCast(bytes.ptr + const_start));
+        @memcpy(const_dest[0..const_count], constants);
+
+        // Copy upvalue info
+        const const_end = const_start + @as(usize, const_count) * @sizeOf(u32);
+        const upval_start = std.mem.alignForward(usize, const_end, @alignOf(UpvalueInfo));
+        const upval_dest: [*]UpvalueInfo = @ptrCast(@alignCast(bytes.ptr + upval_start));
+        @memcpy(upval_dest[0..upvalue_count], upvalues);
+
+        return self;
+    }
+
+    /// Free the compact bytecode
+    pub fn destroy(self: *FunctionBytecodeCompact, allocator: std.mem.Allocator) void {
+        const total_size = calcSize(self.code_len, self.const_count, self.upvalue_count);
+        const bytes: [*]align(8) u8 = @ptrCast(self);
+        allocator.free(bytes[0..total_size]);
+    }
+
+    /// Get raw bytes for serialization
+    pub fn asBytes(self: *const FunctionBytecodeCompact) []const u8 {
+        const total_size = calcSize(self.code_len, self.const_count, self.upvalue_count);
+        const base = @as([*]const u8, @ptrCast(self));
+        return base[0..total_size];
+    }
+};
+
 test "Opcode encoding" {
     try std.testing.expectEqual(@as(u8, 0x20), @intFromEnum(Opcode.add));
     try std.testing.expectEqual(@as(u8, 0x50), @intFromEnum(Opcode.goto));
@@ -259,4 +395,95 @@ test "BytecodeHeader" {
     const header = BytecodeHeader{};
     try std.testing.expectEqual(MAGIC, header.magic);
     try std.testing.expectEqual(VERSION_MAJOR, header.version_major);
+}
+
+test "FunctionBytecodeCompact creation and access" {
+    const allocator = std.testing.allocator;
+
+    const code = [_]u8{ 0x01, 0x00, 0x02, 0x20, 0x53 }; // push_const 2, add, ret
+    const constants = [_]u32{ 42, 100, 200 };
+    const upvalues = [_]UpvalueInfo{
+        .{ .is_local = true, .index = 0 },
+        .{ .is_local = false, .index = 1 },
+    };
+
+    const func = try FunctionBytecodeCompact.create(
+        allocator,
+        .{},
+        0, // name_atom
+        2, // arg_count
+        4, // local_count
+        8, // stack_size
+        .{}, // flags
+        &code,
+        &constants,
+        &upvalues,
+    );
+    defer func.destroy(allocator);
+
+    // Verify header fields
+    try std.testing.expectEqual(@as(u16, 2), func.arg_count);
+    try std.testing.expectEqual(@as(u16, 4), func.local_count);
+    try std.testing.expectEqual(@as(u16, 8), func.stack_size);
+
+    // Verify code access
+    const retrieved_code = func.getCode();
+    try std.testing.expectEqual(@as(usize, 5), retrieved_code.len);
+    try std.testing.expectEqual(@as(u8, 0x01), retrieved_code[0]);
+    try std.testing.expectEqual(@as(u8, 0x53), retrieved_code[4]);
+
+    // Verify constants access
+    const retrieved_const = func.getConstants();
+    try std.testing.expectEqual(@as(usize, 3), retrieved_const.len);
+    try std.testing.expectEqual(@as(u32, 42), retrieved_const[0]);
+    try std.testing.expectEqual(@as(u32, 200), retrieved_const[2]);
+
+    // Verify upvalue access
+    const retrieved_upval = func.getUpvalues();
+    try std.testing.expectEqual(@as(usize, 2), retrieved_upval.len);
+    try std.testing.expect(retrieved_upval[0].is_local);
+    try std.testing.expect(!retrieved_upval[1].is_local);
+}
+
+test "FunctionBytecodeCompact serialization" {
+    const allocator = std.testing.allocator;
+
+    const code = [_]u8{ 0x08, 0x53 }; // push_null, ret
+    const constants = [_]u32{123};
+
+    const func = try FunctionBytecodeCompact.create(
+        allocator,
+        .{},
+        0,
+        0,
+        1,
+        2,
+        .{},
+        &code,
+        &constants,
+        &.{},
+    );
+    defer func.destroy(allocator);
+
+    // Get bytes for serialization
+    const bytes = func.asBytes();
+
+    // Verify we can read back the header
+    const deserialized: *const FunctionBytecodeCompact = @ptrCast(@alignCast(bytes.ptr));
+    try std.testing.expectEqual(func.code_len, deserialized.code_len);
+    try std.testing.expectEqual(func.const_count, deserialized.const_count);
+}
+
+test "FunctionBytecodeCompact size calculation" {
+    // Verify header size is reasonable (includes padding)
+    // BytecodeHeader(12) + name_atom(4) + arg/local/stack(6) + flags(1) + upvalue(1) + pad(1) + code_len(4) + const_count(2) + pad2(2) = 33, but struct alignment adds padding
+    try std.testing.expect(FunctionBytecodeCompact.HEADER_SIZE <= 48);
+
+    // Small function
+    const small_size = FunctionBytecodeCompact.calcSize(10, 2, 0);
+    try std.testing.expect(small_size < 80);
+
+    // Medium function
+    const medium_size = FunctionBytecodeCompact.calcSize(256, 16, 4);
+    try std.testing.expect(medium_size < 512);
 }
