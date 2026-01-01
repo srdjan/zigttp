@@ -249,10 +249,9 @@ zigttp-server/
 │   ├── object.zig         # Hidden classes, object system
 │   ├── gc.zig             # Generational GC
 │   └── heap.zig           # Size-class allocator
-├── mquickjs/              # Legacy C engine (benchmarks only)
 ├── src/
 │   ├── main.zig           # CLI entry point
-│   ├── runtime.zig        # RuntimePool, JS context management
+│   ├── zruntime.zig       # RuntimePool, JS context management
 │   ├── server.zig         # HTTP server implementation
 │   ├── bindings.zig       # Native APIs (console, fetch, Deno)
 │   └── jsx.zig            # JSX transformer
@@ -287,20 +286,20 @@ zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"
 
 ## Extending with Native Functions
 
-Add custom C functions callable from JavaScript:
+Add custom native functions callable from JavaScript by implementing the `NativeFn` signature in `zts/object.zig`:
 
 ```zig
-// In runtime.zig, add to installBindings():
+// In bindings.zig or a custom module:
 
-fn myNativeFunction(ctx: *mq.JSContext, this: mq.JSValue, argc: c_int, argv: [*c]mq.JSValue) callconv(.C) mq.JSValue {
+fn myNativeFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
     // Your implementation
-    return mq.fromInt(42);
+    return zts.JSValue.fromInt(42);
 }
 
-// Register it:
-const my_fn = mq.newCFunction(ctx, myNativeFunction, "myFunction", 0);
-_ = mq.setPropertyStr(ctx, global, "myFunction", my_fn.ok);
+// Register it via context.setGlobal()
 ```
+
+See `src/bindings.zig` for examples of console, fetch, and Deno API implementations.
 
 ## Performance for FaaS
 
@@ -329,4 +328,3 @@ MIT licensed.
 
 - **zts** - Pure Zig JavaScript engine (part of this project)
 - [Zig](https://ziglang.org/) programming language
-- [MicroQuickJS](https://github.com/bellard/mquickjs) by Fabrice Bellard (legacy benchmarking only)

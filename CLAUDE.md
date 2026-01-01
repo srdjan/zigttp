@@ -10,8 +10,6 @@ zigttp-server is a **serverless JavaScript runtime** for FaaS (Function-as-a-Ser
 
 **Trade-offs for FaaS optimization**: Single-threaded sequential processing (one request per instance), compile-time configuration, ES5 JavaScript subset (with some ES6).
 
-**Note**: mquickjs.zig is **legacy code retained only for benchmarking**. zts is the active JavaScript engine.
-
 ## Build Commands
 
 Requires Zig 0.16.0+ (nightly).
@@ -38,7 +36,6 @@ zig build test-zruntime             # Native Zig runtime tests only
 - **main.zig** - CLI argument parsing, creates ServerConfig, starts server
 - **server.zig** - HTTP listener, request parsing, connection handling, static file serving, JSX detection
 - **zruntime.zig** - Native Zig runtime: RuntimePool, JS context management, Request/Response conversion, JSX runtime (uses zts)
-- **runtime.zig** - Legacy runtime wrapper around mquickjs (C bindings) - retained for benchmarking only
 - **bindings.zig** - Native API implementations (console, fetch, Deno namespace, timers)
 - **event_loop.zig** - Async operation management, microtask queue, Promise resolution
 - **jsx.zig** - JSX-to-JavaScript transformer for SSR
@@ -57,11 +54,6 @@ zig build test-zruntime             # Native Zig runtime tests only
 - **zts/heap.zig** - Size-class segregated allocator
 - **zts/pool.zig** - Lock-free runtime pooling
 - **zts/builtins.zig** - Built-in JavaScript functions
-
-### Legacy (Benchmarking Only)
-
-- **mquickjs.zig** - C bindings to mquickjs (used only for performance comparisons)
-- **runtime.zig** - Legacy runtime using mquickjs
 
 ### Request Flow
 
@@ -129,7 +121,7 @@ Generational GC with nursery (young generation) and tenured (old generation) hea
 3. JSX elements → h() calls, JS code → pass-through
 4. Transformed code loaded into RuntimePool
 
-### JSX Runtime (in runtime.zig)
+### JSX Runtime (in zruntime.zig)
 
 - `h(tag, props, ...children)` - Creates virtual DOM nodes
 - `renderToString(node)` - Renders to HTML string
