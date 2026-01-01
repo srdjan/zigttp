@@ -26,7 +26,7 @@ A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure Function
 
 ### Prerequisites
 
-- **Zig 0.15.0+**: Download from [ziglang.org](https://ziglang.org/download/)
+- **Zig 0.16.0+** (nightly): Download from [ziglang.org](https://ziglang.org/download/)
 
 ### Build
 

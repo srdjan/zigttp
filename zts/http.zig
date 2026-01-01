@@ -481,9 +481,13 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
 
             try writer.writeByte('>');
 
-            // Render children
+            // Render children - use raw output for style/script elements
             if (obj.getProperty(.children)) |children| {
-                try renderChildren(ctx, children, writer);
+                if (isRawTextElement(tag_data)) {
+                    try renderRawChildren(children, writer);
+                } else {
+                    try renderChildren(ctx, children, writer);
+                }
             }
 
             try writer.writeAll("</");
@@ -608,6 +612,41 @@ fn isVoidElement(tag: []const u8) bool {
         if (std.mem.eql(u8, tag, ve)) return true;
     }
     return false;
+}
+
+/// Check if element should have raw (unescaped) text content
+fn isRawTextElement(tag: []const u8) bool {
+    return std.mem.eql(u8, tag, "style") or std.mem.eql(u8, tag, "script");
+}
+
+/// Render children without HTML escaping (for style/script elements)
+fn renderRawChildren(children: value.JSValue, writer: anytype) !void {
+    if (children.isNull() or children.isUndefined()) return;
+
+    if (children.isString()) {
+        const str = children.toPtr(string.JSString);
+        try writer.writeAll(str.data());
+        return;
+    }
+
+    if (children.isInt()) {
+        try writer.print("{d}", .{children.getInt()});
+        return;
+    }
+
+    // Handle array of children
+    if (children.isObject()) {
+        const children_obj = object.JSObject.fromValue(children);
+        if (children_obj.class_id == .array) {
+            const len = children_obj.getArrayLength();
+            var i: u32 = 0;
+            while (i < len) : (i += 1) {
+                if (children_obj.getIndex(i)) |child| {
+                    try renderRawChildren(child, writer);
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================

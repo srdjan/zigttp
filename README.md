@@ -242,13 +242,20 @@ The Result<T> pattern throughout makes error handling explicit and prevents sile
 ```
 zigttp-server/
 ├── build.zig              # Zig build configuration
-├── zts/              # Pure Zig JavaScript engine
-│   ├── parser.zig         # Tokenizer + bytecode compiler
-│   ├── interpreter.zig    # Stack-based VM
+├── zts/                   # Pure Zig JavaScript engine
+│   ├── parser/            # Two-pass parser with IR
+│   │   ├── parse.zig      # Main parser (Pratt parser)
+│   │   ├── tokenizer.zig  # Tokenizer
+│   │   ├── codegen.zig    # Bytecode generation
+│   │   └── ir.zig         # Intermediate representation
+│   ├── interpreter.zig    # Stack-based bytecode VM
 │   ├── value.zig          # NaN-boxing value representation
 │   ├── object.zig         # Hidden classes, object system
-│   ├── gc.zig             # Generational GC
-│   └── heap.zig           # Size-class allocator
+│   ├── gc.zig             # Generational GC (nursery + tenured)
+│   ├── heap.zig           # Size-class segregated allocator
+│   ├── http.zig           # HTTP/JSX runtime for SSR
+│   ├── pool.zig           # Lock-free runtime pooling
+│   └── builtins.zig       # Built-in JavaScript functions
 ├── src/
 │   ├── main.zig           # CLI entry point
 │   ├── zruntime.zig       # RuntimePool, JS context management
@@ -256,8 +263,7 @@ zigttp-server/
 │   ├── bindings.zig       # Native APIs (console, fetch, Deno)
 │   └── jsx.zig            # JSX transformer
 └── examples/
-    ├── handler.js         # Example JavaScript handler
-    ├── handler.jsx        # Same example using JSX
+    ├── handler.jsx        # Example JSX handler
     ├── htmx-todo/         # HTMX Todo app example
     └── jsx-ssr.jsx        # Full SSR example
 ```
@@ -266,7 +272,7 @@ zigttp-server/
 
 ### Prerequisites
 
-- Zig 0.15.0 or later
+- Zig 0.16.0 or later (nightly)
 
 ### Build Commands
 
@@ -278,7 +284,9 @@ zig build
 zig build -Doptimize=ReleaseFast
 
 # Run tests
-zig build test
+zig build test              # Main runtime tests
+zig build test-zts          # JS engine tests
+zig build test-zruntime     # Native Zig runtime tests
 
 # Run directly
 zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"

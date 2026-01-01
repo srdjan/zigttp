@@ -1719,7 +1719,9 @@ pub const Parser = struct {
 
         // Strip quotes
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        const str_idx = try self.addString(content);
+        // Unescape string escape sequences (\n, \t, \\, etc.)
+        const unescaped = try self.unescapeString(content);
+        const str_idx = try self.addString(unescaped);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -3087,6 +3089,144 @@ pub const Parser = struct {
 
     fn addString(self: *Parser, str: []const u8) !u16 {
         return try self.constants.addString(str);
+    }
+
+    /// Unescape a JavaScript string literal, converting escape sequences to actual characters.
+    /// Handles: \n, \r, \t, \\, \', \", \0, \xNN (hex), \uNNNN (unicode)
+    /// Returns a newly allocated string that must be freed by the caller.
+    fn unescapeString(self: *Parser, input: []const u8) ![]const u8 {
+        // Quick check: if no backslashes, return as-is (common case)
+        var has_escape = false;
+        for (input) |c| {
+            if (c == '\\') {
+                has_escape = true;
+                break;
+            }
+        }
+        if (!has_escape) {
+            return input;
+        }
+
+        // Allocate buffer for unescaped string (can be at most same length as input)
+        var result = try self.allocator.alloc(u8, input.len);
+        var out_pos: usize = 0;
+        var i: usize = 0;
+
+        while (i < input.len) {
+            if (input[i] == '\\' and i + 1 < input.len) {
+                const next = input[i + 1];
+                switch (next) {
+                    'n' => {
+                        result[out_pos] = '\n';
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    'r' => {
+                        result[out_pos] = '\r';
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    't' => {
+                        result[out_pos] = '\t';
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    '\\' => {
+                        result[out_pos] = '\\';
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    '\'' => {
+                        result[out_pos] = '\'';
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    '"' => {
+                        result[out_pos] = '"';
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    '0' => {
+                        result[out_pos] = 0;
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    'b' => {
+                        result[out_pos] = 0x08; // backspace
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    'f' => {
+                        result[out_pos] = 0x0C; // form feed
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    'v' => {
+                        result[out_pos] = 0x0B; // vertical tab
+                        out_pos += 1;
+                        i += 2;
+                    },
+                    'x' => {
+                        // Hex escape: \xNN
+                        if (i + 3 < input.len) {
+                            const hex = input[i + 2 .. i + 4];
+                            const byte = std.fmt.parseInt(u8, hex, 16) catch {
+                                // Invalid hex, copy literally
+                                result[out_pos] = input[i];
+                                out_pos += 1;
+                                i += 1;
+                                continue;
+                            };
+                            result[out_pos] = byte;
+                            out_pos += 1;
+                            i += 4;
+                        } else {
+                            result[out_pos] = input[i];
+                            out_pos += 1;
+                            i += 1;
+                        }
+                    },
+                    'u' => {
+                        // Unicode escape: \uNNNN
+                        if (i + 5 < input.len) {
+                            const hex = input[i + 2 .. i + 6];
+                            const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
+                                // Invalid hex, copy literally
+                                result[out_pos] = input[i];
+                                out_pos += 1;
+                                i += 1;
+                                continue;
+                            };
+                            // Encode as UTF-8
+                            const len = std.unicode.utf8Encode(codepoint, result[out_pos..]) catch {
+                                result[out_pos] = input[i];
+                                out_pos += 1;
+                                i += 1;
+                                continue;
+                            };
+                            out_pos += len;
+                            i += 6;
+                        } else {
+                            result[out_pos] = input[i];
+                            out_pos += 1;
+                            i += 1;
+                        }
+                    },
+                    else => {
+                        // Unknown escape, just copy the character after backslash
+                        result[out_pos] = next;
+                        out_pos += 1;
+                        i += 2;
+                    },
+                }
+            } else {
+                result[out_pos] = input[i];
+                out_pos += 1;
+                i += 1;
+            }
+        }
+
+        return result[0..out_pos];
     }
 
     fn addAtom(self: *Parser, name: []const u8) !u16 {
