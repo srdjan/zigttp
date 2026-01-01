@@ -199,6 +199,25 @@ pub const Context = struct {
         return self.stack[self.sp - 1 - offset];
     }
 
+    /// Swap top two stack values in place (no pop/push)
+    pub inline fn swap2(self: *Context) void {
+        std.debug.assert(self.sp >= 2);
+        const a = self.stack[self.sp - 1];
+        self.stack[self.sp - 1] = self.stack[self.sp - 2];
+        self.stack[self.sp - 2] = a;
+    }
+
+    /// Rotate top 3 stack values: [a,b,c] -> [b,c,a] (no pop/push)
+    pub inline fn rot3(self: *Context) void {
+        std.debug.assert(self.sp >= 3);
+        const c = self.stack[self.sp - 1];
+        const b = self.stack[self.sp - 2];
+        const a = self.stack[self.sp - 3];
+        self.stack[self.sp - 3] = b;
+        self.stack[self.sp - 2] = c;
+        self.stack[self.sp - 1] = a;
+    }
+
     /// Push call frame
     pub fn pushFrame(self: *Context, func: value.JSValue, this: value.JSValue, return_pc: usize) !void {
         if (self.call_depth >= self.call_stack.len) {

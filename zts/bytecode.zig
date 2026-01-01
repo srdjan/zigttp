@@ -53,6 +53,8 @@ pub const Opcode = enum(u8) {
     // Extended stack operations
     halt = 0x1A,
     loop = 0x1B, // +i16 offset (loop back)
+    get_length = 0x1C, // Get length of array/string/range (fast path, no atom lookup)
+    dup2 = 0x1D, // Duplicate top 2 stack values
 
     // Local variables
     get_loc = 0x10, // +u8 local_idx

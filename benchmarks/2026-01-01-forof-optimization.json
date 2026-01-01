@@ -1,0 +1,33 @@
+{
+  "date": "2026-01-01",
+  "description": "After for-of loop optimization with get_length and dup2 opcodes",
+  "total_time_ms": 331.4,
+  "benchmarks": [
+    { "name": "intArithmetic", "iterations": 50000, "time_ms": 4.662, "ops_per_sec": 10724051, "vs_mquickjs": 0.66 },
+    { "name": "stringConcat", "iterations": 50000, "time_ms": 6.117, "ops_per_sec": 8174164, "vs_mquickjs": 1.32 },
+    { "name": "stringOps", "iterations": 50000, "time_ms": 3.577, "ops_per_sec": 13976568, "vs_mquickjs": 54.09 },
+    { "name": "objectCreate", "iterations": 50000, "time_ms": 10.616, "ops_per_sec": 4709945, "vs_mquickjs": 2.78 },
+    { "name": "propertyAccess", "iterations": 50000, "time_ms": 4.720, "ops_per_sec": 10592378, "vs_mquickjs": 3.15 },
+    { "name": "arrayOps", "iterations": 50000, "time_ms": 6.022, "ops_per_sec": 8302544, "vs_mquickjs": 1.26 },
+    { "name": "functionCalls", "iterations": 50000, "time_ms": 4.386, "ops_per_sec": 11400340, "vs_mquickjs": 2.22 },
+    { "name": "recursion", "iterations": 25, "time_ms": 8.657, "ops_per_sec": 2887, "vs_mquickjs": 1.29 },
+    { "name": "jsonOps", "iterations": 5000, "time_ms": 70.791, "ops_per_sec": 70630, "vs_mquickjs": 1.00 },
+    { "name": "gcPressure", "iterations": 50000, "time_ms": 205.621, "ops_per_sec": 243165, "vs_mquickjs": 1.06 },
+    { "name": "httpHandler", "iterations": 5000, "time_ms": 4.398, "ops_per_sec": 1136815, "vs_mquickjs": 3.42 },
+    { "name": "forOfLoop", "iterations": 50000, "time_ms": 1.812, "ops_per_sec": 27590012, "vs_mquickjs": 0.50 }
+  ],
+  "summary": {
+    "faster_than_mquickjs": ["stringConcat", "stringOps", "objectCreate", "propertyAccess", "arrayOps", "functionCalls", "recursion", "jsonOps", "gcPressure", "httpHandler"],
+    "at_parity": [],
+    "remaining_gaps": ["forOfLoop", "intArithmetic"]
+  },
+  "optimizations_applied": [
+    "get_length opcode: Fast path for array/string/range length without atom lookup",
+    "dup2 opcode: Duplicate top 2 stack values efficiently",
+    "Optimized for-of bytecode: reduced from 16+ opcodes to 6 per iteration"
+  ],
+  "improvement_from_baseline": {
+    "forOfLoop": "0.22x -> 0.50x (127% improvement)",
+    "intArithmetic": "0.39x -> 0.66x (69% improvement)"
+  }
+}

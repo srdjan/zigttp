@@ -1124,42 +1124,30 @@ pub const CodeGen = struct {
         self.pushStack(1);
 
         // Loop start
+        // Stack: [array, index]
         try self.placeLabel(loop_start);
 
         // Check: index < array.length
         // Stack: [array, index]
-        try self.emit(.dup); // [array, index, index]
-        self.pushStack(1);
-        try self.emit(.rot3); // [index, index, array]
-        try self.emit(.dup); // [index, index, array, array]
-        self.pushStack(1);
-        try self.emit(.get_field); // [index, index, array, length]
-        try self.emitU16(@intFromEnum(js_object.Atom.length));
-        try self.emit(.rot3); // [index, array, length, index]
-        try self.emit(.swap); // [index, array, index, length]
-        try self.emit(.lt); // [index, array, (index < length)]
-        self.popStack(1);
+        try self.emit(.dup2); // [array, index, array, index]
+        self.pushStack(2);
+        try self.emit(.swap); // [array, index, index, array]
+        try self.emit(.get_length); // [array, index, index, length]
+        try self.emit(.lt); // [array, index, (index < length)]
+        self.popStack(2);
         try self.emitJump(.if_false, loop_end);
         self.popStack(1);
-        // Stack: [index, array]
+        // Stack: [array, index]
 
         // Get current element: array[index]
-        try self.emit(.swap); // [array, index]
-        try self.emit(.dup); // [array, index, index]
-        self.pushStack(1);
-        try self.emit(.rot3); // [index, index, array]
-        try self.emit(.dup); // [index, index, array, array]
-        self.pushStack(1);
-        try self.emit(.rot3); // [index, array, array, index]
-        try self.emit(.swap); // [index, array, index, array]
-        try self.emit(.swap); // [index, array, array, index]
-        try self.emit(.get_elem); // [index, array, element]
+        try self.emit(.dup2); // [array, index, array, index]
+        self.pushStack(2);
+        try self.emit(.get_elem); // [array, index, element]
         self.popStack(1);
 
         // Store element in loop binding
         try self.emitSetBinding(for_iter.binding);
-        // Stack: [index, array]
-        try self.emit(.swap); // [array, index]
+        // Stack: [array, index]
 
         // Execute loop body
         try self.emitNode(for_iter.body);
@@ -1176,8 +1164,7 @@ pub const CodeGen = struct {
 
         // Loop end
         try self.placeLabel(loop_end);
-        // Stack: [index, array] (after the swap in condition check)
-        // or [array, index] if we jumped from condition
+        // Stack: [array, index]
         // Clean up both values
         try self.emit(.drop);
         self.popStack(1);

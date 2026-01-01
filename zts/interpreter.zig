@@ -320,19 +320,44 @@ pub const Interpreter = struct {
                 .drop => _ = self.ctx.pop(),
 
                 .swap => {
-                    const a = self.ctx.pop();
-                    const b = self.ctx.pop();
-                    try self.ctx.push(a);
-                    try self.ctx.push(b);
+                    self.ctx.swap2();
                 },
 
                 .rot3 => {
-                    const c = self.ctx.pop();
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(b);
-                    try self.ctx.push(c);
+                    self.ctx.rot3();
+                },
+
+                .get_length => {
+                    // Fast path for getting length without atom lookup
+                    const obj_val = self.ctx.pop();
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        if (obj.class_id == .array) {
+                            try self.ctx.push(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH]);
+                        } else if (obj.class_id == .range_iterator) {
+                            try self.ctx.push(value.JSValue.fromInt(@intCast(obj.getRangeLength())));
+                        } else {
+                            // Fallback to property lookup
+                            if (obj.getProperty(.length)) |len| {
+                                try self.ctx.push(len);
+                            } else {
+                                try self.ctx.push(value.JSValue.undefined_val);
+                            }
+                        }
+                    } else if (obj_val.isString()) {
+                        const str = obj_val.toPtr(string.JSString);
+                        try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                },
+
+                .dup2 => {
+                    // Duplicate top 2 stack values: [a, b] -> [a, b, a, b]
+                    const b = self.ctx.peekAt(0);
+                    const a = self.ctx.peekAt(1);
                     try self.ctx.push(a);
+                    try self.ctx.push(b);
                 },
 
                 // ========================================

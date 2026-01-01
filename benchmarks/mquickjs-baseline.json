@@ -1,0 +1,94 @@
+{
+  "benchmarks": [
+    {
+      "name": "intArithmetic",
+      "iterations": 50000,
+      "time_ms": 3.099,
+      "ops_per_sec": 16134237
+    },
+    {
+      "name": "floatArithmetic",
+      "iterations": 50000,
+      "time_ms": 8.440,
+      "ops_per_sec": 5924171
+    },
+    {
+      "name": "stringConcat",
+      "iterations": 50000,
+      "time_ms": 8.081,
+      "ops_per_sec": 6187353
+    },
+    {
+      "name": "stringOps",
+      "iterations": 50000,
+      "time_ms": 193.497,
+      "ops_per_sec": 258402
+    },
+    {
+      "name": "objectCreate",
+      "iterations": 50000,
+      "time_ms": 29.472,
+      "ops_per_sec": 1696526
+    },
+    {
+      "name": "propertyAccess",
+      "iterations": 50000,
+      "time_ms": 14.891,
+      "ops_per_sec": 3357733
+    },
+    {
+      "name": "arrayOps",
+      "iterations": 50000,
+      "time_ms": 7.588,
+      "ops_per_sec": 6589352
+    },
+    {
+      "name": "functionCalls",
+      "iterations": 50000,
+      "time_ms": 9.718,
+      "ops_per_sec": 5145092
+    },
+    {
+      "name": "recursion",
+      "iterations": 25,
+      "time_ms": 11.142,
+      "ops_per_sec": 2244
+    },
+    {
+      "name": "closures",
+      "iterations": 50000,
+      "time_ms": 8.191,
+      "ops_per_sec": 6104261
+    },
+    {
+      "name": "jsonOps",
+      "iterations": 5000,
+      "time_ms": 70.660,
+      "ops_per_sec": 70761
+    },
+    {
+      "name": "gcPressure",
+      "iterations": 50000,
+      "time_ms": 217.935,
+      "ops_per_sec": 229426
+    },
+    {
+      "name": "httpHandler",
+      "iterations": 5000,
+      "time_ms": 15.039,
+      "ops_per_sec": 332469
+    },
+    {
+      "name": "forOfLoop",
+      "iterations": 50000,
+      "time_ms": 0.912,
+      "ops_per_sec": 54824561
+    },
+    {
+      "name": "typedArrays",
+      "iterations": 50000,
+      "time_ms": 3.919,
+      "ops_per_sec": 12758357
+    }
+  ]
+}
