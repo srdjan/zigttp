@@ -661,9 +661,26 @@ fn getStringArg(val: value.JSValue) ![]const u8 {
     return "";
 }
 
+/// Estimate JSON size for buffer pre-allocation
+fn estimateJsonSize(val: value.JSValue) usize {
+    if (val.isObject()) {
+        const obj = object.JSObject.fromValue(val);
+        if (obj.class_id == .array) {
+            return 32 + obj.getArrayLength() * 16;
+        }
+        return 32 + obj.hidden_class.property_count * 24;
+    }
+    if (val.isString()) {
+        const str = val.toPtr(string.JSString);
+        return str.len + 2; // quotes
+    }
+    return 32;
+}
+
 /// Convert a JSValue to JSON string
 pub fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
-    var buffer = std.ArrayList(u8).empty;
+    const estimated = estimateJsonSize(val);
+    var buffer = try std.ArrayList(u8).initCapacity(ctx.allocator, estimated);
     errdefer buffer.deinit(ctx.allocator);
 
     var aw: std.Io.Writer.Allocating = .fromArrayList(ctx.allocator, &buffer);

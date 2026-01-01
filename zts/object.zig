@@ -790,6 +790,7 @@ pub const ClassId = enum(u8) {
     symbol_object = 20,
     arguments = 21,
     result = 22, // Result type for functional error handling
+    range_iterator = 23, // Lazy range iterator for for...of
     // Custom class IDs start here
     _,
 
@@ -835,6 +836,15 @@ pub const JSObject = extern struct {
 
         /// Generator objects: generator state data pointer
         pub const GENERATOR_DATA: usize = 0;
+
+        /// Range iterator: start value (i32 stored as JSValue)
+        pub const RANGE_START: usize = 0;
+        /// Range iterator: end value (i32 stored as JSValue)
+        pub const RANGE_END: usize = 1;
+        /// Range iterator: step value (i32 stored as JSValue)
+        pub const RANGE_STEP: usize = 2;
+        /// Range iterator: cached length (computed once at creation)
+        pub const RANGE_LENGTH: usize = 3;
     };
 
     pub const ObjectFlags = packed struct {
@@ -1102,6 +1112,10 @@ pub const JSObject = extern struct {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
+        // Range iterator: compute length on demand
+        if (self.class_id == .range_iterator and name == .length) {
+            return value.JSValue.fromInt(@intCast(self.getRangeLength()));
+        }
         // Check own properties first
         if (self.hidden_class.findProperty(name)) |slot| {
             return self.getSlot(slot.offset);
@@ -1123,6 +1137,10 @@ pub const JSObject = extern struct {
     pub fn getOwnProperty(self: *const JSObject, name: Atom) ?value.JSValue {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
+        }
+        // Range iterator: compute length on demand
+        if (self.class_id == .range_iterator and name == .length) {
+            return value.JSValue.fromInt(@intCast(self.getRangeLength()));
         }
         if (self.hidden_class.findProperty(name)) |slot| {
             return self.getSlot(slot.offset);
@@ -1266,6 +1284,57 @@ pub const JSObject = extern struct {
         return obj;
     }
 
+    /// Create a lazy range iterator object
+    /// Unlike createArray, this doesn't pre-allocate elements - values are computed on access
+    pub fn createRangeIterator(allocator: std.mem.Allocator, class: *HiddenClass, start: i32, end: i32, step: i32) !*JSObject {
+        // Compute length once at creation (avoid division in hot loop)
+        const length: u32 = blk: {
+            if (step == 0) break :blk 0;
+            if (step > 0) {
+                if (end <= start) break :blk 0;
+                break :blk @intCast(@divTrunc(end - start + step - 1, step));
+            } else {
+                if (start <= end) break :blk 0;
+                break :blk @intCast(@divTrunc(start - end - step - 1, -step));
+            }
+        };
+
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .range_iterator,
+            .flags = .{ .is_exotic = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+        };
+        // Store range parameters and cached length
+        obj.inline_slots[Slots.RANGE_START] = value.JSValue.fromInt(start);
+        obj.inline_slots[Slots.RANGE_END] = value.JSValue.fromInt(end);
+        obj.inline_slots[Slots.RANGE_STEP] = value.JSValue.fromInt(step);
+        obj.inline_slots[Slots.RANGE_LENGTH] = value.JSValue.fromInt(@intCast(length));
+        return obj;
+    }
+
+    /// Get range iterator length (cached at creation time)
+    pub inline fn getRangeLength(self: *const JSObject) u32 {
+        if (self.class_id != .range_iterator) return 0;
+        return @intCast(self.inline_slots[Slots.RANGE_LENGTH].getInt());
+    }
+
+    /// Get range element at index (computed, not stored)
+    pub fn getRangeIndex(self: *const JSObject, index: u32) ?value.JSValue {
+        if (self.class_id != .range_iterator) return null;
+        const len = self.getRangeLength();
+        if (index >= len) return null;
+        const start = self.inline_slots[Slots.RANGE_START].getInt();
+        const step = self.inline_slots[Slots.RANGE_STEP].getInt();
+        const val = start + @as(i32, @intCast(index)) * step;
+        return value.JSValue.fromInt(val);
+    }
+
     /// Check if this is an array
     pub fn isArray(self: *const JSObject) bool {
         return self.class_id == .array;
@@ -1313,6 +1382,15 @@ pub const JSObject = extern struct {
             }
         }
         return null;
+    }
+
+    /// Get array element without bounds check - caller must ensure array type and valid index
+    pub inline fn getIndexUnchecked(self: *const JSObject, index: u32) value.JSValue {
+        const slot = index + 1;
+        if (slot < INLINE_SLOT_COUNT) {
+            return self.inline_slots[slot];
+        }
+        return self.overflow_slots.?[slot - INLINE_SLOT_COUNT];
     }
 
     /// Set element at index (for arrays)

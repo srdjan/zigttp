@@ -77,4 +77,25 @@ pub fn build(b: *std.Build) void {
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
+
+    // Benchmark executable
+    const bench_exe = b.addExecutable(.{
+        .name = "zigttp-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bench_exe.root_module.addImport("zts", zts_mod);
+    b.installArtifact(bench_exe);
+
+    // Benchmark run command
+    const bench_cmd = b.addRunArtifact(bench_exe);
+    bench_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        bench_cmd.addArgs(args);
+    }
+    const bench_step = b.step("bench", "Run performance benchmarks");
+    bench_step.dependOn(&bench_cmd.step);
 }

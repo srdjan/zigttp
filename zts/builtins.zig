@@ -873,25 +873,8 @@ pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.
         if (step == 0) step = 1; // Prevent infinite loop
     }
 
-    // Create result array
-    const result = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
-    result.prototype = ctx.array_prototype;
-
-    // Fill array with values
-    var i: u32 = 0;
-    if (step > 0) {
-        var val = start;
-        while (val < end) : (val += step) {
-            result.setIndex(allocator, i, value.JSValue.fromInt(val)) catch return value.JSValue.undefined_val;
-            i += 1;
-        }
-    } else if (step < 0) {
-        var val = start;
-        while (val > end) : (val += step) {
-            result.setIndex(allocator, i, value.JSValue.fromInt(val)) catch return value.JSValue.undefined_val;
-            i += 1;
-        }
-    }
+    // Create lazy range iterator - values are computed on demand, not pre-allocated
+    const result = object.JSObject.createRangeIterator(allocator, root_class, start, end, step) catch return value.JSValue.undefined_val;
 
     return result.toValue();
 }

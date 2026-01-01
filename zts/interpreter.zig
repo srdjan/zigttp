@@ -267,16 +267,9 @@ pub const Interpreter = struct {
     ///
     /// Public because native callbacks may need to call back into JS.
     pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
-        var op_count: u32 = 0;
         dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
             const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
             self.pc += 1;
-            op_count += 1;
-
-            // Log first 100 ops at top level
-            if (self.ctx.call_depth == 0 and op_count <= 100) {
-                std.log.debug("Op[{}]: {s} (sp={})", .{ op_count, @tagName(op), self.ctx.sp });
-            }
 
             switch (op) {
                 // ========================================
@@ -380,13 +373,13 @@ pub const Interpreter = struct {
                 .sub => {
                     const b = self.ctx.pop();
                     const a = self.ctx.pop();
-                    try self.ctx.push(try subValues(a, b));
+                    try self.ctx.push(try self.subValues(a, b));
                 },
 
                 .mul => {
                     const b = self.ctx.pop();
                     const a = self.ctx.pop();
-                    try self.ctx.push(try mulValues(a, b));
+                    try self.ctx.push(try self.mulValues(a, b));
                 },
 
                 .div => {
@@ -678,9 +671,18 @@ pub const Interpreter = struct {
                         const obj = object.JSObject.fromValue(obj_val);
                         const idx = index_val.getInt();
                         if (idx >= 0) {
+                            const idx_u: u32 = @intCast(idx);
                             if (obj.class_id == .array) {
-                                const idx_u: u32 = @intCast(idx);
-                                if (obj.getIndex(idx_u)) |val| {
+                                // Fast path: check bounds once, then unchecked access
+                                const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
+                                if (idx_u < len) {
+                                    self.ctx.pushUnchecked(obj.getIndexUnchecked(idx_u));
+                                } else {
+                                    self.ctx.pushUnchecked(value.JSValue.undefined_val);
+                                }
+                            } else if (obj.class_id == .range_iterator) {
+                                // Lazy range: compute value on demand
+                                if (obj.getRangeIndex(idx_u)) |val| {
                                     try self.ctx.push(val);
                                 } else {
                                     try self.ctx.push(value.JSValue.undefined_val);
@@ -1124,6 +1126,40 @@ pub const Interpreter = struct {
         return try self.allocFloat(an + bn);
     }
 
+    /// Subtract two values with proper float fallback on overflow
+    fn subValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        // Integer fast path
+        if (a.isInt() and b.isInt()) {
+            const result = @subWithOverflow(a.getInt(), b.getInt());
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            // Overflow - convert to float
+            return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
+        }
+        // Float path
+        const an = a.toNumber() orelse return error.TypeError;
+        const bn = b.toNumber() orelse return error.TypeError;
+        return try self.allocFloat(an - bn);
+    }
+
+    /// Multiply two values with proper float fallback on overflow
+    fn mulValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        // Integer fast path
+        if (a.isInt() and b.isInt()) {
+            const result = @mulWithOverflow(a.getInt(), b.getInt());
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            // Overflow - convert to float
+            return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));
+        }
+        // Float path
+        const an = a.toNumber() orelse return error.TypeError;
+        const bn = b.toNumber() orelse return error.TypeError;
+        return try self.allocFloat(an * bn);
+    }
+
     /// Convert value to string and concatenate
     fn concatToString(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Convert a to string
@@ -1464,7 +1500,7 @@ pub const Interpreter = struct {
             .sub => {
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
-                try self.ctx.push(try subValues(a, b));
+                try self.ctx.push(try self.subValues(a, b));
                 return error.NoTransition;
             },
             .lt => {
@@ -1561,32 +1597,6 @@ pub const Interpreter = struct {
 // ============================================================================
 // Helper Functions (standalone, used by interpreter)
 // ============================================================================
-
-/// Subtract two values (integer fast path)
-fn subValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
-    if (a.isInt() and b.isInt()) {
-        const result = @subWithOverflow(a.getInt(), b.getInt());
-        if (result[1] == 0) {
-            return value.JSValue.fromInt(result[0]);
-        }
-        return error.IntegerOverflow;
-    }
-    // Float fallback - need to use interpreter's allocFloat for heap allocation
-    // For standalone function, just return error (use interpreter method for floats)
-    return error.TypeError;
-}
-
-/// Multiply two values (integer fast path)
-fn mulValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
-    if (a.isInt() and b.isInt()) {
-        const result = @mulWithOverflow(a.getInt(), b.getInt());
-        if (result[1] == 0) {
-            return value.JSValue.fromInt(result[0]);
-        }
-        return error.IntegerOverflow;
-    }
-    return error.TypeError;
-}
 
 /// Modulo two values
 fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {

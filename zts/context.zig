@@ -174,6 +174,12 @@ pub const Context = struct {
         self.sp += 1;
     }
 
+    /// Push without bounds check - caller must ensure stack space
+    pub inline fn pushUnchecked(self: *Context, val: value.JSValue) void {
+        self.stack[self.sp] = val;
+        self.sp += 1;
+    }
+
     /// Pop value from stack
     pub inline fn pop(self: *Context) value.JSValue {
         std.debug.assert(self.sp > 0);
