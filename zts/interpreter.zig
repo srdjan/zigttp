@@ -136,8 +136,8 @@ pub const Interpreter = struct {
             current = uv.next;
         }
 
-        // Create new open upvalue
-        const new_uv = try self.ctx.allocator.create(object.Upvalue);
+        // Create new open upvalue from pool
+        const new_uv = try self.ctx.gc_state.acquireUpvalue();
         new_uv.* = object.Upvalue.init(local_ptr);
 
         // Insert into linked list
@@ -175,6 +175,20 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Execute a bytecode function with given arguments and return the result.
+    ///
+    /// This function handles the full lifecycle of a JavaScript function call:
+    /// 1. Saves current interpreter state (pc, code_end, constants)
+    /// 2. Pushes a new call frame onto the context's call stack
+    /// 3. Sets up local variables from arguments (undefined for missing args)
+    /// 4. Executes the function's bytecode via dispatch()
+    /// 5. Restores state and returns the result value
+    ///
+    /// Closures: If func_val is a closure, the caller should have already set up
+    /// upvalue access. The function uses the context's scope chain for upvalues.
+    ///
+    /// Errors: Returns InterpreterError on stack overflow, type errors, or
+    /// unhandled exceptions. The call frame is always cleaned up via errdefer.
     pub fn callBytecodeFunction(
         self: *Interpreter,
         func_val: value.JSValue,
@@ -234,7 +248,24 @@ pub const Interpreter = struct {
         NoRootClass,
     };
 
-    /// Main dispatch loop (public for use by native function callbacks that need to call JS functions)
+    /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
+    ///
+    /// This is the core interpreter loop that executes JavaScript bytecode. It uses
+    /// a switch-based dispatch (Zig optimizes this to computed goto on supported platforms).
+    ///
+    /// Execution model:
+    /// - Fetches opcode at pc, increments pc, then executes via switch
+    /// - Stack-based: operands popped from stack, results pushed
+    /// - Immediate values: small constants encoded inline after opcode
+    /// - Constants: large values referenced by index into constants array
+    ///
+    /// Control flow:
+    /// - ret: Returns top of stack value, exits dispatch loop
+    /// - halt: Returns top of stack or undefined, exits dispatch loop
+    /// - goto/goto_if_false: Absolute jump by modifying pc
+    /// - call/call_method: Recursive dispatch via callBytecodeFunction
+    ///
+    /// Public because native callbacks may need to call back into JS.
     pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
         var op_count: u32 = 0;
         dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
@@ -756,8 +787,8 @@ pub const Interpreter = struct {
                         bc_ptr,
                         @enumFromInt(bc_ptr.name_atom),
                     );
-                    // Mark as async function using slot 3
-                    func_obj.inline_slots[3] = value.JSValue.true_val;
+                    // Mark as async function using flag (more efficient than inline slot check)
+                    func_obj.flags.is_async = true;
                     try self.ctx.push(func_obj.toValue());
                 },
 
@@ -1036,8 +1067,8 @@ pub const Interpreter = struct {
                             if (self.current_closure) |closure| {
                                 upvalues[i] = closure.upvalues[info.index];
                             } else {
-                                // Create a new closed upvalue with undefined
-                                const uv = try self.ctx.allocator.create(object.Upvalue);
+                                // Create a new closed upvalue with undefined from pool
+                                const uv = try self.ctx.gc_state.acquireUpvalue();
                                 uv.* = .{
                                     .location = .{ .closed = value.JSValue.undefined_val },
                                     .next = null,
@@ -1195,7 +1226,25 @@ pub const Interpreter = struct {
     /// Maximum arguments for stack-based allocation (security limit)
     const MAX_STACK_ARGS = 256;
 
-    /// Perform function call
+    /// Perform function call, dispatching to native functions, bytecode functions,
+    /// generators, or async functions as appropriate.
+    ///
+    /// Stack layout on entry:
+    ///   Regular call: [func, arg0, arg1, ..., argN-1] (argc values after func)
+    ///   Method call:  [obj, func, arg0, arg1, ..., argN-1] (obj is 'this')
+    ///
+    /// Call dispatch order:
+    /// 1. Pop arguments from stack into local array
+    /// 2. Pop function value
+    /// 3. For method calls, pop 'this' value
+    /// 4. Check if value is callable (has function data)
+    /// 5. Dispatch based on function type:
+    ///    - Native: Call C/Zig function directly, push result
+    ///    - Generator: Create generator object, initialize locals, push iterator
+    ///    - Async: Execute synchronously, wrap result in Promise-like object
+    ///    - Bytecode: Call via callBytecodeFunction, push result
+    ///
+    /// Security: Limits argc to MAX_STACK_ARGS (256) to prevent stack buffer overflow.
     fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!void {
         // Stack layout for regular call: [func, arg0, arg1, ..., argN-1]
         // Stack layout for method call: [obj, func, arg0, arg1, ..., argN-1]
@@ -1246,8 +1295,8 @@ pub const Interpreter = struct {
         if (func_obj.getBytecodeFunctionData()) |bc_data| {
             const func_bc = bc_data.bytecode;
 
-            // Check if this is a generator function (slot[2] is true)
-            if (func_obj.inline_slots[2].isTrue()) {
+            // Check if this is a generator function (using cached flag)
+            if (func_obj.flags.is_generator) {
                 // Create a generator object instead of executing
                 const root_class = self.ctx.root_class orelse return error.NoRootClass;
                 const gen_obj = object.JSObject.createGenerator(
@@ -1270,8 +1319,8 @@ pub const Interpreter = struct {
                 return;
             }
 
-            // Check if this is an async function (slot[3] is true)
-            if (func_obj.inline_slots[3].isTrue()) {
+            // Check if this is an async function (using cached flag)
+            if (func_obj.flags.is_async) {
                 // Execute async function synchronously and wrap result in Promise-like object
                 // For full async support, we'd need an event loop and proper Promise integration
                 // This simplified version executes synchronously and returns a resolved Promise
@@ -2507,4 +2556,250 @@ test "End-to-end: default parameters" {
     // Expression statements drop values, so result is undefined
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
+}
+
+test "Interpreter unary negation" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push 42, negate it: -42
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 42,
+        @intFromEnum(bytecode.Opcode.neg),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, -42), result.getInt());
+}
+
+test "Interpreter increment and decrement" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push 10, increment: 11
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.inc),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 11), result.getInt());
+}
+
+test "Interpreter logical not" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // !true = false
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_true),
+        @intFromEnum(bytecode.Opcode.not),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(value.JSValue.false_val, result);
+}
+
+test "Interpreter bitwise not" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // ~0 = -1 (all bits flipped)
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_0),
+        @intFromEnum(bytecode.Opcode.bit_not),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+}
+
+test "Interpreter power operator" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // 2 ** 10 = 1024
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_2),
+        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.pow),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    // pow always returns a float
+    try std.testing.expect(result.isFloat64());
+    try std.testing.expectEqual(@as(f64, 1024.0), result.getFloat64());
+}
+
+test "Interpreter new_object" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Create empty object
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.new_object),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isObject());
+}
+
+test "Interpreter strict equality edge cases" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // null === null should be true
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_null),
+        @intFromEnum(bytecode.Opcode.push_null),
+        @intFromEnum(bytecode.Opcode.strict_eq),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(value.JSValue.true_val, result);
 }

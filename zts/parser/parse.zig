@@ -607,6 +607,22 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse function parameters and body, producing a FunctionDecl node.
+    ///
+    /// This handles:
+    /// 1. Pushing a new function scope for local bindings
+    /// 2. Parsing parameter list (including rest params, default values)
+    /// 3. Registering parameters as local bindings in the new scope
+    /// 4. Parsing the function body (block or expression for arrows)
+    /// 5. Collecting upvalue references for closures
+    ///
+    /// Upvalues: When a variable reference cannot be resolved in the current
+    /// function's scope, it's captured as an upvalue. The scope manager tracks
+    /// which outer variables are referenced, and this info is stored in the
+    /// FunctionDecl node for codegen.
+    ///
+    /// Arrow functions: If the body starts with '{', parse as block statement.
+    /// Otherwise parse as expression and wrap in implicit return.
     fn parseFunctionBody(self: *Parser, name_atom: u16, flags: FunctionFlags) anyerror!NodeIndex {
         const loc = self.current.location();
 
@@ -775,6 +791,19 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse for/for-of statement.
+    ///
+    /// Supports two forms:
+    /// 1. C-style for: for (init; condition; update) body
+    /// 2. For-of: for (let/const x of iterable) body (arrays only, not objects)
+    ///
+    /// Note: 'var' is rejected - only 'let' and 'const' are supported.
+    ///
+    /// For-of detection: If initializer is a declaration followed by 'of' keyword,
+    /// we parse as for-of. Otherwise we expect semicolons and parse as C-style.
+    ///
+    /// Scope: A loop scope is pushed for the initializer, allowing 'let' bindings
+    /// to be block-scoped to the loop body.
     fn parseForStatement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance(); // consume 'for'
@@ -1280,6 +1309,20 @@ pub const Parser = struct {
 
     // ============ Expression Parsing (Pratt) ============
 
+    /// Parse an expression using Pratt parsing (precedence climbing).
+    ///
+    /// Pratt parsing handles operator precedence without explicit grammar rules
+    /// for each precedence level. It works by:
+    /// 1. Parse prefix expression (literal, unary op, grouped expr, etc.)
+    /// 2. While next token has higher precedence than min_prec:
+    ///    - Parse infix expression with left operand and current precedence
+    ///    - Result becomes new left operand
+    ///
+    /// Special case: Arrow functions are detected via lookahead before parsing
+    /// begins, since they have unique syntax that doesn't fit the prefix/infix model.
+    ///
+    /// min_prec controls how tightly we bind to the right. For example:
+    ///   1 + 2 * 3 parses as 1 + (2 * 3) because * has higher precedence than +
     fn parseExpression(self: *Parser, min_prec: Precedence) anyerror!NodeIndex {
         // Check for arrow function
         if (self.isArrowFunction()) {
@@ -2525,6 +2568,8 @@ pub const Parser = struct {
 
     // ============ JSX Parsing ============
 
+    /// Check if current position is a JSX closing tag (</...).
+    /// Uses direct source inspection to avoid tokenizer confusion with regex.
     fn peekJsxClosingTag(self: *Parser) bool {
         // Look ahead from the tokenizer position (right after '<') to see if this is a closing tag.
         // Avoid tokenizer.next() here because it can misclassify `</` as a regex literal.
@@ -2538,6 +2583,23 @@ pub const Parser = struct {
         return false;
     }
 
+    /// Parse JSX element: <Tag attrs>children</Tag> or <Tag />
+    ///
+    /// JSX is transformed to h() calls (hyperscript pattern) for SSR:
+    ///   <div className="foo">text</div>
+    ///   => h('div', {className: 'foo'}, 'text')
+    ///
+    /// Tag classification:
+    /// - Lowercase (div, span): String literal tag name
+    /// - Uppercase (Button, Card): Component reference (identifier)
+    /// - Member (Foo.Bar): Member expression for namespaced components
+    ///
+    /// Children can be:
+    /// - Text nodes (whitespace-trimmed)
+    /// - Nested JSX elements
+    /// - Expression containers: {expr}
+    ///
+    /// Self-closing: <Tag /> and void elements (br, img, input, etc.)
     fn parseJsxElement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance(); // consume '<'

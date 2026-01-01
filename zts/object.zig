@@ -810,13 +810,42 @@ pub const JSObject = extern struct {
 
     pub const INLINE_SLOT_COUNT = 8;
 
+    /// Inline slot indices with semantic meaning
+    /// Different object types use slots for different purposes:
+    pub const Slots = struct {
+        /// Function objects: data pointer (NativeFunctionData/BytecodeFunctionData/ClosureData)
+        pub const FUNC_DATA: usize = 0;
+        /// Function objects: true_val for bytecode function, undefined for native
+        pub const FUNC_IS_BYTECODE: usize = 1;
+        /// Closure objects: true_val marker to identify closures
+        pub const FUNC_IS_CLOSURE: usize = 4;
+
+        /// Array objects: length as integer
+        pub const ARRAY_LENGTH: usize = 0;
+        /// Array objects: elements start at index 1
+        pub const ARRAY_ELEMENTS_START: usize = 1;
+
+        /// Result objects: isOk boolean (true = ok, false = err)
+        pub const RESULT_IS_OK: usize = 0;
+        /// Result objects: the value (either ok value or error)
+        pub const RESULT_VALUE: usize = 1;
+
+        /// WeakMap/WeakSet: internal hash map data pointer
+        pub const WEAK_COLLECTION_DATA: usize = 0;
+
+        /// Generator objects: generator state data pointer
+        pub const GENERATOR_DATA: usize = 0;
+    };
+
     pub const ObjectFlags = packed struct {
         extensible: bool = true,
         is_exotic: bool = false, // Array, TypedArray, etc.
         is_callable: bool = false,
         is_constructor: bool = false,
         has_small_array: bool = false, // Dense array optimization
-        _reserved: u3 = 0,
+        is_generator: bool = false, // Generator function (function*)
+        is_async: bool = false, // Async function (async function)
+        _reserved: u1 = 0,
     };
 
     /// Create a new object
@@ -870,23 +899,23 @@ pub const JSObject = extern struct {
             .overflow_slots = null,
             .overflow_capacity = 0,
         };
-        // Store native function data pointer in first slot
-        obj.inline_slots[0] = value.JSValue.fromPtr(data);
+        // Store native function data pointer
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
         return obj;
     }
 
     /// Get native function data (if this is a native function)
     pub fn getNativeFunctionData(self: *const JSObject) ?*NativeFunctionData {
         if (self.class_id != .function or !self.flags.is_callable) return null;
-        const slot = self.inline_slots[0];
+        const slot = self.inline_slots[Slots.FUNC_DATA];
         if (!slot.isPtr()) return null;
-        // Check if it's a native function by checking inline_slots[1]
-        // Native functions have undefined in slot 1, bytecode functions have the data pointer
-        if (!self.inline_slots[1].isUndefined()) return null;
+        // Native functions have undefined in FUNC_IS_BYTECODE slot
+        if (!self.inline_slots[Slots.FUNC_IS_BYTECODE].isUndefined()) return null;
         return slot.toPtr(NativeFunctionData);
     }
 
     /// Create a JS bytecode function object
+    /// Copies is_generator and is_async flags from bytecode for efficient call-time checks
     pub fn createBytecodeFunction(allocator: std.mem.Allocator, class: *HiddenClass, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, name: Atom) !*JSObject {
         // Allocate bytecode function data
         const data = try allocator.create(BytecodeFunctionData);
@@ -896,22 +925,25 @@ pub const JSObject = extern struct {
             .name = name,
         };
 
-        // Create function object
+        // Create function object with flags copied from bytecode
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
             .hidden_class = class,
             .prototype = null,
             .class_id = .function,
-            .flags = .{ .is_callable = true },
+            .flags = .{
+                .is_callable = true,
+                .is_generator = bytecode_ptr.flags.is_generator,
+                .is_async = bytecode_ptr.flags.is_async,
+            },
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
         };
-        // Store bytecode function data pointer in first slot
-        // Use slot 1 to mark this as a bytecode function (non-undefined)
-        obj.inline_slots[0] = value.JSValue.fromPtr(data);
-        obj.inline_slots[1] = value.JSValue.true_val; // Marker for bytecode function
+        // Store bytecode function data and marker
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
         return obj;
     }
 
@@ -921,14 +953,14 @@ pub const JSObject = extern struct {
             std.log.debug("getBytecodeFunc fail: class_id={} is_callable={}", .{ @intFromEnum(self.class_id), self.flags.is_callable });
             return null;
         }
-        const slot = self.inline_slots[0];
+        const slot = self.inline_slots[Slots.FUNC_DATA];
         if (!slot.isPtr()) {
-            std.log.debug("getBytecodeFunc fail: slot0 not ptr, raw={x}", .{slot.raw});
+            std.log.debug("getBytecodeFunc fail: FUNC_DATA not ptr, raw={x}", .{slot.raw});
             return null;
         }
-        // Bytecode functions have non-undefined in slot 1
-        if (self.inline_slots[1].isUndefined()) {
-            std.log.debug("getBytecodeFunc fail: slot1 is undefined", .{});
+        // Bytecode functions have non-undefined in FUNC_IS_BYTECODE slot
+        if (self.inline_slots[Slots.FUNC_IS_BYTECODE].isUndefined()) {
+            std.log.debug("getBytecodeFunc fail: FUNC_IS_BYTECODE is undefined", .{});
             return null;
         }
         std.log.debug("getBytecodeFunc success!", .{});
@@ -936,6 +968,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a closure (function with captured upvalues)
+    /// Copies is_generator and is_async flags from bytecode for efficient call-time checks
     pub fn createClosure(
         allocator: std.mem.Allocator,
         class: *HiddenClass,
@@ -952,33 +985,35 @@ pub const JSObject = extern struct {
             .upvalues = upvalues,
         };
 
-        // Create function object
+        // Create function object with flags copied from bytecode
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
             .hidden_class = class,
             .prototype = null,
             .class_id = .function,
-            .flags = .{ .is_callable = true },
+            .flags = .{
+                .is_callable = true,
+                .is_generator = bytecode_ptr.flags.is_generator,
+                .is_async = bytecode_ptr.flags.is_async,
+            },
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
         };
-        // Store closure data in first slot
-        // Use slot 1 = true for bytecode function marker
-        // Use slot 4 = true to mark this as a closure (has upvalues)
-        obj.inline_slots[0] = value.JSValue.fromPtr(data);
-        obj.inline_slots[1] = value.JSValue.true_val; // Marker for bytecode function
-        obj.inline_slots[4] = value.JSValue.true_val; // Marker for closure
+        // Store closure data and markers
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
+        obj.inline_slots[Slots.FUNC_IS_CLOSURE] = value.JSValue.true_val;
         return obj;
     }
 
     /// Get closure data (if this is a closure)
     pub fn getClosureData(self: *const JSObject) ?*ClosureData {
         if (self.class_id != .function or !self.flags.is_callable) return null;
-        // Check if it's a closure (slot 4 is true)
-        if (!self.inline_slots[4].isTrue()) return null;
-        const slot = self.inline_slots[0];
+        // Check if it's a closure
+        if (!self.inline_slots[Slots.FUNC_IS_CLOSURE].isTrue()) return null;
+        const slot = self.inline_slots[Slots.FUNC_DATA];
         if (!slot.isPtr()) return null;
         return slot.toPtr(ClosureData);
     }
@@ -1019,15 +1054,15 @@ pub const JSObject = extern struct {
             .overflow_slots = null,
             .overflow_capacity = 0,
         };
-        // Store generator data pointer in first slot
-        obj.inline_slots[0] = value.JSValue.fromPtr(data);
+        // Store generator data pointer
+        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromPtr(data);
         return obj;
     }
 
     /// Get generator data (if this is a generator object)
     pub fn getGeneratorData(self: *const JSObject) ?*GeneratorData {
         if (self.class_id != .generator) return null;
-        const slot = self.inline_slots[0];
+        const slot = self.inline_slots[Slots.GENERATOR_DATA];
         if (!slot.isPtr()) return null;
         return slot.toPtr(GeneratorData);
     }
@@ -1065,7 +1100,7 @@ pub const JSObject = extern struct {
     /// Get property by name (with prototype chain lookup)
     pub fn getProperty(self: *const JSObject, name: Atom) ?value.JSValue {
         if (self.class_id == .array and name == .length) {
-            return self.inline_slots[0];
+            return self.inline_slots[Slots.ARRAY_LENGTH];
         }
         // Check own properties first
         if (self.hidden_class.findProperty(name)) |slot| {
@@ -1087,7 +1122,7 @@ pub const JSObject = extern struct {
     /// Get own property (no prototype lookup)
     pub fn getOwnProperty(self: *const JSObject, name: Atom) ?value.JSValue {
         if (self.class_id == .array and name == .length) {
-            return self.inline_slots[0];
+            return self.inline_slots[Slots.ARRAY_LENGTH];
         }
         if (self.hidden_class.findProperty(name)) |slot| {
             return self.getSlot(slot.offset);
@@ -1226,8 +1261,8 @@ pub const JSObject = extern struct {
             .overflow_slots = null,
             .overflow_capacity = 0,
         };
-        // Slot 0 holds array length
-        obj.inline_slots[0] = value.JSValue.fromInt(0);
+        // Initialize array length to 0
+        obj.inline_slots[Slots.ARRAY_LENGTH] = value.JSValue.fromInt(0);
         return obj;
     }
 
@@ -1239,7 +1274,7 @@ pub const JSObject = extern struct {
     /// Get array length (for arrays)
     pub fn getArrayLength(self: *const JSObject) u32 {
         if (self.class_id != .array) return 0;
-        const len_val = self.inline_slots[0];
+        const len_val = self.inline_slots[Slots.ARRAY_LENGTH];
         if (len_val.isInt()) {
             const len = len_val.getInt();
             return if (len >= 0) @intCast(len) else 0;
@@ -1250,7 +1285,7 @@ pub const JSObject = extern struct {
     /// Set array length
     pub fn setArrayLength(self: *JSObject, len: u32) void {
         if (self.class_id != .array) return;
-        self.inline_slots[0] = value.JSValue.fromInt(@intCast(len));
+        self.inline_slots[Slots.ARRAY_LENGTH] = value.JSValue.fromInt(@intCast(len));
     }
 
     /// Get element at index (for arrays)

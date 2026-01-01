@@ -5,6 +5,7 @@
 const std = @import("std");
 const context = @import("context.zig");
 const gc = @import("gc.zig");
+const heap = @import("heap.zig");
 
 /// Pool configuration
 pub const PoolConfig = struct {
@@ -27,6 +28,7 @@ pub const LockFreePool = struct {
     pub const Runtime = struct {
         ctx: *context.Context,
         gc_state: *gc.GC,
+        heap_state: *heap.Heap,
         in_use: bool,
 
         pub fn create(allocator: std.mem.Allocator, config: PoolConfig) !*Runtime {
@@ -38,11 +40,18 @@ pub const LockFreePool = struct {
             gc_state.* = try gc.GC.init(allocator, config.gc_config);
             errdefer gc_state.deinit();
 
+            // Initialize heap for size-class allocation and wire up to GC
+            const heap_state = try allocator.create(heap.Heap);
+            errdefer allocator.destroy(heap_state);
+            heap_state.* = heap.Heap.init(allocator, .{});
+            gc_state.setHeap(heap_state);
+
             const ctx = try context.Context.init(allocator, gc_state, config.ctx_config);
 
             rt.* = .{
                 .ctx = ctx,
                 .gc_state = gc_state,
+                .heap_state = heap_state,
                 .in_use = false,
             };
 
@@ -52,7 +61,9 @@ pub const LockFreePool = struct {
         pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
             self.ctx.deinit();
             self.gc_state.deinit();
+            self.heap_state.deinit();
             allocator.destroy(self.gc_state);
+            allocator.destroy(self.heap_state);
             allocator.destroy(self);
         }
 

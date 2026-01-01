@@ -79,6 +79,12 @@ pub fn createContext(allocator: std.mem.Allocator, gc_config: GCConfig) !*Contex
     gc_state.* = try GC.init(allocator, gc_config);
     errdefer gc_state.deinit();
 
+    // Initialize heap for size-class allocation and wire up to GC
+    const heap_state = try allocator.create(heap.Heap);
+    errdefer allocator.destroy(heap_state);
+    heap_state.* = heap.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+
     return try Context.init(allocator, gc_state, .{});
 }
 
@@ -86,8 +92,13 @@ pub fn createContext(allocator: std.mem.Allocator, gc_config: GCConfig) !*Contex
 pub fn destroyContext(ctx: *Context) void {
     const allocator = ctx.allocator;
     const gc_state = ctx.gc_state;
+    const heap_state = gc_state.heap_ptr;
     ctx.deinit();
     gc_state.deinit();
+    if (heap_state) |h| {
+        h.deinit();
+        allocator.destroy(h);
+    }
     allocator.destroy(gc_state);
 }
 

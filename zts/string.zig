@@ -481,6 +481,105 @@ pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const
     return str;
 }
 
+/// Concatenate multiple strings efficiently (single allocation)
+/// More efficient than chained concatStrings for 3+ strings
+pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString) !*JSString {
+    if (strings.len == 0) {
+        return try createString(allocator, "");
+    }
+    if (strings.len == 1) {
+        // Return a copy of the single string
+        return try createString(allocator, strings[0].data());
+    }
+    if (strings.len == 2) {
+        return try concatStrings(allocator, strings[0], strings[1]);
+    }
+
+    // Calculate total length and check ASCII
+    var total_len: u32 = 0;
+    var all_ascii = true;
+    for (strings) |s| {
+        total_len += s.len;
+        all_ascii = all_ascii and s.flags.is_ascii;
+    }
+
+    // Single allocation for result
+    const total_size = @sizeOf(JSString) + total_len;
+    const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
+
+    const str: *JSString = @ptrCast(@alignCast(mem.ptr));
+    str.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = all_ascii,
+            .is_numeric = false,
+        },
+        .len = total_len,
+        .hash = 0,
+    };
+
+    // Copy all strings into result
+    const data_mut = str.dataMut();
+    var offset: usize = 0;
+    for (strings) |s| {
+        @memcpy(data_mut[offset .. offset + s.len], s.data());
+        offset += s.len;
+    }
+
+    // Compute hash
+    str.hash = hashString(str.data());
+
+    return str;
+}
+
+/// StringBuilder for efficient incremental string building
+/// Use when building a string from multiple parts dynamically
+pub const StringBuilder = struct {
+    parts: std.ArrayListUnmanaged(*const JSString),
+    allocator: std.mem.Allocator,
+    total_len: u32 = 0,
+    all_ascii: bool = true,
+
+    pub fn init(allocator: std.mem.Allocator) StringBuilder {
+        return .{
+            .parts = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *StringBuilder) void {
+        self.parts.deinit(self.allocator);
+    }
+
+    /// Add a string to the builder
+    pub fn append(self: *StringBuilder, str: *const JSString) !void {
+        try self.parts.append(self.allocator, str);
+        self.total_len += str.len;
+        self.all_ascii = self.all_ascii and str.flags.is_ascii;
+    }
+
+    /// Add a raw string slice to the builder (creates temporary JSString)
+    pub fn appendSlice(self: *StringBuilder, slice: []const u8) !void {
+        const str = try createString(self.allocator, slice);
+        try self.parts.append(self.allocator, str);
+        self.total_len += @intCast(slice.len);
+        self.all_ascii = self.all_ascii and isAscii(slice);
+    }
+
+    /// Build the final concatenated string
+    pub fn build(self: *StringBuilder) !*JSString {
+        return try concatMany(self.allocator, self.parts.items);
+    }
+
+    /// Clear the builder for reuse
+    pub fn clear(self: *StringBuilder) void {
+        self.parts.clearRetainingCapacity();
+        self.total_len = 0;
+        self.all_ascii = true;
+    }
+};
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -593,6 +692,54 @@ test "string concatenation" {
 
     try std.testing.expectEqualStrings("hello world", concat.data());
     try std.testing.expectEqual(@as(u32, 11), concat.len);
+}
+
+test "concatMany optimization" {
+    const allocator = std.testing.allocator;
+
+    const str1 = try createString(allocator, "Hello");
+    defer freeString(allocator, str1);
+
+    const str2 = try createString(allocator, ", ");
+    defer freeString(allocator, str2);
+
+    const str3 = try createString(allocator, "World");
+    defer freeString(allocator, str3);
+
+    const str4 = try createString(allocator, "!");
+    defer freeString(allocator, str4);
+
+    // Concatenate 4 strings in one allocation
+    const strings = [_]*const JSString{ str1, str2, str3, str4 };
+    const result = try concatMany(allocator, &strings);
+    defer freeString(allocator, result);
+
+    try std.testing.expectEqualStrings("Hello, World!", result.data());
+    try std.testing.expectEqual(@as(u32, 13), result.len);
+}
+
+test "StringBuilder" {
+    const allocator = std.testing.allocator;
+
+    var builder = StringBuilder.init(allocator);
+    defer builder.deinit();
+
+    const str1 = try createString(allocator, "Hello");
+    defer freeString(allocator, str1);
+    const str2 = try createString(allocator, " ");
+    defer freeString(allocator, str2);
+    const str3 = try createString(allocator, "World");
+    defer freeString(allocator, str3);
+
+    try builder.append(str1);
+    try builder.append(str2);
+    try builder.append(str3);
+
+    const result = try builder.build();
+    defer freeString(allocator, result);
+
+    try std.testing.expectEqualStrings("Hello World", result.data());
+    try std.testing.expectEqual(@as(u32, 11), result.len);
 }
 
 test "JSString methods" {

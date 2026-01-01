@@ -123,6 +123,7 @@ pub const Runtime = struct {
     allocator: std.mem.Allocator,
     ctx: *zq.Context,
     gc_state: *zq.GC,
+    heap: *zq.heap.Heap,
     interpreter: zq.Interpreter,
     strings: zq.StringTable,
     handler_atom: ?zq.Atom,
@@ -142,6 +143,12 @@ pub const Runtime = struct {
         });
         errdefer gc_state.deinit();
 
+        // Initialize heap for size-class allocation and wire up to GC
+        const heap_state = try allocator.create(zq.heap.Heap);
+        errdefer allocator.destroy(heap_state);
+        heap_state.* = zq.heap.Heap.init(allocator, .{});
+        gc_state.setHeap(heap_state);
+
         // Initialize context
         const ctx = try zq.Context.init(allocator, gc_state, .{});
         errdefer ctx.deinit();
@@ -153,6 +160,7 @@ pub const Runtime = struct {
             .allocator = allocator,
             .ctx = ctx,
             .gc_state = gc_state,
+            .heap = heap_state,
             .interpreter = zq.Interpreter.init(ctx),
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
@@ -169,7 +177,9 @@ pub const Runtime = struct {
         self.strings.deinit();
         self.ctx.deinit();
         self.gc_state.deinit();
+        self.heap.deinit();
         self.allocator.destroy(self.gc_state);
+        self.allocator.destroy(self.heap);
         self.allocator.destroy(self);
     }
 
@@ -487,6 +497,33 @@ fn printValue(val: zq.JSValue, file: std.fs.File) !void {
 // Runtime Pool
 // ============================================================================
 
+/// Thread-safe pool of pre-initialized JavaScript runtimes.
+///
+/// Current implementation uses mutex for acquire/release. This is adequate for
+/// moderate concurrency but may become a bottleneck at very high request rates
+/// (>50k req/s with many concurrent connections).
+///
+/// ## Lock-free Alternative
+///
+/// For high-concurrency deployments, consider using the lock-free pool pattern
+/// from zts/pool.zig which uses atomic compare-and-swap operations:
+///
+/// 1. Replace ArrayList with fixed-size atomic slot array
+/// 2. Use cmpxchgWeak for acquire: scan slots for non-null, CAS to null
+/// 3. Use cmpxchgWeak for release: scan slots for null, CAS to runtime
+/// 4. Add thread-local caching to eliminate pool access for repeated calls
+///
+/// The zts.LockFreePool demonstrates this pattern. Migration would require:
+/// - Replacing available/in_use ArrayLists with atomic slot array
+/// - Removing mutex entirely
+/// - Storing handler code in pool rather than per-runtime
+///
+/// ## Thread-Local Sharding Alternative
+///
+/// Another approach is per-thread pool sharding:
+/// - Each worker thread gets its own mini-pool
+/// - No synchronization needed for thread-local access
+/// - Requires worker thread model (not connection-per-thread)
 pub const RuntimePool = struct {
     allocator: std.mem.Allocator,
     config: RuntimeConfig,

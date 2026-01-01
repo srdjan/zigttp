@@ -1,3 +1,17 @@
+//! LEGACY CODE - Retained for benchmarking only
+//!
+//! This module wraps mquickjs (C-based QuickJS bindings) and is no longer used
+//! in production. The active JavaScript runtime is zruntime.zig which uses the
+//! pure-Zig zts engine.
+//!
+//! Use this module only for:
+//! - Performance comparisons between mquickjs and zts
+//! - Regression testing during zts development
+//!
+//! For new features, modify zruntime.zig instead.
+//!
+//! ---
+//!
 //! JavaScript Runtime - Higher-level wrapper around mquickjs
 //!
 //! Architecture:

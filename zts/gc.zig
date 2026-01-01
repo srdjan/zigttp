@@ -312,6 +312,131 @@ pub const GrayStack = struct {
     }
 };
 
+/// Float constant pool for common float values
+/// Pre-allocates Float64Box instances to avoid repeated allocations
+pub const FloatConstantPool = struct {
+    zero: value.JSValue.Float64Box,
+    one: value.JSValue.Float64Box,
+    neg_one: value.JSValue.Float64Box,
+    nan: value.JSValue.Float64Box,
+    pos_inf: value.JSValue.Float64Box,
+    neg_inf: value.JSValue.Float64Box,
+
+    const box_size = @sizeOf(value.JSValue.Float64Box);
+
+    pub fn init() FloatConstantPool {
+        return .{
+            .zero = .{
+                .header = heap.MemBlockHeader.init(.float64, box_size),
+                ._pad = 0,
+                .value = 0.0,
+            },
+            .one = .{
+                .header = heap.MemBlockHeader.init(.float64, box_size),
+                ._pad = 0,
+                .value = 1.0,
+            },
+            .neg_one = .{
+                .header = heap.MemBlockHeader.init(.float64, box_size),
+                ._pad = 0,
+                .value = -1.0,
+            },
+            .nan = .{
+                .header = heap.MemBlockHeader.init(.float64, box_size),
+                ._pad = 0,
+                .value = std.math.nan(f64),
+            },
+            .pos_inf = .{
+                .header = heap.MemBlockHeader.init(.float64, box_size),
+                ._pad = 0,
+                .value = std.math.inf(f64),
+            },
+            .neg_inf = .{
+                .header = heap.MemBlockHeader.init(.float64, box_size),
+                ._pad = 0,
+                .value = -std.math.inf(f64),
+            },
+        };
+    }
+
+    /// Try to get a cached Float64Box for a common value
+    /// Returns null if the value is not in the cache
+    pub fn get(self: *FloatConstantPool, v: f64) ?*value.JSValue.Float64Box {
+        // Check for exact matches of common values
+        if (v == 0.0) return &self.zero;
+        if (v == 1.0) return &self.one;
+        if (v == -1.0) return &self.neg_one;
+        if (std.math.isNan(v)) return &self.nan;
+        if (std.math.isPositiveInf(v)) return &self.pos_inf;
+        if (std.math.isNegativeInf(v)) return &self.neg_inf;
+        return null;
+    }
+};
+
+/// Pool of pre-allocated Upvalue objects for efficient closure creation
+/// Uses a free list for O(1) acquire/release operations
+pub const UpvaluePool = struct {
+    /// Free list of available upvalues (intrusive linked list via next pointer)
+    free_list: ?*object.Upvalue = null,
+    /// Number of upvalues currently in the free list
+    free_count: u32 = 0,
+    /// Total upvalues allocated (for stats)
+    total_allocated: u32 = 0,
+    /// Number of pool hits (reused from free list)
+    pool_hits: u64 = 0,
+    /// Allocator for new allocations when pool is empty
+    allocator: std.mem.Allocator,
+    /// Maximum size of the free list (to bound memory usage)
+    max_pool_size: u32 = 256,
+
+    pub fn init(allocator: std.mem.Allocator) UpvaluePool {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *UpvaluePool) void {
+        // Free all pooled upvalues
+        var current = self.free_list;
+        while (current) |uv| {
+            const next = uv.next;
+            self.allocator.destroy(uv);
+            current = next;
+        }
+        self.free_list = null;
+        self.free_count = 0;
+    }
+
+    /// Acquire an upvalue from the pool or allocate a new one
+    pub fn acquire(self: *UpvaluePool) !*object.Upvalue {
+        if (self.free_list) |uv| {
+            // Fast path: reuse from pool
+            self.free_list = uv.next;
+            self.free_count -= 1;
+            self.pool_hits += 1;
+            return uv;
+        }
+        // Slow path: allocate new
+        const uv = try self.allocator.create(object.Upvalue);
+        self.total_allocated += 1;
+        return uv;
+    }
+
+    /// Release an upvalue back to the pool for reuse
+    pub fn release(self: *UpvaluePool, uv: *object.Upvalue) void {
+        if (self.free_count >= self.max_pool_size) {
+            // Pool is full, just free it
+            self.allocator.destroy(uv);
+            return;
+        }
+        // Add to free list
+        uv.* = .{
+            .location = .{ .closed = value.JSValue.undefined_val },
+            .next = self.free_list,
+        };
+        self.free_list = uv;
+        self.free_count += 1;
+    }
+};
+
 /// Main GC structure
 pub const GC = struct {
     nursery: NurseryHeap,
@@ -329,11 +454,20 @@ pub const GC = struct {
     /// Forwarding pointers for evacuation (maps old ptr address -> new ptr)
     forwarding_pointers: std.AutoHashMap(usize, *anyopaque),
 
+    /// Float constant pool for common values (0.0, 1.0, -1.0, NaN, Infinity)
+    float_pool: FloatConstantPool,
+
+    /// Upvalue pool for efficient closure creation
+    upvalue_pool: UpvaluePool,
+
     /// Statistics
     minor_gc_count: u64 = 0,
     major_gc_count: u64 = 0,
     total_bytes_allocated: usize = 0,
     total_bytes_freed: usize = 0,
+
+    /// Number of float allocations saved by constant pool
+    float_pool_hits: u64 = 0,
 
     /// Threshold for automatic major GC (number of tenured objects)
     major_gc_threshold: usize = 10000,
@@ -361,6 +495,8 @@ pub const GC = struct {
             .root_set = RootSet.init(allocator),
             .gray_stack = GrayStack.init(allocator),
             .forwarding_pointers = std.AutoHashMap(usize, *anyopaque).init(allocator),
+            .float_pool = FloatConstantPool.init(),
+            .upvalue_pool = UpvaluePool.init(allocator),
             .config = config,
             .allocator = allocator,
             .heap_ptr = null,
@@ -376,6 +512,7 @@ pub const GC = struct {
         self.forwarding_pointers.deinit();
         self.gray_stack.deinit();
         self.root_set.deinit();
+        self.upvalue_pool.deinit();
         self.allocator.free(self.nursery.base[0..self.nursery.size]);
         self.tenured.deinit();
         self.remembered_set.deinit();
@@ -422,7 +559,15 @@ pub const GC = struct {
     }
 
     /// Allocate a Float64Box for boxed float values
+    /// Uses constant pool for common values (0.0, 1.0, -1.0, NaN, Infinity) to avoid allocation
     pub fn allocFloat(self: *GC, v: f64) !*value.JSValue.Float64Box {
+        // Fast path: check constant pool for common values
+        if (self.float_pool.get(v)) |cached| {
+            self.float_pool_hits += 1;
+            return cached;
+        }
+
+        // Slow path: allocate new Float64Box
         const size = @sizeOf(value.JSValue.Float64Box);
         const ptr = try self.allocWithGC(size);
         const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(ptr));
@@ -432,6 +577,18 @@ pub const GC = struct {
             .value = v,
         };
         return box;
+    }
+
+    /// Acquire an Upvalue from the pool (or allocate new)
+    /// Use this instead of allocator.create(Upvalue) for closure creation
+    pub fn acquireUpvalue(self: *GC) !*object.Upvalue {
+        return self.upvalue_pool.acquire();
+    }
+
+    /// Release an Upvalue back to the pool for reuse
+    /// Call this when an upvalue is no longer needed
+    pub fn releaseUpvalue(self: *GC, uv: *object.Upvalue) void {
+        self.upvalue_pool.release(uv);
     }
 
     /// Minor GC: evacuate live nursery objects to tenured (Cheney-style copying collector)
@@ -499,26 +656,33 @@ pub const GC = struct {
             return fwd;
         }
 
-        // Get object size from header
+        // Get object size from header (header is embedded at start of object)
         const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
         const size = header.sizeBytes();
+        if (size == 0) return error.InvalidObjectSize;
 
-        // Allocate in tenured space
-        const new_ptr = self.allocator.alignedAlloc(u8, .@"8", size) catch return error.OutOfMemory;
+        // Allocate in tenured space using heap if available, otherwise fallback to raw allocator
+        const new_ptr_opt: ?*anyopaque = if (self.heap_ptr) |h|
+            h.allocRaw(size)
+        else
+            @ptrCast((self.allocator.alignedAlloc(u8, .@"8", size) catch null) orelse null);
 
-        // Copy object data
-        const src_bytes: [*]u8 = @ptrCast(ptr);
-        @memcpy(new_ptr[0..size], src_bytes[0..size]);
+        const new_ptr = new_ptr_opt orelse return error.OutOfMemory;
+
+        // Copy object data including header
+        const src_bytes: [*]const u8 = @ptrCast(ptr);
+        const dst_bytes: [*]u8 = @ptrCast(new_ptr);
+        @memcpy(dst_bytes[0..size], src_bytes[0..size]);
 
         // Store forwarding pointer in old location (for pointer updates)
-        try self.setForwardingPointer(ptr, new_ptr.ptr);
+        try self.setForwardingPointer(ptr, new_ptr);
 
         // Register in tenured heap for tracking
-        _ = self.tenured.registerObject(new_ptr.ptr) catch {};
+        _ = self.tenured.registerObject(new_ptr) catch {};
 
         self.total_bytes_allocated += size;
 
-        return new_ptr.ptr;
+        return new_ptr;
     }
 
     /// Update all pointers to point to new locations after evacuation
@@ -1003,4 +1167,96 @@ test "TenuredHeap mark bits" {
     tenured.setMark(idx2);
     try std.testing.expect(tenured.isMarked(idx1));
     try std.testing.expect(tenured.isMarked(idx2));
+}
+
+test "FloatConstantPool caching" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Allocate common values - should use constant pool
+    const zero = try gc_state.allocFloat(0.0);
+    const one = try gc_state.allocFloat(1.0);
+    const neg_one = try gc_state.allocFloat(-1.0);
+    const nan = try gc_state.allocFloat(std.math.nan(f64));
+    const pos_inf = try gc_state.allocFloat(std.math.inf(f64));
+    const neg_inf = try gc_state.allocFloat(-std.math.inf(f64));
+
+    // Verify values are correct
+    try std.testing.expectEqual(@as(f64, 0.0), zero.value);
+    try std.testing.expectEqual(@as(f64, 1.0), one.value);
+    try std.testing.expectEqual(@as(f64, -1.0), neg_one.value);
+    try std.testing.expect(std.math.isNan(nan.value));
+    try std.testing.expect(std.math.isPositiveInf(pos_inf.value));
+    try std.testing.expect(std.math.isNegativeInf(neg_inf.value));
+
+    // Verify constant pool was used (6 hits)
+    try std.testing.expectEqual(@as(u64, 6), gc_state.float_pool_hits);
+
+    // Allocate same values again - should return same pointers from pool
+    const zero2 = try gc_state.allocFloat(0.0);
+    const one2 = try gc_state.allocFloat(1.0);
+    try std.testing.expectEqual(zero, zero2);
+    try std.testing.expectEqual(one, one2);
+    try std.testing.expectEqual(@as(u64, 8), gc_state.float_pool_hits);
+
+    // Allocate a non-cached value - should allocate new box
+    const pi = try gc_state.allocFloat(3.14159);
+    try std.testing.expectEqual(@as(f64, 3.14159), pi.value);
+    try std.testing.expectEqual(@as(u64, 8), gc_state.float_pool_hits); // No new hit
+}
+
+test "UpvaluePool acquire and release" {
+    const allocator = std.testing.allocator;
+    var pool = UpvaluePool.init(allocator);
+    defer pool.deinit();
+
+    // Initially empty pool
+    try std.testing.expectEqual(@as(u32, 0), pool.free_count);
+    try std.testing.expectEqual(@as(u64, 0), pool.pool_hits);
+
+    // Acquire first upvalue - should allocate new
+    const uv1 = try pool.acquire();
+    try std.testing.expectEqual(@as(u32, 1), pool.total_allocated);
+    try std.testing.expectEqual(@as(u64, 0), pool.pool_hits);
+
+    // Acquire second upvalue - should allocate new
+    const uv2 = try pool.acquire();
+    try std.testing.expectEqual(@as(u32, 2), pool.total_allocated);
+
+    // Release first upvalue back to pool
+    pool.release(uv1);
+    try std.testing.expectEqual(@as(u32, 1), pool.free_count);
+
+    // Acquire again - should reuse from pool (hit)
+    const uv3 = try pool.acquire();
+    try std.testing.expectEqual(@as(u64, 1), pool.pool_hits);
+    try std.testing.expectEqual(@as(u32, 0), pool.free_count);
+
+    // uv3 should be the same as uv1 (reused)
+    try std.testing.expectEqual(uv1, uv3);
+
+    // Release both remaining upvalues
+    pool.release(uv2);
+    pool.release(uv3);
+    try std.testing.expectEqual(@as(u32, 2), pool.free_count);
+}
+
+test "UpvaluePool max size limit" {
+    const allocator = std.testing.allocator;
+    var pool = UpvaluePool.init(allocator);
+    pool.max_pool_size = 2; // Set small limit for testing
+    defer pool.deinit();
+
+    // Acquire 3 upvalues
+    const uv1 = try pool.acquire();
+    const uv2 = try pool.acquire();
+    const uv3 = try pool.acquire();
+
+    // Release all 3 - only 2 should be pooled, 1 freed
+    pool.release(uv1);
+    pool.release(uv2);
+    pool.release(uv3); // This one exceeds max, should be freed
+
+    try std.testing.expectEqual(@as(u32, 2), pool.free_count);
 }

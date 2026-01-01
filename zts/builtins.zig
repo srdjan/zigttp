@@ -216,8 +216,8 @@ fn createResultOk(ctx: *context.Context, val: value.JSValue) value.JSValue {
     const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
     const result_obj = object.JSObject.create(allocator, root_class, ctx.result_prototype) catch return value.JSValue.undefined_val;
     result_obj.class_id = .result;
-    result_obj.inline_slots[0] = value.JSValue.true_val; // isOk = true
-    result_obj.inline_slots[1] = val;
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.true_val;
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = val;
     return result_obj.toValue();
 }
 
@@ -227,8 +227,8 @@ fn createResultErr(ctx: *context.Context, err_val: value.JSValue) value.JSValue 
     const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
     const result_obj = object.JSObject.create(allocator, root_class, ctx.result_prototype) catch return value.JSValue.undefined_val;
     result_obj.class_id = .result;
-    result_obj.inline_slots[0] = value.JSValue.false_val; // isOk = false
-    result_obj.inline_slots[1] = err_val;
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.false_val;
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = err_val;
     return result_obj.toValue();
 }
 
@@ -2323,18 +2323,31 @@ pub fn stringPadEnd(ctx: *context.Context, this: value.JSValue, args: []const va
 }
 
 /// String.prototype.concat(...strings) - Concatenate strings
+/// Uses concatMany for efficient single-allocation concatenation
 pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    var total_len: i32 = 0;
-    if (getJSString(this)) |str| {
-        total_len = @intCast(str.len);
-    }
+    const allocator = ctx.allocator;
+
+    // Fast path: no args, return this
+    if (args.len == 0) return this;
+
+    // Get this as string
+    const this_str = getJSString(this) orelse return this;
+
+    // Collect all strings to concatenate
+    var strings: std.ArrayListUnmanaged(*const string.JSString) = .{};
+    defer strings.deinit(allocator);
+
+    strings.append(allocator, this_str) catch return this;
+
     for (args) |arg| {
         if (getJSString(arg)) |str| {
-            total_len += @intCast(str.len);
+            strings.append(allocator, str) catch return this;
         }
     }
-    return value.JSValue.fromInt(total_len);
+
+    // Use concatMany for efficient single-allocation concatenation
+    const result = string.concatMany(allocator, strings.items) catch return this;
+    return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.replace(searchValue, replaceValue) - Replace first occurrence
@@ -3455,7 +3468,7 @@ pub fn resultIsOk(_: *context.Context, this: value.JSValue, _: []const value.JSV
     if (!this.isObject()) return value.JSValue.false_val;
     const obj = object.JSObject.fromValue(this);
     if (obj.class_id != .result) return value.JSValue.false_val;
-    return obj.inline_slots[0]; // isOk boolean
+    return obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK];
 }
 
 /// Result.prototype.isErr() - returns true if result is err
@@ -3464,7 +3477,7 @@ pub fn resultIsErr(_: *context.Context, this: value.JSValue, _: []const value.JS
     const obj = object.JSObject.fromValue(this);
     if (obj.class_id != .result) return value.JSValue.true_val;
     // Return opposite of isOk
-    return if (obj.inline_slots[0].isTrue()) value.JSValue.false_val else value.JSValue.true_val;
+    return if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) value.JSValue.false_val else value.JSValue.true_val;
 }
 
 /// Result.prototype.unwrap() - returns value if ok, undefined if err
@@ -3473,8 +3486,8 @@ pub fn resultUnwrap(_: *context.Context, this: value.JSValue, _: []const value.J
     const obj = object.JSObject.fromValue(this);
     if (obj.class_id != .result) return value.JSValue.undefined_val;
 
-    if (obj.inline_slots[0].isTrue()) {
-        return obj.inline_slots[1]; // ok value
+    if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) {
+        return obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
     }
     return value.JSValue.undefined_val;
 }
@@ -3489,8 +3502,8 @@ pub fn resultUnwrapOr(_: *context.Context, this: value.JSValue, args: []const va
         return if (args.len > 0) args[0] else value.JSValue.undefined_val;
     }
 
-    if (obj.inline_slots[0].isTrue()) {
-        return obj.inline_slots[1]; // ok value
+    if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) {
+        return obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
     }
     return if (args.len > 0) args[0] else value.JSValue.undefined_val;
 }
@@ -3501,8 +3514,8 @@ pub fn resultUnwrapErr(_: *context.Context, this: value.JSValue, _: []const valu
     const obj = object.JSObject.fromValue(this);
     if (obj.class_id != .result) return value.JSValue.undefined_val;
 
-    if (!obj.inline_slots[0].isTrue()) {
-        return obj.inline_slots[1]; // err value
+    if (!obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) {
+        return obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
     }
     return value.JSValue.undefined_val;
 }
@@ -3529,7 +3542,7 @@ pub fn resultMatch(_: *context.Context, this: value.JSValue, _: []const value.JS
     if (obj.class_id != .result) return value.JSValue.undefined_val;
     // TODO: Implement when callback infrastructure is available
     // For now just return the inner value
-    return obj.inline_slots[1];
+    return obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
 }
 
 // ============================================================================
@@ -3714,7 +3727,7 @@ pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     // Allocate and store WeakMapData
     const data = allocator.create(WeakMapData) catch return value.JSValue.undefined_val;
     data.* = WeakMapData.init(allocator);
-    weak_map.inline_slots[0] = value.JSValue.fromPtr(data);
+    weak_map.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromPtr(data);
 
     // If iterable argument provided, add entries
     if (args.len > 0 and args[0].isObject()) {
@@ -3733,7 +3746,7 @@ pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.
     const map_obj = object.JSObject.fromValue(this);
     if (map_obj.class_id != .weak_map) return value.JSValue.undefined_val;
 
-    const data_val = map_obj.inline_slots[0];
+    const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.undefined_val;
     const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
 
@@ -3749,7 +3762,7 @@ pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.
     const map_obj = object.JSObject.fromValue(this);
     if (map_obj.class_id != .weak_map) return value.JSValue.undefined_val;
 
-    const data_val = map_obj.inline_slots[0];
+    const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.undefined_val;
     const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
 
@@ -3766,7 +3779,7 @@ pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.
     const map_obj = object.JSObject.fromValue(this);
     if (map_obj.class_id != .weak_map) return value.JSValue.false_val;
 
-    const data_val = map_obj.inline_slots[0];
+    const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.false_val;
     const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
 
@@ -3782,7 +3795,7 @@ pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const val
     const map_obj = object.JSObject.fromValue(this);
     if (map_obj.class_id != .weak_map) return value.JSValue.false_val;
 
-    const data_val = map_obj.inline_slots[0];
+    const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.false_val;
     const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
 
@@ -3839,7 +3852,7 @@ pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     // Allocate and store WeakSetData
     const data = allocator.create(WeakSetData) catch return value.JSValue.undefined_val;
     data.* = WeakSetData.init(allocator);
-    weak_set.inline_slots[0] = value.JSValue.fromPtr(data);
+    weak_set.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromPtr(data);
 
     // If iterable argument provided, add entries
     if (args.len > 0 and args[0].isObject()) {
@@ -3858,7 +3871,7 @@ pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.
     const set_obj = object.JSObject.fromValue(this);
     if (set_obj.class_id != .weak_set) return value.JSValue.undefined_val;
 
-    const data_val = set_obj.inline_slots[0];
+    const data_val = set_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.undefined_val;
     const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
 
@@ -3875,7 +3888,7 @@ pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.
     const set_obj = object.JSObject.fromValue(this);
     if (set_obj.class_id != .weak_set) return value.JSValue.false_val;
 
-    const data_val = set_obj.inline_slots[0];
+    const data_val = set_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.false_val;
     const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
 
@@ -3891,7 +3904,7 @@ pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const val
     const set_obj = object.JSObject.fromValue(this);
     if (set_obj.class_id != .weak_set) return value.JSValue.false_val;
 
-    const data_val = set_obj.inline_slots[0];
+    const data_val = set_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
     if (!data_val.isPtr()) return value.JSValue.false_val;
     const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
 
