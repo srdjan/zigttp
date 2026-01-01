@@ -42,6 +42,7 @@ pub const parser = @import("parser/root.zig");
 pub const pool = @import("pool.zig");
 pub const c_abi = @import("c_abi.zig");
 pub const http = @import("http.zig");
+pub const stripper = @import("stripper.zig");
 
 // Re-export main types for convenience
 pub const JSValue = value.JSValue;
@@ -62,6 +63,9 @@ pub const JSString = string.JSString;
 pub const StringTable = string.StringTable;
 pub const createString = string.createString;
 pub const Parser = parser.Parser;
+pub const StripResult = stripper.StripResult;
+pub const StripOptions = stripper.StripOptions;
+pub const strip = stripper.strip;
 
 /// Version information
 pub const version = struct {

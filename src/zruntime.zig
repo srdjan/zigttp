@@ -232,12 +232,27 @@ pub const Runtime = struct {
 
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
+        var source_to_parse: []const u8 = code;
+        var strip_result: ?zq.StripResult = null;
+        defer if (strip_result) |*sr| sr.deinit();
+
+        // Type strip for .ts/.tsx files
+        const is_ts = std.mem.endsWith(u8, filename, ".ts");
+        const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
+        if (is_ts or is_tsx) {
+            strip_result = zq.strip(self.allocator, code, .{ .tsx_mode = is_tsx }) catch |err| {
+                std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
+                return err;
+            };
+            source_to_parse = strip_result.?.code;
+        }
+
         // Parse the source code
-        var p = zq.Parser.init(self.allocator, code, &self.strings, &self.ctx.atoms);
+        var p = zq.Parser.init(self.allocator, source_to_parse, &self.strings, &self.ctx.atoms);
         defer p.deinit();
 
-        // Enable JSX mode for .jsx files
-        if (std.mem.endsWith(u8, filename, ".jsx")) {
+        // Enable JSX mode for .jsx and .tsx files
+        if (std.mem.endsWith(u8, filename, ".jsx") or is_tsx) {
             p.enableJsx();
         }
 
