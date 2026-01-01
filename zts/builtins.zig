@@ -4449,3 +4449,1541 @@ test "Number.isFinite" {
     try std.testing.expect(nan_result.isBool());
     try std.testing.expect(nan_result.getBool() == false);
 }
+
+// ============================================================================
+// String Method Tests
+// ============================================================================
+
+test "String.indexOf basic match" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const needle = try string.createString(allocator, "world");
+    defer string.freeString(allocator, needle);
+
+    // indexOf("world") = 6
+    const result = stringIndexOf(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(needle)});
+    try std.testing.expectEqual(@as(i32, 6), result.getInt());
+}
+
+test "String.indexOf no match" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const needle = try string.createString(allocator, "xyz");
+    defer string.freeString(allocator, needle);
+
+    // indexOf("xyz") = -1 (not found)
+    const result = stringIndexOf(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(needle)});
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+}
+
+test "String.indexOf empty args" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    // indexOf() with no args returns -1
+    const result = stringIndexOf(ctx, str_val, &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+}
+
+test "String.lastIndexOf basic match" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello hello");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const needle = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, needle);
+
+    // lastIndexOf("hello") = 6 (second occurrence)
+    const result = stringLastIndexOf(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(needle)});
+    try std.testing.expectEqual(@as(i32, 6), result.getInt());
+}
+
+test "String.lastIndexOf no match" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const needle = try string.createString(allocator, "xyz");
+    defer string.freeString(allocator, needle);
+
+    // lastIndexOf("xyz") = -1
+    const result = stringLastIndexOf(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(needle)});
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+}
+
+test "String.startsWith true case" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const prefix = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, prefix);
+
+    const result = stringStartsWith(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(prefix)});
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "String.startsWith false case" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const prefix = try string.createString(allocator, "world");
+    defer string.freeString(allocator, prefix);
+
+    const result = stringStartsWith(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(prefix)});
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "String.endsWith true case" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const suffix = try string.createString(allocator, "world");
+    defer string.freeString(allocator, suffix);
+
+    const result = stringEndsWith(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(suffix)});
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "String.endsWith false case" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const suffix = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, suffix);
+
+    const result = stringEndsWith(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(suffix)});
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "String.includes found" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const needle = try string.createString(allocator, "wor");
+    defer string.freeString(allocator, needle);
+
+    const result = stringIncludes(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(needle)});
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "String.includes not found" {
+    const gc = @import("gc.zig");
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, str);
+    const str_val = value.JSValue.fromPtr(str);
+
+    const needle = try string.createString(allocator, "xyz");
+    defer string.freeString(allocator, needle);
+
+    const result = stringIncludes(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(needle)});
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "String.trim whitespace" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "  hello world  ");
+    const str_val = value.JSValue.fromPtr(str);
+
+    const result = stringTrim(ctx, str_val, &[_]value.JSValue{});
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("hello world", result.toPtr(string.JSString).data());
+}
+
+test "String.trimStart whitespace" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "  hello  ");
+    const str_val = value.JSValue.fromPtr(str);
+
+    const result = stringTrimStart(ctx, str_val, &[_]value.JSValue{});
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("hello  ", result.toPtr(string.JSString).data());
+}
+
+test "String.trimEnd whitespace" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "  hello  ");
+    const str_val = value.JSValue.fromPtr(str);
+
+    const result = stringTrimEnd(ctx, str_val, &[_]value.JSValue{});
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("  hello", result.toPtr(string.JSString).data());
+}
+
+test "String.substring basic" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    const str_val = value.JSValue.fromPtr(str);
+
+    // substring(0, 5) = "hello"
+    const result = stringSubstring(ctx, str_val, &[_]value.JSValue{
+        value.JSValue.fromInt(0),
+        value.JSValue.fromInt(5),
+    });
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("hello", result.toPtr(string.JSString).data());
+}
+
+test "String.substring swapped indices" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello world");
+    const str_val = value.JSValue.fromPtr(str);
+
+    // substring(5, 0) should swap to (0, 5) = "hello"
+    const result = stringSubstring(ctx, str_val, &[_]value.JSValue{
+        value.JSValue.fromInt(5),
+        value.JSValue.fromInt(0),
+    });
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("hello", result.toPtr(string.JSString).data());
+}
+
+test "String.split with delimiter" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "a,b,c");
+    const str_val = value.JSValue.fromPtr(str);
+
+    const sep = try string.createString(allocator, ",");
+
+    const result = stringSplit(ctx, str_val, &[_]value.JSValue{value.JSValue.fromPtr(sep)});
+    try std.testing.expect(result.isObject());
+
+    // Check array length
+    const arr = result.toPtr(object.JSObject);
+    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
+}
+
+test "String.split with limit" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "a,b,c,d,e");
+    const str_val = value.JSValue.fromPtr(str);
+
+    const sep = try string.createString(allocator, ",");
+
+    // split(",", 2) should only return 2 elements
+    const result = stringSplit(ctx, str_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(sep),
+        value.JSValue.fromInt(2),
+    });
+    try std.testing.expect(result.isObject());
+
+    const arr = result.toPtr(object.JSObject);
+    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
+}
+
+test "String.split no separator" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello");
+    const str_val = value.JSValue.fromPtr(str);
+
+    // split() with no args returns array with whole string
+    const result = stringSplit(ctx, str_val, &[_]value.JSValue{});
+    try std.testing.expect(result.isObject());
+
+    const arr = result.toPtr(object.JSObject);
+    try std.testing.expectEqual(@as(u32, 1), arr.getArrayLength());
+}
+
+test "String.concat multiple strings" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const str = try string.createString(allocator, "hello");
+    const str_val = value.JSValue.fromPtr(str);
+
+    const s1 = try string.createString(allocator, " ");
+    const s2 = try string.createString(allocator, "world");
+
+    const result = stringConcat(ctx, str_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(s1),
+        value.JSValue.fromPtr(s2),
+    });
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("hello world", result.toPtr(string.JSString).data());
+}
+
+// ============================================================================
+// Array Method Tests
+// ============================================================================
+
+test "Array.push adds elements" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // Push 3 elements
+    const result = arrayPush(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(2),
+        value.JSValue.fromInt(3),
+    });
+
+    // Should return new length = 3
+    try std.testing.expectEqual(@as(i32, 3), result.getInt());
+    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
+}
+
+test "Array.pop removes last element" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // Add elements
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    try arr.setIndex(allocator, 2, value.JSValue.fromInt(30));
+    arr.setArrayLength(3);
+
+    // Pop should return 30 and reduce length
+    const result = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, 30), result.getInt());
+    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
+}
+
+test "Array.pop on empty array" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // Pop on empty array should return undefined
+    const result = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Array.shift removes first element" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // Add elements [10, 20, 30]
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    try arr.setIndex(allocator, 2, value.JSValue.fromInt(30));
+    arr.setArrayLength(3);
+
+    // Shift should return 10 and elements should shift
+    const result = arrayShift(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, 10), result.getInt());
+    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
+
+    // First element should now be 20
+    const first = arr.getIndex(0) orelse value.JSValue.undefined_val;
+    try std.testing.expectEqual(@as(i32, 20), first.getInt());
+}
+
+test "Array.unshift adds to beginning" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // Start with [30]
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(30));
+    arr.setArrayLength(1);
+
+    // Unshift [10, 20] to get [10, 20, 30]
+    const result = arrayUnshift(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(10),
+        value.JSValue.fromInt(20),
+    });
+
+    try std.testing.expectEqual(@as(i32, 3), result.getInt());
+    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
+
+    // First element should be 10
+    const first = arr.getIndex(0) orelse value.JSValue.undefined_val;
+    try std.testing.expectEqual(@as(i32, 10), first.getInt());
+}
+
+test "Array.indexOf finds element" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // [10, 20, 30, 20]
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    try arr.setIndex(allocator, 2, value.JSValue.fromInt(30));
+    try arr.setIndex(allocator, 3, value.JSValue.fromInt(20));
+    arr.setArrayLength(4);
+
+    // indexOf(20) = 1
+    const result = arrayIndexOf(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(20),
+    });
+    try std.testing.expectEqual(@as(i32, 1), result.getInt());
+}
+
+test "Array.indexOf not found" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    arr.setArrayLength(2);
+
+    // indexOf(99) = -1
+    const result = arrayIndexOf(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(99),
+    });
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+}
+
+test "Array.includes found" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    arr.setArrayLength(2);
+
+    const result = arrayIncludes(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(20),
+    });
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "Array.includes not found" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    arr.setArrayLength(1);
+
+    const result = arrayIncludes(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(99),
+    });
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "Array.splice delete elements" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // [1, 2, 3, 4, 5]
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
+    try arr.setIndex(allocator, 2, value.JSValue.fromInt(3));
+    try arr.setIndex(allocator, 3, value.JSValue.fromInt(4));
+    try arr.setIndex(allocator, 4, value.JSValue.fromInt(5));
+    arr.setArrayLength(5);
+
+    // splice(1, 2) removes elements at index 1 and 2
+    const removed = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(2),
+    });
+
+    try std.testing.expect(removed.isObject());
+    const removed_arr = removed.toPtr(object.JSObject);
+    try std.testing.expectEqual(@as(u32, 2), removed_arr.getArrayLength());
+
+    // Original array should now be [1, 4, 5]
+    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
+}
+
+test "Array.splice insert elements" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // [1, 4]
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(4));
+    arr.setArrayLength(2);
+
+    // splice(1, 0, 2, 3) inserts 2 and 3 at index 1
+    _ = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(0),
+        value.JSValue.fromInt(2),
+        value.JSValue.fromInt(3),
+    });
+
+    // Array should now be [1, 2, 3, 4]
+    try std.testing.expectEqual(@as(u32, 4), arr.getArrayLength());
+}
+
+test "Array.join with separator" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    // [1, 2, 3]
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
+    try arr.setIndex(allocator, 2, value.JSValue.fromInt(3));
+    arr.setArrayLength(3);
+
+    const sep = try string.createString(allocator, "-");
+
+    const result = arrayJoin(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromPtr(sep),
+    });
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("1-2-3", result.toPtr(string.JSString).data());
+}
+
+test "Array.join default separator" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
+    arr.setArrayLength(2);
+
+    // join() with no args uses comma
+    const result = arrayJoin(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("1,2", result.toPtr(string.JSString).data());
+}
+
+test "Array.reverse returns this" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(3);
+
+    // reverse() returns this (stub behavior - actual reversal not implemented)
+    const result = arrayReverse(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.isObject());
+}
+
+test "Array.concat returns total length" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+
+    // First array [1, 2]
+    const arr1 = try object.JSObject.createArray(allocator, root_class);
+    arr1.prototype = ctx.array_prototype;
+    arr1.setArrayLength(2);
+
+    // Second array [3, 4]
+    const arr2 = try object.JSObject.createArray(allocator, root_class);
+    arr2.prototype = ctx.array_prototype;
+    arr2.setArrayLength(2);
+
+    // concat returns total length (stub behavior)
+    const result = arrayConcat(ctx, arr1.toValue(), &[_]value.JSValue{
+        arr2.toValue(),
+    });
+
+    try std.testing.expectEqual(@as(i32, 4), result.getInt());
+}
+
+test "Array.map returns length stub" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
+    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
+    try arr.setIndex(allocator, 2, value.JSValue.fromInt(3));
+    arr.setArrayLength(3);
+
+    // map with no callback returns length (stub behavior)
+    const result = arrayMap(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, 3), result.getInt());
+}
+
+test "Array.filter returns zero stub" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(2);
+
+    // filter with no callback returns 0 (stub behavior - needs callback infrastructure)
+    const result = arrayFilter(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, 0), result.getInt());
+}
+
+test "Array.reduce returns initial value or undefined" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(3);
+
+    // reduce with no args returns undefined (stub behavior)
+    const result = arrayReduce(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.isUndefined());
+
+    // reduce with initial value returns that value (stub behavior)
+    const with_init = arrayReduce(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.undefined_val, // callback placeholder
+        value.JSValue.fromInt(42), // initial value
+    });
+    try std.testing.expectEqual(@as(i32, 42), with_init.getInt());
+}
+
+test "Array.every returns true stub" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // every on empty array returns true
+    const result = arrayEvery(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "Array.some returns false stub" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // some on empty array returns false
+    const result = arraySome(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "Array.find returns undefined stub" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // find on empty array returns undefined
+    const result = arrayFind(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Array.findIndex returns -1 stub" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const arr = try object.JSObject.createArray(allocator, root_class);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // findIndex on empty array returns -1
+    const result = arrayFindIndex(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+}
+
+// ============================================================================
+// JSON Method Tests
+// ============================================================================
+
+test "JSON.parse object" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const json_str = try string.createString(allocator, "{\"key\":123}");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(json_str),
+    });
+
+    try std.testing.expect(result.isObject());
+}
+
+test "JSON.parse number" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const json_str = try string.createString(allocator, "42");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(json_str),
+    });
+
+    try std.testing.expectEqual(@as(i32, 42), result.getInt());
+}
+
+test "JSON.parse string" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const json_str = try string.createString(allocator, "\"hello\"");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(json_str),
+    });
+
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("hello", result.toPtr(string.JSString).data());
+}
+
+test "JSON.parse boolean" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const true_str = try string.createString(allocator, "true");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(true_str),
+    });
+
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "JSON.parse null" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const null_str = try string.createString(allocator, "null");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(null_str),
+    });
+
+    try std.testing.expect(result.isNull());
+}
+
+test "JSON.parse array" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const json_str = try string.createString(allocator, "[1,2,3]");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(json_str),
+    });
+
+    try std.testing.expect(result.isObject());
+}
+
+test "JSON.parse invalid returns undefined" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const invalid_str = try string.createString(allocator, "{invalid}");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromPtr(invalid_str),
+    });
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "JSON.stringify object" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const root_class = ctx.root_class orelse unreachable;
+    const obj = try object.JSObject.create(allocator, root_class, null);
+
+    const result = jsonStringify(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        obj.toValue(),
+    });
+
+    try std.testing.expect(result.isString());
+}
+
+test "JSON.stringify number" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const result = jsonStringify(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        value.JSValue.fromInt(42),
+    });
+
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("42", result.toPtr(string.JSString).data());
+}
+
+// ============================================================================
+// Map Tests
+// ============================================================================
+
+test "Map constructor creates empty map" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const result = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    try std.testing.expect(result.isObject());
+}
+
+test "Map.set and Map.get" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const map = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+
+    // Set a value
+    _ = mapSet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(100),
+    });
+
+    // Get the value
+    const result = mapGet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+    });
+
+    try std.testing.expectEqual(@as(i32, 100), result.getInt());
+}
+
+test "Map.get missing key returns undefined" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const map = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+
+    const result = mapGet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(999),
+    });
+
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Map.has returns true for existing key" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const map = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = mapSet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(100),
+    });
+
+    const result = mapHas(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+    });
+
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "Map.has returns false for missing key" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const map = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+
+    const result = mapHas(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(999),
+    });
+
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "Map.delete removes key" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const map = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = mapSet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(100),
+    });
+
+    // Delete the key
+    const deleted = mapDelete(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+    });
+    try std.testing.expect(deleted.getBool() == true);
+
+    // Key should no longer exist
+    const result = mapHas(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+    });
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "Map.clear empties map" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const map = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = mapSet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(1),
+        value.JSValue.fromInt(100),
+    });
+    _ = mapSet(ctx, map, &[_]value.JSValue{
+        value.JSValue.fromInt(2),
+        value.JSValue.fromInt(200),
+    });
+
+    // Clear the map
+    _ = mapClear(ctx, map, &[_]value.JSValue{});
+
+    // All keys should be gone
+    const has1 = mapHas(ctx, map, &[_]value.JSValue{value.JSValue.fromInt(1)});
+    const has2 = mapHas(ctx, map, &[_]value.JSValue{value.JSValue.fromInt(2)});
+    try std.testing.expect(has1.getBool() == false);
+    try std.testing.expect(has2.getBool() == false);
+}
+
+// ============================================================================
+// Set Tests
+// ============================================================================
+
+test "Set constructor creates empty set" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const result = setConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    try std.testing.expect(result.isObject());
+}
+
+test "Set.add and Set.has" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const set = setConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+
+    // Add a value
+    _ = setAdd(ctx, set, &[_]value.JSValue{
+        value.JSValue.fromInt(42),
+    });
+
+    // Check it exists
+    const result = setHas(ctx, set, &[_]value.JSValue{
+        value.JSValue.fromInt(42),
+    });
+
+    try std.testing.expect(result.getBool() == true);
+}
+
+test "Set.has returns false for missing value" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const set = setConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+
+    const result = setHas(ctx, set, &[_]value.JSValue{
+        value.JSValue.fromInt(999),
+    });
+
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "Set.delete removes value" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const set = setConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = setAdd(ctx, set, &[_]value.JSValue{value.JSValue.fromInt(42)});
+
+    // Delete the value
+    const deleted = setDelete(ctx, set, &[_]value.JSValue{
+        value.JSValue.fromInt(42),
+    });
+    try std.testing.expect(deleted.getBool() == true);
+
+    // Value should no longer exist
+    const result = setHas(ctx, set, &[_]value.JSValue{
+        value.JSValue.fromInt(42),
+    });
+    try std.testing.expect(result.getBool() == false);
+}
+
+test "Set.clear empties set" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const set = setConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = setAdd(ctx, set, &[_]value.JSValue{value.JSValue.fromInt(1)});
+    _ = setAdd(ctx, set, &[_]value.JSValue{value.JSValue.fromInt(2)});
+
+    // Clear the set
+    _ = setClear(ctx, set, &[_]value.JSValue{});
+
+    // All values should be gone
+    const has1 = setHas(ctx, set, &[_]value.JSValue{value.JSValue.fromInt(1)});
+    const has2 = setHas(ctx, set, &[_]value.JSValue{value.JSValue.fromInt(2)});
+    try std.testing.expect(has1.getBool() == false);
+    try std.testing.expect(has2.getBool() == false);
+}

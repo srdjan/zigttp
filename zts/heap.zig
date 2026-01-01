@@ -540,3 +540,42 @@ test "Heap allocFloat64" {
     try std.testing.expect(box != null);
     try std.testing.expectEqual(@as(f64, 3.14159), box.?.value);
 }
+
+test "Heap allocRaw" {
+    const allocator = std.testing.allocator;
+    var heap = Heap.init(allocator, .{});
+    defer heap.deinit();
+
+    const ptr = heap.allocRaw(128);
+    try std.testing.expect(ptr != null);
+
+    // Should be able to write to the memory
+    const bytes: [*]u8 = @ptrCast(ptr.?);
+    bytes[0] = 0xAB;
+    bytes[127] = 0xCD;
+}
+
+test "SizeClass fromSize" {
+    // Small sizes should map to appropriate size classes
+    try std.testing.expectEqual(SizeClass.size_16, SizeClass.fromSize(1));
+    try std.testing.expectEqual(SizeClass.size_16, SizeClass.fromSize(16));
+    try std.testing.expectEqual(SizeClass.size_32, SizeClass.fromSize(17));
+    try std.testing.expectEqual(SizeClass.size_32, SizeClass.fromSize(32));
+    try std.testing.expectEqual(SizeClass.size_64, SizeClass.fromSize(33));
+    try std.testing.expectEqual(SizeClass.size_128, SizeClass.fromSize(65));
+    try std.testing.expectEqual(SizeClass.size_256, SizeClass.fromSize(129));
+}
+
+test "SizeClass slotSize" {
+    try std.testing.expectEqual(@as(usize, 16), SizeClass.size_16.slotSize());
+    try std.testing.expectEqual(@as(usize, 32), SizeClass.size_32.slotSize());
+    try std.testing.expectEqual(@as(usize, 64), SizeClass.size_64.slotSize());
+    try std.testing.expectEqual(@as(usize, 128), SizeClass.size_128.slotSize());
+    try std.testing.expectEqual(@as(usize, 256), SizeClass.size_256.slotSize());
+}
+
+test "MemBlockHeader sizeBytes" {
+    // Size is rounded up to 8-byte words: (100 + 7) / 8 = 13 words * 8 = 104
+    const header = MemBlockHeader.init(.object, 100);
+    try std.testing.expectEqual(@as(usize, 104), header.sizeBytes());
+}

@@ -449,3 +449,176 @@ test "AtomTable interning" {
     try std.testing.expectEqual(atom1, atom2);
     try std.testing.expect(atom1 != atom3);
 }
+
+test "Context pushFrame and popFrame" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push a frame
+    try ctx.pushFrame(value.JSValue.undefined_val, value.JSValue.undefined_val, 0);
+    try std.testing.expectEqual(@as(usize, 1), ctx.call_depth);
+
+    // Pop the frame
+    const frame = ctx.popFrame();
+    try std.testing.expect(frame != null);
+    try std.testing.expectEqual(@as(usize, 0), ctx.call_depth);
+}
+
+test "Context exception handling" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Initially no exception
+    try std.testing.expect(!ctx.hasException());
+
+    // Throw exception
+    ctx.throwException(value.JSValue.fromInt(42));
+    try std.testing.expect(ctx.hasException());
+
+    // Clear exception
+    ctx.clearException();
+    try std.testing.expect(!ctx.hasException());
+}
+
+test "Context catch handler" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // No handler initially
+    try std.testing.expect(ctx.getCatchHandler() == null);
+
+    // Push a catch handler
+    try ctx.pushCatch(100);
+    const handler = ctx.getCatchHandler();
+    try std.testing.expect(handler != null);
+    try std.testing.expectEqual(@as(usize, 100), handler.?.catch_pc);
+
+    // Pop the handler
+    ctx.popCatch();
+    try std.testing.expect(ctx.getCatchHandler() == null);
+}
+
+test "Context global variables" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const atom = try ctx.atoms.intern("myVar");
+
+    // Initially undefined
+    try std.testing.expect(ctx.getGlobal(atom) == null);
+
+    // Set global
+    try ctx.setGlobal(atom, value.JSValue.fromInt(123));
+
+    // Get global
+    const val = ctx.getGlobal(atom);
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(i32, 123), val.?.getInt());
+}
+
+test "AtomTable getName" {
+    const allocator = std.testing.allocator;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    const atom = try atoms.intern("testName");
+    const name = atoms.getName(atom);
+
+    try std.testing.expect(name != null);
+    try std.testing.expectEqualStrings("testName", name.?);
+}
+
+test "AtomTable count" {
+    const allocator = std.testing.allocator;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), atoms.count());
+
+    _ = try atoms.intern("first");
+    try std.testing.expectEqual(@as(usize, 1), atoms.count());
+
+    _ = try atoms.intern("second");
+    try std.testing.expectEqual(@as(usize, 2), atoms.count());
+
+    // Interning same string shouldn't increase count
+    _ = try atoms.intern("first");
+    try std.testing.expectEqual(@as(usize, 2), atoms.count());
+}
+
+test "AtomTable reset" {
+    const allocator = std.testing.allocator;
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    _ = try atoms.intern("one");
+    _ = try atoms.intern("two");
+    try std.testing.expectEqual(@as(usize, 2), atoms.count());
+
+    atoms.reset();
+    try std.testing.expectEqual(@as(usize, 0), atoms.count());
+}
+
+test "Context nested catch handlers" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push two nested handlers
+    try ctx.pushCatch(100);
+    try ctx.pushCatch(200);
+
+    // Should get most recent handler
+    const handler1 = ctx.getCatchHandler();
+    try std.testing.expect(handler1 != null);
+    try std.testing.expectEqual(@as(usize, 200), handler1.?.catch_pc);
+
+    // Pop and get outer handler
+    ctx.popCatch();
+    const handler2 = ctx.getCatchHandler();
+    try std.testing.expect(handler2 != null);
+    try std.testing.expectEqual(@as(usize, 100), handler2.?.catch_pc);
+
+    ctx.popCatch();
+    try std.testing.expect(ctx.getCatchHandler() == null);
+}
+
+test "Context popFrame on empty returns null" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // No frames pushed
+    try std.testing.expect(ctx.popFrame() == null);
+}

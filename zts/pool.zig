@@ -227,3 +227,51 @@ test "LockFreePool multiple runtimes" {
 
     try std.testing.expectEqual(@as(usize, 3), pool.getAvailable());
 }
+
+test "LockFreePool beyond pool size creates new runtimes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var pool = try LockFreePool.init(allocator, .{ .max_size = 2 });
+
+    // Acquire more than pool size - creates new runtimes
+    const rt1 = try pool.acquire();
+    const rt2 = try pool.acquire();
+    const rt3 = try pool.acquire();
+
+    try std.testing.expectEqual(@as(usize, 3), pool.getSize());
+
+    pool.release(rt1);
+    pool.release(rt2);
+    pool.release(rt3);
+}
+
+test "Runtime reset" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var pool = try LockFreePool.init(allocator, .{ .max_size = 2 });
+
+    const rt = try pool.acquire();
+
+    // Reset should complete without error
+    rt.reset();
+
+    pool.release(rt);
+}
+
+test "acquireWithCache and releaseWithCache" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var pool = try LockFreePool.init(allocator, .{ .max_size = 4 });
+
+    const rt = try acquireWithCache(&pool);
+    try std.testing.expect(rt.in_use);
+
+    releaseWithCache(&pool, rt);
+    try std.testing.expect(!rt.in_use);
+}

@@ -2803,3 +2803,530 @@ test "Interpreter strict equality edge cases" {
     const result = try interp.run(&func);
     try std.testing.expectEqual(value.JSValue.true_val, result);
 }
+
+test "Interpreter local variable get and put" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Store 42 in local 0, then return it
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 42,
+        @intFromEnum(bytecode.Opcode.put_loc_0),
+        @intFromEnum(bytecode.Opcode.get_loc_0),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 1,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 42), result.getInt());
+}
+
+test "Interpreter multiple locals" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Store 10 in local 0, 20 in local 1, add them
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.put_loc_0),
+        @intFromEnum(bytecode.Opcode.push_i8), 20,
+        @intFromEnum(bytecode.Opcode.put_loc_1),
+        @intFromEnum(bytecode.Opcode.get_loc_0),
+        @intFromEnum(bytecode.Opcode.get_loc_1),
+        @intFromEnum(bytecode.Opcode.add),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 2,
+        .stack_size = 4,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 30), result.getInt());
+}
+
+test "Interpreter undefined equals undefined" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // undefined === undefined should be true
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_undefined),
+        @intFromEnum(bytecode.Opcode.push_undefined),
+        @intFromEnum(bytecode.Opcode.strict_eq),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(value.JSValue.true_val, result);
+}
+
+test "Interpreter null vs undefined strict not equal" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // null === undefined should be false
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_null),
+        @intFromEnum(bytecode.Opcode.push_undefined),
+        @intFromEnum(bytecode.Opcode.strict_eq),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(value.JSValue.false_val, result);
+}
+
+test "Interpreter typeof operations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // typeof 42 should return "number"
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 42,
+        @intFromEnum(bytecode.Opcode.typeof),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("number", result.toPtr(string.JSString).data());
+}
+
+test "Interpreter modulo operation" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // 10 % 3 = 1
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.push_3),
+        @intFromEnum(bytecode.Opcode.mod),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 1), result.getInt());
+}
+
+test "Interpreter inc dec roundtrip" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // 5 -> inc -> dec -> should be 5
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 5,
+        @intFromEnum(bytecode.Opcode.inc),
+        @intFromEnum(bytecode.Opcode.dec),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 5), result.getInt());
+}
+
+test "Interpreter negation" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // -42 should be -42
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 42,
+        @intFromEnum(bytecode.Opcode.neg),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, -42), result.getInt());
+}
+
+test "Interpreter dup operation" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push 7, dup, add -> 14
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 7,
+        @intFromEnum(bytecode.Opcode.dup),
+        @intFromEnum(bytecode.Opcode.add),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 14), result.getInt());
+}
+
+test "Interpreter drop operation" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push 5, push 10, drop, ret -> should return 5
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 5,
+        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.drop),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 5), result.getInt());
+}
+
+test "Interpreter swap operation" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push 10, push 3, swap, sub -> 10 - 3 = 7
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.push_3),
+        @intFromEnum(bytecode.Opcode.swap),
+        @intFromEnum(bytecode.Opcode.sub),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 3,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    // After swap: [3, 10], sub: 3 - 10 = -7
+    try std.testing.expectEqual(@as(i32, -7), result.getInt());
+}
+
+test "Interpreter not operator inverts false" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // !false = true
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_false),
+        @intFromEnum(bytecode.Opcode.not),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(value.JSValue.true_val, result);
+}
+
+test "Interpreter new_array" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Create empty array (new_array takes u16 length)
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.new_array), 0, 0, // u16 length = 0
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isObject());
+}
+
+test "Interpreter ret_undefined" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.ret_undefined),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "Interpreter push_i16" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Push 1000 (requires i16)
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_i16),
+        @as(u8, @truncate(1000 & 0xFF)), // low byte
+        @as(u8, @truncate((1000 >> 8) & 0xFF)), // high byte
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    const result = try interp.run(&func);
+    try std.testing.expectEqual(@as(i32, 1000), result.getInt());
+}

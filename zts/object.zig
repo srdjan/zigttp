@@ -1615,3 +1615,190 @@ test "InlineCache with object" {
     try std.testing.expectEqual(@as(i32, 100), hit_result.?.getInt());
     try std.testing.expectEqual(@as(u32, 1), ic.hit_count);
 }
+
+test "lookupPredefinedAtom" {
+    const length_atom = lookupPredefinedAtom("length");
+    try std.testing.expect(length_atom != null);
+    try std.testing.expectEqual(Atom.length, length_atom.?);
+
+    const prototype_atom = lookupPredefinedAtom("prototype");
+    try std.testing.expect(prototype_atom != null);
+    try std.testing.expectEqual(Atom.prototype, prototype_atom.?);
+
+    const unknown_atom = lookupPredefinedAtom("unknownAtomName");
+    try std.testing.expect(unknown_atom == null);
+}
+
+test "Upvalue operations" {
+    var slot: value.JSValue = value.JSValue.fromInt(42);
+    var uv = Upvalue.init(&slot);
+
+    // Get initial value
+    try std.testing.expectEqual(@as(i32, 42), uv.get().getInt());
+
+    // Set new value
+    uv.set(value.JSValue.fromInt(100));
+    try std.testing.expectEqual(@as(i32, 100), uv.get().getInt());
+
+    // Close the upvalue
+    uv.close();
+    // Check that value is preserved after closing
+    try std.testing.expectEqual(@as(i32, 100), uv.get().getInt());
+}
+
+test "JSObject deleteProperty" {
+    const allocator = std.testing.allocator;
+
+    var root_class = try HiddenClass.init(allocator);
+    defer root_class.deinit(allocator);
+
+    var obj = try JSObject.create(allocator, root_class, null);
+    defer obj.destroy(allocator);
+
+    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
+    defer allocator.free(obj.hidden_class.properties);
+    defer obj.hidden_class.deinit(allocator);
+
+    // Property exists
+    try std.testing.expect(obj.hasOwnProperty(.length));
+
+    // Delete property - returns true
+    const deleted = obj.deleteProperty(.length);
+    try std.testing.expect(deleted);
+
+    // Deleting non-existent property also returns true (JS spec behavior)
+    const deleted_again = obj.deleteProperty(.prototype);
+    try std.testing.expect(deleted_again);
+}
+
+test "JSObject hasOwnProperty" {
+    const allocator = std.testing.allocator;
+
+    var root_class = try HiddenClass.init(allocator);
+    defer root_class.deinit(allocator);
+
+    var obj = try JSObject.create(allocator, root_class, null);
+    defer obj.destroy(allocator);
+
+    // Initially no property
+    try std.testing.expect(!obj.hasOwnProperty(.length));
+
+    try obj.setProperty(allocator, .length, value.JSValue.fromInt(5));
+    defer allocator.free(obj.hidden_class.properties);
+    defer obj.hidden_class.deinit(allocator);
+
+    try std.testing.expect(obj.hasOwnProperty(.length));
+}
+
+test "JSObject array operations" {
+    const allocator = std.testing.allocator;
+
+    var root_class = try HiddenClass.init(allocator);
+    defer root_class.deinit(allocator);
+
+    var arr = try JSObject.createArray(allocator, root_class);
+    defer arr.destroy(allocator);
+
+    // Check it's an array
+    try std.testing.expect(arr.isArray());
+
+    // Initial length is 0
+    try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
+
+    // Set length
+    arr.setArrayLength(5);
+    try std.testing.expectEqual(@as(u32, 5), arr.getArrayLength());
+}
+
+test "JSObject getIndex and setIndex" {
+    const allocator = std.testing.allocator;
+
+    var root_class = try HiddenClass.init(allocator);
+    defer root_class.deinit(allocator);
+
+    var arr = try JSObject.createArray(allocator, root_class);
+    defer arr.destroy(allocator);
+
+    // Initially no element at index 0
+    try std.testing.expect(arr.getIndex(0) == null);
+
+    // Set element
+    try arr.setIndex(allocator, 0, value.JSValue.fromInt(42));
+    const val = arr.getIndex(0);
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(i32, 42), val.?.getInt());
+}
+
+test "JSObject arrayPush" {
+    const allocator = std.testing.allocator;
+
+    var root_class = try HiddenClass.init(allocator);
+    defer root_class.deinit(allocator);
+
+    var arr = try JSObject.createArray(allocator, root_class);
+    defer arr.destroy(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
+
+    try arr.arrayPush(allocator, value.JSValue.fromInt(1));
+    try std.testing.expectEqual(@as(u32, 1), arr.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 1), arr.getIndex(0).?.getInt());
+
+    try arr.arrayPush(allocator, value.JSValue.fromInt(2));
+    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 2), arr.getIndex(1).?.getInt());
+}
+
+test "JSObject getOwnEnumerableKeys" {
+    const allocator = std.testing.allocator;
+
+    var root_class = try HiddenClass.init(allocator);
+    defer root_class.deinit(allocator);
+
+    var obj = try JSObject.create(allocator, root_class, null);
+    defer obj.destroy(allocator);
+
+    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
+    defer allocator.free(obj.hidden_class.properties);
+    defer obj.hidden_class.deinit(allocator);
+
+    const keys = try obj.getOwnEnumerableKeys(allocator);
+    defer allocator.free(keys);
+
+    try std.testing.expectEqual(@as(usize, 1), keys.len);
+    try std.testing.expectEqual(Atom.length, keys[0]);
+}
+
+test "InlineCache hitRatio" {
+    var ic = InlineCache{};
+
+    // Initially 0/0 - returns 0
+    try std.testing.expectEqual(@as(f64, 0.0), ic.hitRatio());
+
+    // Simulate some hits and misses
+    ic.hit_count = 3;
+    ic.miss_count = 1;
+
+    try std.testing.expectEqual(@as(f64, 0.75), ic.hitRatio());
+}
+
+test "PropertyIterator" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root_class = try HiddenClass.init(allocator);
+
+    const obj = try JSObject.create(allocator, root_class, null);
+
+    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
+    try obj.setProperty(allocator, .prototype, value.JSValue.fromInt(20));
+
+    var iter = obj.propertyIterator();
+    var count: usize = 0;
+    while (iter.next()) |_| {
+        count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), count);
+}

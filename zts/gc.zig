@@ -1260,3 +1260,179 @@ test "UpvaluePool max size limit" {
 
     try std.testing.expectEqual(@as(u32, 2), pool.free_count);
 }
+
+test "GC major collection" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Trigger major GC (should complete without error)
+    gc_state.majorGC();
+
+    try std.testing.expectEqual(@as(u64, 1), gc_state.major_gc_count);
+    try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
+}
+
+test "GC maybeDoMajorGC below threshold" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // With no tenured allocations, should not trigger major GC
+    gc_state.maybeDoMajorGC();
+
+    try std.testing.expectEqual(@as(u64, 0), gc_state.major_gc_count);
+}
+
+test "GC multiple minor collections" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 256 });
+    defer gc_state.deinit();
+
+    // Run multiple minor GCs
+    gc_state.minorGC();
+    gc_state.minorGC();
+    gc_state.minorGC();
+
+    try std.testing.expectEqual(@as(u64, 3), gc_state.minor_gc_count);
+}
+
+test "GC phase transitions" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Initial phase is idle
+    try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
+
+    // After minor GC, should return to idle
+    gc_state.minorGC();
+    try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
+
+    // After major GC, should return to idle
+    gc_state.majorGC();
+    try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
+}
+
+test "GC isInNursery" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    // Allocate in nursery
+    const ptr = gc_state.allocNursery(64);
+    try std.testing.expect(ptr != null);
+    try std.testing.expect(gc_state.isInNursery(ptr.?));
+}
+
+test "TenuredHeap SIMD sweep" {
+    const allocator = std.testing.allocator;
+    var tenured = try TenuredHeap.init(allocator, 4096);
+    defer tenured.deinit();
+
+    var dummy1: u64 = 1;
+    var dummy2: u64 = 2;
+
+    const idx1 = try tenured.registerObject(&dummy1);
+    const idx2 = try tenured.registerObject(&dummy2);
+
+    // Mark only first object
+    tenured.setMark(idx1);
+
+    // SIMD sweep should clear marks
+    tenured.simdSweep(null, null);
+
+    // After sweep, marks should be cleared
+    try std.testing.expect(!tenured.isMarked(idx1));
+    try std.testing.expect(!tenured.isMarked(idx2));
+}
+
+test "TenuredHeap scalar sweep" {
+    const allocator = std.testing.allocator;
+    var tenured = try TenuredHeap.init(allocator, 4096);
+    defer tenured.deinit();
+
+    var dummy1: u64 = 1;
+    var dummy2: u64 = 2;
+
+    const idx1 = try tenured.registerObject(&dummy1);
+    const idx2 = try tenured.registerObject(&dummy2);
+
+    // Mark only second object
+    tenured.setMark(idx2);
+
+    // Scalar sweep should clear marks
+    tenured.scalarSweep(null, null);
+
+    // After sweep, marks should be cleared
+    try std.testing.expect(!tenured.isMarked(idx1));
+    try std.testing.expect(!tenured.isMarked(idx2));
+}
+
+test "RootSet iterator" {
+    const allocator = std.testing.allocator;
+    var rs = RootSet.init(allocator);
+    defer rs.deinit();
+
+    const val1 = value.JSValue.fromInt(1);
+    const val2 = value.JSValue.fromInt(2);
+    const val3 = value.JSValue.fromInt(3);
+
+    try rs.addRoot(val1);
+    try rs.addRoot(val2);
+    try rs.addRoot(val3);
+
+    const roots = rs.iterator();
+    try std.testing.expectEqual(@as(usize, 3), roots.len);
+}
+
+test "RememberedSet duplicate entries" {
+    const allocator = std.testing.allocator;
+    var rs = RememberedSet.init(allocator);
+    defer rs.deinit();
+
+    var dummy: u64 = 42;
+
+    // Add same pointer twice
+    try rs.add(&dummy);
+    try rs.add(&dummy);
+
+    // Both should be added (no dedup in basic impl)
+    try std.testing.expectEqual(@as(usize, 2), rs.entries.items.len);
+}
+
+test "GrayStack clear" {
+    const allocator = std.testing.allocator;
+    var stack = GrayStack.init(allocator);
+    defer stack.deinit();
+
+    var dummy1: u64 = 1;
+    var dummy2: u64 = 2;
+
+    try stack.push(&dummy1);
+    try stack.push(&dummy2);
+
+    try std.testing.expect(!stack.isEmpty());
+
+    stack.clear();
+
+    try std.testing.expect(stack.isEmpty());
+}
+
+test "GC allocNursery returns null when exhausted" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 64 });
+    defer gc_state.deinit();
+
+    // First allocation should succeed
+    const ptr1 = gc_state.allocNursery(32);
+    try std.testing.expect(ptr1 != null);
+
+    // Second allocation should succeed
+    const ptr2 = gc_state.allocNursery(16);
+    try std.testing.expect(ptr2 != null);
+
+    // Third allocation should fail (not enough space)
+    const ptr3 = gc_state.allocNursery(32);
+    try std.testing.expect(ptr3 == null);
+}
