@@ -154,6 +154,12 @@ pub const Opcode = enum(u8) {
     get_field_call = 0xA3, // get_field + call
     if_false_goto = 0xA4, // if_false + goto
 
+    // Fused arithmetic-modulo (for patterns like (a + b) % c)
+    // Uses i64 intermediate to avoid overflow, result guaranteed to fit in i32
+    add_mod = 0xA5, // +u16 divisor_const_idx: pop a,b; push (a+b) % divisor
+    sub_mod = 0xA6, // +u16 divisor_const_idx: pop a,b; push (a-b) % divisor
+    mul_mod = 0xA7, // +u16 divisor_const_idx: pop a,b; push (a*b) % divisor
+
     // Inline cache instructions
     get_field_ic = 0xB0, // +u16 atom_idx +u16 cache_idx
     put_field_ic = 0xB1, // +u16 atom_idx +u16 cache_idx

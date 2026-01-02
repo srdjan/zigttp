@@ -328,27 +328,31 @@ pub const Interpreter = struct {
                 },
 
                 .get_length => {
-                    // Fast path for getting length without atom lookup
-                    const obj_val = self.ctx.pop();
+                    // Optimized - modify stack in place
+                    const sp = self.ctx.sp;
+                    const obj_val = self.ctx.stack[sp - 1];
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
                         if (obj.class_id == .array) {
-                            try self.ctx.push(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH]);
+                            self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH];
+                            continue :dispatch;
                         } else if (obj.class_id == .range_iterator) {
-                            try self.ctx.push(value.JSValue.fromInt(@intCast(obj.getRangeLength())));
+                            self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH];
+                            continue :dispatch;
                         } else {
                             // Fallback to property lookup
                             if (obj.getProperty(.length)) |len| {
-                                try self.ctx.push(len);
+                                self.ctx.stack[sp - 1] = len;
                             } else {
-                                try self.ctx.push(value.JSValue.undefined_val);
+                                self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
                             }
+                            continue :dispatch;
                         }
                     } else if (obj_val.isString()) {
                         const str = obj_val.toPtr(string.JSString);
-                        try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intCast(str.len));
                     } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
+                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
                     }
                 },
 
@@ -387,36 +391,96 @@ pub const Interpreter = struct {
                 .put_loc_3 => self.ctx.setLocal(3, self.ctx.pop()),
 
                 // ========================================
-                // Arithmetic
+                // Arithmetic - optimized direct stack access
                 // ========================================
                 .add => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(try self.addValues(a, b));
+                    // Direct stack manipulation avoids push bounds check
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    // Inline integer fast path
+                    if (a.isInt() and b.isInt()) {
+                        const ai = a.getInt();
+                        const bi = b.getInt();
+                        const result = @addWithOverflow(ai, bi);
+                        if (result[1] == 0) {
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                        // Integer overflow - convert to float
+                        self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
+                    // Slow path for strings/floats
+                    self.ctx.sp = sp - 2;
+                    self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
                 },
 
                 .sub => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(try self.subValues(a, b));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        const ai = a.getInt();
+                        const bi = b.getInt();
+                        const result = @subWithOverflow(ai, bi);
+                        if (result[1] == 0) {
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                        // Integer overflow - convert to float
+                        self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
+                    self.ctx.sp = sp - 2;
+                    self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
                 },
 
                 .mul => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(try self.mulValues(a, b));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        const ai = a.getInt();
+                        const bi = b.getInt();
+                        const result = @mulWithOverflow(ai, bi);
+                        if (result[1] == 0) {
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                        // Integer overflow - convert to float
+                        self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
+                    self.ctx.sp = sp - 2;
+                    self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
                 },
 
                 .div => {
                     const b = self.ctx.pop();
                     const a = self.ctx.pop();
-                    try self.ctx.push(try self.divValues(a, b));
+                    self.ctx.pushUnchecked(try self.divValues(a, b));
                 },
 
                 .mod => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(try modValues(a, b));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        const bv = b.getInt();
+                        if (bv != 0) {
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(a.getInt(), bv));
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                    }
+                    return error.DivisionByZero;
                 },
 
                 .pow => {
@@ -431,136 +495,194 @@ pub const Interpreter = struct {
                 },
 
                 .inc => {
-                    const a = self.ctx.pop();
+                    // Optimize for common integer case - modify stack in place
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
                     if (a.isInt()) {
-                        const result = @addWithOverflow(a.getInt(), 1);
+                        const ai = a.getInt();
+                        const result = @addWithOverflow(ai, 1);
                         if (result[1] == 0) {
-                            try self.ctx.push(value.JSValue.fromInt(result[0]));
-                        } else {
-                            try self.ctx.push(try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + 1.0));
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                            continue :dispatch;
                         }
+                        // Overflow - convert to float
+                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + 1.0);
+                        continue :dispatch;
                     } else if (a.isFloat64()) {
-                        try self.ctx.push(try self.allocFloat(a.getFloat64() + 1.0));
+                        self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() + 1.0);
                     } else {
                         return error.TypeError;
                     }
                 },
 
                 .dec => {
-                    const a = self.ctx.pop();
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
                     if (a.isInt()) {
-                        const result = @subWithOverflow(a.getInt(), 1);
+                        const ai = a.getInt();
+                        const result = @subWithOverflow(ai, 1);
                         if (result[1] == 0) {
-                            try self.ctx.push(value.JSValue.fromInt(result[0]));
-                        } else {
-                            try self.ctx.push(try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - 1.0));
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                            continue :dispatch;
                         }
+                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - 1.0);
+                        continue :dispatch;
                     } else if (a.isFloat64()) {
-                        try self.ctx.push(try self.allocFloat(a.getFloat64() - 1.0));
+                        self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() - 1.0);
                     } else {
                         return error.TypeError;
                     }
                 },
 
                 // ========================================
-                // Bitwise Operations
+                // Bitwise Operations - optimized direct stack access
                 // ========================================
                 .bit_and => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromInt(toInt32(a) & toInt32(b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) & toInt32(b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 .bit_or => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromInt(toInt32(a) | toInt32(b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) | toInt32(b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 .bit_xor => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromInt(toInt32(a) ^ toInt32(b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) ^ toInt32(b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 .bit_not => {
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromInt(~toInt32(a)));
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(~toInt32(a));
                 },
 
                 .shl => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
                     const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                    try self.ctx.push(value.JSValue.fromInt(toInt32(a) << shift));
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) << shift);
+                    self.ctx.sp = sp - 1;
                 },
 
                 .shr => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
                     const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                    try self.ctx.push(value.JSValue.fromInt(toInt32(a) >> shift));
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) >> shift);
+                    self.ctx.sp = sp - 1;
                 },
 
                 .ushr => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
                     const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
                     const ua: u32 = @bitCast(toInt32(a));
-                    try self.ctx.push(value.JSValue.fromInt(@bitCast(ua >> shift)));
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(@bitCast(ua >> shift));
+                    self.ctx.sp = sp - 1;
                 },
 
                 // ========================================
-                // Comparison
+                // Comparison - optimized with inline integer fast paths
                 // ========================================
                 .lt => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(try compareValues(a, b) == .lt));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    // Inline integer fast path
+                    if (a.isInt() and b.isInt()) {
+                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() < b.getInt());
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
+                    self.ctx.sp = sp - 1;
                 },
 
                 .lte => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() <= b.getInt());
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
                     const cmp = try compareValues(a, b);
-                    try self.ctx.push(value.JSValue.fromBool(cmp == .lt or cmp == .eq));
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .lt or cmp == .eq);
+                    self.ctx.sp = sp - 1;
                 },
 
                 .gt => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(try compareValues(a, b) == .gt));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() > b.getInt());
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .gt);
+                    self.ctx.sp = sp - 1;
                 },
 
                 .gte => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() >= b.getInt());
+                        self.ctx.sp = sp - 1;
+                        continue :dispatch;
+                    }
                     const cmp = try compareValues(a, b);
-                    try self.ctx.push(value.JSValue.fromBool(cmp == .gt or cmp == .eq));
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .gt or cmp == .eq);
+                    self.ctx.sp = sp - 1;
                 },
 
                 .eq => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(looseEquals(a, b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(looseEquals(a, b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 .neq => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(!looseEquals(a, b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(!looseEquals(a, b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 .strict_eq => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(a.strictEquals(b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.strictEquals(b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 .strict_neq => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(!a.strictEquals(b)));
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(!a.strictEquals(b));
+                    self.ctx.sp = sp - 1;
                 },
 
                 // ========================================
@@ -689,8 +811,10 @@ pub const Interpreter = struct {
                 },
 
                 .get_elem => {
-                    const index_val = self.ctx.pop();
-                    const obj_val = self.ctx.pop();
+                    // Optimized with direct stack access
+                    const sp = self.ctx.sp;
+                    const index_val = self.ctx.stack[sp - 1];
+                    const obj_val = self.ctx.stack[sp - 2];
 
                     if (obj_val.isObject() and index_val.isInt()) {
                         const obj = object.JSObject.fromValue(obj_val);
@@ -701,36 +825,44 @@ pub const Interpreter = struct {
                                 // Fast path: check bounds once, then unchecked access
                                 const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
                                 if (idx_u < len) {
-                                    self.ctx.pushUnchecked(obj.getIndexUnchecked(idx_u));
+                                    self.ctx.stack[sp - 2] = obj.getIndexUnchecked(idx_u);
                                 } else {
-                                    self.ctx.pushUnchecked(value.JSValue.undefined_val);
+                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                                 }
+                                self.ctx.sp = sp - 1;
+                                continue :dispatch;
                             } else if (obj.class_id == .range_iterator) {
-                                // Lazy range: compute value on demand
-                                if (obj.getRangeIndex(idx_u)) |val| {
-                                    try self.ctx.push(val);
+                                // Inline range iterator computation
+                                const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt()));
+                                if (idx_u < len) {
+                                    const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                                    const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
                                 } else {
-                                    try self.ctx.push(value.JSValue.undefined_val);
+                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                                 }
+                                self.ctx.sp = sp - 1;
+                                continue :dispatch;
                             } else {
                                 var idx_buf: [32]u8 = undefined;
                                 const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
-                                    try self.ctx.push(value.JSValue.undefined_val);
+                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                                    self.ctx.sp = sp - 1;
                                     continue :dispatch;
                                 };
                                 const atom = self.ctx.atoms.intern(idx_slice) catch {
-                                    try self.ctx.push(value.JSValue.undefined_val);
+                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                                    self.ctx.sp = sp - 1;
                                     continue :dispatch;
                                 };
-                                const val = obj.getProperty(atom) orelse value.JSValue.undefined_val;
-                                try self.ctx.push(val);
+                                self.ctx.stack[sp - 2] = obj.getProperty(atom) orelse value.JSValue.undefined_val;
+                                self.ctx.sp = sp - 1;
+                                continue :dispatch;
                             }
-                        } else {
-                            try self.ctx.push(value.JSValue.undefined_val);
                         }
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
                     }
+                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                    self.ctx.sp = sp - 1;
                 },
 
                 .put_elem => {
@@ -1030,6 +1162,86 @@ pub const Interpreter = struct {
                     }
                 },
 
+                // Fused arithmetic-modulo: (a op b) % divisor
+                // Uses i64 intermediate to avoid overflow, then modulo brings result back to i32 range
+                .add_mod => {
+                    const divisor_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const divisor_val = try self.getConstant(divisor_idx);
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+
+                    if (a.isInt() and b.isInt() and divisor_val.isInt()) {
+                        const ai: i64 = a.getInt();
+                        const bi: i64 = b.getInt();
+                        const div: i64 = divisor_val.getInt();
+                        if (div != 0) {
+                            const sum = ai + bi;
+                            // JavaScript % can return negative for negative numerators
+                            // Use @mod for always-positive result (matches common usage)
+                            const result: i32 = @intCast(@mod(sum, div));
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                    }
+                    // Fallback to normal path
+                    self.ctx.sp = sp - 2;
+                    const add_result = try self.addValues(a, b);
+                    self.ctx.pushUnchecked(try modValues(add_result, divisor_val));
+                },
+
+                .sub_mod => {
+                    const divisor_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const divisor_val = try self.getConstant(divisor_idx);
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+
+                    if (a.isInt() and b.isInt() and divisor_val.isInt()) {
+                        const ai: i64 = a.getInt();
+                        const bi: i64 = b.getInt();
+                        const div: i64 = divisor_val.getInt();
+                        if (div != 0) {
+                            const diff = ai - bi;
+                            const result: i32 = @intCast(@mod(diff, div));
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                    }
+                    self.ctx.sp = sp - 2;
+                    const sub_result = try self.subValues(a, b);
+                    self.ctx.pushUnchecked(try modValues(sub_result, divisor_val));
+                },
+
+                .mul_mod => {
+                    const divisor_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const divisor_val = try self.getConstant(divisor_idx);
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+
+                    if (a.isInt() and b.isInt() and divisor_val.isInt()) {
+                        const ai: i64 = a.getInt();
+                        const bi: i64 = b.getInt();
+                        const div: i64 = divisor_val.getInt();
+                        if (div != 0) {
+                            const product = ai * bi;
+                            const result: i32 = @intCast(@mod(product, div));
+                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
+                            self.ctx.sp = sp - 1;
+                            continue :dispatch;
+                        }
+                    }
+                    self.ctx.sp = sp - 2;
+                    const mul_result = try self.mulValues(a, b);
+                    self.ctx.pushUnchecked(try modValues(mul_result, divisor_val));
+                },
+
                 // ========================================
                 // Closure Operations
                 // ========================================
@@ -1131,12 +1343,10 @@ pub const Interpreter = struct {
     // Value Operations (with heap allocation for floats)
     // ========================================================================
 
-    fn addValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        // String concatenation - if either operand is a string
-        if (a.isString() or b.isString()) {
-            return try self.concatToString(a, b);
-        }
-        // Integer fast path
+    /// Add two values - optimized for the common integer case
+    inline fn addValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        // Integer fast path FIRST - most common case in arithmetic benchmarks
+        // Checking integers before strings saves a branch in the hot path
         if (a.isInt() and b.isInt()) {
             const result = @addWithOverflow(a.getInt(), b.getInt());
             if (result[1] == 0) {
@@ -1145,14 +1355,25 @@ pub const Interpreter = struct {
             // Overflow - convert to float
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
         }
+        // Slow path: strings or floats
+        return self.addValuesSlow(a, b);
+    }
+
+    /// Slow path for addition - handles strings and floats
+    fn addValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        @branchHint(.cold);
+        // String concatenation - if either operand is a string
+        if (a.isString() or b.isString()) {
+            return try self.concatToString(a, b);
+        }
         // Float path
         const an = a.toNumber() orelse return error.TypeError;
         const bn = b.toNumber() orelse return error.TypeError;
         return try self.allocFloat(an + bn);
     }
 
-    /// Subtract two values with proper float fallback on overflow
-    fn subValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+    /// Subtract two values - optimized for integer fast path
+    inline fn subValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Integer fast path
         if (a.isInt() and b.isInt()) {
             const result = @subWithOverflow(a.getInt(), b.getInt());
@@ -1162,14 +1383,19 @@ pub const Interpreter = struct {
             // Overflow - convert to float
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
         }
-        // Float path
+        // Slow path
+        return self.subValuesSlow(a, b);
+    }
+
+    fn subValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        @branchHint(.cold);
         const an = a.toNumber() orelse return error.TypeError;
         const bn = b.toNumber() orelse return error.TypeError;
         return try self.allocFloat(an - bn);
     }
 
-    /// Multiply two values with proper float fallback on overflow
-    fn mulValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+    /// Multiply two values - optimized for integer fast path
+    inline fn mulValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Integer fast path
         if (a.isInt() and b.isInt()) {
             const result = @mulWithOverflow(a.getInt(), b.getInt());
@@ -1179,7 +1405,12 @@ pub const Interpreter = struct {
             // Overflow - convert to float
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));
         }
-        // Float path
+        // Slow path
+        return self.mulValuesSlow(a, b);
+    }
+
+    fn mulValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        @branchHint(.cold);
         const an = a.toNumber() orelse return error.TypeError;
         const bn = b.toNumber() orelse return error.TypeError;
         return try self.allocFloat(an * bn);
@@ -1624,7 +1855,8 @@ pub const Interpreter = struct {
 // ============================================================================
 
 /// Modulo two values
-fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
+/// Modulo operation - optimized for integer fast path
+inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     if (a.isInt() and b.isInt()) {
         const bv = b.getInt();
         if (bv == 0) return error.DivisionByZero;
@@ -1650,7 +1882,7 @@ fn compareValues(a: value.JSValue, b: value.JSValue) !std.math.Order {
 }
 
 /// Convert value to Int32 (for bitwise operations, per ECMAScript ToInt32)
-fn toInt32(v: value.JSValue) i32 {
+inline fn toInt32(v: value.JSValue) i32 {
     if (v.isInt()) return v.getInt();
     if (v.isFloat64()) {
         const f = v.getFloat64();

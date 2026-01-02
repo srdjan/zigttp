@@ -362,6 +362,75 @@ pub const CodeGen = struct {
 
     // ============ Expression Emission ============
 
+    /// Try to get a constant integer value from a node
+    fn tryGetConstantInt(self: *CodeGen, node_idx: NodeIndex) ?i32 {
+        const node = self.nodes.get(node_idx) orelse return null;
+        return switch (node.tag) {
+            .lit_int => node.data.int_value,
+            else => null,
+        };
+    }
+
+    /// Try to fold a binary operation on two constant integers
+    fn tryFoldIntBinaryOp(op: BinaryOp, a: i32, b: i32) ?i32 {
+        return switch (op) {
+            .add => blk: {
+                const result = @addWithOverflow(a, b);
+                break :blk if (result[1] == 0) result[0] else null;
+            },
+            .sub => blk: {
+                const result = @subWithOverflow(a, b);
+                break :blk if (result[1] == 0) result[0] else null;
+            },
+            .mul => blk: {
+                const result = @mulWithOverflow(a, b);
+                break :blk if (result[1] == 0) result[0] else null;
+            },
+            .mod => if (b != 0) @mod(a, b) else null,
+            .bit_and => a & b,
+            .bit_or => a | b,
+            .bit_xor => a ^ b,
+            .shl => blk: {
+                const shift: u5 = @intCast(@as(u32, @bitCast(b)) & 31);
+                break :blk a << shift;
+            },
+            .shr => blk: {
+                const shift: u5 = @intCast(@as(u32, @bitCast(b)) & 31);
+                break :blk a >> shift;
+            },
+            else => null, // Division, comparison, etc. not folded
+        };
+    }
+
+    /// Try to emit a fused arithmetic-modulo opcode for pattern: (a op b) % divisor
+    /// Returns error if pattern doesn't match
+    fn tryEmitFusedArithMod(self: *CodeGen, left_expr: NodeIndex, divisor: i32) !void {
+        const left_node = self.nodes.get(left_expr) orelse return error.PatternNotMatched;
+
+        // Check if left expression is a binary add/sub/mul
+        if (left_node.tag != .binary_op) return error.PatternNotMatched;
+
+        const inner_binary = left_node.data.binary;
+        const fused_opcode: Opcode = switch (inner_binary.op) {
+            .add => .add_mod,
+            .sub => .sub_mod,
+            .mul => .mul_mod,
+            else => return error.PatternNotMatched,
+        };
+
+        // Emit the inner operands
+        try self.emitNode(inner_binary.left);
+        try self.emitNode(inner_binary.right);
+
+        // Add divisor to constant pool
+        const divisor_idx = try self.addConstant(JSValue.fromInt(divisor));
+
+        // Emit the fused opcode with divisor constant index
+        try self.emit(fused_opcode);
+        try self.emitU16(divisor_idx);
+        self.popStack(1); // Two operands -> one result
+    }
+
     fn emitBinaryOp(self: *CodeGen, binary: Node.BinaryExpr) !void {
         // Short-circuit operators need special handling
         switch (binary.op) {
@@ -369,6 +438,29 @@ pub const CodeGen = struct {
             .or_op => return self.emitShortCircuitOr(binary),
             .nullish => return self.emitNullishCoalescing(binary),
             else => {},
+        }
+
+        // Try constant folding for integer operands
+        if (self.tryGetConstantInt(binary.left)) |left_val| {
+            if (self.tryGetConstantInt(binary.right)) |right_val| {
+                if (tryFoldIntBinaryOp(binary.op, left_val, right_val)) |result| {
+                    try self.emitInteger(result);
+                    return;
+                }
+            }
+        }
+
+        // Pattern: (a op b) % constant - emit fused opcode
+        if (binary.op == .mod) {
+            if (self.tryGetConstantInt(binary.right)) |divisor| {
+                if (divisor > 0) {
+                    if (self.tryEmitFusedArithMod(binary.left, divisor)) |_| {
+                        return;
+                    } else |_| {
+                        // Fall through to normal emission
+                    }
+                }
+            }
         }
 
         try self.emitNode(binary.left);
@@ -458,6 +550,23 @@ pub const CodeGen = struct {
     }
 
     fn emitUnaryOp(self: *CodeGen, unary: Node.UnaryExpr) !void {
+        // Try constant folding for unary operations
+        if (self.tryGetConstantInt(unary.operand)) |val| {
+            const folded: ?i32 = switch (unary.op) {
+                .neg => blk: {
+                    // Negation can overflow for MIN_INT
+                    if (val == std.math.minInt(i32)) break :blk null;
+                    break :blk -val;
+                },
+                .bit_not => ~val,
+                else => null,
+            };
+            if (folded) |result| {
+                try self.emitInteger(result);
+                return;
+            }
+        }
+
         try self.emitNode(unary.operand);
 
         const opcode: Opcode = switch (unary.op) {
@@ -1481,7 +1590,7 @@ test "binary op codegen" {
 
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
-    // Create 1 + 2
+    // Create 1 + 2 - with constant folding, this should emit push_3 instead of push_1, push_2, add
     const left = try nodes.add(Node.litInt(loc, 1));
     const right = try nodes.add(Node.litInt(loc, 2));
     const add_node = try nodes.add(Node.binaryOp(loc, .add, left, right));
@@ -1492,13 +1601,19 @@ test "binary op codegen" {
     const result = try gen.generate(add_node);
     try std.testing.expect(result.code.len > 0);
 
-    // Should contain push_1, push_2, add
+    // Constant folding should eliminate the add opcode - 1+2 is folded to 3 at compile time
+    // Should contain push_3 (the folded result), NOT add
     var found_add = false;
+    var found_push_3 = false;
     for (result.code) |b| {
         if (b == @intFromEnum(Opcode.add)) {
             found_add = true;
-            break;
+        }
+        if (b == @intFromEnum(Opcode.push_3)) {
+            found_push_3 = true;
         }
     }
-    try std.testing.expect(found_add);
+    // With constant folding, we should NOT have add opcode, but SHOULD have push_3
+    try std.testing.expect(!found_add);
+    try std.testing.expect(found_push_3);
 }
