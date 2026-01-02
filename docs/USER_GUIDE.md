@@ -16,9 +16,10 @@ A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure Function
 8. [Working with JSON](#working-with-json)
 9. [Error Handling](#error-handling)
 10. [JavaScript Subset Reference](#javascript-subset-reference)
-11. [Complete Examples](#complete-examples)
-12. [Performance Tuning](#performance-tuning)
-13. [Troubleshooting](#troubleshooting)
+11. [TypeScript Support](#typescript-support)
+12. [Complete Examples](#complete-examples)
+13. [Performance Tuning](#performance-tuning)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -725,6 +726,232 @@ x = 1;                       // Error: must use 'let x = 1'
 with (obj) {}                // Error: 'with' not allowed
 delete x;                    // Error: cannot delete letiables
 ```
+
+---
+
+## TypeScript Support
+
+zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly without a separate build step.
+
+### How It Works
+
+The TypeScript stripper performs a single-pass transformation:
+1. Removes type annotations (`: Type`, `as Type`)
+2. Removes interface and type declarations
+3. Removes generics (`<T>`)
+4. Preserves all runtime code unchanged
+5. Optionally evaluates `comptime()` expressions
+
+### Basic TypeScript Handler
+
+```typescript
+// handler.ts
+interface Request {
+    method: string;
+    path: string;
+    headers: Record<string, string>;
+    body: string | null;
+}
+
+interface User {
+    id: number;
+    name: string;
+    email: string;
+}
+
+function handler(request: Request): Response {
+    const users: User[] = [
+        { id: 1, name: "Alice", email: "alice@example.com" },
+        { id: 2, name: "Bob", email: "bob@example.com" }
+    ];
+
+    if (request.path === "/api/users") {
+        return Response.json(users);
+    }
+
+    return Response.json({ error: "Not found" }, { status: 404 });
+}
+```
+
+After stripping, this becomes valid ES5 JavaScript with all type annotations removed.
+
+### TSX for Server-Side Rendering
+
+Combine TypeScript types with JSX syntax:
+
+```tsx
+// handler.tsx
+interface PageProps {
+    title: string;
+    children: any;
+}
+
+function Layout(props: PageProps) {
+    return (
+        <html>
+            <head><title>{props.title}</title></head>
+            <body>{props.children}</body>
+        </html>
+    );
+}
+
+function handler(request: Request): Response {
+    const page = (
+        <Layout title="My App">
+            <h1>Welcome</h1>
+            <p>Path: {request.path}</p>
+        </Layout>
+    );
+    return Response.html(renderToString(page));
+}
+```
+
+### Compile-Time Evaluation with comptime()
+
+The `comptime()` function evaluates expressions at load time and replaces them with literal values. This is useful for:
+- Pre-computing constants
+- Embedding build metadata
+- Generating hash-based ETags
+- Parsing JSON configuration
+
+#### Basic Usage
+
+```typescript
+// Arithmetic - computed at load time
+const x = comptime(1 + 2 * 3);              // -> const x = 7;
+const bits = comptime(1 << 10);             // -> const bits = 1024;
+
+// String operations
+const upper = comptime("hello".toUpperCase()); // -> const upper = "HELLO";
+const parts = comptime("a,b,c".split(","));    // -> const parts = ["a","b","c"];
+
+// Math constants and functions
+const pi = comptime(Math.PI);               // -> const pi = 3.141592653589793;
+const max = comptime(Math.max(1, 5, 3));    // -> const max = 5;
+const root = comptime(Math.sqrt(2));        // -> const root = 1.4142135623730951;
+
+// Objects and arrays
+const config = comptime({ timeout: 30 });   // -> const config = ({timeout:30});
+const arr = comptime([1, 2, 3]);            // -> const arr = [1,2,3];
+```
+
+#### Hash Function
+
+Generate deterministic hashes for cache keys or ETags:
+
+```typescript
+// FNV-1a hash returns 8-character hex string
+const etag = comptime(hash("content-v1"));  // -> const etag = "a1b2c3d4";
+
+function handler(request: Request): Response {
+    return new Response("Content", {
+        headers: { "ETag": etag }
+    });
+}
+```
+
+#### JSON Parsing
+
+Parse JSON at compile time:
+
+```typescript
+const config = comptime(JSON.parse('{"debug":false,"maxItems":100}'));
+// -> const config = ({debug:false,maxItems:100});
+```
+
+#### Method Chaining
+
+String method chaining works in comptime:
+
+```typescript
+const cleaned = comptime("  Hello World  ".trim().toUpperCase());
+// -> const cleaned = "HELLO WORLD";
+
+const slug = comptime("My Blog Post".toLowerCase().replace(" ", "-"));
+// -> const slug = "my-blog-post";
+```
+
+#### comptime in TSX
+
+Expressions inside JSX are also evaluated:
+
+```tsx
+const el = <div class={comptime("container-" + hash("v1"))}>
+    {comptime(Math.PI.toFixed(2))}
+</div>;
+// -> <div class="container-a1b2c3d4">3.14</div>
+```
+
+### Supported comptime Operations
+
+#### Literals
+- Numbers: `42`, `3.14`, `-1`, `0xFF`
+- Strings: `"hello"`, `'world'`
+- Booleans: `true`, `false`
+- Special: `null`, `undefined`, `NaN`, `Infinity`
+
+#### Operators
+
+| Type | Operators |
+|------|-----------|
+| Unary | `+ - ! ~` |
+| Arithmetic | `+ - * / % **` |
+| Bitwise | `\| & ^ << >> >>>` |
+| Comparison | `== != === !== < <= > >=` |
+| Logical | `&& \|\| ??` |
+| Ternary | `cond ? a : b` |
+
+#### Math Constants
+- `Math.PI`, `Math.E`, `Math.LN2`, `Math.LN10`
+- `Math.LOG2E`, `Math.LOG10E`, `Math.SQRT2`, `Math.SQRT1_2`
+
+#### Math Functions
+- `abs`, `floor`, `ceil`, `round`, `trunc`
+- `sqrt`, `cbrt`, `pow`, `exp`, `log`, `log2`, `log10`
+- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
+- `min`, `max`, `sign`, `hypot`
+- `clz32`, `imul`, `fround`
+
+#### String Properties and Methods
+- `.length`
+- `toUpperCase()`, `toLowerCase()`
+- `trim()`, `trimStart()`, `trimEnd()`
+- `slice(start, end?)`, `substring(start, end?)`
+- `includes(search)`, `startsWith(search)`, `endsWith(search)`
+- `indexOf(search)`, `charAt(index)`
+- `split(delimiter)`, `repeat(count)`
+- `replace(search, replacement)`, `replaceAll(search, replacement)`
+- `padStart(length, padStr?)`, `padEnd(length, padStr?)`
+
+#### Array Properties
+- `.length`
+
+#### Built-in Functions
+- `parseInt(str, radix?)`, `parseFloat(str)`
+- `JSON.parse(str)` - parses JSON string to comptime value
+- `hash(str)` - FNV-1a hash, returns 8-char hex string
+
+### comptime Errors
+
+Certain operations are not allowed in comptime and will produce errors:
+
+```typescript
+// These will fail at load time:
+comptime(foo + 1)           // Error: unknown identifier 'foo'
+comptime(Date.now())        // Error: Date.now() not allowed (non-deterministic)
+comptime(Math.random())     // Error: Math.random() not allowed (non-deterministic)
+comptime(() => 1)           // Error: function literals not allowed
+comptime(x = 1)             // Error: assignments not allowed
+```
+
+Error messages include line and column information for debugging.
+
+### Performance Benefits
+
+1. **Zero-cost types**: Type annotations are stripped with no runtime overhead
+2. **Pre-computed values**: `comptime()` shifts computation from runtime to load time
+3. **Smaller output**: Type declarations don't appear in the stripped output
+4. **Single-pass**: Stripping happens in one pass, no AST construction
 
 ---
 

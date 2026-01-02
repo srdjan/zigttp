@@ -11,6 +11,7 @@ A serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases, powe
 - **Request isolation**: RuntimePool with pre-warmed contexts
 - **Functional API**: Response helpers similar to Deno/Fetch API
 - **Safe by default**: Strict mode JavaScript, sandboxed execution
+- **TypeScript/TSX**: Native type stripping with compile-time evaluation
 
 ## Use Cases
 
@@ -189,6 +190,70 @@ function handler(request) {
 }
 ```
 
+## TypeScript Support
+
+zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly without a separate build step.
+
+### Basic Usage
+
+```typescript
+// handler.ts
+interface Request {
+    method: string;
+    path: string;
+    headers: Record<string, string>;
+    body: string | null;
+}
+
+function handler(request: Request): Response {
+    const data: { message: string } = { message: "Hello TypeScript!" };
+    return Response.json(data);
+}
+```
+
+### Compile-Time Evaluation
+
+The `comptime()` function evaluates expressions at load time and replaces them with literal values:
+
+```typescript
+// Arithmetic
+const x = comptime(1 + 2 * 3);              // -> const x = 7;
+
+// String operations
+const upper = comptime("hello".toUpperCase()); // -> const upper = "HELLO";
+
+// Math functions
+const pi = comptime(Math.PI);               // -> const pi = 3.141592653589793;
+const max = comptime(Math.max(1, 5, 3));    // -> const max = 5;
+
+// Hash function (FNV-1a)
+const etag = comptime(hash("content-v1"));  // -> const etag = "a1b2c3d4";
+
+// JSON parsing
+const cfg = comptime(JSON.parse('{"a":1}')); // -> const cfg = ({a:1});
+
+// TSX works too
+const el = <div>{comptime(1+2)}</div>;      // -> <div>{3}</div>
+```
+
+### Supported comptime Operations
+
+| Category | Operations |
+|----------|------------|
+| Literals | number, string, boolean, null, undefined, NaN, Infinity |
+| Arithmetic | `+ - * / % **` |
+| Bitwise | `\| & ^ << >> >>>` |
+| Comparison | `== != === !== < <= > >=` |
+| Logical | `&& \|\| ??` |
+| Ternary | `cond ? a : b` |
+| Math | PI, E, floor, ceil, round, sqrt, sin, cos, min, max, etc. |
+| String | length, toUpperCase, toLowerCase, trim, slice, split, replace, etc. |
+| Built-in | parseInt, parseFloat, JSON.parse, hash |
+
+Disallowed: variables, Date.now(), Math.random(), closures, assignments.
+
+See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for the full specification.
+
 ## JavaScript Subset
 
 zts implements ES5 with some ES6+ extensions. Key limitations:
@@ -255,7 +320,9 @@ zigttp-server/
 │   ├── heap.zig           # Size-class segregated allocator
 │   ├── http.zig           # HTTP/JSX runtime for SSR
 │   ├── pool.zig           # Lock-free runtime pooling
-│   └── builtins.zig       # Built-in JavaScript functions
+│   ├── builtins.zig       # Built-in JavaScript functions
+│   ├── stripper.zig       # TypeScript/TSX type stripper
+│   └── comptime.zig       # Compile-time expression evaluator
 ├── src/
 │   ├── main.zig           # CLI entry point
 │   ├── zruntime.zig       # RuntimePool, JS context management

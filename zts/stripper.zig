@@ -18,6 +18,7 @@
 //! - angle-bracket assertions in TSX (<T>expr)
 
 const std = @import("std");
+const comptime_eval = @import("comptime.zig");
 
 pub const StripError = error{
     UnsupportedEnum,
@@ -29,6 +30,7 @@ pub const StripError = error{
     UnterminatedString,
     UnterminatedComment,
     OutOfMemory,
+    ComptimeEvaluationFailed,
 };
 
 pub const StripResult = struct {
@@ -40,9 +42,23 @@ pub const StripResult = struct {
     }
 };
 
+/// Environment for comptime evaluation
+pub const ComptimeEnv = struct {
+    /// Environment variables for Env.* lookups
+    env_vars: ?*const std.StringHashMap([]const u8) = null,
+    /// Build metadata
+    build_time: ?[]const u8 = null,
+    git_commit: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+};
+
 pub const StripOptions = struct {
     /// TSX mode: disallow angle-bracket assertions, preserve JSX
     tsx_mode: bool = false,
+    /// Enable comptime() expression evaluation
+    enable_comptime: bool = false,
+    /// Environment for comptime evaluation
+    comptime_env: ?ComptimeEnv = null,
 };
 
 /// Strip TypeScript types from source code
@@ -63,6 +79,8 @@ const Stripper = struct {
 
     // Configuration
     tsx_mode: bool,
+    enable_comptime: bool,
+    comptime_env: ?ComptimeEnv,
 
     // State
     line: u32,
@@ -81,6 +99,8 @@ const Stripper = struct {
             .pos = 0,
             .output = .empty,
             .tsx_mode = options.tsx_mode,
+            .enable_comptime = options.enable_comptime,
+            .comptime_env = options.comptime_env,
             .line = 1,
             .col = 1,
             .in_expression = false,
@@ -163,6 +183,11 @@ const Stripper = struct {
         // Identifiers
         if (isIdentifierStart(c)) {
             const ident = self.scanIdentifier();
+
+            // Check for comptime() expression
+            if (self.enable_comptime and std.mem.eql(u8, ident, "comptime")) {
+                if (try self.tryEvaluateComptime(start)) return;
+            }
 
             // Check for 'as' or 'satisfies' after expression
             if (std.mem.eql(u8, ident, "as")) {
@@ -789,6 +814,95 @@ const Stripper = struct {
 
         // Blank from 'satisfies' to current position
         self.blankSpan(keyword_start, self.pos);
+        return true;
+    }
+
+    // ========================================================================
+    // Comptime Expression Evaluation
+    // ========================================================================
+
+    fn tryEvaluateComptime(self: *Self, keyword_start: usize) StripError!bool {
+        // We just scanned 'comptime', now expect (
+        self.skipWhitespaceTracked();
+
+        if (self.pos >= self.source.len or self.source[self.pos] != '(') {
+            // Not a comptime() call, restore and treat as regular identifier
+            self.pos = keyword_start + 8; // "comptime".len
+            return false;
+        }
+
+        // Find the matching closing paren
+        self.pos += 1; // skip (
+        self.col += 1;
+
+        var paren_depth: u16 = 1;
+        const expr_start = self.pos;
+
+        while (self.pos < self.source.len and paren_depth > 0) {
+            const c = self.source[self.pos];
+
+            // Handle strings
+            if (c == '"' or c == '\'' or c == '`') {
+                self.skipString(c) catch return StripError.ComptimeEvaluationFailed;
+                continue;
+            }
+
+            if (c == '(') {
+                paren_depth += 1;
+            } else if (c == ')') {
+                paren_depth -= 1;
+            }
+
+            if (c == '\n') {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+            self.pos += 1;
+        }
+
+        if (paren_depth != 0) {
+            return StripError.ComptimeEvaluationFailed;
+        }
+
+        // expr_end is one before the closing paren
+        const expr_end = self.pos - 1;
+        const expr = self.source[expr_start..expr_end];
+
+        // Evaluate the expression
+        var evaluator = comptime_eval.ComptimeEvaluator.init(self.allocator, expr, self.line, self.col);
+
+        // Set up environment if provided
+        if (self.comptime_env) |env| {
+            evaluator.env = env.env_vars;
+            evaluator.build_time = env.build_time;
+            evaluator.git_commit = env.git_commit;
+            evaluator.version = env.version;
+        }
+
+        const result = evaluator.evaluate() catch return StripError.ComptimeEvaluationFailed;
+        defer result.deinit(self.allocator);
+
+        // Emit the literal value
+        const literal = comptime_eval.emitLiteral(self.allocator, result) catch return StripError.OutOfMemory;
+        defer self.allocator.free(literal);
+
+        // Output the literal
+        self.output.appendSlice(self.allocator, literal) catch return StripError.OutOfMemory;
+
+        // Pad with spaces to preserve line/column positions
+        // The total span is from keyword_start to self.pos (end of closing paren)
+        const total_span = self.pos - keyword_start;
+        const literal_len = literal.len;
+
+        if (total_span > literal_len) {
+            const padding = total_span - literal_len;
+            for (0..padding) |_| {
+                self.output.append(self.allocator, ' ') catch return StripError.OutOfMemory;
+            }
+        }
+
         return true;
     }
 
@@ -1558,4 +1672,84 @@ test "tsx mode handles fragments" {
     // Fragment syntax preserved
     try std.testing.expect(std.mem.indexOf(u8, result.code, "<>") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "</>") != null);
+}
+
+// ============================================================================
+// Comptime Tests
+// ============================================================================
+
+test "comptime disabled by default" {
+    // When enable_comptime is false, comptime() is passed through as-is
+    const result = try strip(std.testing.allocator, "const x = comptime(1 + 2);", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime(1 + 2)") != null);
+}
+
+test "comptime simple arithmetic" {
+    const result = try strip(std.testing.allocator, "const x = comptime(1 + 2 * 3);", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime") == null);
+}
+
+test "comptime Math.PI" {
+    const result = try strip(std.testing.allocator, "const pi = comptime(Math.PI);", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "3.14159") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime") == null);
+}
+
+test "comptime string" {
+    const result = try strip(std.testing.allocator, "const s = comptime(\"hello\");", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "\"hello\"") != null);
+}
+
+test "comptime array" {
+    const result = try strip(std.testing.allocator, "const arr = comptime([1, 2, 3]);", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "[1,2,3]") != null);
+}
+
+test "comptime object" {
+    const result = try strip(std.testing.allocator, "const cfg = comptime({ a: 1, b: 2 });", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "({a:1,b:2})") != null);
+}
+
+test "comptime ternary" {
+    const result = try strip(std.testing.allocator, "const v = comptime(true ? 1 : 0);", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "true") == null);
+}
+
+test "comptime Math.max" {
+    const result = try strip(std.testing.allocator, "const m = comptime(Math.max(1, 5, 3));", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "5") != null);
+}
+
+test "comptime hash" {
+    const result = try strip(std.testing.allocator, "const h = comptime(hash(\"test\"));", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    // Should have an 8-char hex string
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "hash") == null);
+}
+
+test "comptime with types" {
+    // Both type stripping and comptime should work together
+    const source = "const x: number = comptime(1 + 2);";
+    const result = try strip(std.testing.allocator, source, .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "3") != null);
+}
+
+test "comptime identifier without parens passes through" {
+    // The identifier 'comptime' without () should be passed through
+    const result = try strip(std.testing.allocator, "const comptime = 5;", .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const comptime = 5;") != null);
 }

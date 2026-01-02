@@ -1,211 +1,229 @@
-# TypeScript `comptime` (Strict) — Specification (Option A)
+# TypeScript `comptime()` Feature - Specification
 
-This document specifies a **strict compile‑time evaluation** feature for zts by **extending the existing TypeScript/TSX stripper** (`zts/stripper.zig`). The goal is to evaluate explicitly marked expressions at compile time and replace them with literal values, while keeping the existing type‑stripping behavior intact.
+This document specifies the **compile-time evaluation** feature for zts, implemented as an extension to the TypeScript/TSX stripper (`zts/stripper.zig`). The feature evaluates explicitly marked expressions at compile time and replaces them with literal values.
 
-Status: **spec only** (no implementation yet).
+Status: **Implemented** in `zts/comptime.zig` and integrated with `zts/stripper.zig`.
 
 ---
 
 ## Overview
 
 - **Syntax:** `comptime(<expr>)`
-- **Strict mode:** any unsupported operation or runtime dependency is a compile‑time error.
-- **Scope:** implemented as a pre‑parse transformation in `zts/stripper.zig`.
+- **Strict mode:** any unsupported operation or runtime dependency is a compile-time error.
+- **Scope:** implemented as a pre-parse transformation in `zts/stripper.zig`.
 - **Compatibility:** works for `.ts` and `.tsx` sources; JSX preserved in TSX.
 
 ---
 
-## Goals
+## Usage Examples
 
-- Allow **compile‑time constant evaluation** in TS/TSX code.
-- Preserve **line/column positions** for diagnostics by blanking stripped spans.
-- Reuse the existing stripper pipeline without altering the core JS parser.
+```typescript
+// Basic arithmetic
+const x = comptime(1 + 2 * 3);              // -> const x = 7;
 
-## Non‑Goals
+// String operations
+const upper = comptime("hello".toUpperCase()); // -> const upper = "HELLO";
+const parts = comptime("a,b,c".split(","));    // -> const parts = ["a","b","c"];
 
-- Full TypeScript evaluation or type‑system inference
-- Executing arbitrary JS at compile time
-- Runtime dependency injection into comptime
+// Math functions
+const pi = comptime(Math.PI);               // -> const pi = 3.141592653589793;
+const max = comptime(Math.max(1, 5, 3));    // -> const max = 5;
 
----
+// Objects and arrays
+const cfg = comptime({ timeout: 30 });      // -> const cfg = ({timeout:30});
+const arr = comptime([1, 2, 3]);            // -> const arr = [1,2,3];
 
-## Syntax
+// Hash function (FNV-1a)
+const etag = comptime(hash("content-v1")); // -> const etag = "a1b2c3d4";
 
-**Required syntax (only supported form):**
+// JSON parsing
+const config = comptime(JSON.parse('{"a":1}')); // -> const config = ({a:1});
 
-```ts
-const value = comptime(1 + 2 * 3);
+// Environment variables (when configured)
+const region = comptime(Env.AWS_REGION);    // -> const region = "us-east-1";
+
+// Build metadata (when configured)
+const version = comptime(__VERSION__);      // -> const version = "1.0.0";
+
+// TSX
+const el = <div>{comptime(1+2)}</div>;      // -> <div>{3}</div>
 ```
 
-Rationale:
-- Valid JS syntax even without stripping.
-- No JSX ambiguity.
-- Simple to detect in the stripper.
+---
+
+## Supported Operations
+
+### Literals
+- number, string, boolean, `null`, `undefined`, `NaN`, `Infinity`
+
+### Unary Operators
+- `+ - ! ~`
+
+### Binary Operators
+- Arithmetic: `+ - * / % **`
+- Bitwise: `| & ^ << >> >>>`
+- Comparison: `== != === !== < <= > >=`
+- Logical: `&& || ??`
+
+### Ternary Operator
+- `cond ? a : b` (all sub-expressions comptime)
+
+### Arrays and Objects
+- `[1, 2, 3]`, `{ a: 1, b: "x" }` with comptime values only
+
+### Math Constants
+- `Math.PI`, `Math.E`, `Math.LN2`, `Math.LN10`, `Math.LOG2E`, `Math.LOG10E`, `Math.SQRT2`, `Math.SQRT1_2`
+
+### Math Functions
+- `abs`, `floor`, `ceil`, `round`, `trunc`, `sqrt`, `cbrt`
+- `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`
+- `log`, `log2`, `log10`, `exp`, `pow`
+- `min`, `max`, `sign`, `clz32`, `imul`, `fround`, `hypot`
+
+### String Properties
+- `length`
+
+### String Methods
+- `toUpperCase()`, `toLowerCase()`
+- `trim()`, `trimStart()`, `trimEnd()` (aliases: `trimLeft()`, `trimRight()`)
+- `slice(start, end?)`, `substring(start, end?)`
+- `includes(search)`, `startsWith(search)`, `endsWith(search)`, `indexOf(search)`
+- `charAt(index)`
+- `split(delimiter)`
+- `repeat(count)`
+- `replace(search, replacement)`, `replaceAll(search, replacement)`
+- `padStart(length, padStr?)`, `padEnd(length, padStr?)`
+
+### Array Properties
+- `length`
+
+### Built-in Functions
+- `parseInt(str, radix?)`, `parseFloat(str)`
+- `JSON.parse(str)` - parses JSON string to comptime value
+- `hash(str)` - FNV-1a hash, returns 8-char hex string
+
+### Environment Variables (Optional)
+- `Env.VARNAME` - access environment variables at compile time
+- Configured via `StripOptions.comptime_env`
+
+### Build Metadata (Optional)
+- `__BUILD_TIME__` - ISO timestamp of build
+- `__GIT_COMMIT__` - git commit hash
+- `__VERSION__` - version string
+- Configured via `StripOptions.comptime_env`
 
 ---
 
-## Strict Evaluation Rules
-
-### Allowed
-
-**Literals**
-- number, string, boolean, `null`, `undefined`, `NaN`, `Infinity`
-
-**Unary**
-- `+ - ! ~`
-
-**Binary**
-- `+ - * / % **`
-- `| & ^ << >> >>>`
-- `== != === !== < <= > >=`
-- `&& || ??`
-
-**Ternary**
-- `cond ? a : b` (all sub‑expressions comptime)
-
-**Grouping**
-- Parentheses
-
-**Arrays/Objects**
-- `[1, 2, 3]`, `{ a: 1, b: "x" }` with comptime values only
-
-**Whitelisted globals** (pure subset)
-- `Math` constants: `Math.PI`, `Math.E`, `Math.SQRT2`, etc.
-- `Math` pure functions: `abs`, `min`, `max`, `floor`, `trunc`, `clz32`, `imul`, `fround`, etc.
-
-> The whitelist must be explicit and minimal.
-
-### Disallowed (Strict Errors)
+## Disallowed Operations (Compile-Time Errors)
 
 - Any variable not explicitly whitelisted
-- Any function call except whitelisted `Math.*`
-- Property access except `Math.*` constants
+- Any function call except whitelisted ones
+- `Date.now()`, `Math.random()` (non-deterministic)
 - `new`, `this`, `super`, `arguments`, `eval`
-- `Date.now`, `Math.random`
 - Assignments, update expressions, `delete`, `throw`, `try`, loops
 - Function literals, class literals, or closures
 
 ---
 
-## Error Handling (Strict)
+## Error Types
 
-On any unsupported construct or failure, **stop stripping and return an error**.
+| Error | Description |
+|-------|-------------|
+| `ComptimeUnsupportedOp` | Operation not supported in comptime context |
+| `ComptimeUnknownIdentifier` | Variable/function not whitelisted |
+| `ComptimeCallNotAllowed` | Function call not allowed (e.g., `Math.random()`) |
+| `ComptimeSyntaxError` | Syntax error in comptime expression |
+| `ComptimeDepthExceeded` | Expression nesting too deep (max 64) |
+| `ComptimeExpressionTooLong` | Expression exceeds 8KB limit |
+| `ComptimeTypeMismatch` | Type error (e.g., string op on number) |
+| `ComptimeDivisionByZero` | Division by zero |
+| `ComptimeUnclosedString` | Unterminated string literal |
+| `ComptimeUnclosedParen` | Unbalanced parentheses |
+| `ComptimeOutOfMemory` | Memory allocation failed |
 
-Suggested error categories:
-- `ComptimeUnsupportedOp`
-- `ComptimeUnknownIdentifier`
-- `ComptimeCallNotAllowed`
-- `ComptimeSyntaxError`
-- `ComptimeDepthExceeded`
-
-Error messages should include **line/column** in the original file.
-
----
-
-## Implementation (Option A — Stripper Extension)
-
-### Integration Points
-
-- Extend `StripOptions` with:
-  - `enable_comptime: bool`
-  - `comptime_strict: bool = true`
-- In `processToken()` (stripper):
-  - Detect identifier `comptime` followed by `(`
-  - Parse balanced parentheses to extract expression span
-  - Evaluate expression (see evaluator spec)
-  - Replace entire span with a **literal string**
-
-### Preserve Line/Column
-
-Introduce `emitReplacedSpan(start, end, replacement)`:
-- Emit replacement text (single‑line literal)
-- For the rest of the span:
-  - Preserve newlines
-  - Replace other chars with spaces
-
-This keeps error positions consistent with the original source.
+Error messages include line/column information from the original source.
 
 ---
 
-## Expression Evaluator
+## Implementation Details
 
-Implement a **minimal expression parser** inside the stripper:
+### Files
 
-- Pratt or recursive‑descent
-- Only expression grammar (no statements)
-- JS‑like precedence for allowed operators
+- **`zts/comptime.zig`** - Core evaluator (~2000 lines)
+  - `ComptimeValue` union: number, string, boolean, null, undefined, nan, infinity, array, object
+  - `ComptimeEvaluator` struct with Pratt parser
+  - `emitLiteral()` - serialize values back to JS source
+  - Math, string, hash implementations
+  - Memory management with proper cleanup
 
-### Output Type
+- **`zts/stripper.zig`** - Integration
+  - Extended `StripOptions` with `enable_comptime` and `comptime_env`
+  - `tryEvaluateComptime()` - detect and evaluate `comptime(...)` expressions
 
-`ComptimeValue` union:
-- `number`, `string`, `bool`, `null`, `undefined`, `array`, `object`
+### Stripper Integration
+
+```zig
+pub const StripOptions = struct {
+    tsx_mode: bool = false,
+    enable_comptime: bool = false,
+    comptime_env: ?*ComptimeEnv = null,
+};
+
+pub const ComptimeEnv = struct {
+    env_vars: ?std.StringHashMap([]const u8) = null,
+    build_time: ?[]const u8 = null,
+    git_commit: ?[]const u8 = null,
+    version: ?[]const u8 = null,
+};
+```
 
 ### Literal Emission
 
-- Numbers: decimal
-- Strings: escaped with quotes
-- Objects: `{a:1}`
-- Arrays: `[1,2,3]`
-- Wrap objects in `({ … })` when replacing in expression context to avoid parsing ambiguities.
+| Type | Output |
+|------|--------|
+| Integer | `42` |
+| Float | `3.14` |
+| String | `"hello"` (with escaping) |
+| Boolean | `true` / `false` |
+| Null | `null` |
+| Array | `[1,2,3]` |
+| Object | `({a:1,b:2})` (wrapped for expression safety) |
+| NaN | `NaN` |
+| Infinity | `Infinity` / `-Infinity` |
+
+### Performance Guards
+
+- Max expression length: 8KB
+- Max AST depth: 64
+- Memory managed with proper allocator cleanup
 
 ---
 
-## TSX Behavior
+## Test Coverage
 
-- JSX structure is preserved.
-- `comptime(...)` inside `{ ... }` works normally.
-- Angle‑bracket type assertions remain unsupported in TSX.
+### Positive Tests
+- Basic arithmetic and string operations
+- Math constants and functions (all listed above)
+- String methods (all listed above)
+- Method chaining: `"  hello  ".trim().toUpperCase()`
+- Arrays and objects
+- Ternary and logical operators
+- Hash and JSON.parse functions
+- Environment variables and build metadata
 
----
+### Negative Tests
+- `comptime(Date.now())` - ComptimeCallNotAllowed
+- `comptime(Math.random())` - ComptimeCallNotAllowed
+- `comptime(foo + 1)` - ComptimeUnknownIdentifier
+- `comptime(() => 1)` - ComptimeUnsupportedOp
 
-## Performance Guards
-
-Add hard limits to prevent pathological compile‑time cost:
-
-- Max comptime expression length (e.g., 4–8 KB)
-- Max AST depth
-- Max literal size emitted
-
----
-
-## Test Matrix (Additive)
-
-### Positive
-
-```ts
-const x = comptime(1 + 2 * 3);          // -> const x = 7;
-const s = comptime("a" + "b");        // -> const s = "ab";
-const v = comptime(Math.max(1, 2));     // -> const v = 2;
-const o = comptime({ a: 1, b: 2 });     // -> const o = { a: 1, b: 2 };
-```
-
-TSX:
-```tsx
-const el = <div>{comptime(1+2)}</div>;  // -> <div>{3}</div>
-```
-
-### Negative (Strict Errors)
-
-```ts
-comptime(Date.now())      // ComptimeCallNotAllowed
-comptime(Math.random())   // ComptimeCallNotAllowed
-comptime(foo + 1)         // ComptimeUnknownIdentifier
-comptime(() => 1)         // ComptimeUnsupportedOp
-```
-
----
-
-## Integration Summary
-
-- **Stripper**: extend to parse and replace `comptime(...)`.
-- **Runtime**: enable for `.ts` / `.tsx` inputs (configurable).
-- **Parser**: unchanged.
+### TSX Tests
+- `<div>{comptime(1+2)}</div>` - transforms to `<div>{3}</div>`
 
 ---
 
 ## Future Extensions (Optional)
 
-- Allow user‑defined `const` values in a `comptime env` map
 - Cache evaluated expressions to speed repeated compilation
 - Add `comptime` to bytecode constant pool if upstream compiler gains constant folding
-
+- Additional string/array methods as needed
