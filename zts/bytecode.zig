@@ -183,29 +183,149 @@ pub const OpcodeInfo = struct {
     name: []const u8,
 };
 
-/// Get opcode metadata
+/// Get opcode metadata for debugging, disassembly, and validation
 pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
     return switch (op) {
+        // Stack operations
         .nop => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "nop" },
         .push_const => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "push_const" },
         .push_0 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_0" },
         .push_1 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_1" },
+        .push_2 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_2" },
+        .push_3 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_3" },
         .push_i8 => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "push_i8" },
+        .push_i16 => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "push_i16" },
+        .push_null => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_null" },
+        .push_undefined => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_undefined" },
+        .push_true => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_true" },
+        .push_false => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "push_false" },
+        .dup => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "dup" },
+        .drop => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "drop" },
+        .swap => .{ .size = 1, .n_pop = 2, .n_push = 2, .name = "swap" },
+        .rot3 => .{ .size = 1, .n_pop = 3, .n_push = 3, .name = "rot3" },
+
+        // Extended stack operations
+        .halt => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "halt" },
+        .loop => .{ .size = 3, .n_pop = 0, .n_push = 0, .name = "loop" },
+        .get_length => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "get_length" },
+        .dup2 => .{ .size = 1, .n_pop = 0, .n_push = 2, .name = "dup2" },
+
+        // Local variables
+        .get_loc => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "get_loc" },
+        .put_loc => .{ .size = 2, .n_pop = 1, .n_push = 0, .name = "put_loc" },
+        .get_loc_0 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "get_loc_0" },
+        .get_loc_1 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "get_loc_1" },
+        .get_loc_2 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "get_loc_2" },
+        .get_loc_3 => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "get_loc_3" },
+        .put_loc_0 => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "put_loc_0" },
+        .put_loc_1 => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "put_loc_1" },
+        .put_loc_2 => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "put_loc_2" },
+        .put_loc_3 => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "put_loc_3" },
+
+        // Arithmetic
         .add => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "add" },
         .sub => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "sub" },
         .mul => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "mul" },
         .div => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "div" },
-        .get_loc => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "get_loc" },
-        .put_loc => .{ .size = 2, .n_pop = 1, .n_push = 0, .name = "put_loc" },
+        .mod => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "mod" },
+        .pow => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "pow" },
+        .neg => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "neg" },
+        .inc => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "inc" },
+        .dec => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "dec" },
+
+        // Bitwise
+        .bit_and => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "bit_and" },
+        .bit_or => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "bit_or" },
+        .bit_xor => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "bit_xor" },
+        .bit_not => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "bit_not" },
+        .shl => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "shl" },
+        .shr => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "shr" },
+        .ushr => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "ushr" },
+
+        // Comparison
+        .lt => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "lt" },
+        .lte => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "lte" },
+        .gt => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "gt" },
+        .gte => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "gte" },
+        .eq => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "eq" },
+        .neq => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "neq" },
+        .strict_eq => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "strict_eq" },
+        .strict_neq => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "strict_neq" },
+
+        // Logical
+        .not => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "not" },
+
+        // Control flow
         .goto => .{ .size = 3, .n_pop = 0, .n_push = 0, .name = "goto" },
         .if_true => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "if_true" },
         .if_false => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "if_false" },
-        .call => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "call" }, // Dynamic pop
         .ret => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "ret" },
+        .ret_undefined => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "ret_undefined" },
+
+        // Function calls (n_pop is dynamic based on argc)
+        .call => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "call" },
+        .call_method => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "call_method" },
+        .tail_call => .{ .size = 2, .n_pop = 0, .n_push = 0, .name = "tail_call" },
+
+        // Property access
         .get_field => .{ .size = 3, .n_pop = 1, .n_push = 1, .name = "get_field" },
         .put_field => .{ .size = 3, .n_pop = 2, .n_push = 0, .name = "put_field" },
+        .get_elem => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "get_elem" },
+        .put_elem => .{ .size = 1, .n_pop = 3, .n_push = 0, .name = "put_elem" },
+        .delete_field => .{ .size = 3, .n_pop = 1, .n_push = 1, .name = "delete_field" },
+        .delete_elem => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "delete_elem" },
         .put_field_keep => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "put_field_keep" },
-        else => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "unknown" },
+
+        // Object operations
+        .new_object => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "new_object" },
+        .new_array => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "new_array" },
+        .get_global => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "get_global" },
+        .put_global => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "put_global" },
+        .define_global => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "define_global" },
+        .make_function => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "make_function" },
+        .array_spread => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "array_spread" },
+        .call_spread => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "call_spread" },
+
+        // Type checks
+        .typeof => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "typeof" },
+        .instanceof => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "instanceof" },
+
+        // Async operations
+        .await_val => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "await_val" },
+        .make_async => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "make_async" },
+
+        // Module operations
+        .import_module => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "import_module" },
+        .import_name => .{ .size = 3, .n_pop = 1, .n_push = 1, .name = "import_name" },
+        .import_default => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "import_default" },
+        .export_name => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "export_name" },
+        .export_default => .{ .size = 1, .n_pop = 1, .n_push = 0, .name = "export_default" },
+
+        // Superinstructions
+        .get_loc_add => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "get_loc_add" },
+        .get_loc_get_loc_add => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "get_loc_get_loc_add" },
+        .push_const_call => .{ .size = 4, .n_pop = 0, .n_push = 1, .name = "push_const_call" },
+        .get_field_call => .{ .size = 4, .n_pop = 1, .n_push = 1, .name = "get_field_call" },
+        .if_false_goto => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "if_false_goto" },
+
+        // Fused arithmetic-modulo
+        .add_mod => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "add_mod" },
+        .sub_mod => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "sub_mod" },
+        .mul_mod => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "mul_mod" },
+
+        // Inline cache instructions
+        .get_field_ic => .{ .size = 5, .n_pop = 1, .n_push = 1, .name = "get_field_ic" },
+        .put_field_ic => .{ .size = 5, .n_pop = 2, .n_push = 0, .name = "put_field_ic" },
+        .call_ic => .{ .size = 4, .n_pop = 0, .n_push = 1, .name = "call_ic" },
+
+        // Closure operations
+        .get_upvalue => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "get_upvalue" },
+        .put_upvalue => .{ .size = 2, .n_pop = 1, .n_push = 0, .name = "put_upvalue" },
+        .close_upvalue => .{ .size = 2, .n_pop = 0, .n_push = 0, .name = "close_upvalue" },
+        .make_closure => .{ .size = 4, .n_pop = 0, .n_push = 1, .name = "make_closure" },
+
+        // Unknown/reserved opcodes
+        _ => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "unknown" },
     };
 }
 

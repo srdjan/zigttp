@@ -217,28 +217,37 @@ pub const TenuredHeap = struct {
     }
 };
 
-/// Remembered set for cross-generation pointers
+/// Remembered set for cross-generation pointers (tenured -> nursery)
+/// Uses a hash set for O(1) deduplication to avoid scanning duplicates during minor GC
 pub const RememberedSet = struct {
     entries: std.ArrayList(*anyopaque),
+    seen: std.AutoHashMap(*anyopaque, void),
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) RememberedSet {
         return .{
             .entries = .empty,
+            .seen = std.AutoHashMap(*anyopaque, void).init(allocator),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *RememberedSet) void {
         self.entries.deinit(self.allocator);
+        self.seen.deinit();
     }
 
+    /// Add a cross-generation pointer (deduplicates automatically)
     pub fn add(self: *RememberedSet, ptr: *anyopaque) !void {
-        try self.entries.append(self.allocator, ptr);
+        const result = try self.seen.getOrPut(ptr);
+        if (!result.found_existing) {
+            try self.entries.append(self.allocator, ptr);
+        }
     }
 
     pub fn clear(self: *RememberedSet) void {
         self.entries.clearRetainingCapacity();
+        self.seen.clearRetainingCapacity();
     }
 };
 
@@ -661,13 +670,13 @@ pub const GC = struct {
         const size = header.sizeBytes();
         if (size == 0) return error.InvalidObjectSize;
 
-        // Allocate in tenured space using heap if available, otherwise fallback to raw allocator
-        const new_ptr_opt: ?*anyopaque = if (self.heap_ptr) |h|
-            h.allocRaw(size)
-        else
-            @ptrCast((self.allocator.alignedAlloc(u8, .@"8", size) catch null) orelse null);
-
-        const new_ptr = new_ptr_opt orelse return error.OutOfMemory;
+        // Allocate in tenured space - heap_ptr MUST be set for proper GC operation
+        // Without heap reference, evacuated objects cannot be freed during major GC (memory leak)
+        const h = self.heap_ptr orelse {
+            std.log.err("GC.evacuateObject: heap_ptr not set - call gc.setHeap() after initialization", .{});
+            return error.HeapNotConfigured;
+        };
+        const new_ptr = h.allocRaw(size) orelse return error.OutOfMemory;
 
         // Copy object data including header
         const src_bytes: [*]const u8 = @ptrCast(ptr);
@@ -1391,13 +1400,20 @@ test "RememberedSet duplicate entries" {
     var rs = RememberedSet.init(allocator);
     defer rs.deinit();
 
-    var dummy: u64 = 42;
+    var dummy1: u64 = 42;
+    var dummy2: u64 = 43;
 
-    // Add same pointer twice
-    try rs.add(&dummy);
-    try rs.add(&dummy);
+    // Add same pointer twice - should be deduplicated
+    try rs.add(&dummy1);
+    try rs.add(&dummy1);
 
-    // Both should be added (no dedup in basic impl)
+    // Only one entry due to deduplication
+    try std.testing.expectEqual(@as(usize, 1), rs.entries.items.len);
+
+    // Add different pointer
+    try rs.add(&dummy2);
+
+    // Now should have two entries
     try std.testing.expectEqual(@as(usize, 2), rs.entries.items.len);
 }
 
