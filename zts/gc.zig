@@ -1339,17 +1339,20 @@ test "TenuredHeap SIMD sweep" {
     var tenured = try TenuredHeap.init(allocator, 4096);
     defer tenured.deinit();
 
-    var dummy1: u64 = 1;
-    var dummy2: u64 = 2;
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
 
-    const idx1 = try tenured.registerObject(&dummy1);
-    const idx2 = try tenured.registerObject(&dummy2);
+    const obj1 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
+    const obj2 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
+
+    const idx1 = try tenured.registerObject(obj1);
+    const idx2 = try tenured.registerObject(obj2);
 
     // Mark only first object
     tenured.setMark(idx1);
 
     // SIMD sweep should clear marks
-    tenured.simdSweep(null, null);
+    tenured.simdSweep(null, &heap_state);
 
     // After sweep, marks should be cleared
     try std.testing.expect(!tenured.isMarked(idx1));
@@ -1361,17 +1364,20 @@ test "TenuredHeap scalar sweep" {
     var tenured = try TenuredHeap.init(allocator, 4096);
     defer tenured.deinit();
 
-    var dummy1: u64 = 1;
-    var dummy2: u64 = 2;
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
 
-    const idx1 = try tenured.registerObject(&dummy1);
-    const idx2 = try tenured.registerObject(&dummy2);
+    const obj1 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
+    const obj2 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
+
+    const idx1 = try tenured.registerObject(obj1);
+    const idx2 = try tenured.registerObject(obj2);
 
     // Mark only second object
     tenured.setMark(idx2);
 
     // Scalar sweep should clear marks
-    tenured.scalarSweep(null, null);
+    tenured.scalarSweep(null, &heap_state);
 
     // After sweep, marks should be cleared
     try std.testing.expect(!tenured.isMarked(idx1));

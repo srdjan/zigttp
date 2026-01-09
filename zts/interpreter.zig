@@ -218,7 +218,10 @@ pub const Interpreter = struct {
 
         // Push call frame
         try self.ctx.pushFrame(func_val, this_val, @intFromPtr(self.pc));
-        errdefer _ = self.ctx.popFrame();
+        errdefer {
+            self.closeUpvaluesAbove(0);
+            _ = self.ctx.popFrame();
+        }
 
         // Set up new function's locals with arguments
         const local_count = func_bc.local_count;
@@ -240,10 +243,10 @@ pub const Interpreter = struct {
         self.current_func = func_bc;
 
         const result = self.dispatch() catch |err| {
-            _ = self.ctx.popFrame();
             return err;
         };
 
+        self.closeUpvaluesAbove(0);
         _ = self.ctx.popFrame();
         return result;
     }
@@ -1682,9 +1685,20 @@ pub const Interpreter = struct {
             return;
         }
 
-        // Check for bytecode function
-        if (func_obj.getBytecodeFunctionData()) |bc_data| {
-            const func_bc = bc_data.bytecode;
+        // Closure or bytecode function
+        const closure_data = func_obj.getClosureData();
+        const func_bc_opt = if (closure_data) |cd|
+            cd.bytecode
+        else if (func_obj.getBytecodeFunctionData()) |bc_data|
+            bc_data.bytecode
+        else
+            null;
+
+        if (func_bc_opt) |func_bc| {
+            // Set current closure context for this call (null for non-closures)
+            const prev_closure = self.current_closure;
+            self.current_closure = closure_data;
+            defer self.current_closure = prev_closure;
 
             // Check if this is a generator function (using cached flag)
             if (func_obj.flags.is_generator) {
@@ -2361,11 +2375,16 @@ test "End-to-end: parse and execute JS" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
     const parser_mod = @import("parser/root.zig");
     const string_mod = @import("string.zig");
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
     defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
 
     var ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
@@ -2398,6 +2417,58 @@ test "End-to-end: parse and execute JS" {
     // Full integration testing is done in zruntime tests
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
+}
+
+test "End-to-end: closure captures local" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\function make() { let x = 2; return () => x + 3; }
+        \\let f = make();
+        \\let result = f();
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_opt = ctx.getGlobal(result_atom);
+    try std.testing.expect(result_opt != null);
+    const result_val = result_opt.?;
+    try std.testing.expect(result_val.isInt());
+    try std.testing.expectEqual(@as(i32, 5), result_val.getInt());
 }
 
 test "End-to-end: JSX parse, compile, and execute" {
