@@ -1081,7 +1081,7 @@ function layout(title, content) {
         '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
         '  <title>' + title + ' | My Site</title>',
         '  <style>',
-        '    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }',
+        '    body { font-family: -apple-system, ".SFNSText-Regular", "San Francisco", "Roboto", "Segoe UI", "Helvetica Neue", sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }',
         '    nav { margin-bottom: 20px; }',
         '    nav a { margin-right: 15px; }',
         '    .success { color: green; }',
