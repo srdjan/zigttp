@@ -74,6 +74,12 @@ pub const CodeGen = struct {
     current_scope: ScopeId,
     max_stack_depth: u16,
     current_stack_depth: u16,
+    /// Next inline cache slot index (per function)
+    /// When >= IC_CACHE_SIZE, falls back to non-IC opcodes
+    ic_cache_idx: u16,
+
+    /// Maximum inline cache slots per function (must match interpreter.IC_CACHE_SIZE)
+    pub const IC_CACHE_SIZE: u16 = 256;
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -108,6 +114,7 @@ pub const CodeGen = struct {
             .current_scope = 0,
             .max_stack_depth = 0,
             .current_stack_depth = 0,
+            .ic_cache_idx = 0,
         };
     }
 
@@ -618,8 +625,7 @@ pub const CodeGen = struct {
             try self.emitNode(callee_node.data.member.object);
             try self.emit(.dup); // Keep object as 'this'
             self.pushStack(1);
-            try self.emit(.get_field);
-            try self.emitU16(callee_node.data.member.property);
+            try self.emitGetField(callee_node.data.member.property);
 
             // Emit arguments
             try self.emitCallArgs(call);
@@ -654,8 +660,7 @@ pub const CodeGen = struct {
 
     fn emitMemberAccess(self: *CodeGen, member: Node.MemberExpr) !void {
         try self.emitNode(member.object);
-        try self.emit(.get_field);
-        try self.emitU16(member.property);
+        try self.emitGetField(member.property);
     }
 
     fn emitComputedAccess(self: *CodeGen, member: Node.MemberExpr) !void {
@@ -775,21 +780,15 @@ pub const CodeGen = struct {
                 if (key_node.tag == .lit_string) {
                     // Key is a string constant, use put_field with atom
                     try self.emitNode(prop.value);
-                    try self.emit(.put_field);
                     // Get string from IR constant pool and look up/intern atom
                     const key_str = self.ir_constants.getString(key_node.data.string_idx) orelse "";
-                    if (js_object.lookupPredefinedAtom(key_str)) |atom| {
-                        // Use predefined atom index
-                        try self.emitU16(@intCast(@intFromEnum(atom)));
-                    } else if (self.atoms) |atoms| {
-                        // Intern string as dynamic atom in the runtime's atom table
-                        const atom = try atoms.intern(key_str);
-                        try self.emitU16(@intCast(@intFromEnum(atom)));
-                    } else {
-                        // Fallback: use string index as dynamic atom (may not work correctly)
-                        const dynamic_atom: u16 = @intCast(js_object.Atom.FIRST_DYNAMIC + key_node.data.string_idx);
-                        try self.emitU16(dynamic_atom);
-                    }
+                    const atom_idx: u16 = if (js_object.lookupPredefinedAtom(key_str)) |atom|
+                        @intCast(@intFromEnum(atom))
+                    else if (self.atoms) |atoms|
+                        @intCast(@intFromEnum(try atoms.intern(key_str)))
+                    else
+                        @intCast(js_object.Atom.FIRST_DYNAMIC + key_node.data.string_idx);
+                    try self.emitPutField(atom_idx);
                     self.popStack(2);
                 } else {
                     // Computed key
@@ -815,6 +814,7 @@ pub const CodeGen = struct {
         const saved_scope = self.current_scope;
         const saved_max_stack = self.max_stack_depth;
         const saved_current_stack = self.current_stack_depth;
+        const saved_ic_cache_idx = self.ic_cache_idx;
 
         // Reset for function compilation
         self.code = std.ArrayList(u8).empty;
@@ -826,6 +826,7 @@ pub const CodeGen = struct {
         self.current_scope = func.scope_id;
         self.max_stack_depth = 0;
         self.current_stack_depth = 0;
+        self.ic_cache_idx = 0;
 
         // Compile function body
         try self.emitNode(func.body);
@@ -885,6 +886,7 @@ pub const CodeGen = struct {
         self.current_scope = saved_scope;
         self.max_stack_depth = saved_max_stack;
         self.current_stack_depth = saved_current_stack;
+        self.ic_cache_idx = saved_ic_cache_idx;
 
         // Add function bytecode to parent constants and emit opcode
         const func_idx = try self.addConstant(JSValue.fromPtr(func_bc));
@@ -978,8 +980,7 @@ pub const CodeGen = struct {
                     self.pushStack(1);
 
                     // Get the property value using the atom
-                    try self.emit(.get_field);
-                    try self.emitU16(elem.key_atom);
+                    try self.emitGetField(elem.key_atom);
 
                     // Handle default value if present
                     if (elem.default_value != null_node) {
@@ -995,8 +996,7 @@ pub const CodeGen = struct {
                     self.pushStack(1);
 
                     // Get the property value using the atom
-                    try self.emit(.get_field);
-                    try self.emitU16(elem.key_atom);
+                    try self.emitGetField(elem.key_atom);
 
                     // Handle default
                     if (elem.default_value != null_node) {
@@ -1411,8 +1411,7 @@ pub const CodeGen = struct {
                         try self.emit(.push_true);
                         self.pushStack(1);
                     }
-                    try self.emit(.put_field);
-                    try self.emitU16(prop_node.data.jsx_attr.name_atom);
+                    try self.emitPutField(prop_node.data.jsx_attr.name_atom);
                     self.popStack(2);
                 }
             }
@@ -1462,6 +1461,34 @@ pub const CodeGen = struct {
     fn emitPushConst(self: *CodeGen, idx: u16) !void {
         try self.emit(.push_const);
         try self.emitU16(idx);
+    }
+
+    /// Emit get_field with inline cache if cache slots available
+    /// Falls back to regular get_field when IC_CACHE_SIZE exceeded
+    fn emitGetField(self: *CodeGen, atom_idx: u16) !void {
+        if (self.ic_cache_idx < IC_CACHE_SIZE) {
+            try self.emit(.get_field_ic);
+            try self.emitU16(atom_idx);
+            try self.emitU16(self.ic_cache_idx);
+            self.ic_cache_idx += 1;
+        } else {
+            try self.emit(.get_field);
+            try self.emitU16(atom_idx);
+        }
+    }
+
+    /// Emit put_field with inline cache if cache slots available
+    /// Falls back to regular put_field when IC_CACHE_SIZE exceeded
+    fn emitPutField(self: *CodeGen, atom_idx: u16) !void {
+        if (self.ic_cache_idx < IC_CACHE_SIZE) {
+            try self.emit(.put_field_ic);
+            try self.emitU16(atom_idx);
+            try self.emitU16(self.ic_cache_idx);
+            self.ic_cache_idx += 1;
+        } else {
+            try self.emit(.put_field);
+            try self.emitU16(atom_idx);
+        }
     }
 
     // ============ Jump Handling ============

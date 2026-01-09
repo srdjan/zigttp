@@ -13,6 +13,19 @@ const string = @import("string.zig");
 
 const empty_code: [0]u8 = .{};
 
+/// Inline cache entry for monomorphic property access
+/// Caches the hidden class pointer and slot offset for fast subsequent lookups
+pub const InlineCacheEntry = struct {
+    /// Cached hidden class pointer (null = cache miss/uninitialized)
+    hidden_class: ?*object.HiddenClass = null,
+    /// Cached slot offset for direct property access
+    slot_offset: u16 = 0,
+};
+
+/// Maximum number of inline cache slots per function
+/// Each get_field_ic/put_field_ic instruction references a cache index
+pub const IC_CACHE_SIZE = 256;
+
 /// Interpreter state
 pub const Interpreter = struct {
     const MAX_STATE_DEPTH = 1024;
@@ -37,6 +50,9 @@ pub const Interpreter = struct {
     open_upvalues: ?*object.Upvalue, // Linked list of open upvalues
     state_stack: [MAX_STATE_DEPTH]SavedState,
     state_depth: usize,
+    /// Inline cache for monomorphic property access optimization
+    /// Indexed by cache_idx from get_field_ic/put_field_ic instructions
+    ic_cache: [IC_CACHE_SIZE]InlineCacheEntry,
 
     pub fn init(ctx: *context.Context) Interpreter {
         return .{
@@ -49,6 +65,7 @@ pub const Interpreter = struct {
             .open_upvalues = null,
             .state_stack = undefined,
             .state_depth = 0,
+            .ic_cache = [_]InlineCacheEntry{.{}} ** IC_CACHE_SIZE,
         };
     }
 
@@ -808,6 +825,88 @@ pub const Interpreter = struct {
                     }
                     // Push value back as assignment expression result
                     try self.ctx.push(val);
+                },
+
+                // Inline cache opcodes for optimized property access
+                // Format: +u16 atom_idx +u16 cache_idx
+                .get_field_ic => {
+                    const atom_idx = readU16(self.pc);
+                    const cache_idx = readU16(self.pc + 2);
+                    self.pc += 4;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        const cache = &self.ic_cache[cache_idx];
+
+                        // Cache hit: same hidden class, use cached slot offset
+                        if (cache.hidden_class == obj.hidden_class) {
+                            try self.ctx.push(obj.getSlot(cache.slot_offset));
+                            continue :dispatch;
+                        }
+
+                        // Cache miss: full lookup and update cache
+                        if (obj.hidden_class.findProperty(atom)) |slot| {
+                            cache.hidden_class = obj.hidden_class;
+                            cache.slot_offset = slot.offset;
+                            try self.ctx.push(obj.getSlot(slot.offset));
+                        } else if (obj.getProperty(atom)) |prop_val| {
+                            // Property found in prototype chain (don't cache)
+                            try self.ctx.push(prop_val);
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else if (obj_val.isString()) {
+                        // Primitive string property access (same as get_field)
+                        if (atom == .length) {
+                            const str = obj_val.toPtr(string.JSString);
+                            try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
+                        } else if (self.ctx.string_prototype) |proto| {
+                            if (proto.getProperty(atom)) |prop_val| {
+                                try self.ctx.push(prop_val);
+                            } else {
+                                try self.ctx.push(value.JSValue.undefined_val);
+                            }
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                },
+
+                .put_field_ic => {
+                    const atom_idx = readU16(self.pc);
+                    const cache_idx = readU16(self.pc + 2);
+                    self.pc += 4;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+                    const val = self.ctx.pop();
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        const cache = &self.ic_cache[cache_idx];
+
+                        // Cache hit: same hidden class, use cached slot offset
+                        if (cache.hidden_class == obj.hidden_class) {
+                            obj.setSlot(cache.slot_offset, val);
+                            continue :dispatch;
+                        }
+
+                        // Cache miss: check if property exists
+                        if (obj.hidden_class.findProperty(atom)) |slot| {
+                            // Property exists, update cache and set value
+                            cache.hidden_class = obj.hidden_class;
+                            cache.slot_offset = slot.offset;
+                            obj.setSlot(slot.offset, val);
+                        } else {
+                            // Property doesn't exist, use full setProperty (may transition)
+                            // Don't cache transitions as hidden class will change
+                            try obj.setProperty(self.ctx.allocator, atom, val);
+                        }
+                    }
+                    // Non-object assignment silently fails in non-strict mode
                 },
 
                 .get_elem => {

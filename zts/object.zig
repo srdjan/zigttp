@@ -635,6 +635,23 @@ pub const PropertySlot = struct {
 // ============================================================================
 // Index-Based Hidden Class System (Zig Compiler Pattern)
 // ============================================================================
+//
+// STATUS: Infrastructure ready, not yet integrated with JSObject
+//
+// This index-based system provides better memory efficiency than pointer-based:
+// - 4 bytes per reference vs 8 bytes (50% savings)
+// - Structure-of-Arrays (SoA) layout for cache-friendly property lookups
+// - Suitable for serialization/caching
+//
+// MIGRATION PATH (not yet implemented):
+// 1. Change JSObject.hidden_class from *HiddenClass to HiddenClassIndex
+// 2. Add pool reference to JSObject or pass through method parameters
+// 3. Update InlineCacheEntry to use HiddenClassIndex
+// 4. Remove legacy HiddenClass struct after migration complete
+//
+// The legacy pointer-based HiddenClass (below) is currently used by JSObject
+// and the interpreter's inline cache.
+// ============================================================================
 
 /// Index into HiddenClassPool - uses u32 for 50% memory savings vs pointers
 pub const HiddenClassIndex = enum(u32) {
@@ -849,7 +866,21 @@ pub const HiddenClassPool = struct {
     }
 };
 
-/// Hidden class (shape) for objects
+// ============================================================================
+// Pointer-Based Hidden Class (Currently Active)
+// ============================================================================
+//
+// This is the active hidden class implementation used by JSObject.
+// It uses pointer-based transitions and is integrated with the inline cache.
+//
+// Pros: Simple, works with existing JSObject design, fast pointer comparison
+// Cons: 8 bytes per reference, not suitable for serialization
+//
+// See HiddenClassPool above for the index-based alternative.
+// ============================================================================
+
+/// Hidden class (shape) for objects - pointer-based implementation
+/// Used by JSObject for property storage layout and inline caching
 pub const HiddenClass = struct {
     properties: []const PropertySlot,
     transitions: TransitionMap,
