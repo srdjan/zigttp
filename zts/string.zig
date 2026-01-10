@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const heap = @import("heap.zig");
+const arena_mod = @import("arena.zig");
 
 /// JavaScript string representation
 /// Uses extern struct for predictable C-compatible memory layout
@@ -448,6 +449,27 @@ pub fn freeString(allocator: std.mem.Allocator, str: *JSString) void {
     const total_size = @sizeOf(JSString) + str.len;
     const ptr: [*]align(@alignOf(JSString)) u8 = @ptrCast(@alignCast(str));
     allocator.free(ptr[0..total_size]);
+}
+
+/// Create a string using arena allocation (ephemeral, dies at request end)
+pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString {
+    const total_size = @sizeOf(JSString) + s.len;
+    const mem = arena.alloc(total_size) orelse return null;
+
+    const str: *JSString = @ptrCast(@alignCast(mem));
+    str.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = isAscii(s),
+            .is_numeric = isArrayIndex(s) != null,
+        },
+        .len = @intCast(s.len),
+        .hash = hashString(s),
+    };
+
+    @memcpy(str.dataMut(), s);
+    return str;
 }
 
 /// Concatenate two strings

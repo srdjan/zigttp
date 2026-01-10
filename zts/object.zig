@@ -5,6 +5,7 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 const value = @import("value.zig");
+const arena_mod = @import("arena.zig");
 
 /// Atom - interned property name identifier
 pub const Atom = enum(u32) {
@@ -1056,6 +1057,8 @@ pub const JSObject = extern struct {
     inline_slots: [INLINE_SLOT_COUNT]value.JSValue,
     overflow_slots: ?[*]value.JSValue,
     overflow_capacity: u16,
+    /// Arena pointer for arena-allocated objects (null for standard allocator)
+    arena_ptr: ?*arena_mod.Arena,
 
     pub const INLINE_SLOT_COUNT = 8;
 
@@ -1103,7 +1106,7 @@ pub const JSObject = extern struct {
         has_small_array: bool = false, // Dense array optimization
         is_generator: bool = false, // Generator function (function*)
         is_async: bool = false, // Async function (async function)
-        _reserved: u1 = 0,
+        is_arena: bool = false, // Allocated from request arena (ephemeral)
     };
 
     /// Create a new object
@@ -1118,7 +1121,43 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
+        return obj;
+    }
+
+    /// Create a new object using arena allocation (ephemeral, dies at request end)
+    pub fn createWithArena(arena: *arena_mod.Arena, class: *HiddenClass, prototype: ?*JSObject) ?*JSObject {
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = prototype,
+            .class_id = .object,
+            .flags = .{ .is_arena = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
+        return obj;
+    }
+
+    /// Create an array object using arena allocation
+    pub fn createArrayWithArena(arena: *arena_mod.Arena, class: *HiddenClass) ?*JSObject {
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .array,
+            .flags = .{ .is_exotic = true, .has_small_array = true, .is_arena = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
+        obj.inline_slots[Slots.ARRAY_LENGTH] = value.JSValue.fromInt(0);
         return obj;
     }
 
@@ -1156,6 +1195,7 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
         // Store native function data pointer
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
@@ -1198,6 +1238,7 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
         // Store bytecode function data and marker
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
@@ -1258,6 +1299,7 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
         // Store closure data and markers
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
@@ -1311,8 +1353,42 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
         // Store generator data pointer
+        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromPtr(data);
+        return obj;
+    }
+
+    /// Create a generator object using arena allocation (ephemeral)
+    pub fn createGeneratorWithArena(arena: *arena_mod.Arena, class: *HiddenClass, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) ?*JSObject {
+        const data = arena.create(GeneratorData) orelse return null;
+        const locals = arena.allocSlice(value.JSValue, bytecode_ptr.local_count) orelse return null;
+        @memset(locals, value.JSValue.undefined_val);
+        const stack = arena.allocSlice(value.JSValue, 64) orelse return null;
+        @memset(stack, value.JSValue.undefined_val);
+
+        data.* = .{
+            .bytecode = bytecode_ptr,
+            .state = .suspended_start,
+            .pc_offset = 0,
+            .locals = locals,
+            .stack = stack,
+            .stack_len = 0,
+        };
+
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = prototype,
+            .class_id = .generator,
+            .flags = .{ .is_arena = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
         obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromPtr(data);
         return obj;
     }
@@ -1397,6 +1473,7 @@ pub const JSObject = extern struct {
     }
 
     /// Set property (with hidden class transition)
+    /// Returns error.ArenaObjectEscape if storing arena object into persistent object
     pub fn setProperty(self: *JSObject, allocator: std.mem.Allocator, name: Atom, val: value.JSValue) !void {
         if (self.class_id == .array and name == .length) {
             if (val.isInt()) {
@@ -1407,6 +1484,15 @@ pub const JSObject = extern struct {
             }
             return;
         }
+
+        // Check for arena escape: arena object stored into persistent object
+        if (!self.flags.is_arena and val.isObject()) {
+            const val_obj = val.toPtr(JSObject);
+            if (val_obj.flags.is_arena) {
+                return error.ArenaObjectEscape;
+            }
+        }
+
         // Check if property exists
         if (self.hidden_class.findProperty(name)) |slot| {
             self.setSlot(slot.offset, val);
@@ -1432,16 +1518,26 @@ pub const JSObject = extern struct {
     }
 
     /// Ensure overflow slots have enough capacity
+    /// Uses arena allocation for arena objects, standard allocator otherwise
     fn ensureOverflowCapacity(self: *JSObject, allocator: std.mem.Allocator, min_capacity: u16) !void {
         if (self.overflow_capacity >= min_capacity) return;
 
         const new_capacity = @max(min_capacity, self.overflow_capacity * 2, 4);
-        const new_slots = try allocator.alloc(value.JSValue, new_capacity);
+
+        // Use arena for arena objects, standard allocator otherwise
+        const new_slots: []value.JSValue = if (self.arena_ptr) |arena| blk: {
+            break :blk arena.allocSlice(value.JSValue, new_capacity) orelse return error.OutOfMemory;
+        } else blk: {
+            break :blk try allocator.alloc(value.JSValue, new_capacity);
+        };
 
         // Copy existing
         if (self.overflow_slots) |old_slots| {
             @memcpy(new_slots[0..self.overflow_capacity], old_slots[0..self.overflow_capacity]);
-            allocator.free(old_slots[0..self.overflow_capacity]);
+            // Only free if not arena (arena memory freed on reset)
+            if (self.arena_ptr == null) {
+                allocator.free(old_slots[0..self.overflow_capacity]);
+            }
         }
 
         // Initialize new slots
@@ -1526,6 +1622,7 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
         // Initialize array length to 0
         obj.inline_slots[Slots.ARRAY_LENGTH] = value.JSValue.fromInt(0);
@@ -1557,8 +1654,41 @@ pub const JSObject = extern struct {
             .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
             .overflow_slots = null,
             .overflow_capacity = 0,
+            .arena_ptr = null,
         };
         // Store range parameters and cached length
+        obj.inline_slots[Slots.RANGE_START] = value.JSValue.fromInt(start);
+        obj.inline_slots[Slots.RANGE_END] = value.JSValue.fromInt(end);
+        obj.inline_slots[Slots.RANGE_STEP] = value.JSValue.fromInt(step);
+        obj.inline_slots[Slots.RANGE_LENGTH] = value.JSValue.fromInt(@intCast(length));
+        return obj;
+    }
+
+    /// Create a lazy range iterator object using arena allocation (ephemeral)
+    pub fn createRangeIteratorWithArena(arena: *arena_mod.Arena, class: *HiddenClass, start: i32, end: i32, step: i32) ?*JSObject {
+        const length: u32 = blk: {
+            if (step == 0) break :blk 0;
+            if (step > 0) {
+                if (end <= start) break :blk 0;
+                break :blk @intCast(@divTrunc(end - start + step - 1, step));
+            } else {
+                if (start <= end) break :blk 0;
+                break :blk @intCast(@divTrunc(start - end - step - 1, -step));
+            }
+        };
+
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class = class,
+            .prototype = null,
+            .class_id = .range_iterator,
+            .flags = .{ .is_exotic = true, .is_arena = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
         obj.inline_slots[Slots.RANGE_START] = value.JSValue.fromInt(start);
         obj.inline_slots[Slots.RANGE_END] = value.JSValue.fromInt(end);
         obj.inline_slots[Slots.RANGE_STEP] = value.JSValue.fromInt(step);

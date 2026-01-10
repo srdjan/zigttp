@@ -6,15 +6,20 @@ const std = @import("std");
 const context = @import("context.zig");
 const gc = @import("gc.zig");
 const heap = @import("heap.zig");
+const arena_mod = @import("arena.zig");
 
 /// Pool configuration
 pub const PoolConfig = struct {
     /// Maximum number of runtimes in pool
     max_size: usize = 16,
-    /// GC configuration for each runtime
+    /// GC configuration for each runtime (used for persistent allocations)
     gc_config: gc.GCConfig = .{},
     /// Context configuration
     ctx_config: context.ContextConfig = .{},
+    /// Arena configuration for ephemeral request allocations
+    arena_config: arena_mod.ArenaConfig = .{},
+    /// Use hybrid allocation (arena for ephemeral, GC for persistent)
+    use_hybrid_allocation: bool = true,
 };
 
 /// Lock-free runtime pool
@@ -26,10 +31,23 @@ pub const LockFreePool = struct {
 
     /// Individual runtime instance
     pub const Runtime = struct {
+        // Persistent state (lives across requests)
         ctx: *context.Context,
         gc_state: *gc.GC,
         heap_state: *heap.Heap,
+
+        // Request-scoped state (reset per request)
+        request_arena: ?*arena_mod.Arena,
+        hybrid: ?arena_mod.HybridAllocator,
+
+        // Runtime state
         in_use: bool,
+        use_hybrid: bool,
+
+        // Diagnostics
+        request_count: u64,
+        peak_arena_usage: usize,
+        overflow_count: u64,
 
         pub fn create(allocator: std.mem.Allocator, config: PoolConfig) !*Runtime {
             const rt = try allocator.create(Runtime);
@@ -46,14 +64,41 @@ pub const LockFreePool = struct {
             heap_state.* = heap.Heap.init(allocator, .{});
             gc_state.setHeap(heap_state);
 
+            // Initialize request arena if hybrid allocation enabled
+            var request_arena: ?*arena_mod.Arena = null;
+            var hybrid: ?arena_mod.HybridAllocator = null;
+
+            if (config.use_hybrid_allocation) {
+                const arena_ptr = try allocator.create(arena_mod.Arena);
+                errdefer allocator.destroy(arena_ptr);
+                arena_ptr.* = try arena_mod.Arena.init(allocator, config.arena_config);
+                request_arena = arena_ptr;
+
+                hybrid = arena_mod.HybridAllocator{
+                    .persistent = allocator,
+                    .arena = arena_ptr,
+                };
+            }
+
             const ctx = try context.Context.init(allocator, gc_state, config.ctx_config);
 
             rt.* = .{
                 .ctx = ctx,
                 .gc_state = gc_state,
                 .heap_state = heap_state,
+                .request_arena = request_arena,
+                .hybrid = hybrid,
                 .in_use = false,
+                .use_hybrid = config.use_hybrid_allocation,
+                .request_count = 0,
+                .peak_arena_usage = 0,
+                .overflow_count = 0,
             };
+
+            // Wire up hybrid allocator to context
+            if (rt.hybrid) |*h| {
+                ctx.setHybridAllocator(h);
+            }
 
             return rt;
         }
@@ -62,23 +107,70 @@ pub const LockFreePool = struct {
             self.ctx.deinit();
             self.gc_state.deinit();
             self.heap_state.deinit();
+            if (self.request_arena) |arena| {
+                arena.deinit();
+                allocator.destroy(arena);
+            }
             allocator.destroy(self.gc_state);
             allocator.destroy(self.heap_state);
             allocator.destroy(self);
         }
 
-        /// Reset runtime state for reuse
+        /// Reset runtime state for reuse - O(1) with hybrid allocation
         pub fn reset(self: *Runtime) void {
-            // Clear stack
+            // Clear execution state
             self.ctx.sp = 0;
             self.ctx.call_depth = 0;
             self.ctx.clearException();
 
-            // Optionally trigger minor GC
-            if (self.gc_state.nursery.used() > self.gc_state.config.nursery_size / 2) {
-                self.gc_state.minorGC();
+            if (self.use_hybrid) {
+                // O(1) arena reset - instant cleanup
+                if (self.request_arena) |arena| {
+                    // Track peak usage before reset
+                    const stats = arena.getStats();
+                    if (stats.high_watermark > self.peak_arena_usage) {
+                        self.peak_arena_usage = stats.high_watermark;
+                    }
+                    if (stats.overflow_count > 0) {
+                        self.overflow_count += stats.overflow_count;
+                    }
+                    arena.reset();
+                }
+            } else {
+                // Legacy GC-based cleanup
+                if (self.gc_state.nursery.used() > self.gc_state.config.nursery_size / 2) {
+                    self.gc_state.minorGC();
+                }
             }
+
+            self.request_count += 1;
         }
+
+        /// Get arena statistics (if hybrid allocation enabled)
+        pub fn getArenaStats(self: *const Runtime) ?arena_mod.ArenaStats {
+            if (self.request_arena) |arena| {
+                return arena.getStats();
+            }
+            return null;
+        }
+
+        /// Get cumulative runtime statistics
+        pub fn getStats(self: *const Runtime) RuntimeStats {
+            return .{
+                .request_count = self.request_count,
+                .peak_arena_usage = self.peak_arena_usage,
+                .overflow_count = self.overflow_count,
+                .current_arena_stats = self.getArenaStats(),
+            };
+        }
+    };
+
+    /// Runtime statistics
+    pub const RuntimeStats = struct {
+        request_count: u64,
+        peak_arena_usage: usize,
+        overflow_count: u64,
+        current_arena_stats: ?arena_mod.ArenaStats,
     };
 
     pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !LockFreePool {
@@ -258,6 +350,30 @@ test "Runtime reset" {
 
     // Reset should complete without error
     rt.reset();
+
+    pool.release(rt);
+}
+
+test "Hybrid runtime reset clears arena allocations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var pool = try LockFreePool.init(allocator, .{ .max_size = 1, .use_hybrid_allocation = true });
+    const rt = try pool.acquire();
+
+    try std.testing.expect(rt.request_arena != null);
+    const req_arena = rt.request_arena.?;
+
+    // Allocate some ephemeral objects/strings in the request arena
+    _ = try rt.ctx.createObject(null);
+    _ = try rt.ctx.createString("hello");
+
+    try std.testing.expect(req_arena.usedBytes() > 0);
+
+    rt.reset();
+
+    try std.testing.expectEqual(@as(usize, 0), req_arena.usedBytes());
 
     pool.release(rt);
 }

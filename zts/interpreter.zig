@@ -266,6 +266,7 @@ pub const Interpreter = struct {
         OutOfMemory,
         NoTransition,
         NoRootClass,
+        ArenaObjectEscape, // Arena object stored into persistent object
     };
 
     /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
@@ -809,7 +810,7 @@ pub const Interpreter = struct {
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
-                        try obj.setProperty(self.ctx.allocator, atom, val);
+                        try self.ctx.setPropertyChecked(obj, atom, val);
                     }
                     // Non-object assignment silently fails in non-strict mode
                 },
@@ -824,7 +825,7 @@ pub const Interpreter = struct {
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
-                        try obj.setProperty(self.ctx.allocator, atom, val);
+                        try self.ctx.setPropertyChecked(obj, atom, val);
                     }
                     // Push value back as assignment expression result
                     try self.ctx.push(val);
@@ -890,6 +891,9 @@ pub const Interpreter = struct {
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
                         const cache = &self.ic_cache[cache_idx];
+                        if (self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
+                            return error.ArenaObjectEscape;
+                        }
 
                         // Cache hit: same hidden class, use cached slot offset
                         if (cache.hidden_class == obj.hidden_class) {
@@ -906,7 +910,7 @@ pub const Interpreter = struct {
                         } else {
                             // Property doesn't exist, use full setProperty (may transition)
                             // Don't cache transitions as hidden class will change
-                            try obj.setProperty(self.ctx.allocator, atom, val);
+                            try self.ctx.setPropertyChecked(obj, atom, val);
                         }
                     }
                     // Non-object assignment silently fails in non-strict mode
@@ -977,12 +981,12 @@ pub const Interpreter = struct {
                         const idx = index_val.getInt();
                         if (idx >= 0) {
                             if (obj.class_id == .array) {
-                                try obj.setIndex(self.ctx.allocator, @intCast(idx), val);
+                                try self.ctx.setIndexChecked(obj, @intCast(idx), val);
                             } else {
                                 var idx_buf: [32]u8 = undefined;
                                 const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch continue :dispatch;
                                 const atom = self.ctx.atoms.intern(idx_slice) catch continue :dispatch;
-                                try obj.setProperty(self.ctx.allocator, atom, val);
+                                try self.ctx.setPropertyChecked(obj, atom, val);
                             }
                         }
                     }
@@ -1072,8 +1076,7 @@ pub const Interpreter = struct {
                     _ = module_name_val;
                     // Module loading requires a module registry/loader which would be
                     // set up in the context. For now, push an empty namespace object.
-                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
-                    const namespace = try object.JSObject.create(self.ctx.allocator, root_class, null);
+                    const namespace = try self.ctx.createObject(null);
                     try self.ctx.push(namespace.toValue());
                 },
 
@@ -1146,6 +1149,9 @@ pub const Interpreter = struct {
                                 // Copy each element from source to target
                                 for (0..src_len) |i| {
                                     const elem = source.getSlot(@intCast(i));
+                                    if (self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
+                                        return error.ArenaObjectEscape;
+                                    }
                                     target.setSlot(@intCast(idx), elem);
                                     idx += 1;
                                 }
@@ -1169,7 +1175,7 @@ pub const Interpreter = struct {
                     const a = self.ctx.pop();
                     const type_str = a.typeOf();
                     // Create JS string for typeof result
-                    const js_str = string.createString(self.ctx.allocator, type_str) catch {
+                    const js_str = self.createString(type_str) catch {
                         try self.ctx.push(value.JSValue.undefined_val);
                         continue;
                     };
@@ -1540,31 +1546,31 @@ pub const Interpreter = struct {
         }
         if (val.isInt()) {
             var buf: [32]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return try string.createString(self.ctx.allocator, "0");
-            return try string.createString(self.ctx.allocator, slice);
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return try self.createString("0");
+            return try self.createString(slice);
         }
         if (val.isNull()) {
-            return try string.createString(self.ctx.allocator, "null");
+            return try self.createString("null");
         }
         if (val.isUndefined()) {
-            return try string.createString(self.ctx.allocator, "undefined");
+            return try self.createString("undefined");
         }
         if (val.isTrue()) {
-            return try string.createString(self.ctx.allocator, "true");
+            return try self.createString("true");
         }
         if (val.isFalse()) {
-            return try string.createString(self.ctx.allocator, "false");
+            return try self.createString("false");
         }
         if (val.isObject()) {
-            return try string.createString(self.ctx.allocator, "[object Object]");
+            return try self.createString("[object Object]");
         }
         // Float
         if (val.toNumber()) |n| {
             var buf: [64]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try string.createString(self.ctx.allocator, "NaN");
-            return try string.createString(self.ctx.allocator, slice);
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try self.createString("NaN");
+            return try self.createString(slice);
         }
-        return try string.createString(self.ctx.allocator, "undefined");
+        return try self.createString("undefined");
     }
 
     fn divValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
@@ -1596,20 +1602,56 @@ pub const Interpreter = struct {
     }
 
     fn allocFloat(self: *Interpreter, v: f64) !value.JSValue {
+        // Use arena for ephemeral float allocation if hybrid mode enabled
+        if (self.ctx.hybrid) |h| {
+            // Use createAligned to respect Float64Box alignment requirements
+            const box = h.arena.createAligned(value.JSValue.Float64Box) orelse
+                return error.OutOfMemory;
+            box.* = .{
+                .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
+                ._pad = 0,
+                .value = v,
+            };
+            return value.JSValue.fromPtr(box);
+        }
+        // Fallback to GC-managed allocation
         const box = try self.ctx.gc_state.allocFloat(v);
         return value.JSValue.fromPtr(box);
     }
 
     fn createObject(self: *Interpreter) !*object.JSObject {
         const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        // Use arena for ephemeral object allocation if hybrid mode enabled
+        if (self.ctx.hybrid) |h| {
+            return object.JSObject.createWithArena(h.arena, root_class, null) orelse
+                return error.OutOfMemory;
+        }
         return try object.JSObject.create(self.ctx.allocator, root_class, null);
     }
 
     fn createArray(self: *Interpreter) !*object.JSObject {
         const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        // Use arena for ephemeral array allocation if hybrid mode enabled
+        if (self.ctx.hybrid) |h| {
+            const obj = object.JSObject.createArrayWithArena(h.arena, root_class) orelse
+                return error.OutOfMemory;
+            obj.prototype = self.ctx.array_prototype;
+            return obj;
+        }
         const obj = try object.JSObject.createArray(self.ctx.allocator, root_class);
         obj.prototype = self.ctx.array_prototype;
         return obj;
+    }
+
+    /// Create a string using hybrid allocator if available
+    /// Ephemeral strings use arena allocation, persistent strings use standard allocator
+    fn createString(self: *Interpreter, s: []const u8) !*string.JSString {
+        // Use arena for ephemeral string allocation if hybrid mode enabled
+        if (self.ctx.hybrid) |h| {
+            return string.createStringWithArena(h.arena, s) orelse
+                return error.OutOfMemory;
+        }
+        return try string.createString(self.ctx.allocator, s);
     }
 
     fn getConstant(self: *Interpreter, idx: u16) !value.JSValue {
@@ -1704,12 +1746,20 @@ pub const Interpreter = struct {
             if (func_obj.flags.is_generator) {
                 // Create a generator object instead of executing
                 const root_class = self.ctx.root_class orelse return error.NoRootClass;
-                const gen_obj = object.JSObject.createGenerator(
-                    self.ctx.allocator,
-                    root_class,
-                    func_bc,
-                    self.ctx.generator_prototype,
-                ) catch return error.OutOfMemory;
+                const gen_obj = if (self.ctx.hybrid) |h|
+                    (object.JSObject.createGeneratorWithArena(
+                        h.arena,
+                        root_class,
+                        func_bc,
+                        self.ctx.generator_prototype,
+                    ) orelse return error.OutOfMemory)
+                else
+                    (object.JSObject.createGenerator(
+                        self.ctx.allocator,
+                        root_class,
+                        func_bc,
+                        self.ctx.generator_prototype,
+                    ) catch return error.OutOfMemory);
 
                 // Initialize generator locals with arguments
                 const gen_data = gen_obj.getGeneratorData().?;
@@ -1732,21 +1782,31 @@ pub const Interpreter = struct {
                 const result = try self.callBytecodeFunction(func_val, func_bc, this_val, args[0..argc]);
 
                 // Create a resolved Promise-like object {then: fn, value: result}
-                const root_class = self.ctx.root_class orelse return error.NoRootClass;
-                const promise_obj = object.JSObject.create(
-                    self.ctx.allocator,
-                    root_class,
-                    null,
-                ) catch return error.OutOfMemory;
+                const promise_obj = self.ctx.createObject(null) catch |err| {
+                    return switch (err) {
+                        error.NoRootClass => error.NoRootClass,
+                        else => error.OutOfMemory,
+                    };
+                };
 
                 // Store the resolved value
                 const value_atom = self.ctx.atoms.intern("value") catch return error.OutOfMemory;
-                promise_obj.setProperty(self.ctx.allocator, value_atom, result) catch return error.OutOfMemory;
+                self.ctx.setPropertyChecked(promise_obj, value_atom, result) catch |err| {
+                    return switch (err) {
+                        error.ArenaObjectEscape => error.ArenaObjectEscape,
+                        else => error.OutOfMemory,
+                    };
+                };
 
                 // Add a 'then' method (simplified - just calls callback with value)
                 // For a full implementation, we'd create a proper Promise with thenable support
                 const then_atom = self.ctx.atoms.intern("then") catch return error.OutOfMemory;
-                promise_obj.setProperty(self.ctx.allocator, then_atom, value.JSValue.true_val) catch return error.OutOfMemory;
+                self.ctx.setPropertyChecked(promise_obj, then_atom, value.JSValue.true_val) catch |err| {
+                    return switch (err) {
+                        error.ArenaObjectEscape => error.ArenaObjectEscape,
+                        else => error.OutOfMemory,
+                    };
+                };
 
                 try self.ctx.push(promise_obj.toValue());
                 return;
@@ -2417,6 +2477,63 @@ test "End-to-end: parse and execute JS" {
     // Full integration testing is done in zruntime tests
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
+}
+
+test "Hybrid: reject arena escape to global" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+    const arena_mod = @import("arena.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\let x = { a: 1 };
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    try std.testing.expectError(error.ArenaObjectEscape, interp.run(&func));
 }
 
 test "End-to-end: closure captures local" {

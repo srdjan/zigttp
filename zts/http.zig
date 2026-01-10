@@ -43,39 +43,36 @@ pub fn createRequest(
     headers: []const [2][]const u8,
     body: ?[]const u8,
 ) !value.JSValue {
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const allocator = ctx.allocator;
-
-    const req_obj = try object.JSObject.create(allocator, root_class, null);
+    const req_obj = try ctx.createObject(null);
 
     // Set method
     const method_atom = try ctx.atoms.intern("method");
-    const method_str = try string.createString(allocator, method);
-    try req_obj.setProperty(allocator, method_atom, value.JSValue.fromPtr(method_str));
+    const method_str = try ctx.createString(method);
+    try ctx.setPropertyChecked(req_obj, method_atom, method_str);
 
     // Set url
     const url_atom = try ctx.atoms.intern("url");
-    const url_str = try string.createString(allocator, url);
-    try req_obj.setProperty(allocator, url_atom, value.JSValue.fromPtr(url_str));
+    const url_str = try ctx.createString(url);
+    try ctx.setPropertyChecked(req_obj, url_atom, url_str);
 
     // Set body
     const body_atom = try ctx.atoms.intern("body");
     if (body) |b| {
-        const body_str = try string.createString(allocator, b);
-        try req_obj.setProperty(allocator, body_atom, value.JSValue.fromPtr(body_str));
+        const body_str = try ctx.createString(b);
+        try ctx.setPropertyChecked(req_obj, body_atom, body_str);
     } else {
-        try req_obj.setProperty(allocator, body_atom, value.JSValue.null_val);
+        try ctx.setPropertyChecked(req_obj, body_atom, value.JSValue.null_val);
     }
 
     // Set headers object
     const headers_atom = try ctx.atoms.intern("headers");
-    const headers_obj = try object.JSObject.create(allocator, root_class, null);
+    const headers_obj = try ctx.createObject(null);
     for (headers) |header| {
         const name_atom = try ctx.atoms.intern(header[0]);
-        const value_str = try string.createString(allocator, header[1]);
-        try headers_obj.setProperty(allocator, name_atom, value.JSValue.fromPtr(value_str));
+        const value_str = try ctx.createString(header[1]);
+        try ctx.setPropertyChecked(headers_obj, name_atom, value_str);
     }
-    try req_obj.setProperty(allocator, headers_atom, headers_obj.toValue());
+    try ctx.setPropertyChecked(req_obj, headers_atom, headers_obj.toValue());
 
     return req_obj.toValue();
 }
@@ -91,17 +88,14 @@ pub fn createResponse(
     status: u16,
     content_type: []const u8,
 ) !value.JSValue {
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const allocator = ctx.allocator;
-
-    const resp_obj = try object.JSObject.create(allocator, root_class, null);
+    const resp_obj = try ctx.createObject(null);
 
     // Set body (using predefined atom for efficiency)
-    const body_str = try string.createString(allocator, body);
-    try resp_obj.setProperty(allocator, object.Atom.body, value.JSValue.fromPtr(body_str));
+    const body_str = try ctx.createString(body);
+    try ctx.setPropertyChecked(resp_obj, object.Atom.body, body_str);
 
     // Set status (using predefined atom)
-    try resp_obj.setProperty(allocator, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
+    try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
 
     // Set statusText
     const status_text_atom = try ctx.atoms.intern("statusText");
@@ -118,19 +112,19 @@ pub fn createResponse(
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    const status_text_str = try string.createString(allocator, status_text);
-    try resp_obj.setProperty(allocator, status_text_atom, value.JSValue.fromPtr(status_text_str));
+    const status_text_str = try ctx.createString(status_text);
+    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_str);
 
     // Set ok (status 200-299)
     const ok_atom = try ctx.atoms.intern("ok");
-    try resp_obj.setProperty(allocator, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
+    try ctx.setPropertyChecked(resp_obj, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
 
     // Set headers (using predefined atom)
-    const headers_obj = try object.JSObject.create(allocator, root_class, null);
+    const headers_obj = try ctx.createObject(null);
     const ct_atom = try ctx.atoms.intern("Content-Type");
-    const ct_str = try string.createString(allocator, content_type);
-    try headers_obj.setProperty(allocator, ct_atom, value.JSValue.fromPtr(ct_str));
-    try resp_obj.setProperty(allocator, object.Atom.headers, headers_obj.toValue());
+    const ct_str = try ctx.createString(content_type);
+    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_str);
+    try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
 
     return resp_obj.toValue();
 }
@@ -205,8 +199,6 @@ pub fn responseHtml(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 /// Response.redirect(url, status?) - Create redirect response
 pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return error.NoRootClass;
 
     if (args.len == 0) {
         return value.JSValue.undefined_val;
@@ -219,21 +211,21 @@ pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
     }
 
     // Create response with Location header
-    const resp_obj = try object.JSObject.create(allocator, root_class, null);
+    const resp_obj = try ctx.createObject(null);
 
     const body_atom = try ctx.atoms.intern("_body");
-    const body_str = try string.createString(allocator, "");
-    try resp_obj.setProperty(allocator, body_atom, value.JSValue.fromPtr(body_str));
+    const body_str = try ctx.createString("");
+    try ctx.setPropertyChecked(resp_obj, body_atom, body_str);
 
     const status_atom = try ctx.atoms.intern("status");
-    try resp_obj.setProperty(allocator, status_atom, value.JSValue.fromInt(@intCast(status)));
+    try ctx.setPropertyChecked(resp_obj, status_atom, value.JSValue.fromInt(@intCast(status)));
 
     const headers_atom = try ctx.atoms.intern("headers");
-    const headers_obj = try object.JSObject.create(allocator, root_class, null);
+    const headers_obj = try ctx.createObject(null);
     const location_atom = try ctx.atoms.intern("Location");
-    const location_str = try string.createString(allocator, url);
-    try headers_obj.setProperty(allocator, location_atom, value.JSValue.fromPtr(location_str));
-    try resp_obj.setProperty(allocator, headers_atom, headers_obj.toValue());
+    const location_str = try ctx.createString(url);
+    try ctx.setPropertyChecked(headers_obj, location_atom, location_str);
+    try ctx.setPropertyChecked(resp_obj, headers_atom, headers_obj.toValue());
 
     return resp_obj.toValue();
 }
@@ -290,8 +282,6 @@ pub const FRAGMENT_MARKER = "__fragment__";
 /// h(tag, props, ...children) - Create virtual DOM node
 pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return error.NoRootClass;
 
     // Debug: log what h() receives
     if (args.len > 0) {
@@ -312,29 +302,29 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
     }
 
     // Create node object with { tag, props, children }
-    const node = try object.JSObject.create(allocator, root_class, null);
+    const node = try ctx.createObject(null);
 
     // Set tag (first arg)
     const tag_atom: object.Atom = .tag;
     if (args.len > 0) {
-        try node.setProperty(allocator, tag_atom, args[0]);
+        try ctx.setPropertyChecked(node, tag_atom, args[0]);
     } else {
-        const div_str = try string.createString(allocator, "div");
-        try node.setProperty(allocator, tag_atom, value.JSValue.fromPtr(div_str));
+        const div_str = try ctx.createString("div");
+        try ctx.setPropertyChecked(node, tag_atom, div_str);
     }
 
     // Set props (second arg or empty object)
     const props_atom: object.Atom = .props;
     if (args.len > 1 and args[1].isObject()) {
-        try node.setProperty(allocator, props_atom, args[1]);
+        try ctx.setPropertyChecked(node, props_atom, args[1]);
     } else {
-        const empty_props = try object.JSObject.create(allocator, root_class, null);
-        try node.setProperty(allocator, props_atom, empty_props.toValue());
+        const empty_props = try ctx.createObject(null);
+        try ctx.setPropertyChecked(node, props_atom, empty_props.toValue());
     }
 
     // Collect children (remaining args)
     const children_atom: object.Atom = .children;
-    const children_arr = try object.JSObject.createArray(allocator, root_class);
+    const children_arr = try ctx.createArray();
     children_arr.prototype = ctx.array_prototype;
 
     var child_count: u32 = 0;
@@ -343,11 +333,11 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
         if (child.isNull() or child.isUndefined()) continue;
 
         // TODO: Flatten arrays of children
-        try children_arr.setIndex(allocator, child_count, child);
+        try ctx.setIndexChecked(children_arr, child_count, child);
         child_count += 1;
     }
     children_arr.setArrayLength(child_count);
-    try node.setProperty(allocator, children_atom, children_arr.toValue());
+    try ctx.setPropertyChecked(node, children_atom, children_arr.toValue());
 
     return node.toValue();
 }
@@ -357,8 +347,7 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
     if (args.len == 0) {
-        const empty = try string.createString(ctx.allocator, "");
-        return value.JSValue.fromPtr(empty);
+        return ctx.createString("") catch return value.JSValue.undefined_val;
     }
 
     var buffer = std.ArrayList(u8).empty;
@@ -368,8 +357,7 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     try renderNode(ctx, args[0], &aw.writer);
     buffer = aw.toArrayList();
 
-    const result = try string.createString(ctx.allocator, buffer.items);
-    return value.JSValue.fromPtr(result);
+    return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
 }
 
 const RenderError = std.Io.Writer.Error || error{OutOfMemory};
@@ -427,14 +415,12 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
                 if (props_val.isObject()) {
                     // Add children to existing props
                     const props_obj = object.JSObject.fromValue(props_val);
-                    props_obj.setProperty(ctx.allocator, .children, cv) catch {};
-                } else if (ctx.root_class) |root_class| {
+                    ctx.setPropertyChecked(props_obj, .children, cv) catch {};
+                } else {
                     // Create new props object with children
-                    const new_props = object.JSObject.create(ctx.allocator, root_class, null) catch null;
-                    if (new_props) |np| {
-                        np.setProperty(ctx.allocator, .children, cv) catch {};
-                        props_val = value.JSValue.fromPtr(np);
-                    }
+                    const new_props = ctx.createObject(null) catch return;
+                    ctx.setPropertyChecked(new_props, .children, cv) catch {};
+                    props_val = new_props.toValue();
                 }
             }
 
@@ -856,7 +842,7 @@ test "renderToString with attributes and nested elements" {
     const props = try object.JSObject.create(allocator, root_class, null);
     const href_atom = try ctx.atoms.intern("href");
     const href_str = try string.createString(allocator, "/api/health");
-    try props.setProperty(allocator, href_atom, value.JSValue.fromPtr(href_str));
+    try ctx.setPropertyChecked(props, href_atom, value.JSValue.fromPtr(href_str));
 
     // child text
     const child_str = try string.createString(allocator, "GET /api/health");
@@ -880,4 +866,45 @@ test "renderToString with attributes and nested elements" {
         "<a href=\"/api/health\">GET /api/health</a>",
         rendered_str,
     );
+}
+
+test "Hybrid: h and renderToString accept arena values" {
+    const gc = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const arena_mod = @import("arena.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const tag_val = try ctx.createString("div");
+    const child_val = try ctx.createString("hello");
+
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+    const node = try h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        tag_val,
+        value.JSValue.undefined_val,
+        child_val,
+    });
+
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node});
+    try std.testing.expect(rendered.isString());
+    try std.testing.expectEqualStrings("<div>hello</div>", rendered.toPtr(string.JSString).data());
 }

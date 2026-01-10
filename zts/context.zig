@@ -6,6 +6,8 @@ const std = @import("std");
 const value = @import("value.zig");
 const gc = @import("gc.zig");
 const object = @import("object.zig");
+const arena_mod = @import("arena.zig");
+const string = @import("string.zig");
 
 /// Context configuration
 pub const ContextConfig = struct {
@@ -72,6 +74,9 @@ pub const Context = struct {
     catch_depth: usize,
     /// Configuration
     config: ContextConfig,
+    /// Optional hybrid allocator for request-scoped allocation
+    /// When set, ephemeral allocations use arena, persistent use standard allocator
+    hybrid: ?*arena_mod.HybridAllocator,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -119,9 +124,137 @@ pub const Context = struct {
             .catch_stack = undefined,
             .catch_depth = 0,
             .config = config,
+            .hybrid = null,
         };
 
         return ctx;
+    }
+
+    /// Set hybrid allocator (called by Runtime when using hybrid allocation)
+    /// Also enables hybrid_mode on GC to disable collection
+    pub fn setHybridAllocator(self: *Context, hybrid: *arena_mod.HybridAllocator) void {
+        self.hybrid = hybrid;
+        // Disable GC when hybrid allocator is active - arena handles ephemeral cleanup
+        self.gc_state.hybrid_mode = true;
+    }
+
+    // ========================================================================
+    // Hybrid Allocation Helpers
+    // ========================================================================
+
+    /// Allocate ephemeral memory (dies at request end)
+    /// Uses arena if hybrid allocator set, otherwise falls back to standard allocator
+    pub fn allocEphemeral(self: *Context, size: usize) !*anyopaque {
+        if (self.hybrid) |h| {
+            return h.alloc(.ephemeral, size) orelse return error.OutOfMemory;
+        }
+        // Fallback to GC-managed allocation
+        return self.gc_state.allocWithGC(size);
+    }
+
+    /// Allocate ephemeral typed object
+    pub fn createEphemeral(self: *Context, comptime T: type) !*T {
+        if (self.hybrid) |h| {
+            return h.create(.ephemeral, T) orelse return error.OutOfMemory;
+        }
+        return self.allocator.create(T);
+    }
+
+    /// Allocate persistent memory (lives forever)
+    /// Always uses standard allocator
+    pub fn allocPersistent(self: *Context, size: usize) !*anyopaque {
+        if (self.hybrid) |h| {
+            return h.alloc(.persistent, size) orelse return error.OutOfMemory;
+        }
+        const mem = try self.allocator.alignedAlloc(u8, .@"8", size);
+        return @ptrCast(mem.ptr);
+    }
+
+    /// Allocate persistent typed object
+    pub fn createPersistent(self: *Context, comptime T: type) !*T {
+        return self.allocator.create(T);
+    }
+
+    /// Create a JS object, using arena when hybrid mode is enabled
+    pub fn createObject(self: *Context, prototype: ?*object.JSObject) !*object.JSObject {
+        const root_class = self.root_class orelse return error.NoRootClass;
+        if (self.hybrid) |h| {
+            return object.JSObject.createWithArena(h.arena, root_class, prototype) orelse
+                return error.OutOfMemory;
+        }
+        return try object.JSObject.create(self.allocator, root_class, prototype);
+    }
+
+    /// Create a JS array, using arena when hybrid mode is enabled
+    pub fn createArray(self: *Context) !*object.JSObject {
+        const root_class = self.root_class orelse return error.NoRootClass;
+        if (self.hybrid) |h| {
+            return object.JSObject.createArrayWithArena(h.arena, root_class) orelse
+                return error.OutOfMemory;
+        }
+        return try object.JSObject.createArray(self.allocator, root_class);
+    }
+
+    /// Create a JS string pointer, using arena when hybrid mode is enabled
+    pub fn createStringPtr(self: *Context, s: []const u8) !*string.JSString {
+        if (self.hybrid) |h| {
+            return string.createStringWithArena(h.arena, s) orelse return error.OutOfMemory;
+        }
+        return try string.createString(self.allocator, s);
+    }
+
+    /// Create a JS string value, using arena when hybrid mode is enabled
+    pub fn createString(self: *Context, s: []const u8) !value.JSValue {
+        const str = try self.createStringPtr(s);
+        return value.JSValue.fromPtr(str);
+    }
+
+    /// Extract a string slice from a JSValue if it is a string
+    pub fn getString(self: *const Context, val: value.JSValue) ?[]const u8 {
+        _ = self;
+        if (val.isString()) {
+            return val.toPtr(string.JSString).data();
+        }
+        return null;
+    }
+
+    /// Check if hybrid allocation is enabled
+    pub fn isHybridEnabled(self: *const Context) bool {
+        return self.hybrid != null;
+    }
+
+    /// Check if a JSValue points to arena-allocated memory
+    pub fn isEphemeralValue(self: *const Context, val: value.JSValue) bool {
+        if (!val.isPtr()) return false;
+        if (self.hybrid) |h| {
+            const ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+            return h.arena.contains(ptr);
+        }
+        return false;
+    }
+
+    /// Set property with arena escape protection (reject-on-escape)
+    pub fn setPropertyChecked(self: *Context, obj: *object.JSObject, name: object.Atom, val: value.JSValue) !void {
+        if (self.hybrid != null and !obj.flags.is_arena and self.isEphemeralValue(val)) {
+            self.throwException(value.JSValue.exception_val);
+            return error.ArenaObjectEscape;
+        }
+        obj.setProperty(self.allocator, name, val) catch |err| {
+            self.throwException(value.JSValue.exception_val);
+            return err;
+        };
+    }
+
+    /// Set array index with arena escape protection (reject-on-escape)
+    pub fn setIndexChecked(self: *Context, obj: *object.JSObject, index: u32, val: value.JSValue) !void {
+        if (self.hybrid != null and !obj.flags.is_arena and self.isEphemeralValue(val)) {
+            self.throwException(value.JSValue.exception_val);
+            return error.ArenaObjectEscape;
+        }
+        obj.setIndex(self.allocator, index, val) catch |err| {
+            self.throwException(value.JSValue.exception_val);
+            return err;
+        };
     }
 
     pub fn deinit(self: *Context) void {
@@ -156,7 +289,7 @@ pub const Context = struct {
     /// Set global property by atom
     pub fn setGlobal(self: *Context, atom: object.Atom, val: value.JSValue) !void {
         if (self.global_obj) |g| {
-            try g.setProperty(self.allocator, atom, val);
+            try self.setPropertyChecked(g, atom, val);
         }
     }
 
@@ -594,6 +727,30 @@ test "Context global variables" {
     const val = ctx.getGlobal(atom);
     try std.testing.expect(val != null);
     try std.testing.expectEqual(@as(i32, 123), val.?.getInt());
+}
+
+test "Hybrid rejects arena value to global" {
+    const allocator = std.testing.allocator;
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const arena_obj = try ctx.createObject(null);
+    const atom = try ctx.atoms.intern("ephemeral");
+
+    try std.testing.expectError(error.ArenaObjectEscape, ctx.setGlobal(atom, arena_obj.toValue()));
+    try std.testing.expect(ctx.hasException());
 }
 
 test "AtomTable getName" {

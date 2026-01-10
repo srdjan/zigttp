@@ -472,7 +472,11 @@ export fn JS_SetPropertyStr(ctx: ?*JSContext, obj_val: JSValue, prop: ?[*:0]cons
         return JSValue.exception_val;
     };
 
-    obj.setProperty(allocator, atom, val) catch return JSValue.exception_val;
+    if (ctx) |c| {
+        c.setPropertyChecked(obj, atom, val) catch return JSValue.exception_val;
+    } else {
+        obj.setProperty(allocator, atom, val) catch return JSValue.exception_val;
+    }
     return val;
 }
 
@@ -486,14 +490,22 @@ export fn JS_SetPropertyUint32(ctx: ?*JSContext, obj_val: JSValue, idx: u32, val
     if (obj.class_id == .array) {
         const allocator = if (ctx) |c| c.allocator else (global_allocator orelse return JSValue.exception_val);
         const atom: object.Atom = @enumFromInt(object.Atom.FIRST_DYNAMIC + idx);
-        obj.setProperty(allocator, atom, val) catch return JSValue.exception_val;
+        if (ctx) |c| {
+            c.setPropertyChecked(obj, atom, val) catch return JSValue.exception_val;
+        } else {
+            obj.setProperty(allocator, atom, val) catch return JSValue.exception_val;
+        }
 
         // Update length if needed
         if (obj.getOwnProperty(.length)) |len_val| {
             if (len_val.isInt()) {
                 const len: u32 = @intCast(len_val.getInt());
                 if (idx >= len) {
-                    obj.setProperty(allocator, .length, JSValue.fromInt(@intCast(idx + 1))) catch {};
+                    if (ctx) |c| {
+                        c.setPropertyChecked(obj, .length, JSValue.fromInt(@intCast(idx + 1))) catch {};
+                    } else {
+                        obj.setProperty(allocator, .length, JSValue.fromInt(@intCast(idx + 1))) catch {};
+                    }
                 }
             }
         }

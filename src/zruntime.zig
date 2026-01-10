@@ -332,40 +332,38 @@ pub const Runtime = struct {
     }
 
     fn createRequestObject(self: *Self, request: HttpRequest) !zq.JSValue {
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
-        const req_obj = try zq.JSObject.create(self.allocator, root_class, null);
+        const req_obj = try self.ctx.createObject(null);
 
         // Set URL using predefined atom
-        const url_str = try self.createString(request.url);
-        try req_obj.setProperty(self.allocator, zq.Atom.url, url_str);
+        const url_str = try self.ctx.createString(request.url);
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.url, url_str);
 
         // Set method using predefined atom
-        const method_str = try self.createString(request.method);
-        try req_obj.setProperty(self.allocator, zq.Atom.method, method_str);
+        const method_str = try self.ctx.createString(request.method);
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.method, method_str);
 
         // Set body if present using predefined atom
         if (request.body) |body| {
-            const body_str = try self.createString(body);
-            try req_obj.setProperty(self.allocator, zq.Atom.body, body_str);
+            const body_str = try self.ctx.createString(body);
+            try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
         }
 
         if (request.headers.count() > 0) {
-            const headers_obj = try zq.JSObject.create(self.allocator, root_class, null);
+            const headers_obj = try self.ctx.createObject(null);
             var it = request.headers.iterator();
             while (it.next()) |entry| {
                 const key_atom = try self.ctx.atoms.intern(entry.key_ptr.*);
-                const value_str = try self.createString(entry.value_ptr.*);
-                try headers_obj.setProperty(self.allocator, key_atom, value_str);
+                const value_str = try self.ctx.createString(entry.value_ptr.*);
+                try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
             }
-            try req_obj.setProperty(self.allocator, zq.Atom.headers, headers_obj.toValue());
+            try self.ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
         }
 
         return req_obj.toValue();
     }
 
     fn createString(self: *Self, str: []const u8) !zq.JSValue {
-        const js_str = try zq.createString(self.allocator, str);
-        return zq.JSValue.fromPtr(js_str);
+        return self.ctx.createString(str);
     }
 
     fn callFunction(self: *Self, func_obj: *zq.JSObject, args: []const zq.JSValue) !zq.JSValue {

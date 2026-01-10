@@ -49,7 +49,11 @@ pub fn wrap(comptime impl: ImplFn) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-            return impl(ctx, this, args);
+            const result = impl(ctx, this, args);
+            if (ctx.hasException()) {
+                return error.NativeFunctionError;
+            }
+            return result;
         }
     }.call;
 }
@@ -212,9 +216,7 @@ pub fn jsonTryParse(ctx: *context.Context, this: value.JSValue, args: []const va
 
 /// Helper to create Result.ok(value)
 fn createResultOk(ctx: *context.Context, val: value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const result_obj = object.JSObject.create(allocator, root_class, ctx.result_prototype) catch return value.JSValue.undefined_val;
+    const result_obj = ctx.createObject(ctx.result_prototype) catch return value.JSValue.undefined_val;
     result_obj.class_id = .result;
     result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.true_val;
     result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = val;
@@ -223,9 +225,7 @@ fn createResultOk(ctx: *context.Context, val: value.JSValue) value.JSValue {
 
 /// Helper to create Result.err(error)
 fn createResultErr(ctx: *context.Context, err_val: value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const result_obj = object.JSObject.create(allocator, root_class, ctx.result_prototype) catch return value.JSValue.undefined_val;
+    const result_obj = ctx.createObject(ctx.result_prototype) catch return value.JSValue.undefined_val;
     result_obj.class_id = .result;
     result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.false_val;
     result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = err_val;
@@ -244,8 +244,7 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
     defer ctx.allocator.free(json_str);
 
     // Create JS string from result
-    const result = string.createString(ctx.allocator, json_str) catch return value.JSValue.undefined_val;
-    return value.JSValue.fromPtr(result);
+    return ctx.createString(json_str) catch return value.JSValue.undefined_val;
 }
 // ============================================================================
 // Error methods
@@ -283,28 +282,27 @@ fn createErrorObject(ctx: *context.Context, this: value.JSValue, args: []const v
     const obj: *object.JSObject = if (this.isObject() and !this.isUndefined())
         object.JSObject.fromValue(this)
     else blk: {
-        const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-        break :blk object.JSObject.create(ctx.allocator, root_class, ctx.object_prototype) catch return value.JSValue.undefined_val;
+        break :blk ctx.createObject(ctx.object_prototype) catch return value.JSValue.undefined_val;
     };
 
     // Set the 'name' property
-    const name_str = string.createString(ctx.allocator, error_name) catch return value.JSValue.undefined_val;
-    obj.setProperty(ctx.allocator, .name, value.JSValue.fromPtr(name_str)) catch {};
+    const name_val = ctx.createString(error_name) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(obj, .name, name_val) catch {};
 
     // Set the 'message' property
     if (args.len > 0 and args[0].isString()) {
-        obj.setProperty(ctx.allocator, .message, args[0]) catch {};
+        ctx.setPropertyChecked(obj, .message, args[0]) catch {};
     } else if (args.len > 0) {
         // Convert to string
         const msg_str = valueToStringSimple(ctx.allocator, args[0]) catch {
-            const empty = string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val;
-            obj.setProperty(ctx.allocator, .message, value.JSValue.fromPtr(empty)) catch {};
+            const empty_val = ctx.createString("") catch return value.JSValue.undefined_val;
+            ctx.setPropertyChecked(obj, .message, empty_val) catch {};
             return obj.toValue();
         };
-        obj.setProperty(ctx.allocator, .message, value.JSValue.fromPtr(msg_str)) catch {};
+        ctx.setPropertyChecked(obj, .message, value.JSValue.fromPtr(msg_str)) catch {};
     } else {
-        const empty = string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val;
-        obj.setProperty(ctx.allocator, .message, value.JSValue.fromPtr(empty)) catch {};
+        const empty_val = ctx.createString("") catch return value.JSValue.undefined_val;
+        ctx.setPropertyChecked(obj, .message, empty_val) catch {};
     }
 
     obj.class_id = .@"error";
@@ -339,8 +337,7 @@ pub fn errorToString(ctx: *context.Context, this: value.JSValue, args: []const v
 
     // Format as "Name: message" or just "Name" if no message
     if (msg_text.len == 0) {
-        const result = string.createString(ctx.allocator, name_text) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(result);
+        return ctx.createString(name_text) catch return value.JSValue.undefined_val;
     }
 
     // Concatenate: name + ": " + message
@@ -350,8 +347,7 @@ pub fn errorToString(ctx: *context.Context, this: value.JSValue, args: []const v
     buffer.appendSlice(ctx.allocator, ": ") catch return value.JSValue.undefined_val;
     buffer.appendSlice(ctx.allocator, msg_text) catch return value.JSValue.undefined_val;
 
-    const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
-    return value.JSValue.fromPtr(result);
+    return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
 }
 
 /// Simple value to string conversion
@@ -396,22 +392,21 @@ pub fn promiseConstructor(ctx: *context.Context, this: value.JSValue, args: []co
     _ = this;
 
     // Create the promise object
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const promise_obj = object.JSObject.create(ctx.allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const promise_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
     promise_obj.class_id = .promise;
 
     // Store initial state (pending)
     const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
-    promise_obj.setProperty(ctx.allocator, state_atom, value.JSValue.fromInt(0)) catch {};
+    ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(0)) catch {};
 
     const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
-    promise_obj.setProperty(ctx.allocator, result_atom, value.JSValue.undefined_val) catch {};
+    ctx.setPropertyChecked(promise_obj, result_atom, value.JSValue.undefined_val) catch {};
 
     // If executor function provided, call it with resolve/reject
     if (args.len > 0 and args[0].isObject()) {
         // For now, immediately resolve with undefined
         // A full implementation would create resolve/reject functions and call the executor
-        promise_obj.setProperty(ctx.allocator, state_atom, value.JSValue.fromInt(1)) catch {};
+        ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(1)) catch {};
     }
 
     return promise_obj.toValue();
@@ -421,19 +416,18 @@ pub fn promiseConstructor(ctx: *context.Context, this: value.JSValue, args: []co
 pub fn promiseResolve(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
 
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const promise_obj = object.JSObject.create(ctx.allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const promise_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
     promise_obj.class_id = .promise;
 
     const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
     const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
 
     // Set state to fulfilled
-    promise_obj.setProperty(ctx.allocator, state_atom, value.JSValue.fromInt(1)) catch {};
+    ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(1)) catch {};
 
     // Set result
     const result_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
-    promise_obj.setProperty(ctx.allocator, result_atom, result_val) catch {};
+    ctx.setPropertyChecked(promise_obj, result_atom, result_val) catch {};
 
     return promise_obj.toValue();
 }
@@ -442,19 +436,18 @@ pub fn promiseResolve(ctx: *context.Context, this: value.JSValue, args: []const 
 pub fn promiseReject(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
 
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const promise_obj = object.JSObject.create(ctx.allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const promise_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
     promise_obj.class_id = .promise;
 
     const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
     const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
 
     // Set state to rejected
-    promise_obj.setProperty(ctx.allocator, state_atom, value.JSValue.fromInt(2)) catch {};
+    ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(2)) catch {};
 
     // Set reason
     const reason_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
-    promise_obj.setProperty(ctx.allocator, result_atom, reason_val) catch {};
+    ctx.setPropertyChecked(promise_obj, result_atom, reason_val) catch {};
 
     return promise_obj.toValue();
 }
@@ -848,7 +841,6 @@ pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value
 /// Global range(end) or range(start, end) or range(start, end, step)
 /// Returns an array of integers for use with for-of iteration
 pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
     const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
 
     // Parse arguments
@@ -874,7 +866,12 @@ pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.
     }
 
     // Create lazy range iterator - values are computed on demand, not pre-allocated
-    const result = object.JSObject.createRangeIterator(allocator, root_class, start, end, step) catch return value.JSValue.undefined_val;
+    const result = if (ctx.hybrid) |h|
+        (object.JSObject.createRangeIteratorWithArena(h.arena, root_class, start, end, step) orelse
+            return value.JSValue.undefined_val)
+    else
+        (object.JSObject.createRangeIterator(ctx.allocator, root_class, start, end, step) catch
+            return value.JSValue.undefined_val);
 
     return result.toValue();
 }
@@ -885,11 +882,8 @@ pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.
 
 /// Map constructor - new Map() or new Map(iterable)
 pub fn mapConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
     // Create the Map object
-    const map_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const map_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
 
     // Internal storage: _keys and _values arrays
     const keys_atom = ctx.atoms.intern("_keys") catch return value.JSValue.undefined_val;
@@ -897,12 +891,12 @@ pub fn mapConstructor(ctx: *context.Context, _: value.JSValue, args: []const val
     const size_atom = ctx.atoms.intern("size") catch return value.JSValue.undefined_val;
 
     // Create internal arrays (proper arrays for efficient indexed access)
-    const keys_arr = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
-    const values_arr = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    const keys_arr = ctx.createArray() catch return value.JSValue.undefined_val;
+    const values_arr = ctx.createArray() catch return value.JSValue.undefined_val;
 
-    map_obj.setProperty(allocator, keys_atom, keys_arr.toValue()) catch return value.JSValue.undefined_val;
-    map_obj.setProperty(allocator, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
-    map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(map_obj, keys_atom, keys_arr.toValue()) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(map_obj, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(map_obj, size_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
 
     // If iterable provided, add entries
     if (args.len > 0 and args[0].isObject()) {
@@ -916,7 +910,6 @@ pub fn mapConstructor(ctx: *context.Context, _: value.JSValue, args: []const val
 pub fn mapSet(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject() or args.len < 2) return this;
 
-    const allocator = ctx.allocator;
     const map_obj = object.JSObject.fromValue(this);
     const key = args[0];
     const val = args[1];
@@ -941,16 +934,16 @@ pub fn mapSet(ctx: *context.Context, this: value.JSValue, args: []const value.JS
         if (keys_arr.getIndex(i)) |existing_key| {
             if (existing_key.strictEquals(key)) {
                 // Update existing value
-                values_arr.setIndex(allocator, i, val) catch return this;
+                ctx.setIndexChecked(values_arr, i, val) catch return this;
                 return this;
             }
         }
     }
 
     // Add new entry
-    keys_arr.setIndex(allocator, len, key) catch return this;
-    values_arr.setIndex(allocator, len, val) catch return this;
-    map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) + 1)) catch return this;
+    ctx.setIndexChecked(keys_arr, len, key) catch return this;
+    ctx.setIndexChecked(values_arr, len, val) catch return this;
+    ctx.setPropertyChecked(map_obj, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) + 1)) catch return this;
 
     return this;
 }
@@ -1018,7 +1011,6 @@ pub fn mapHas(ctx: *context.Context, this: value.JSValue, args: []const value.JS
 pub fn mapDelete(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject() or args.len < 1) return value.JSValue.fromBool(false);
 
-    const allocator = ctx.allocator;
     const map_obj = object.JSObject.fromValue(this);
     const key = args[0];
 
@@ -1044,15 +1036,15 @@ pub fn mapDelete(ctx: *context.Context, this: value.JSValue, args: []const value
                 var j = i;
                 while (j < len - 1) : (j += 1) {
                     if (keys_arr.getIndex(j + 1)) |next_key| {
-                        keys_arr.setIndex(allocator, j, next_key) catch {};
+                        ctx.setIndexChecked(keys_arr, j, next_key) catch {};
                     }
                     if (values_arr.getIndex(j + 1)) |next_val| {
-                        values_arr.setIndex(allocator, j, next_val) catch {};
+                        ctx.setIndexChecked(values_arr, j, next_val) catch {};
                     }
                 }
                 keys_arr.setArrayLength(len - 1);
                 values_arr.setArrayLength(len - 1);
-                map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) - 1)) catch {};
+                ctx.setPropertyChecked(map_obj, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) - 1)) catch {};
                 return value.JSValue.fromBool(true);
             }
         }
@@ -1065,7 +1057,6 @@ pub fn mapDelete(ctx: *context.Context, this: value.JSValue, args: []const value
 pub fn mapClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.undefined_val;
 
-    const allocator = ctx.allocator;
     const map_obj = object.JSObject.fromValue(this);
 
     const keys_atom = ctx.atoms.intern("_keys") catch return value.JSValue.undefined_val;
@@ -1082,7 +1073,7 @@ pub fn mapClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
     keys_arr.setArrayLength(0);
     values_arr.setArrayLength(0);
-    map_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(0)) catch {};
+    ctx.setPropertyChecked(map_obj, size_atom, value.JSValue.fromInt(0)) catch {};
 
     return value.JSValue.undefined_val;
 }
@@ -1096,21 +1087,18 @@ pub fn mapClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
 /// Set constructor - new Set() or new Set(iterable)
 pub fn setConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
     // Create the Set object
-    const set_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const set_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
 
     // Internal storage: _values array
     const values_atom = ctx.atoms.intern("_values") catch return value.JSValue.undefined_val;
     const size_atom = ctx.atoms.intern("size") catch return value.JSValue.undefined_val;
 
     // Create internal array (proper array for efficient indexed access)
-    const values_arr = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    const values_arr = ctx.createArray() catch return value.JSValue.undefined_val;
 
-    set_obj.setProperty(allocator, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
-    set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(set_obj, values_atom, values_arr.toValue()) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(set_obj, size_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
 
     // If iterable provided, add values
     if (args.len > 0 and args[0].isObject()) {
@@ -1124,7 +1112,6 @@ pub fn setConstructor(ctx: *context.Context, _: value.JSValue, args: []const val
 pub fn setAdd(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject() or args.len < 1) return this;
 
-    const allocator = ctx.allocator;
     const set_obj = object.JSObject.fromValue(this);
     const val = args[0];
 
@@ -1148,8 +1135,8 @@ pub fn setAdd(ctx: *context.Context, this: value.JSValue, args: []const value.JS
     }
 
     // Add new value
-    values_arr.setIndex(allocator, len, val) catch return this;
-    set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) + 1)) catch return this;
+    ctx.setIndexChecked(values_arr, len, val) catch return this;
+    ctx.setPropertyChecked(set_obj, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) + 1)) catch return this;
 
     return this;
 }
@@ -1185,7 +1172,6 @@ pub fn setHas(ctx: *context.Context, this: value.JSValue, args: []const value.JS
 pub fn setDelete(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject() or args.len < 1) return value.JSValue.fromBool(false);
 
-    const allocator = ctx.allocator;
     const set_obj = object.JSObject.fromValue(this);
     const val = args[0];
 
@@ -1206,11 +1192,11 @@ pub fn setDelete(ctx: *context.Context, this: value.JSValue, args: []const value
                 var j = i;
                 while (j < len - 1) : (j += 1) {
                     if (values_arr.getIndex(j + 1)) |next_val| {
-                        values_arr.setIndex(allocator, j, next_val) catch {};
+                        ctx.setIndexChecked(values_arr, j, next_val) catch {};
                     }
                 }
                 values_arr.setArrayLength(len - 1);
-                set_obj.setProperty(allocator, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) - 1)) catch {};
+                ctx.setPropertyChecked(set_obj, size_atom, value.JSValue.fromInt(@as(i32, @intCast(len)) - 1)) catch {};
                 return value.JSValue.fromBool(true);
             }
         }
@@ -1233,7 +1219,7 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
     const values_arr = object.JSObject.fromValue(values_val);
     values_arr.setArrayLength(0);
-    set_obj.setProperty(ctx.allocator, size_atom, value.JSValue.fromInt(0)) catch {};
+    ctx.setPropertyChecked(set_obj, size_atom, value.JSValue.fromInt(0)) catch {};
 
     return value.JSValue.undefined_val;
 }
@@ -1243,7 +1229,7 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
 
 
-const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass };
+const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass, ArenaObjectEscape };
 
 /// Skip JSON whitespace characters (space, newline, carriage return, tab)
 inline fn skipJsonWhitespace(text: []const u8, pos: *usize) void {
@@ -1314,8 +1300,7 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonEr
 fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip '{'
 
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const obj = try object.JSObject.create(ctx.allocator, root_class, null);
+    const obj = try ctx.createObject(null);
 
     skipJsonWhitespace(text, pos);
 
@@ -1343,7 +1328,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
 
         // Store in object using dynamic atom
         const atom = try ctx.atoms.intern(key_str.data());
-        try obj.setProperty(ctx.allocator, atom, val);
+        try ctx.setPropertyChecked(obj, atom, val);
 
         skipJsonWhitespace(text, pos);
 
@@ -1367,8 +1352,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
 fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip '['
 
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-    const arr = try object.JSObject.createArray(ctx.allocator, root_class);
+    const arr = try ctx.createArray();
     arr.prototype = ctx.array_prototype;
 
     skipJsonWhitespace(text, pos);
@@ -1383,7 +1367,7 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonErro
     while (pos.* < text.len) {
         // Parse element
         const elem = try parseJsonValueAt(ctx, text, pos);
-        try arr.setIndex(ctx.allocator, index, elem);
+        try ctx.setIndexChecked(arr, index, elem);
         index += 1;
 
         skipJsonWhitespace(text, pos);
@@ -1416,8 +1400,7 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
         const c = text[pos.*];
         if (c == '"') {
             pos.* += 1;
-            const result = try string.createString(ctx.allocator, buffer.items);
-            return value.JSValue.fromPtr(result);
+            return try ctx.createString(buffer.items);
         }
         if (c == '\\') {
             pos.* += 1;
@@ -1569,10 +1552,9 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
 
     const source = args[0];
     const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
 
     // Create result array
-    const result = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    const result = ctx.createArray() catch return value.JSValue.undefined_val;
     result.prototype = ctx.array_prototype;
 
     // Handle string - convert to array of characters
@@ -1586,7 +1568,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
             const char_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
             const char_slice = data[i..@min(i + char_len, data.len)];
             const char_str = string.createString(allocator, char_slice) catch return result.toValue();
-            result.setIndex(allocator, idx, value.JSValue.fromPtr(char_str)) catch return result.toValue();
+            ctx.setIndexChecked(result, idx, value.JSValue.fromPtr(char_str)) catch return result.toValue();
             idx += 1;
             i += char_len;
         }
@@ -1609,7 +1591,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
                         const idx_atom = ctx.atoms.intern(idx_slice) catch break :blk value.JSValue.undefined_val;
                         break :blk src_obj.getProperty(idx_atom) orelse value.JSValue.undefined_val;
                     };
-                    result.setIndex(allocator, @intCast(idx), elem) catch return result.toValue();
+                    ctx.setIndexChecked(result, @intCast(idx), elem) catch return result.toValue();
                 }
                 return result.toValue();
             }
@@ -1621,14 +1603,11 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
 
 /// Array.of(...elements) - Create array from arguments
 pub fn arrayOf(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
-    const result = object.JSObject.createArray(allocator, root_class) catch return value.JSValue.undefined_val;
+    const result = ctx.createArray() catch return value.JSValue.undefined_val;
     result.prototype = ctx.array_prototype;
 
     for (args, 0..) |arg, i| {
-        result.setIndex(allocator, @intCast(i), arg) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, @intCast(i), arg) catch return value.JSValue.undefined_val;
     }
     return result.toValue();
 }
@@ -1641,7 +1620,7 @@ pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value
     if (obj.class_id != .array) return value.JSValue.undefined_val;
 
     for (args) |arg| {
-        obj.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(obj, obj.getArrayLength(), arg) catch return value.JSValue.undefined_val;
     }
 
     return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
@@ -1677,7 +1656,7 @@ pub fn arrayShift(ctx: *context.Context, this: value.JSValue, args: []const valu
         var i: u32 = 1;
         while (i < len) : (i += 1) {
             const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-            obj.setIndex(ctx.allocator, i - 1, val) catch return value.JSValue.undefined_val;
+            ctx.setIndexChecked(obj, i - 1, val) catch return value.JSValue.undefined_val;
         }
     }
     obj.setArrayLength(len - 1);
@@ -1697,10 +1676,10 @@ pub fn arrayUnshift(ctx: *context.Context, this: value.JSValue, args: []const va
     while (i > 0) : (i -= 1) {
         const from_idx = i - 1;
         const val = obj.getIndex(from_idx) orelse value.JSValue.undefined_val;
-        obj.setIndex(ctx.allocator, from_idx + insert_count, val) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(obj, from_idx + insert_count, val) catch return value.JSValue.undefined_val;
     }
     for (args, 0..) |arg, idx| {
-        obj.setIndex(ctx.allocator, @intCast(idx), arg) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(obj, @intCast(idx), arg) catch return value.JSValue.undefined_val;
     }
     obj.setArrayLength(len + insert_count);
     return value.JSValue.fromInt(@intCast(len + insert_count));
@@ -1713,8 +1692,7 @@ pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const val
 
     const len = obj.getArrayLength();
     if (len == 0) {
-        const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-        const removed = object.JSObject.createArray(ctx.allocator, root_class) catch return value.JSValue.undefined_val;
+        const removed = ctx.createArray() catch return value.JSValue.undefined_val;
         removed.prototype = ctx.array_prototype;
         return removed.toValue();
     }
@@ -1737,36 +1715,35 @@ pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const val
 
     const insert_count: u32 = if (args.len > 2) @intCast(args.len - 2) else 0;
 
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const removed = object.JSObject.createArray(ctx.allocator, root_class) catch return value.JSValue.undefined_val;
+    const removed = ctx.createArray() catch return value.JSValue.undefined_val;
     removed.prototype = ctx.array_prototype;
 
     const start_u32: u32 = @intCast(start);
     var i: u32 = 0;
     while (i < @as(u32, @intCast(delete_count))) : (i += 1) {
         const val = obj.getIndex(start_u32 + i) orelse value.JSValue.undefined_val;
-        removed.setIndex(ctx.allocator, i, val) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(removed, i, val) catch return value.JSValue.undefined_val;
     }
 
     if (insert_count < @as(u32, @intCast(delete_count))) {
         var from: u32 = @intCast(start + delete_count);
         while (from < len) : (from += 1) {
             const val = obj.getIndex(from) orelse value.JSValue.undefined_val;
-            obj.setIndex(ctx.allocator, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
+            ctx.setIndexChecked(obj, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
         }
     } else if (insert_count > @as(u32, @intCast(delete_count))) {
         var from: u32 = len;
         while (from > @as(u32, @intCast(start + delete_count))) {
             from -= 1;
             const val = obj.getIndex(from) orelse value.JSValue.undefined_val;
-            obj.setIndex(ctx.allocator, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
+            ctx.setIndexChecked(obj, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
         }
     }
 
     if (insert_count > 0) {
         var j: u32 = 0;
         while (j < insert_count) : (j += 1) {
-            obj.setIndex(ctx.allocator, start_u32 + j, args[2 + j]) catch return value.JSValue.undefined_val;
+            ctx.setIndexChecked(obj, start_u32 + j, args[2 + j]) catch return value.JSValue.undefined_val;
         }
     }
 
@@ -2216,8 +2193,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
     const str = this.toPtr(string.JSString);
     const data = str.data();
 
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-    const result = object.JSObject.createArray(ctx.allocator, root_class) catch return value.JSValue.undefined_val;
+    const result = ctx.createArray() catch return value.JSValue.undefined_val;
     result.prototype = ctx.array_prototype;
 
     var limit: ?u32 = null;
@@ -2232,7 +2208,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
 
     if (args.len == 0 or args[0].isUndefined()) {
         const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
-        result.setIndex(ctx.allocator, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
         result.setArrayLength(1);
         return result.toValue();
     }
@@ -2245,7 +2221,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
     if (sep.len == 0) {
         // Simple fallback: return whole string
         const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
-        result.setIndex(ctx.allocator, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
         result.setArrayLength(1);
         return result.toValue();
     }
@@ -2257,7 +2233,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
             if (count >= lim) break;
         }
         const part_str = string.createString(ctx.allocator, part) catch return value.JSValue.undefined_val;
-        result.setIndex(ctx.allocator, count, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, count, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
         count += 1;
     }
     result.setArrayLength(count);
@@ -2449,7 +2425,6 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
 /// String.prototype.match(regexp) - Returns array of matches or null
 pub fn stringMatch(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.null_val;
 
     if (!this.isString() or args.len < 1) return value.JSValue.null_val;
     const str = this.toPtr(string.JSString);
@@ -2483,24 +2458,24 @@ pub fn stringMatch(ctx: *context.Context, this: value.JSValue, args: []const val
             return value.JSValue.null_val;
         }
 
-        const result_arr = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.null_val;
+        const result_arr = ctx.createObject(null) catch return value.JSValue.null_val;
         for (matches, 0..) |match, i| {
             const match_str = string.createString(allocator, match.slice()) catch continue;
-            result_arr.setSlot(i, match_str.toValue());
+            ctx.setIndexChecked(result_arr, @intCast(i), match_str.toValue()) catch {};
         }
-        result_arr.setProperty(allocator, .length, value.JSValue.fromInt(@intCast(matches.len))) catch {};
+        ctx.setPropertyChecked(result_arr, .length, value.JSValue.fromInt(@intCast(matches.len))) catch {};
         allocator.free(matches);
         return result_arr.toValue();
     } else {
         // Return first match array (like exec)
         if (compiled.exec(input)) |match| {
-            const result_arr = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.null_val;
+            const result_arr = ctx.createObject(null) catch return value.JSValue.null_val;
             const matched_str = string.createString(allocator, match.slice()) catch return value.JSValue.null_val;
-            result_arr.setSlot(0, matched_str.toValue());
-            result_arr.setProperty(allocator, .length, value.JSValue.fromInt(1)) catch {};
+            ctx.setIndexChecked(result_arr, 0, matched_str.toValue()) catch return value.JSValue.null_val;
+            ctx.setPropertyChecked(result_arr, .length, value.JSValue.fromInt(1)) catch {};
 
             const index_atom = ctx.atoms.intern("index") catch return result_arr.toValue();
-            result_arr.setProperty(allocator, index_atom, value.JSValue.fromInt(@intCast(match.start))) catch {};
+            ctx.setPropertyChecked(result_arr, index_atom, value.JSValue.fromInt(@intCast(match.start))) catch {};
 
             return result_arr.toValue();
         }
@@ -2887,16 +2862,17 @@ fn addMethodDynamic(
     const root_class = ctx.root_class orelse return error.NoRootClass;
     if (object.lookupPredefinedAtom(name)) |atom| {
         const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, atom, arg_count);
-        try obj.setProperty(allocator, atom, func_obj.toValue());
+        try ctx.setPropertyChecked(obj, atom, func_obj.toValue());
         return;
     }
     const atom = try ctx.atoms.intern(name);
     const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, atom, arg_count);
-    try obj.setProperty(allocator, atom, func_obj.toValue());
+    try ctx.setPropertyChecked(obj, atom, func_obj.toValue());
 }
 
 /// Create a native function and add it as a property on an object
 fn addMethod(
+    ctx: *context.Context,
     allocator: std.mem.Allocator,
     obj: *object.JSObject,
     root_class: *object.HiddenClass,
@@ -2905,7 +2881,7 @@ fn addMethod(
     arg_count: u8,
 ) !void {
     const func_obj = try object.JSObject.createNativeFunction(allocator, root_class, func, name, arg_count);
-    try obj.setProperty(allocator, name, func_obj.toValue());
+    try ctx.setPropertyChecked(obj, name, func_obj.toValue());
 }
 
 /// Initialize all built-in objects on global
@@ -2915,7 +2891,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create console object
     const console_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, console_obj, root_class, .log, wrap(consoleLog), 0);
+    try addMethod(ctx, allocator, console_obj, root_class, .log, wrap(consoleLog), 0);
     // Note: .warn and .error atoms don't exist in predefined atoms, use .log for now
     // In full implementation would add dynamic atoms
 
@@ -2924,24 +2900,24 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create Math object
     const math_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, math_obj, root_class, .abs, wrap(mathAbs), 1);
-    try addMethod(allocator, math_obj, root_class, .floor, wrap(mathFloor), 1);
-    try addMethod(allocator, math_obj, root_class, .ceil, wrap(mathCeil), 1);
-    try addMethod(allocator, math_obj, root_class, .round, wrap(mathRound), 1);
-    try addMethod(allocator, math_obj, root_class, .min, wrap(mathMin), 2);
-    try addMethod(allocator, math_obj, root_class, .max, wrap(mathMax), 2);
-    try addMethod(allocator, math_obj, root_class, .pow, wrap(mathPow), 2);
-    try addMethod(allocator, math_obj, root_class, .sqrt, wrap(mathSqrt), 1);
-    try addMethod(allocator, math_obj, root_class, .sin, wrap(mathSin), 1);
-    try addMethod(allocator, math_obj, root_class, .cos, wrap(mathCos), 1);
-    try addMethod(allocator, math_obj, root_class, .tan, wrap(mathTan), 1);
-    try addMethod(allocator, math_obj, root_class, .log, wrap(mathLog), 1);
-    try addMethod(allocator, math_obj, root_class, .exp, wrap(mathExp), 1);
-    try addMethod(allocator, math_obj, root_class, .random, wrap(mathRandom), 0);
+    try addMethod(ctx, allocator, math_obj, root_class, .abs, wrap(mathAbs), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .floor, wrap(mathFloor), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .ceil, wrap(mathCeil), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .round, wrap(mathRound), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .min, wrap(mathMin), 2);
+    try addMethod(ctx, allocator, math_obj, root_class, .max, wrap(mathMax), 2);
+    try addMethod(ctx, allocator, math_obj, root_class, .pow, wrap(mathPow), 2);
+    try addMethod(ctx, allocator, math_obj, root_class, .sqrt, wrap(mathSqrt), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .sin, wrap(mathSin), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .cos, wrap(mathCos), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .tan, wrap(mathTan), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .log, wrap(mathLog), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .exp, wrap(mathExp), 1);
+    try addMethod(ctx, allocator, math_obj, root_class, .random, wrap(mathRandom), 0);
 
     // Add Math constants as properties
     const pi_box = try ctx.gc_state.allocFloat(math_constants.PI);
-    try math_obj.setProperty(allocator, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromPtr(pi_box));
+    try ctx.setPropertyChecked(math_obj, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromPtr(pi_box));
     // Note: Would need to add "PI", "E" etc as dynamic atoms for full implementation
 
     // Register Math on global
@@ -2949,9 +2925,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create JSON object
     const json_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, json_obj, root_class, .parse, wrap(jsonParse), 1);
-    try addMethod(allocator, json_obj, root_class, .tryParse, wrap(jsonTryParse), 1);
-    try addMethod(allocator, json_obj, root_class, .stringify, wrap(jsonStringify), 1);
+    try addMethod(ctx, allocator, json_obj, root_class, .parse, wrap(jsonParse), 1);
+    try addMethod(ctx, allocator, json_obj, root_class, .tryParse, wrap(jsonTryParse), 1);
+    try addMethod(ctx, allocator, json_obj, root_class, .stringify, wrap(jsonStringify), 1);
 
     // Register JSON on global
     try ctx.setGlobal(.JSON, json_obj.toValue());
@@ -2975,27 +2951,27 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create Error constructor
     const error_ctor_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(errorConstructor), .Error, 1);
-    try error_ctor_func.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setPropertyChecked(error_ctor_func, .prototype, error_proto.toValue());
     try ctx.setGlobal(.Error, error_ctor_func.toValue());
 
     // Create TypeError constructor
     const type_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(typeErrorConstructor), .TypeError, 1);
-    try type_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setPropertyChecked(type_error_ctor, .prototype, error_proto.toValue());
     try ctx.setGlobal(.TypeError, type_error_ctor.toValue());
 
     // Create RangeError constructor
     const range_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(rangeErrorConstructor), .RangeError, 1);
-    try range_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setPropertyChecked(range_error_ctor, .prototype, error_proto.toValue());
     try ctx.setGlobal(.RangeError, range_error_ctor.toValue());
 
     // Create SyntaxError constructor
     const syntax_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(syntaxErrorConstructor), .SyntaxError, 1);
-    try syntax_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setPropertyChecked(syntax_error_ctor, .prototype, error_proto.toValue());
     try ctx.setGlobal(.SyntaxError, syntax_error_ctor.toValue());
 
     // Create ReferenceError constructor
     const ref_error_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(referenceErrorConstructor), .ReferenceError, 1);
-    try ref_error_ctor.setProperty(allocator, .prototype, error_proto.toValue());
+    try ctx.setPropertyChecked(ref_error_ctor, .prototype, error_proto.toValue());
     try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
 
     // Create Promise prototype with then/catch methods
@@ -3005,7 +2981,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create Promise constructor with static methods
     const promise_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(promiseConstructor), .Promise, 1);
-    try promise_ctor.setProperty(allocator, .prototype, promise_proto.toValue());
+    try ctx.setPropertyChecked(promise_ctor, .prototype, promise_proto.toValue());
 
     // Add static methods: Promise.resolve, Promise.reject
     try addMethodDynamic(ctx, promise_ctor, "resolve", wrap(promiseResolve), 1);
@@ -3024,22 +3000,22 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Add Number constants
     const max_value_atom = try ctx.atoms.intern("MAX_VALUE");
     const max_value_box = try ctx.gc_state.allocFloat(1.7976931348623157e+308);
-    try number_obj.setProperty(allocator, max_value_atom, value.JSValue.fromPtr(max_value_box));
+    try ctx.setPropertyChecked(number_obj, max_value_atom, value.JSValue.fromPtr(max_value_box));
 
     const min_value_atom = try ctx.atoms.intern("MIN_VALUE");
     const min_value_box = try ctx.gc_state.allocFloat(5e-324);
-    try number_obj.setProperty(allocator, min_value_atom, value.JSValue.fromPtr(min_value_box));
+    try ctx.setPropertyChecked(number_obj, min_value_atom, value.JSValue.fromPtr(min_value_box));
 
     const nan_atom = try ctx.atoms.intern("NaN");
-    try number_obj.setProperty(allocator, nan_atom, value.JSValue.nan_val);
+    try ctx.setPropertyChecked(number_obj, nan_atom, value.JSValue.nan_val);
 
     const pos_inf_atom = try ctx.atoms.intern("POSITIVE_INFINITY");
     const pos_inf_box = try ctx.gc_state.allocFloat(std.math.inf(f64));
-    try number_obj.setProperty(allocator, pos_inf_atom, value.JSValue.fromPtr(pos_inf_box));
+    try ctx.setPropertyChecked(number_obj, pos_inf_atom, value.JSValue.fromPtr(pos_inf_box));
 
     const neg_inf_atom = try ctx.atoms.intern("NEGATIVE_INFINITY");
     const neg_inf_box = try ctx.gc_state.allocFloat(-std.math.inf(f64));
-    try number_obj.setProperty(allocator, neg_inf_atom, value.JSValue.fromPtr(neg_inf_box));
+    try ctx.setPropertyChecked(number_obj, neg_inf_atom, value.JSValue.fromPtr(neg_inf_box));
 
     // Register Number on global (predefined atom)
     try ctx.setGlobal(.Number, number_obj.toValue());
@@ -3077,7 +3053,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create Map constructor
     const map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(mapConstructor), .Map, 0);
-    try map_ctor.setProperty(allocator, .prototype, map_proto.toValue());
+    try ctx.setPropertyChecked(map_ctor, .prototype, map_proto.toValue());
     try ctx.setGlobal(.Map, map_ctor.toValue());
 
     // Create Set prototype with methods
@@ -3089,7 +3065,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create Set constructor
     const set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(setConstructor), .Set, 0);
-    try set_ctor.setProperty(allocator, .prototype, set_proto.toValue());
+    try ctx.setPropertyChecked(set_ctor, .prototype, set_proto.toValue());
     try ctx.setGlobal(.Set, set_ctor.toValue());
 
     // Create Response constructor with static methods
@@ -3102,16 +3078,16 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const redirect_atom = try ctx.atoms.intern("redirect");
 
     const json_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseJson, json_atom, 1);
-    try response_ctor.setProperty(allocator, json_atom, json_func.toValue());
+    try ctx.setPropertyChecked(response_ctor, json_atom, json_func.toValue());
 
     const text_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseText, text_atom, 1);
-    try response_ctor.setProperty(allocator, text_atom, text_func.toValue());
+    try ctx.setPropertyChecked(response_ctor, text_atom, text_func.toValue());
 
     const html_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseHtml, html_atom, 1);
-    try response_ctor.setProperty(allocator, html_atom, html_func.toValue());
+    try ctx.setPropertyChecked(response_ctor, html_atom, html_func.toValue());
 
     const redirect_func = try object.JSObject.createNativeFunction(allocator, root_class, http.responseRedirect, redirect_atom, 1);
-    try response_ctor.setProperty(allocator, redirect_atom, redirect_func.toValue());
+    try ctx.setPropertyChecked(response_ctor, redirect_atom, redirect_func.toValue());
 
     // Register Response on global (predefined atom)
     try ctx.setGlobal(.Response, response_ctor.toValue());
@@ -3211,25 +3187,25 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     // Create RegExp constructor
     const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(regExpConstructor), .RegExp, 2);
-    try regexp_ctor.setProperty(allocator, .prototype, regexp_proto.toValue());
+    try ctx.setPropertyChecked(regexp_ctor, .prototype, regexp_proto.toValue());
     try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
 
     // Create Result prototype with instance methods
     const result_proto = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, result_proto, root_class, .isOk, wrap(resultIsOk), 0);
-    try addMethod(allocator, result_proto, root_class, .isErr, wrap(resultIsErr), 0);
-    try addMethod(allocator, result_proto, root_class, .unwrap, wrap(resultUnwrap), 0);
-    try addMethod(allocator, result_proto, root_class, .unwrapOr, wrap(resultUnwrapOr), 1);
-    try addMethod(allocator, result_proto, root_class, .unwrapErr, wrap(resultUnwrapErr), 0);
-    try addMethod(allocator, result_proto, root_class, .map, wrap(resultMap), 1);
-    try addMethod(allocator, result_proto, root_class, .mapErr, wrap(resultMapErr), 1);
+    try addMethod(ctx, allocator, result_proto, root_class, .isOk, wrap(resultIsOk), 0);
+    try addMethod(ctx, allocator, result_proto, root_class, .isErr, wrap(resultIsErr), 0);
+    try addMethod(ctx, allocator, result_proto, root_class, .unwrap, wrap(resultUnwrap), 0);
+    try addMethod(ctx, allocator, result_proto, root_class, .unwrapOr, wrap(resultUnwrapOr), 1);
+    try addMethod(ctx, allocator, result_proto, root_class, .unwrapErr, wrap(resultUnwrapErr), 0);
+    try addMethod(ctx, allocator, result_proto, root_class, .map, wrap(resultMap), 1);
+    try addMethod(ctx, allocator, result_proto, root_class, .mapErr, wrap(resultMapErr), 1);
     try addMethodDynamic(ctx, result_proto, "match", wrap(resultMatch), 1);
 
     // Create Result object with static methods ok/err
     const result_obj = try object.JSObject.create(allocator, root_class, null);
-    try addMethod(allocator, result_obj, root_class, .ok, wrap(resultOk), 1);
-    try addMethod(allocator, result_obj, root_class, .err, wrap(resultErr), 1);
-    try result_obj.setProperty(allocator, .prototype, result_proto.toValue());
+    try addMethod(ctx, allocator, result_obj, root_class, .ok, wrap(resultOk), 1);
+    try addMethod(ctx, allocator, result_obj, root_class, .err, wrap(resultErr), 1);
+    try ctx.setPropertyChecked(result_obj, .prototype, result_proto.toValue());
     try ctx.setGlobal(.Result, result_obj.toValue());
 
     // Store Result prototype on context for creating Result instances
@@ -3242,9 +3218,6 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
 /// RegExp constructor - new RegExp(pattern, flags) or RegExp(pattern, flags)
 pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
     // Get pattern string
     var pattern: []const u8 = "";
     if (args.len > 0) {
@@ -3264,7 +3237,7 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     }
 
     // Create RegExp object
-    const regexp_obj = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const regexp_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
 
     // Store pattern and flags as properties
     const source_atom = ctx.atoms.intern("source") catch return value.JSValue.undefined_val;
@@ -3276,18 +3249,18 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     const _regex_atom = ctx.atoms.intern("_regex") catch return value.JSValue.undefined_val;
 
     // Create JS strings for source and flags
-    const source_js = string.createString(allocator, pattern) catch return value.JSValue.undefined_val;
-    const flags_js = string.createString(allocator, flags_str) catch return value.JSValue.undefined_val;
+    const source_js = ctx.createString(pattern) catch return value.JSValue.undefined_val;
+    const flags_js = ctx.createString(flags_str) catch return value.JSValue.undefined_val;
 
-    regexp_obj.setProperty(allocator, source_atom, value.JSValue.fromPtr(source_js)) catch return value.JSValue.undefined_val;
-    regexp_obj.setProperty(allocator, flags_atom, value.JSValue.fromPtr(flags_js)) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, source_atom, source_js) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, flags_atom, flags_js) catch return value.JSValue.undefined_val;
 
     // Parse flags
     const flags = regex.parseFlags(flags_str);
-    regexp_obj.setProperty(allocator, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-    regexp_obj.setProperty(allocator, ignore_case_atom, if (flags.ignore_case) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-    regexp_obj.setProperty(allocator, multiline_atom, if (flags.multiline) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-    regexp_obj.setProperty(allocator, last_index_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, ignore_case_atom, if (flags.ignore_case) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, multiline_atom, if (flags.multiline) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, last_index_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
 
     // Store compiled regex as internal property
     // For now we just store the pattern and flags separately, compile on demand
@@ -3296,7 +3269,7 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
         (if (flags.ignore_case) @as(u8, 1) else 0) << 1 |
         (if (flags.multiline) @as(u8, 1) else 0) << 2 |
         (if (flags.dot_all) @as(u8, 1) else 0) << 3;
-    regexp_obj.setProperty(allocator, _regex_atom, value.JSValue.fromInt(@as(i32, @intCast(flags_bits)))) catch return value.JSValue.undefined_val;
+    ctx.setPropertyChecked(regexp_obj, _regex_atom, value.JSValue.fromInt(@as(i32, @intCast(flags_bits)))) catch return value.JSValue.undefined_val;
 
     return regexp_obj.toValue();
 }
@@ -3338,7 +3311,6 @@ pub fn regExpTest(ctx: *context.Context, this: value.JSValue, args: []const valu
 /// RegExp.prototype.exec(string) - Returns match array or null
 pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.null_val;
 
     if (!this.isObject() or args.len < 1) return value.JSValue.null_val;
 
@@ -3371,20 +3343,20 @@ pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const valu
 
     if (match_result) |match| {
         // Create result array
-        const result_arr = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.null_val;
+        const result_arr = ctx.createObject(null) catch return value.JSValue.null_val;
 
         // Set matched string as index 0
         const matched_str = string.createString(allocator, match.slice()) catch return value.JSValue.null_val;
-        result_arr.setSlot(0, value.JSValue.fromPtr(matched_str));
-        result_arr.setProperty(allocator, .length, value.JSValue.fromInt(1)) catch return value.JSValue.null_val;
+        ctx.setIndexChecked(result_arr, 0, value.JSValue.fromPtr(matched_str)) catch return value.JSValue.null_val;
+        ctx.setPropertyChecked(result_arr, .length, value.JSValue.fromInt(1)) catch return value.JSValue.null_val;
 
         // Set index property
         const index_atom = ctx.atoms.intern("index") catch return result_arr.toValue();
-        result_arr.setProperty(allocator, index_atom, value.JSValue.fromInt(@intCast(match.start))) catch return result_arr.toValue();
+        ctx.setPropertyChecked(result_arr, index_atom, value.JSValue.fromInt(@intCast(match.start))) catch return result_arr.toValue();
 
         // Set input property
         const input_atom = ctx.atoms.intern("input") catch return result_arr.toValue();
-        result_arr.setProperty(allocator, input_atom, args[0]) catch return result_arr.toValue();
+        ctx.setPropertyChecked(result_arr, input_atom, args[0]) catch return result_arr.toValue();
 
         return result_arr.toValue();
     }
@@ -3411,17 +3383,17 @@ pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []con
     const source_js = try string.createString(allocator, pattern);
     const flags_js = try string.createString(allocator, flags_str);
 
-    try regexp_obj.setProperty(allocator, source_atom, value.JSValue.fromPtr(source_js));
-    try regexp_obj.setProperty(allocator, flags_atom, value.JSValue.fromPtr(flags_js));
+    try ctx.setPropertyChecked(regexp_obj, source_atom, value.JSValue.fromPtr(source_js));
+    try ctx.setPropertyChecked(regexp_obj, flags_atom, value.JSValue.fromPtr(flags_js));
 
     const flags = regex.parseFlags(flags_str);
-    try regexp_obj.setProperty(allocator, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val);
-    try regexp_obj.setProperty(allocator, ignore_case_atom, if (flags.ignore_case) value.JSValue.true_val else value.JSValue.false_val);
-    try regexp_obj.setProperty(allocator, multiline_atom, if (flags.multiline) value.JSValue.true_val else value.JSValue.false_val);
-    try regexp_obj.setProperty(allocator, last_index_atom, value.JSValue.fromInt(0));
+    try ctx.setPropertyChecked(regexp_obj, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val);
+    try ctx.setPropertyChecked(regexp_obj, ignore_case_atom, if (flags.ignore_case) value.JSValue.true_val else value.JSValue.false_val);
+    try ctx.setPropertyChecked(regexp_obj, multiline_atom, if (flags.multiline) value.JSValue.true_val else value.JSValue.false_val);
+    try ctx.setPropertyChecked(regexp_obj, last_index_atom, value.JSValue.fromInt(0));
 
     const flags_packed: u8 = @intFromBool(flags.global) | (@as(u8, @intFromBool(flags.ignore_case)) << 1) | (@as(u8, @intFromBool(flags.multiline)) << 2) | (@as(u8, @intFromBool(flags.dot_all)) << 3);
-    try regexp_obj.setProperty(allocator, _regex_atom, value.JSValue.fromInt(@as(i32, flags_packed)));
+    try ctx.setPropertyChecked(regexp_obj, _regex_atom, value.JSValue.fromInt(@as(i32, flags_packed)));
 
     return regexp_obj;
 }
@@ -3566,7 +3538,7 @@ pub fn createWellKnownSymbol(allocator: std.mem.Allocator, which: value.JSValue.
 /// Symbol() - Create a new unique symbol
 pub fn symbolConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     // Symbol() must be called as a function, not with new
-    const allocator = ctx.allocator;
+    const allocator = if (ctx.hybrid) |h| h.arena.allocator() else ctx.allocator;
 
     // Get optional description
     var description: ?[]const u8 = null;
@@ -3596,8 +3568,12 @@ pub fn symbolFor(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     }
 
     // Create new symbol and register it
-    const symbol = createSymbol(ctx.allocator, key) catch return value.JSValue.undefined_val;
-    symbol_registry.?.put(key, symbol) catch return value.JSValue.undefined_val;
+    const key_copy = if (ctx.hybrid != null)
+        (ctx.allocator.dupe(u8, key) catch return value.JSValue.undefined_val)
+    else
+        key;
+    const symbol = createSymbol(ctx.allocator, key_copy) catch return value.JSValue.undefined_val;
+    symbol_registry.?.put(key_copy, symbol) catch return value.JSValue.undefined_val;
     return symbol;
 }
 
@@ -3700,16 +3676,17 @@ pub const WeakMapData = struct {
 
 /// WeakMap constructor - new WeakMap()
 pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
     // Create WeakMap object
-    const weak_map = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const weak_map = ctx.createObject(null) catch return value.JSValue.undefined_val;
     weak_map.class_id = .weak_map;
 
     // Allocate and store WeakMapData
-    const data = allocator.create(WeakMapData) catch return value.JSValue.undefined_val;
-    data.* = WeakMapData.init(allocator);
+    const data_allocator = if (ctx.hybrid) |h| h.arena.allocator() else ctx.allocator;
+    const data = if (ctx.hybrid) |h|
+        h.arena.create(WeakMapData) orelse return value.JSValue.undefined_val
+    else
+        ctx.allocator.create(WeakMapData) catch return value.JSValue.undefined_val;
+    data.* = WeakMapData.init(data_allocator);
     weak_map.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromPtr(data);
 
     // If iterable argument provided, add entries
@@ -3825,16 +3802,17 @@ pub const WeakSetData = struct {
 
 /// WeakSet constructor - new WeakSet()
 pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-    const root_class = ctx.root_class orelse return value.JSValue.undefined_val;
-
     // Create WeakSet object
-    const weak_set = object.JSObject.create(allocator, root_class, null) catch return value.JSValue.undefined_val;
+    const weak_set = ctx.createObject(null) catch return value.JSValue.undefined_val;
     weak_set.class_id = .weak_set;
 
     // Allocate and store WeakSetData
-    const data = allocator.create(WeakSetData) catch return value.JSValue.undefined_val;
-    data.* = WeakSetData.init(allocator);
+    const data_allocator = if (ctx.hybrid) |h| h.arena.allocator() else ctx.allocator;
+    const data = if (ctx.hybrid) |h|
+        h.arena.create(WeakSetData) orelse return value.JSValue.undefined_val
+    else
+        ctx.allocator.create(WeakSetData) catch return value.JSValue.undefined_val;
+    data.* = WeakSetData.init(data_allocator);
     weak_set.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromPtr(data);
 
     // If iterable argument provided, add entries
@@ -3909,7 +3887,7 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
 
     // Create WeakMap constructor
     const weak_map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(weakMapConstructor), .WeakMap, 0);
-    try weak_map_ctor.setProperty(allocator, .prototype, weak_map_proto.toValue());
+    try ctx.setPropertyChecked(weak_map_ctor, .prototype, weak_map_proto.toValue());
     try ctx.setGlobal(.WeakMap, weak_map_ctor.toValue());
 
     // Create WeakSet prototype
@@ -3920,7 +3898,7 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
 
     // Create WeakSet constructor
     const weak_set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(weakSetConstructor), .WeakSet, 0);
-    try weak_set_ctor.setProperty(allocator, .prototype, weak_set_proto.toValue());
+    try ctx.setPropertyChecked(weak_set_ctor, .prototype, weak_set_proto.toValue());
     try ctx.setGlobal(.WeakSet, weak_set_ctor.toValue());
 }
 
@@ -3936,7 +3914,7 @@ pub fn initSymbol(ctx: *context.Context) !void {
 
     // Create Symbol constructor
     const symbol_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(symbolConstructor), .Symbol, 1);
-    try symbol_ctor.setProperty(allocator, .prototype, symbol_proto.toValue());
+    try ctx.setPropertyChecked(symbol_ctor, .prototype, symbol_proto.toValue());
 
     // Add static methods
     try addMethodDynamic(ctx, symbol_ctor, "for", wrap(symbolFor), 1);
@@ -3955,11 +3933,11 @@ pub fn initSymbol(ctx: *context.Context) !void {
     const to_primitive_atom = try ctx.atoms.intern("toPrimitive");
     const has_instance_atom = try ctx.atoms.intern("hasInstance");
 
-    try symbol_ctor.setProperty(allocator, iterator_atom, iterator_sym);
-    try symbol_ctor.setProperty(allocator, async_iterator_atom, async_iterator_sym);
-    try symbol_ctor.setProperty(allocator, to_string_tag_atom, to_string_tag_sym);
-    try symbol_ctor.setProperty(allocator, to_primitive_atom, to_primitive_sym);
-    try symbol_ctor.setProperty(allocator, has_instance_atom, has_instance_sym);
+    try ctx.setPropertyChecked(symbol_ctor, iterator_atom, iterator_sym);
+    try ctx.setPropertyChecked(symbol_ctor, async_iterator_atom, async_iterator_sym);
+    try ctx.setPropertyChecked(symbol_ctor, to_string_tag_atom, to_string_tag_sym);
+    try ctx.setPropertyChecked(symbol_ctor, to_primitive_atom, to_primitive_sym);
+    try ctx.setPropertyChecked(symbol_ctor, has_instance_atom, has_instance_sym);
 
     try ctx.setGlobal(.Symbol, symbol_ctor.toValue());
 }
@@ -4178,7 +4156,7 @@ test "Array.slice" {
     defer arr.destroy(allocator);
 
     // Set length = 10
-    try arr.setProperty(allocator, .length, value.JSValue.fromInt(10));
+    try ctx.setPropertyChecked(arr, .length, value.JSValue.fromInt(10));
     defer allocator.free(arr.hidden_class.properties);
     defer arr.hidden_class.deinit(allocator);
 
@@ -4930,9 +4908,9 @@ test "Array.pop removes last element" {
     arr.prototype = ctx.array_prototype;
 
     // Add elements
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
-    try arr.setIndex(allocator, 2, value.JSValue.fromInt(30));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
     arr.setArrayLength(3);
 
     // Pop should return 30 and reduce length
@@ -4980,9 +4958,9 @@ test "Array.shift removes first element" {
     arr.prototype = ctx.array_prototype;
 
     // Add elements [10, 20, 30]
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
-    try arr.setIndex(allocator, 2, value.JSValue.fromInt(30));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
     arr.setArrayLength(3);
 
     // Shift should return 10 and elements should shift
@@ -5012,7 +4990,7 @@ test "Array.unshift adds to beginning" {
     arr.prototype = ctx.array_prototype;
 
     // Start with [30]
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(30));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(30));
     arr.setArrayLength(1);
 
     // Unshift [10, 20] to get [10, 20, 30]
@@ -5046,10 +5024,10 @@ test "Array.indexOf finds element" {
     arr.prototype = ctx.array_prototype;
 
     // [10, 20, 30, 20]
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
-    try arr.setIndex(allocator, 2, value.JSValue.fromInt(30));
-    try arr.setIndex(allocator, 3, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
+    try ctx.setIndexChecked(arr, 3, value.JSValue.fromInt(20));
     arr.setArrayLength(4);
 
     // indexOf(20) = 1
@@ -5075,8 +5053,8 @@ test "Array.indexOf not found" {
     const arr = try object.JSObject.createArray(allocator, root_class);
     arr.prototype = ctx.array_prototype;
 
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
     arr.setArrayLength(2);
 
     // indexOf(99) = -1
@@ -5102,8 +5080,8 @@ test "Array.includes found" {
     const arr = try object.JSObject.createArray(allocator, root_class);
     arr.prototype = ctx.array_prototype;
 
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
     arr.setArrayLength(2);
 
     const result = arrayIncludes(ctx, arr.toValue(), &[_]value.JSValue{
@@ -5128,7 +5106,7 @@ test "Array.includes not found" {
     const arr = try object.JSObject.createArray(allocator, root_class);
     arr.prototype = ctx.array_prototype;
 
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
     arr.setArrayLength(1);
 
     const result = arrayIncludes(ctx, arr.toValue(), &[_]value.JSValue{
@@ -5154,11 +5132,11 @@ test "Array.splice delete elements" {
     arr.prototype = ctx.array_prototype;
 
     // [1, 2, 3, 4, 5]
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
-    try arr.setIndex(allocator, 2, value.JSValue.fromInt(3));
-    try arr.setIndex(allocator, 3, value.JSValue.fromInt(4));
-    try arr.setIndex(allocator, 4, value.JSValue.fromInt(5));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(3));
+    try ctx.setIndexChecked(arr, 3, value.JSValue.fromInt(4));
+    try ctx.setIndexChecked(arr, 4, value.JSValue.fromInt(5));
     arr.setArrayLength(5);
 
     // splice(1, 2) removes elements at index 1 and 2
@@ -5192,8 +5170,8 @@ test "Array.splice insert elements" {
     arr.prototype = ctx.array_prototype;
 
     // [1, 4]
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(4));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(4));
     arr.setArrayLength(2);
 
     // splice(1, 0, 2, 3) inserts 2 and 3 at index 1
@@ -5225,9 +5203,9 @@ test "Array.join with separator" {
     arr.prototype = ctx.array_prototype;
 
     // [1, 2, 3]
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
-    try arr.setIndex(allocator, 2, value.JSValue.fromInt(3));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(3));
     arr.setArrayLength(3);
 
     const sep = try string.createString(allocator, "-");
@@ -5255,8 +5233,8 @@ test "Array.join default separator" {
     const arr = try object.JSObject.createArray(allocator, root_class);
     arr.prototype = ctx.array_prototype;
 
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(2));
     arr.setArrayLength(2);
 
     // join() with no args uses comma
@@ -5335,9 +5313,9 @@ test "Array.map returns length stub" {
     const arr = try object.JSObject.createArray(allocator, root_class);
     arr.prototype = ctx.array_prototype;
 
-    try arr.setIndex(allocator, 0, value.JSValue.fromInt(1));
-    try arr.setIndex(allocator, 1, value.JSValue.fromInt(2));
-    try arr.setIndex(allocator, 2, value.JSValue.fromInt(3));
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(3));
     arr.setArrayLength(3);
 
     // map with no callback returns length (stub behavior)
@@ -5669,6 +5647,171 @@ test "JSON.stringify number" {
 
     try std.testing.expect(result.isString());
     try std.testing.expectEqualStrings("42", result.toPtr(string.JSString).data());
+}
+
+// ============================================================================
+// Hybrid Allocation Tests
+// ============================================================================
+
+test "Hybrid: JSON.parse returns arena object" {
+    const gc = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const arena_mod = @import("arena.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const json_text = try ctx.createString("{\"a\":1}");
+    const result = jsonParse(ctx, value.JSValue.undefined_val, &[_]value.JSValue{json_text});
+    try std.testing.expect(result.isObject());
+
+    const obj = object.JSObject.fromValue(result);
+    try std.testing.expect(obj.flags.is_arena);
+
+    const atom = try ctx.atoms.intern("a");
+    const prop = obj.getProperty(atom) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, 1), prop.getInt());
+    try std.testing.expect(!ctx.hasException());
+}
+
+test "Hybrid: Map and Set accept arena values" {
+    const gc = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const arena_mod = @import("arena.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const map_val = mapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    const set_val = setConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+
+    const key_obj = try ctx.createObject(null);
+    const val_obj = try ctx.createObject(null);
+
+    _ = mapSet(ctx, map_val, &[_]value.JSValue{ key_obj.toValue(), val_obj.toValue() });
+    try std.testing.expect(!ctx.hasException());
+
+    const got = mapGet(ctx, map_val, &[_]value.JSValue{ key_obj.toValue() });
+    try std.testing.expect(got.strictEquals(val_obj.toValue()));
+
+    _ = setAdd(ctx, set_val, &[_]value.JSValue{ val_obj.toValue() });
+    const has = setHas(ctx, set_val, &[_]value.JSValue{ val_obj.toValue() });
+    try std.testing.expect(has.getBool() == true);
+}
+
+test "Hybrid: Promise.resolve stores arena value" {
+    const gc = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const arena_mod = @import("arena.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const arena_obj = try ctx.createObject(null);
+    const promise_val = promiseResolve(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arena_obj.toValue()});
+    try std.testing.expect(promise_val.isObject());
+
+    const promise_obj = object.JSObject.fromValue(promise_val);
+    try std.testing.expect(promise_obj.flags.is_arena);
+
+    const result_atom = try ctx.atoms.intern("__result");
+    const stored = promise_obj.getProperty(result_atom) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(stored.strictEquals(arena_obj.toValue()));
+    try std.testing.expect(!ctx.hasException());
+}
+
+test "Hybrid: WeakMap and WeakSet accept arena values" {
+    const gc = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const arena_mod = @import("arena.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &req_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const key_obj = try ctx.createObject(null);
+    const val_obj = try ctx.createObject(null);
+
+    const weak_map_val = weakMapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = weakMapSet(ctx, weak_map_val, &[_]value.JSValue{ key_obj.toValue(), val_obj.toValue() });
+    const got = weakMapGet(ctx, weak_map_val, &[_]value.JSValue{ key_obj.toValue() });
+    try std.testing.expect(got.strictEquals(val_obj.toValue()));
+
+    const weak_set_val = weakSetConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
+    _ = weakSetAdd(ctx, weak_set_val, &[_]value.JSValue{ val_obj.toValue() });
+    const has = weakSetHas(ctx, weak_set_val, &[_]value.JSValue{ val_obj.toValue() });
+    try std.testing.expect(has.getBool() == true);
 }
 
 // ============================================================================

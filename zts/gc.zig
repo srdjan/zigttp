@@ -478,6 +478,10 @@ pub const GC = struct {
     /// Number of float allocations saved by constant pool
     float_pool_hits: u64 = 0,
 
+    /// Hybrid allocation mode - when true, GC is disabled
+    /// Arena handles ephemeral allocations, persistent allocations don't need GC
+    hybrid_mode: bool = false,
+
     /// Threshold for automatic major GC (number of tenured objects)
     major_gc_threshold: usize = 10000,
 
@@ -601,7 +605,11 @@ pub const GC = struct {
     }
 
     /// Minor GC: evacuate live nursery objects to tenured (Cheney-style copying collector)
+    /// Skipped in hybrid mode where arena handles ephemeral allocations
     pub fn minorGC(self: *GC) void {
+        // Skip GC in hybrid mode - arena handles ephemeral cleanup
+        if (self.hybrid_mode) return;
+
         self.minor_gc_count += 1;
 
         // 1. Mark phase: mark all reachable nursery objects
@@ -806,20 +814,26 @@ pub const GC = struct {
 
     /// Major GC: mark-sweep on tenured generation
     /// Uses the stored heap_ptr for proper memory deallocation
+    /// Skipped in hybrid mode where arena handles ephemeral allocations
     pub fn majorGC(self: *GC) void {
+        if (self.hybrid_mode) return;
         self.majorGCWithHeap(self.heap_ptr);
     }
 
     /// Check if major GC should be triggered based on tenured heap size
     /// Call this after minor GC to prevent unbounded tenured growth
+    /// Skipped in hybrid mode
     pub fn maybeDoMajorGC(self: *GC) void {
+        if (self.hybrid_mode) return;
         if (self.tenured.objects.items.len > self.major_gc_threshold) {
             self.majorGC();
         }
     }
 
     /// Major GC with explicit heap reference for memory deallocation
+    /// Skipped in hybrid mode
     pub fn majorGCWithHeap(self: *GC, heap_ptr: ?*heap.Heap) void {
+        if (self.hybrid_mode) return;
         self.major_gc_count += 1;
         self.phase = .marking;
 
