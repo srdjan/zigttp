@@ -663,6 +663,37 @@ fn estimateJsonSize(val: value.JSValue) usize {
     return 32;
 }
 
+/// Fast integer to string writing (avoids format string parsing overhead)
+fn writeInt(writer: *std.Io.Writer, val: i32) RenderError!void {
+    var n: i32 = val;
+    var buf: [12]u8 = undefined; // -2147483648 is 11 chars + null
+    var i: usize = buf.len;
+
+    const negative = n < 0;
+    if (negative) {
+        n = -n;
+    }
+
+    // Write digits in reverse
+    if (n == 0) {
+        i -= 1;
+        buf[i] = '0';
+    } else {
+        while (n > 0) {
+            i -= 1;
+            buf[i] = @intCast(@as(u32, @intCast(@rem(n, 10))) + '0');
+            n = @divTrunc(n, 10);
+        }
+    }
+
+    if (negative) {
+        i -= 1;
+        buf[i] = '-';
+    }
+
+    try writer.writeAll(buf[i..]);
+}
+
 /// Convert a JSValue to JSON string
 pub fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
     const estimated = estimateJsonSize(val);
@@ -685,7 +716,7 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
     } else if (val.isFalse()) {
         try writer.writeAll("false");
     } else if (val.isInt()) {
-        try writer.print("{d}", .{val.getInt()});
+        try writeInt(writer, val.getInt());
     } else if (val.isFloat64()) {
         const f = val.getFloat64();
         // Handle special float values

@@ -1389,12 +1389,37 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonErro
     return error.InvalidJson;
 }
 
-/// Parse JSON string
+/// Parse JSON string - fast path for strings without escapes
 fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip opening '"'
+    const start = pos.*;
 
+    // Fast path: scan for closing quote without escapes
+    while (pos.* < text.len) {
+        const c = text[pos.*];
+        if (c == '"') {
+            // No escapes found - create string directly from slice
+            const str_slice = text[start..pos.*];
+            pos.* += 1;
+            return try ctx.createString(str_slice);
+        }
+        if (c == '\\') {
+            // Has escapes - use slow path
+            return parseJsonStringWithEscapes(ctx, text, pos, start);
+        }
+        pos.* += 1;
+    }
+
+    return error.InvalidJson;
+}
+
+/// Slow path for JSON strings with escape sequences
+fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize, start: usize) JsonError!value.JSValue {
+    // Copy the part before the first escape
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(ctx.allocator);
+
+    try buffer.appendSlice(ctx.allocator, text[start..pos.*]);
 
     while (pos.* < text.len) {
         const c = text[pos.*];
@@ -1422,21 +1447,16 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
                     const hex = text[pos.*..][0..4];
                     pos.* += 4;
                     const code = std.fmt.parseInt(u16, hex, 16) catch return error.InvalidJson;
-                    // Simple ASCII handling for now
-                    if (code < 128) {
+                    // UTF-8 encoding
+                    if (code < 0x80) {
                         try buffer.append(ctx.allocator, @intCast(code));
+                    } else if (code < 0x800) {
+                        try buffer.append(ctx.allocator, @intCast(0xC0 | (code >> 6)));
+                        try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
                     } else {
-                        // UTF-8 encoding for BMP characters
-                        if (code < 0x80) {
-                            try buffer.append(ctx.allocator, @intCast(code));
-                        } else if (code < 0x800) {
-                            try buffer.append(ctx.allocator, @intCast(0xC0 | (code >> 6)));
-                            try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
-                        } else {
-                            try buffer.append(ctx.allocator, @intCast(0xE0 | (code >> 12)));
-                            try buffer.append(ctx.allocator, @intCast(0x80 | ((code >> 6) & 0x3F)));
-                            try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
-                        }
+                        try buffer.append(ctx.allocator, @intCast(0xE0 | (code >> 12)));
+                        try buffer.append(ctx.allocator, @intCast(0x80 | ((code >> 6) & 0x3F)));
+                        try buffer.append(ctx.allocator, @intCast(0x80 | (code & 0x3F)));
                     }
                 },
                 else => try buffer.append(ctx.allocator, escaped),

@@ -1,0 +1,78 @@
+{
+  "description": "zts baseline after mod_const optimization",
+  "date": "2026-01-10",
+  "benchmarks": [
+    {
+      "name": "intArithmetic",
+      "iterations": 50000,
+      "time_ms": 2.903,
+      "ops_per_sec": 17225787
+    },
+    {
+      "name": "stringConcat",
+      "iterations": 50000,
+      "time_ms": 4.843,
+      "ops_per_sec": 10323733
+    },
+    {
+      "name": "stringOps",
+      "iterations": 50000,
+      "time_ms": 2.227,
+      "ops_per_sec": 22449208
+    },
+    {
+      "name": "objectCreate",
+      "iterations": 50000,
+      "time_ms": 5.039,
+      "ops_per_sec": 9923588
+    },
+    {
+      "name": "propertyAccess",
+      "iterations": 50000,
+      "time_ms": 2.780,
+      "ops_per_sec": 17985611
+    },
+    {
+      "name": "arrayOps",
+      "iterations": 50000,
+      "time_ms": 3.779,
+      "ops_per_sec": 13231594
+    },
+    {
+      "name": "functionCalls",
+      "iterations": 50000,
+      "time_ms": 2.996,
+      "ops_per_sec": 16688684
+    },
+    {
+      "name": "recursion",
+      "iterations": 25,
+      "time_ms": 8.756,
+      "ops_per_sec": 2855
+    },
+    {
+      "name": "jsonOps",
+      "iterations": 5000,
+      "time_ms": 58.579,
+      "ops_per_sec": 85355
+    },
+    {
+      "name": "gcPressure",
+      "iterations": 50000,
+      "time_ms": 182.161,
+      "ops_per_sec": 274482
+    },
+    {
+      "name": "httpHandler",
+      "iterations": 5000,
+      "time_ms": 4.419,
+      "ops_per_sec": 1131466
+    },
+    {
+      "name": "forOfLoop",
+      "iterations": 50000,
+      "time_ms": 0.940,
+      "ops_per_sec": 53210339
+    }
+  ]
+}

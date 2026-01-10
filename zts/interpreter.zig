@@ -1419,6 +1419,53 @@ pub const Interpreter = struct {
                     self.offsetPc(end_offset);
                 },
 
+                .for_of_next_put_loc => {
+                    // Fused: for_of_next + put_loc (stores element directly to local)
+                    // Stack: [iterable, index] -> [iterable, index+1] (no element pushed)
+                    const local_idx = self.pc[0];
+                    self.pc += 1;
+                    const end_offset = readI16(self.pc);
+                    self.pc += 2;
+                    const sp = self.ctx.sp;
+                    const idx_val = self.ctx.stack[sp - 1];
+                    const iter_val = self.ctx.stack[sp - 2];
+
+                    if (iter_val.isObject() and idx_val.isInt()) {
+                        @branchHint(.likely);
+                        const obj = object.JSObject.fromValue(iter_val);
+                        const idx = idx_val.getInt();
+                        if (idx >= 0) {
+                            @branchHint(.likely);
+                            const idx_u: u32 = @intCast(idx);
+                            // Array fast path
+                            if (obj.class_id == .array) {
+                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+                                if (idx_u < len) {
+                                    @branchHint(.likely);
+                                    // Store element directly to local, increment index in-place
+                                    self.ctx.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
+                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                    continue :dispatch;
+                                }
+                            }
+                            // Range iterator fast path
+                            else if (obj.class_id == .range_iterator) {
+                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+                                if (idx_u < len) {
+                                    @branchHint(.likely);
+                                    const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                                    const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                                    self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                    continue :dispatch;
+                                }
+                            }
+                        }
+                    }
+                    // Loop done - jump to cleanup
+                    self.offsetPc(end_offset);
+                },
+
                 // ========================================
                 // Specialized Constant Opcodes
                 // ========================================
@@ -1456,6 +1503,28 @@ pub const Interpreter = struct {
                         continue :dispatch;
                     }
                     return error.TypeError;
+                },
+
+                .mod_const => {
+                    // Optimized modulo by constant (common pattern x % constant)
+                    const divisor_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const divisor_val = try self.getConstant(divisor_idx);
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt() and divisor_val.isInt()) {
+                        @branchHint(.likely);
+                        const div = divisor_val.getInt();
+                        if (div != 0) {
+                            @branchHint(.likely);
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), div));
+                            continue :dispatch;
+                        }
+                    }
+                    // Fallback to helper (handles division by zero error)
+                    self.ctx.stack[sp - 1] = try modValues(a, divisor_val);
+                    continue :dispatch;
                 },
 
                 // ========================================

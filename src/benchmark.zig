@@ -291,26 +291,26 @@ pub fn main() !void {
     }
 
     println("");
-    println("=== Comparison with Baseline (mquickjs) ===");
+    println("=== Comparison with Baseline (2026-01-10) ===");
     println("");
 
-    // Baseline values from bench-baseline.json
+    // Baseline values from benchmarks/2026-01-10-mod-const-optimization.json
     const baseline = [_]struct { name: []const u8, ops_per_sec: u64 }{
-        .{ .name = "intArithmetic", .ops_per_sec = 16134237 },
-        .{ .name = "stringConcat", .ops_per_sec = 6187353 },
-        .{ .name = "stringOps", .ops_per_sec = 258402 },
-        .{ .name = "objectCreate", .ops_per_sec = 1696526 },
-        .{ .name = "propertyAccess", .ops_per_sec = 3357733 },
-        .{ .name = "arrayOps", .ops_per_sec = 6589352 },
-        .{ .name = "functionCalls", .ops_per_sec = 5145092 },
-        .{ .name = "recursion", .ops_per_sec = 2244 },
-        .{ .name = "jsonOps", .ops_per_sec = 70761 },
-        .{ .name = "gcPressure", .ops_per_sec = 229426 },
-        .{ .name = "httpHandler", .ops_per_sec = 332469 },
-        .{ .name = "forOfLoop", .ops_per_sec = 54824561 },
+        .{ .name = "intArithmetic", .ops_per_sec = 17225787 },
+        .{ .name = "stringConcat", .ops_per_sec = 10323733 },
+        .{ .name = "stringOps", .ops_per_sec = 22449208 },
+        .{ .name = "objectCreate", .ops_per_sec = 9923588 },
+        .{ .name = "propertyAccess", .ops_per_sec = 17985611 },
+        .{ .name = "arrayOps", .ops_per_sec = 13231594 },
+        .{ .name = "functionCalls", .ops_per_sec = 16688684 },
+        .{ .name = "recursion", .ops_per_sec = 2855 },
+        .{ .name = "jsonOps", .ops_per_sec = 85355 },
+        .{ .name = "gcPressure", .ops_per_sec = 274482 },
+        .{ .name = "httpHandler", .ops_per_sec = 1131466 },
+        .{ .name = "forOfLoop", .ops_per_sec = 53210339 },
     };
 
-    printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "mquickjs", "Ratio" });
+    printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "baseline", "Ratio" });
     println("------------------------------------------------------------");
 
     for (results, 0..) |result, i| {

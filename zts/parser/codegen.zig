@@ -464,7 +464,13 @@ pub const CodeGen = struct {
                     if (self.tryEmitFusedArithMod(binary.left, divisor)) |_| {
                         return;
                     } else |_| {
-                        // Fall through to normal emission
+                        // Fused pattern didn't match, try simple mod_const
+                        // Pattern: x % constant - emit mod_const opcode
+                        try self.emitNode(binary.left);
+                        const divisor_idx = try self.addConstant(JSValue.fromInt(divisor));
+                        try self.emit(.mod_const);
+                        try self.emitU16(divisor_idx);
+                        return;
                     }
                 }
             }
@@ -1268,11 +1274,19 @@ pub const CodeGen = struct {
         // for_of_next: check bounds, push element, increment index
         // If index >= length, jumps to loop_end
         // Stack: [iterable, index] -> [iterable, index+1, element]
-        try self.emitJump(.for_of_next, loop_end);
-        self.pushStack(1); // Element pushed on success
-
-        // Store element in loop binding
-        try self.emitSetBinding(for_iter.binding);
+        const binding = for_iter.binding;
+        if ((binding.kind == .local or binding.kind == .argument) and binding.slot <= 255) {
+            // Fused opcode: for_of_next + put_loc (stores directly to local)
+            try self.emit(.for_of_next_put_loc);
+            try self.emitByte(@truncate(binding.slot));
+            try self.emitI16Placeholder(loop_end);
+            // No stack change - element goes directly to local
+        } else {
+            // Standard path: push element then store
+            try self.emitJump(.for_of_next, loop_end);
+            self.pushStack(1); // Element pushed on success
+            try self.emitSetBinding(for_iter.binding);
+        }
         // Stack: [iterable, index]
 
         // Execute loop body
