@@ -22,6 +22,7 @@ const Node = ir.Node;
 const NodeTag = ir.NodeTag;
 const NodeIndex = ir.NodeIndex;
 const NodeList = ir.NodeList;
+const IRStore = ir.IRStore;
 const ConstantPool = ir.ConstantPool;
 const BindingRef = ir.BindingRef;
 const BinaryOp = ir.BinaryOp;
@@ -74,7 +75,7 @@ pub const Parser = struct {
     source: []const u8,
 
     // Output
-    nodes: NodeList,
+    nodes: IRStore,
     constants: ConstantPool,
     scopes: ScopeAnalyzer,
     errors: ErrorList,
@@ -96,7 +97,7 @@ pub const Parser = struct {
             .allocator = allocator,
             .tokenizer = Tokenizer.init(source),
             .source = source,
-            .nodes = NodeList.init(allocator),
+            .nodes = IRStore.init(allocator),
             .constants = ConstantPool.init(allocator),
             .scopes = ScopeAnalyzer.init(allocator),
             .errors = ErrorList.init(allocator, source),

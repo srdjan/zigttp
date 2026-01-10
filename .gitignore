@@ -6,3 +6,4 @@ zig-out/
 mquickjs/*.host.o
 mquickjs/*.host.d
 mquickjs/mqjs_stdlib
+size_check

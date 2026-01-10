@@ -25,6 +25,8 @@ const Node = ir.Node;
 const NodeTag = ir.NodeTag;
 const NodeIndex = ir.NodeIndex;
 const NodeList = ir.NodeList;
+const IRStore = ir.IRStore;
+const IrView = ir.IrView;
 const ConstantPool = ir.ConstantPool;
 const BindingRef = ir.BindingRef;
 const BinaryOp = ir.BinaryOp;
@@ -61,8 +63,7 @@ pub const enable_peephole_opt = true;
 /// Code generator state
 pub const CodeGen = struct {
     allocator: std.mem.Allocator,
-    nodes: *const NodeList,
-    ir_constants: *const ConstantPool,
+    ir: IrView,
     scopes: *ScopeAnalyzer,
     strings: ?*string.StringTable,
     atoms: ?*context.AtomTable,
@@ -98,6 +99,35 @@ pub const CodeGen = struct {
         return initWithStrings(allocator, nodes, ir_constants, scopes, null, null);
     }
 
+    /// Initialize with IRStore (new SoA format)
+    pub fn initWithIRStore(
+        allocator: std.mem.Allocator,
+        nodes: *const IRStore,
+        ir_constants: *const ConstantPool,
+        scopes: *ScopeAnalyzer,
+        strings_table: ?*string.StringTable,
+        atoms_table: ?*context.AtomTable,
+    ) CodeGen {
+        return .{
+            .allocator = allocator,
+            .ir = IrView.fromIRStore(nodes, ir_constants),
+            .scopes = scopes,
+            .strings = strings_table,
+            .atoms = atoms_table,
+            .code = std.ArrayList(u8).empty,
+            .constants = std.ArrayList(JSValue).empty,
+            .upvalue_info = std.ArrayList(UpvalueInfo).empty,
+            .labels = std.ArrayList(Label).empty,
+            .pending_jumps = std.ArrayList(PendingJump).empty,
+            .loop_stack = std.ArrayList(LoopContext).empty,
+            .current_scope = 0,
+            .max_stack_depth = 0,
+            .current_stack_depth = 0,
+            .ic_cache_idx = 0,
+            .opt_stats = .{},
+        };
+    }
+
     pub fn initWithStrings(
         allocator: std.mem.Allocator,
         nodes: *const NodeList,
@@ -108,8 +138,7 @@ pub const CodeGen = struct {
     ) CodeGen {
         return .{
             .allocator = allocator,
-            .nodes = nodes,
-            .ir_constants = ir_constants,
+            .ir = IrView.fromNodeList(nodes, ir_constants),
             .scopes = scopes,
             .strings = strings_table,
             .atoms = atoms_table,
@@ -172,8 +201,7 @@ pub const CodeGen = struct {
     pub fn generateFunction(self: *CodeGen, func_node: NodeIndex, scope_id: ScopeId) !FunctionBytecode {
         self.current_scope = scope_id;
 
-        const node = self.nodes.get(func_node) orelse return error.InvalidNode;
-        const func = node.data.function;
+        const func = self.ir.getFunction(func_node) orelse return error.InvalidNode;
 
         // Emit function body
         try self.emitNode(func.body);
@@ -247,55 +275,56 @@ pub const CodeGen = struct {
     fn emitNode(self: *CodeGen, index: NodeIndex) anyerror!void {
         if (index == null_node) return;
 
-        const node = self.nodes.get(index) orelse return;
+        const tag = self.ir.getTag(index) orelse return;
 
-        switch (node.tag) {
+        switch (tag) {
             // Literals
-            .lit_int => try self.emitInteger(node.data.int_value),
-            .lit_float => try self.emitFloat(node.data.float_idx),
-            .lit_string => try self.emitString(node.data.string_idx),
-            .lit_bool => try self.emitBool(node.data.bool_value),
+            .lit_int => try self.emitInteger(self.ir.getIntValue(index).?),
+            .lit_float => try self.emitFloat(self.ir.getFloatIdx(index).?),
+            .lit_string => try self.emitString(self.ir.getStringIdx(index).?),
+            .lit_bool => try self.emitBool(self.ir.getBoolValue(index).?),
             .lit_null => try self.emit(.push_null),
             .lit_undefined => try self.emit(.push_undefined),
 
             // Identifiers
-            .identifier => try self.emitIdentifier(node.data.binding),
+            .identifier => try self.emitIdentifier(self.ir.getBinding(index).?),
 
             // Expressions
-            .binary_op => try self.emitBinaryOp(node.data.binary),
-            .unary_op => try self.emitUnaryOp(node.data.unary),
-            .ternary => try self.emitTernary(node.data.ternary),
-            .call, .optional_call => try self.emitCall(node.data.call),
-            .member_access, .optional_chain => try self.emitMemberAccess(node.data.member),
-            .computed_access => try self.emitComputedAccess(node.data.member),
-            .assignment => try self.emitAssignment(node.data.assignment),
-            .array_literal => try self.emitArrayLiteral(node.data.array),
-            .object_literal => try self.emitObjectLiteral(node.data.object),
-            .function_expr, .arrow_function => try self.emitFunctionExpr(index, node.data.function),
-            .template_literal => try self.emitTemplateLiteral(node.data.template),
+            .binary_op => try self.emitBinaryOp(self.ir.getBinary(index).?),
+            .unary_op => try self.emitUnaryOp(self.ir.getUnary(index).?),
+            .ternary => try self.emitTernary(self.ir.getTernary(index).?),
+            .call, .optional_call => try self.emitCall(self.ir.getCall(index).?),
+            .member_access, .optional_chain => try self.emitMemberAccess(self.ir.getMember(index).?),
+            .computed_access => try self.emitComputedAccess(self.ir.getMember(index).?),
+            .assignment => try self.emitAssignment(self.ir.getAssignment(index).?),
+            .array_literal => try self.emitArrayLiteral(self.ir.getArray(index).?),
+            .object_literal => try self.emitObjectLiteral(self.ir.getObject(index).?),
+            .function_expr, .arrow_function => try self.emitFunctionExpr(index, self.ir.getFunction(index).?),
+            .template_literal => try self.emitTemplateLiteral(self.ir.getTemplate(index).?),
 
             // Statements
             .expr_stmt => {
-                if (node.data.opt_value) |expr| {
+                if (self.ir.getOptValue(index)) |expr| {
                     try self.emitNode(expr);
                     try self.emit(.drop);
                 }
             },
-            .var_decl, .function_decl => try self.emitVarDecl(node.data.var_decl),
-            .if_stmt => try self.emitIfStmt(node.data.if_stmt),
-            .for_stmt => try self.emitForLoop(node.data.loop),
-            .for_of_stmt => try self.emitForIterLoop(node.data.for_iter),
-            .return_stmt => try self.emitReturn(node.data.opt_value),
-            .switch_stmt => try self.emitSwitch(node.data.switch_stmt),
-            .block, .program => try self.emitBlock(node.data.block),
+            .var_decl, .function_decl => try self.emitVarDecl(self.ir.getVarDecl(index).?),
+            .if_stmt => try self.emitIfStmt(self.ir.getIfStmt(index).?),
+            .for_stmt => try self.emitForLoop(self.ir.getLoop(index).?),
+            .for_of_stmt => try self.emitForIterLoop(self.ir.getForIter(index).?),
+            .return_stmt => try self.emitReturn(self.ir.getOptValue(index)),
+            .switch_stmt => try self.emitSwitch(self.ir.getSwitchStmt(index).?),
+            .block, .program => try self.emitBlock(self.ir.getBlock(index).?),
             .empty_stmt, .debugger_stmt => {},
 
             // JSX - emit as h() calls
-            .jsx_element, .jsx_fragment => try self.emitJsxElement(node),
+            .jsx_element, .jsx_fragment => try self.emitJsxElementByIndex(index),
 
             // JSX text content - emit as string constant
             .jsx_text => {
-                const str = self.ir_constants.getString(node.data.jsx_text) orelse "";
+                const str_idx = self.ir.getJsxText(index).?;
+                const str = self.ir.getString(str_idx) orelse "";
                 const idx = try self.addStringConstant(str);
                 try self.emitPushConst(idx);
                 self.pushStack(1);
@@ -303,7 +332,7 @@ pub const CodeGen = struct {
 
             // JSX expression container - emit the inner expression
             .jsx_expr_container => {
-                if (node.data.opt_value) |inner_expr| {
+                if (self.ir.getOptValue(index)) |inner_expr| {
                     if (inner_expr != null_node) {
                         try self.emitNode(inner_expr);
                     }
@@ -335,7 +364,7 @@ pub const CodeGen = struct {
     }
 
     fn emitFloat(self: *CodeGen, float_idx: u16) !void {
-        const f = self.ir_constants.getFloat(float_idx) orelse 0.0;
+        const f = self.ir.getFloat(float_idx) orelse 0.0;
         // Float64 needs heap allocation via Float64Box
         const float_box = try self.allocator.create(JSValue.Float64Box);
         float_box.* = .{
@@ -349,7 +378,7 @@ pub const CodeGen = struct {
     }
 
     fn emitString(self: *CodeGen, str_idx: u16) !void {
-        const str = self.ir_constants.getString(str_idx) orelse "";
+        const str = self.ir.getString(str_idx) orelse "";
         const idx = try self.addStringConstant(str);
         try self.emitPushConst(idx);
         self.pushStack(1);
@@ -418,9 +447,9 @@ pub const CodeGen = struct {
 
     /// Try to get a constant integer value from a node
     fn tryGetConstantInt(self: *CodeGen, node_idx: NodeIndex) ?i32 {
-        const node = self.nodes.get(node_idx) orelse return null;
-        return switch (node.tag) {
-            .lit_int => node.data.int_value,
+        const tag = self.ir.getTag(node_idx) orelse return null;
+        return switch (tag) {
+            .lit_int => self.ir.getIntValue(node_idx),
             else => null,
         };
     }
@@ -459,12 +488,12 @@ pub const CodeGen = struct {
     /// Try to emit a fused arithmetic-modulo opcode for pattern: (a op b) % divisor
     /// Returns error if pattern doesn't match
     fn tryEmitFusedArithMod(self: *CodeGen, left_expr: NodeIndex, divisor: i32) !void {
-        const left_node = self.nodes.get(left_expr) orelse return error.PatternNotMatched;
+        const tag = self.ir.getTag(left_expr) orelse return error.PatternNotMatched;
 
         // Check if left expression is a binary add/sub/mul
-        if (left_node.tag != .binary_op) return error.PatternNotMatched;
+        if (tag != .binary_op) return error.PatternNotMatched;
 
-        const inner_binary = left_node.data.binary;
+        const inner_binary = self.ir.getBinary(left_expr) orelse return error.PatternNotMatched;
         const fused_opcode: Opcode = switch (inner_binary.op) {
             .add => .add_mod,
             .sub => .sub_mod,
@@ -768,7 +797,7 @@ pub const CodeGen = struct {
 
     fn emitCall(self: *CodeGen, call: Node.CallExpr) !void {
         // Check if this is a method call (callee is member access)
-        const callee_node = self.nodes.get(call.callee) orelse {
+        const callee_tag = self.ir.getTag(call.callee) orelse {
             try self.emitNode(call.callee);
             try self.emitCallArgs(call);
             try self.emit(.call);
@@ -777,15 +806,16 @@ pub const CodeGen = struct {
             return;
         };
 
-        const is_method = callee_node.tag == .member_access or callee_node.tag == .optional_chain;
+        const is_method = callee_tag == .member_access or callee_tag == .optional_chain;
 
         if (is_method) {
+            const member = self.ir.getMember(call.callee).?;
             // Method call: obj.method(args)
             // Stack: [obj] -> [obj, obj] -> [obj, method] -> [obj, method, args...] -> [result]
-            try self.emitNode(callee_node.data.member.object);
+            try self.emitNode(member.object);
             try self.emit(.dup); // Keep object as 'this'
             self.pushStack(1);
-            try self.emitGetField(callee_node.data.member.property);
+            try self.emitGetField(member.property);
 
             // Emit arguments
             try self.emitCallArgs(call);
@@ -813,7 +843,7 @@ pub const CodeGen = struct {
     fn emitCallArgs(self: *CodeGen, call: Node.CallExpr) !void {
         var i: u8 = 0;
         while (i < call.args_count) : (i += 1) {
-            const arg_idx = self.nodes.getListIndex(call.args_start, i);
+            const arg_idx = self.ir.getListIndex(call.args_start, i);
             try self.emitNode(arg_idx);
         }
     }
@@ -831,7 +861,7 @@ pub const CodeGen = struct {
     }
 
     fn emitAssignment(self: *CodeGen, assign: Node.AssignExpr) !void {
-        const target_node = self.nodes.get(assign.target) orelse return;
+        const target_tag = self.ir.getTag(assign.target) orelse return;
 
         if (assign.op) |op| {
             // Compound assignment: get current value first
@@ -844,24 +874,27 @@ pub const CodeGen = struct {
         }
 
         // Store to target
-        switch (target_node.tag) {
+        switch (target_tag) {
             .identifier => {
+                const binding = self.ir.getBinding(assign.target).?;
                 try self.emit(.dup);
                 self.pushStack(1);
-                try self.emitSetBinding(target_node.data.binding);
+                try self.emitSetBinding(binding);
             },
             .member_access => {
+                const member = self.ir.getMember(assign.target).?;
                 // Stack: value
                 // Need: object, value
-                try self.emitNode(target_node.data.member.object);
+                try self.emitNode(member.object);
                 try self.emit(.swap);
                 try self.emit(.put_field_keep);
-                try self.emitU16(target_node.data.member.property);
+                try self.emitU16(member.property);
                 self.popStack(1);
             },
             .computed_access => {
-                try self.emitNode(target_node.data.member.object);
-                try self.emitNode(target_node.data.member.computed);
+                const member = self.ir.getMember(assign.target).?;
+                try self.emitNode(member.object);
+                try self.emitNode(member.computed);
                 try self.emit(.rot3);
                 try self.emit(.put_elem);
                 self.popStack(2);
@@ -896,7 +929,7 @@ pub const CodeGen = struct {
 
         var i: u16 = 0;
         while (i < array.elements_count) : (i += 1) {
-            const elem_idx = self.nodes.getListIndex(array.elements_start, i);
+            const elem_idx = self.ir.getListIndex(array.elements_start, i);
 
             // Duplicate array reference for put_elem
             try self.emit(.dup);
@@ -926,28 +959,29 @@ pub const CodeGen = struct {
 
         var i: u16 = 0;
         while (i < object.properties_count) : (i += 1) {
-            const prop_idx = self.nodes.getListIndex(object.properties_start, i);
-            const prop_node = self.nodes.get(prop_idx) orelse continue;
+            const prop_idx = self.ir.getListIndex(object.properties_start, i);
+            const prop_tag = self.ir.getTag(prop_idx) orelse continue;
 
-            if (prop_node.tag == .object_property) {
-                const prop = prop_node.data.property;
+            if (prop_tag == .object_property) {
+                const prop = self.ir.getProperty(prop_idx).?;
 
                 try self.emit(.dup); // Duplicate object reference
                 self.pushStack(1);
 
                 // Get property key
-                const key_node = self.nodes.get(prop.key) orelse continue;
-                if (key_node.tag == .lit_string) {
+                const key_tag = self.ir.getTag(prop.key) orelse continue;
+                if (key_tag == .lit_string) {
+                    const key_str_idx = self.ir.getStringIdx(prop.key).?;
                     // Key is a string constant, use put_field with atom
                     try self.emitNode(prop.value);
                     // Get string from IR constant pool and look up/intern atom
-                    const key_str = self.ir_constants.getString(key_node.data.string_idx) orelse "";
+                    const key_str = self.ir.getString(key_str_idx) orelse "";
                     const atom_idx: u16 = if (js_object.lookupPredefinedAtom(key_str)) |atom|
                         @intCast(@intFromEnum(atom))
                     else if (self.atoms) |atoms|
                         @intCast(@intFromEnum(try atoms.intern(key_str)))
                     else
-                        @intCast(js_object.Atom.FIRST_DYNAMIC + key_node.data.string_idx);
+                        @intCast(js_object.Atom.FIRST_DYNAMIC + key_str_idx);
                     try self.emitPutField(atom_idx);
                     self.popStack(2);
                 } else {
@@ -1068,13 +1102,14 @@ pub const CodeGen = struct {
         var i: u8 = 0;
 
         while (i < template.parts_count) : (i += 1) {
-            const part_idx = self.nodes.getListIndex(template.parts_start, i);
-            const part = self.nodes.get(part_idx) orelse continue;
+            const part_idx = self.ir.getListIndex(template.parts_start, i);
+            const part_tag = self.ir.getTag(part_idx) orelse continue;
 
-            if (part.tag == .template_part_string) {
-                try self.emitString(part.data.string_idx);
-            } else if (part.tag == .template_part_expr) {
-                if (part.data.opt_value) |expr| {
+            if (part_tag == .template_part_string) {
+                const str_idx = self.ir.getStringIdx(part_idx).?;
+                try self.emitString(str_idx);
+            } else if (part_tag == .template_part_expr) {
+                if (self.ir.getOptValue(part_idx)) |expr| {
                     try self.emitNode(expr);
                     // Convert to string if needed (simplified)
                 }
@@ -1114,11 +1149,11 @@ pub const CodeGen = struct {
     }
 
     fn emitDestructuringPattern(self: *CodeGen, pattern: NodeIndex) anyerror!void {
-        const pattern_node = self.nodes.get(pattern) orelse return;
+        const pattern_tag = self.ir.getTag(pattern) orelse return;
 
-        switch (pattern_node.tag) {
-            .object_pattern => try self.emitObjectPattern(pattern_node.data.array),
-            .array_pattern => try self.emitArrayPattern(pattern_node.data.array),
+        switch (pattern_tag) {
+            .object_pattern => try self.emitObjectPattern(self.ir.getArray(pattern).?),
+            .array_pattern => try self.emitArrayPattern(self.ir.getArray(pattern).?),
             else => {},
         }
     }
@@ -1127,11 +1162,11 @@ pub const CodeGen = struct {
         // For each property in the pattern, extract from the source object
         var i: u16 = 0;
         while (i < array_data.elements_count) : (i += 1) {
-            const elem_idx = self.nodes.getListIndex(array_data.elements_start, i);
-            const elem_node = self.nodes.get(elem_idx) orelse continue;
-            if (elem_node.tag != .pattern_element) continue;
+            const elem_idx = self.ir.getListIndex(array_data.elements_start, i);
+            const elem_tag = self.ir.getTag(elem_idx) orelse continue;
+            if (elem_tag != .pattern_element) continue;
 
-            const elem = elem_node.data.pattern_elem;
+            const elem = self.ir.getPatternElem(elem_idx).?;
 
             switch (elem.kind) {
                 .simple => {
@@ -1185,17 +1220,17 @@ pub const CodeGen = struct {
         var i: u16 = 0;
         var index: u8 = 0;
         while (i < array_data.elements_count) : (i += 1) {
-            const elem_idx = self.nodes.getListIndex(array_data.elements_start, i);
-            const elem_node = self.nodes.get(elem_idx) orelse {
+            const elem_idx = self.ir.getListIndex(array_data.elements_start, i);
+            const elem_tag = self.ir.getTag(elem_idx) orelse {
                 index += 1; // Skip hole
                 continue;
             };
-            if (elem_node.tag != .pattern_element) {
+            if (elem_tag != .pattern_element) {
                 index += 1;
                 continue;
             }
 
-            const elem = elem_node.data.pattern_elem;
+            const elem = self.ir.getPatternElem(elem_idx).?;
 
             switch (elem.kind) {
                 .simple => {
@@ -1328,8 +1363,8 @@ pub const CodeGen = struct {
         // Init
         if (loop.init != null_node) {
             try self.emitNode(loop.init);
-            if (self.nodes.get(loop.init)) |init_node| {
-                if (init_node.tag != .var_decl) {
+            if (self.ir.getTag(loop.init)) |init_tag| {
+                if (init_tag != .var_decl) {
                     try self.emit(.drop);
                     self.popStack(1);
                 }
@@ -1453,12 +1488,12 @@ pub const CodeGen = struct {
         // Create labels for each case
         var i: u8 = 0;
         while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.nodes.getListIndex(switch_stmt.cases_start, i);
+            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
             const label = try self.createLabel();
             try case_labels.append(self.allocator, label);
 
-            const case_node = self.nodes.get(case_idx) orelse continue;
-            if (case_node.data.case_clause.test_expr == null_node) {
+            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
+            if (case_clause.test_expr == null_node) {
                 default_label = label;
             }
         }
@@ -1466,13 +1501,13 @@ pub const CodeGen = struct {
         // Emit comparisons
         i = 0;
         while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.nodes.getListIndex(switch_stmt.cases_start, i);
-            const case_node = self.nodes.get(case_idx) orelse continue;
+            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
+            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
 
-            if (case_node.data.case_clause.test_expr != null_node) {
+            if (case_clause.test_expr != null_node) {
                 try self.emit(.dup);
                 self.pushStack(1);
-                try self.emitNode(case_node.data.case_clause.test_expr);
+                try self.emitNode(case_clause.test_expr);
                 try self.emit(.strict_eq);
                 self.popStack(1);
                 try self.emitJump(.if_true, case_labels.items[i]);
@@ -1494,14 +1529,14 @@ pub const CodeGen = struct {
         // Emit case bodies
         i = 0;
         while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.nodes.getListIndex(switch_stmt.cases_start, i);
+            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
             try self.placeLabel(case_labels.items[i]);
 
-            const case_node = self.nodes.get(case_idx) orelse continue;
+            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
 
             var j: u16 = 0;
-            while (j < case_node.data.case_clause.body_count) : (j += 1) {
-                const body_idx = self.nodes.getListIndex(case_node.data.case_clause.body_start, j);
+            while (j < case_clause.body_count) : (j += 1) {
+                const body_idx = self.ir.getListIndex(case_clause.body_start, j);
                 try self.emitNode(body_idx);
             }
         }
@@ -1512,14 +1547,15 @@ pub const CodeGen = struct {
     fn emitBlock(self: *CodeGen, block: Node.BlockData) !void {
         var i: u16 = 0;
         while (i < block.stmts_count) : (i += 1) {
-            const stmt_idx = self.nodes.getListIndex(block.stmts_start, i);
+            const stmt_idx = self.ir.getListIndex(block.stmts_start, i);
             try self.emitNode(stmt_idx);
         }
     }
 
-    fn emitJsxElement(self: *CodeGen, node: *const Node) !void {
+    fn emitJsxElementByIndex(self: *CodeGen, index: NodeIndex) !void {
         // Emit JSX as h(tag, props, ...children) call
-        const elem = node.data.jsx_element;
+        const elem = self.ir.getJsxElement(index) orelse return;
+        const tag = self.ir.getTag(index) orelse return;
 
         // Push h function reference (predefined atom)
         try self.emit(.get_global);
@@ -1527,7 +1563,7 @@ pub const CodeGen = struct {
         self.pushStack(1);
 
         // Push tag name
-        if (node.tag == .jsx_fragment) {
+        if (tag == .jsx_fragment) {
             // Fragment - use null or Fragment symbol
             try self.emit(.push_null);
             self.pushStack(1);
@@ -1538,7 +1574,7 @@ pub const CodeGen = struct {
             self.pushStack(1);
         } else {
             // HTML tag - push as string
-            const tag_idx = try self.addStringConstant(self.ir_constants.getString(elem.tag_atom) orelse "div");
+            const tag_idx = try self.addStringConstant(self.ir.getString(elem.tag_atom) orelse "div");
             try self.emitPushConst(tag_idx);
             self.pushStack(1);
         }
@@ -1550,18 +1586,19 @@ pub const CodeGen = struct {
             // Add props
             var i: u8 = 0;
             while (i < elem.props_count) : (i += 1) {
-                const prop_idx = self.nodes.getListIndex(elem.props_start, i);
-                const prop_node = self.nodes.get(prop_idx) orelse continue;
-                if (prop_node.tag == .jsx_attribute) {
+                const prop_idx = self.ir.getListIndex(elem.props_start, i);
+                const prop_tag = self.ir.getTag(prop_idx) orelse continue;
+                if (prop_tag == .jsx_attribute) {
+                    const attr = self.ir.getJsxAttr(prop_idx) orelse continue;
                     try self.emit(.dup);
                     self.pushStack(1);
-                    if (prop_node.data.jsx_attr.value != null_node) {
-                        try self.emitNode(prop_node.data.jsx_attr.value);
+                    if (attr.value != null_node) {
+                        try self.emitNode(attr.value);
                     } else {
                         try self.emit(.push_true);
                         self.pushStack(1);
                     }
-                    try self.emitPutField(prop_node.data.jsx_attr.name_atom);
+                    try self.emitPutField(attr.name_atom);
                     self.popStack(2);
                 }
             }
@@ -1575,7 +1612,7 @@ pub const CodeGen = struct {
         if (elem.children_count > 0) {
             var i: u8 = 0;
             while (i < elem.children_count) : (i += 1) {
-                const child_idx = self.nodes.getListIndex(elem.children_start, i);
+                const child_idx = self.ir.getListIndex(elem.children_start, i);
                 try self.emitNode(child_idx);
                 child_count += 1;
             }

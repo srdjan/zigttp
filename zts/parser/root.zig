@@ -186,7 +186,7 @@ pub const Parser = struct {
         const root = try self.js_parser.parse();
 
         // Generate bytecode with string table and atoms for proper string/property handling
-        self.code_gen = CodeGen.initWithStrings(
+        self.code_gen = CodeGen.initWithIRStore(
             self.allocator,
             &self.js_parser.nodes,
             &self.js_parser.constants,
@@ -273,8 +273,8 @@ test "JSX rendering integration" {
 
     // Check nodes include jsx_element
     var found_jsx_element = false;
-    for (p.js_parser.nodes.nodes.items) |node| {
-        if (node.tag == .jsx_element) found_jsx_element = true;
+    for (p.js_parser.nodes.tags.items) |tag| {
+        if (tag == .jsx_element) found_jsx_element = true;
     }
     try std.testing.expect(found_jsx_element);
 }

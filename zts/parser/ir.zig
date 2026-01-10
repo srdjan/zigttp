@@ -142,8 +142,11 @@ pub const NodeTag = enum(u8) {
     template_part_expr,
     spread,
     await_expr,
+    yield_expr,
     sequence_expr,
     comma_expr,
+    this_expr,
+    new_expr,
 
     // Statements
     expr_stmt,
@@ -151,9 +154,16 @@ pub const NodeTag = enum(u8) {
     if_stmt,
     for_stmt,
     for_of_stmt,
+    for_in_stmt,
+    while_stmt,
+    do_while_stmt,
     switch_stmt,
     case_clause,
     return_stmt,
+    throw_stmt,
+    break_stmt,
+    continue_stmt,
+    try_stmt,
     block,
     empty_stmt,
     labeled_stmt,
@@ -161,6 +171,8 @@ pub const NodeTag = enum(u8) {
 
     // Declarations
     function_decl,
+    class_decl,
+    class_method,
 
     // Patterns (for destructuring)
     array_pattern,
@@ -973,6 +985,456 @@ pub const IRStore = struct {
             .kind = @enumFromInt(@as(u2, @truncate(d.b))),
         };
     }
+
+    // ============================================================
+    // Node Adapter: Accept full Node struct for seamless migration
+    // ============================================================
+
+    /// Add a Node struct, converting to compact SoA representation.
+    /// This method enables drop-in replacement of NodeList with IRStore
+    /// in the parser without changing node creation code.
+    pub fn add(self: *IRStore, node: Node) !NodeIndex {
+        const loc = node.loc;
+        return switch (node.tag) {
+            // --- Literals ---
+            .lit_int => self.addNode(.lit_int, loc, DataPayload.fromInt(node.data.int_value)),
+            .lit_float => self.addNode(.lit_float, loc, .{ .a = node.data.float_idx, .b = 0 }),
+            .lit_string => self.addNode(.lit_string, loc, .{ .a = node.data.string_idx, .b = 0 }),
+            .lit_bool => self.addNode(.lit_bool, loc, .{ .a = if (node.data.bool_value) 1 else 0, .b = 0 }),
+            .lit_null => self.addNode(.lit_null, loc, .{ .a = 0, .b = 0 }),
+            .lit_undefined => self.addNode(.lit_undefined, loc, .{ .a = 0, .b = 0 }),
+            .lit_regex => blk: {
+                const r = node.data.regex;
+                break :blk self.addNode(.lit_regex, loc, .{ .a = r.pattern_idx, .b = r.flags_idx });
+            },
+
+            // --- Expressions ---
+            .identifier => blk: {
+                const b = node.data.binding;
+                break :blk self.addNode(.identifier, loc, .{
+                    .a = (@as(u32, b.scope_id) << 16) | b.slot,
+                    .b = @intFromEnum(b.kind),
+                });
+            },
+            .this_expr => self.addNode(.this_expr, loc, .{ .a = 0, .b = 0 }),
+            .binary_op => self.addNode(.binary_op, loc, DataPayload.fromBinary(
+                node.data.binary.op,
+                node.data.binary.left,
+                node.data.binary.right,
+            )),
+            .unary_op => blk: {
+                const u = node.data.unary;
+                break :blk self.addNode(.unary_op, loc, .{ .a = @intFromEnum(u.op), .b = u.operand });
+            },
+            .ternary => blk: {
+                const t = node.data.ternary;
+                const extra_start = try self.addExtra(&.{ t.condition, t.then_branch, t.else_branch });
+                break :blk self.addNode(.ternary, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .call => blk: {
+                const c = node.data.call;
+                // Pack: a = callee, b = args_count(8) | args_start(16) | is_optional(8)
+                const b_val = @as(u32, c.args_count) |
+                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8) |
+                    (@as(u32, if (c.is_optional) 1 else 0) << 24);
+                break :blk self.addNode(.call, loc, .{ .a = c.callee, .b = b_val });
+            },
+            .member_access => blk: {
+                const m = node.data.member;
+                // Pack: a = object, b = property(16) | is_optional(1) << 16
+                const b_val = @as(u32, m.property) | (@as(u32, if (m.is_optional) 1 else 0) << 16);
+                break :blk self.addNode(.member_access, loc, .{ .a = m.object, .b = b_val });
+            },
+            .computed_access => blk: {
+                const m = node.data.member;
+                // Pack: a = object, b = computed | is_optional << 24
+                const b_val = m.computed | (@as(u32, if (m.is_optional) 1 else 0) << 24);
+                break :blk self.addNode(.computed_access, loc, .{ .a = m.object, .b = b_val });
+            },
+            .optional_chain => blk: {
+                const m = node.data.member;
+                const b_val = m.computed | (@as(u32, m.property) << 16);
+                break :blk self.addNode(.optional_chain, loc, .{ .a = m.object, .b = b_val });
+            },
+            .assignment => blk: {
+                const a = node.data.assignment;
+                // Pack: a = target, b = value(24) | op(8) (0 = no op, 1+ = op enum + 1)
+                const op_byte: u8 = if (a.op) |op| @as(u8, @intFromEnum(op)) + 1 else 0;
+                const b_val = @as(u32, @as(u24, @truncate(a.value))) | (@as(u32, op_byte) << 24);
+                break :blk self.addNode(.assignment, loc, .{ .a = a.target, .b = b_val });
+            },
+            .array_literal => blk: {
+                const arr = node.data.array;
+                // Pack: a = elements_start, b = elements_count(16) | has_spread(1) << 16
+                const b_val = @as(u32, arr.elements_count) | (@as(u32, if (arr.has_spread) 1 else 0) << 16);
+                break :blk self.addNode(.array_literal, loc, .{ .a = arr.elements_start, .b = b_val });
+            },
+            .object_literal => blk: {
+                const obj = node.data.object;
+                break :blk self.addNode(.object_literal, loc, .{ .a = obj.properties_start, .b = obj.properties_count });
+            },
+            .object_property => blk: {
+                const p = node.data.property;
+                // Pack: a = key, b = value(24) | is_computed(1) << 24 | is_shorthand(1) << 25
+                const flags: u32 = (@as(u32, if (p.is_computed) 1 else 0) << 24) |
+                    (@as(u32, if (p.is_shorthand) 1 else 0) << 25);
+                const b_val = @as(u32, @as(u24, @truncate(p.value))) | flags;
+                break :blk self.addNode(.object_property, loc, .{ .a = p.key, .b = b_val });
+            },
+            .object_spread => self.addNode(.object_spread, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+            .spread => self.addNode(.spread, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+            .new_expr => blk: {
+                const c = node.data.call;
+                const b_val = @as(u32, c.args_count) | (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
+                break :blk self.addNode(.new_expr, loc, .{ .a = c.callee, .b = b_val });
+            },
+            .yield_expr, .await_expr => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+
+            // --- Function expressions ---
+            .function_expr, .arrow_function => blk: {
+                const f = node.data.function;
+                // Store in extra: [scope_id, name_atom, params_start, params_count, body, flags]
+                const flags_u8: u8 = @bitCast(f.flags);
+                const extra_start = try self.addExtra(&.{
+                    f.scope_id,
+                    f.name_atom,
+                    f.params_start,
+                    f.params_count,
+                    f.body,
+                    @as(u32, flags_u8),
+                });
+                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
+            },
+            // Note: function_decl uses var_decl data (binding + init function)
+            .function_decl => blk: {
+                const v = node.data.var_decl;
+                const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
+                const kind_and_binding_kind = @as(u32, @intFromEnum(v.kind)) |
+                    (@as(u32, @intFromEnum(v.binding.kind)) << 2);
+                const extra_start = try self.addExtra(&.{
+                    binding_packed,
+                    v.pattern,
+                    v.init,
+                    kind_and_binding_kind,
+                });
+                break :blk self.addNode(.function_decl, loc, .{ .a = extra_start, .b = 0 });
+            },
+
+            // --- Template literals ---
+            .template_literal => blk: {
+                const t = node.data.template;
+                break :blk self.addNode(.template_literal, loc, .{
+                    .a = t.parts_start,
+                    .b = @as(u32, t.parts_count) | (@as(u32, @as(u16, @truncate(t.tag))) << 8),
+                });
+            },
+            .template_part_string => self.addNode(.template_part_string, loc, .{ .a = node.data.string_idx, .b = 0 }),
+            .template_part_expr => self.addNode(.template_part_expr, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+
+            // --- Statements ---
+            .var_decl => blk: {
+                const v = node.data.var_decl;
+                // Store in extra: [binding_packed, pattern, init, kind]
+                const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
+                const kind_and_binding_kind = @as(u32, @intFromEnum(v.kind)) |
+                    (@as(u32, @intFromEnum(v.binding.kind)) << 2);
+                const extra_start = try self.addExtra(&.{
+                    binding_packed,
+                    v.pattern,
+                    v.init,
+                    kind_and_binding_kind,
+                });
+                break :blk self.addNode(.var_decl, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .if_stmt => blk: {
+                const i = node.data.if_stmt;
+                const extra_start = try self.addExtra(&.{ i.condition, i.then_branch, i.else_branch });
+                break :blk self.addNode(.if_stmt, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .while_stmt, .do_while_stmt, .for_stmt => blk: {
+                const l = node.data.loop;
+                // Store in extra: [kind, init, condition, update, body]
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(l.kind),
+                    l.init,
+                    l.condition,
+                    l.update,
+                    l.body,
+                });
+                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .for_of_stmt, .for_in_stmt => blk: {
+                const f = node.data.for_iter;
+                const binding_packed = (@as(u32, f.binding.scope_id) << 16) | f.binding.slot;
+                const flags = (@as(u32, if (f.is_for_in) 1 else 0)) |
+                    (@as(u32, if (f.is_const) 1 else 0) << 1) |
+                    (@as(u32, @intFromEnum(f.binding.kind)) << 2);
+                // Store: [flags, binding_packed, pattern, iterable, flags, body]
+                const extra_start = try self.addExtra(&.{
+                    flags,
+                    binding_packed,
+                    f.pattern,
+                    f.iterable,
+                    flags,
+                    f.body,
+                });
+                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .switch_stmt => blk: {
+                const s = node.data.switch_stmt;
+                break :blk self.addNode(.switch_stmt, loc, .{
+                    .a = s.discriminant,
+                    .b = @as(u32, @as(u16, @truncate(s.cases_start))) | (@as(u32, s.cases_count) << 16),
+                });
+            },
+            .case_clause => blk: {
+                const c = node.data.case_clause;
+                break :blk self.addNode(.case_clause, loc, .{
+                    .a = c.test_expr,
+                    .b = @as(u32, @as(u16, @truncate(c.body_start))) | (@as(u32, c.body_count) << 16),
+                });
+            },
+            .return_stmt, .throw_stmt => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+            .break_stmt, .continue_stmt => self.addNode(node.tag, loc, .{ .a = node.data.opt_label orelse 0, .b = 0 }),
+            .try_stmt => blk: {
+                const t = node.data.try_stmt;
+                const binding_packed = (@as(u32, t.catch_binding.scope_id) << 16) | t.catch_binding.slot;
+                const extra_start = try self.addExtra(&.{
+                    t.try_block,
+                    binding_packed,
+                    t.catch_block,
+                    t.finally_block,
+                });
+                break :blk self.addNode(.try_stmt, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .block, .program => blk: {
+                const b = node.data.block;
+                break :blk self.addNode(node.tag, loc, .{
+                    .a = b.stmts_start,
+                    .b = @as(u32, b.stmts_count) | (@as(u32, b.scope_id) << 16),
+                });
+            },
+            .expr_stmt => self.addNode(.expr_stmt, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+            .empty_stmt => self.addNode(.empty_stmt, loc, .{ .a = 0, .b = 0 }),
+            .debugger_stmt => self.addNode(.debugger_stmt, loc, .{ .a = 0, .b = 0 }),
+
+            // --- Patterns ---
+            .pattern_element, .pattern_rest, .object_pattern, .array_pattern => blk: {
+                if (node.tag == .object_pattern or node.tag == .array_pattern) {
+                    const arr = node.data.array;
+                    const b_val = @as(u32, arr.elements_count) | (@as(u32, if (arr.has_spread) 1 else 0) << 16);
+                    break :blk self.addNode(node.tag, loc, .{ .a = arr.elements_start, .b = b_val });
+                }
+                const p = node.data.pattern_elem;
+                const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot |
+                    (@as(u32, @intFromEnum(p.binding.kind)) << 30);
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(p.kind),
+                    binding_packed,
+                    p.key,
+                    p.key_atom,
+                    p.default_value,
+                });
+                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
+            },
+
+            // --- JSX ---
+            .jsx_element, .jsx_fragment => blk: {
+                const j = node.data.jsx_element;
+                // Store in extra: [tag_atom, props_start, props_count, children_start, children_count | flags]
+                const flags = (@as(u32, j.children_count) << 8) |
+                    (@as(u32, if (j.is_component) 1 else 0)) |
+                    (@as(u32, if (j.self_closing) 1 else 0) << 1);
+                const extra_start = try self.addExtra(&.{
+                    j.tag_atom,
+                    j.props_start,
+                    j.props_count,
+                    j.children_start,
+                    flags,
+                });
+                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .jsx_attribute => blk: {
+                const a = node.data.jsx_attr;
+                const b_val = @as(u32, @as(u24, @truncate(a.value))) | (@as(u32, if (a.is_spread) 1 else 0) << 24);
+                break :blk self.addNode(.jsx_attribute, loc, .{ .a = a.name_atom, .b = b_val });
+            },
+            .jsx_spread_attribute => blk: {
+                const a = node.data.jsx_attr;
+                break :blk self.addNode(.jsx_spread_attribute, loc, .{ .a = a.value, .b = 0 });
+            },
+            .jsx_text => self.addNode(.jsx_text, loc, .{ .a = node.data.jsx_text, .b = 0 }),
+            .jsx_expr_container => self.addNode(.jsx_expr_container, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+
+            // --- Classes ---
+            .class_decl => blk: {
+                const c = node.data.class_decl;
+                const binding_packed = (@as(u32, c.binding.scope_id) << 16) | c.binding.slot;
+                const extra_start = try self.addExtra(&.{
+                    c.scope_id,
+                    c.name_atom,
+                    c.super_class,
+                    c.members_start,
+                    c.members_count,
+                    binding_packed,
+                });
+                break :blk self.addNode(.class_decl, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .class_method => blk: {
+                const m = node.data.class_member;
+                const flags = (@as(u32, @intFromEnum(m.kind))) |
+                    (@as(u32, if (m.is_static) 1 else 0) << 2) |
+                    (@as(u32, if (m.is_computed) 1 else 0) << 3);
+                const extra_start = try self.addExtra(&.{ m.key, m.value, flags });
+                break :blk self.addNode(.class_method, loc, .{ .a = extra_start, .b = 0 });
+            },
+
+            // --- Imports/Exports ---
+            .import_decl => blk: {
+                const i = node.data.import_decl;
+                break :blk self.addNode(.import_decl, loc, .{
+                    .a = i.module_idx,
+                    .b = @as(u32, @as(u16, @truncate(i.specifiers_start))) | (@as(u32, i.specifiers_count) << 16),
+                });
+            },
+            .import_specifier => blk: {
+                const i = node.data.import_spec;
+                const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(i.kind),
+                    i.imported_atom,
+                    binding_packed,
+                });
+                break :blk self.addNode(.import_specifier, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .export_decl => blk: {
+                const e = node.data.export_decl;
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(e.kind),
+                    e.declaration,
+                    e.specifiers_start,
+                    e.specifiers_count,
+                    e.from_module_idx,
+                });
+                break :blk self.addNode(.export_decl, loc, .{ .a = extra_start, .b = 0 });
+            },
+
+            // --- Labeled ---
+            .labeled_stmt => blk: {
+                const l = node.data.labeled;
+                break :blk self.addNode(.labeled_stmt, loc, .{ .a = l.label_atom, .b = l.body });
+            },
+
+            // --- Call variants ---
+            .method_call => blk: {
+                const c = node.data.call;
+                const b_val = @as(u32, c.args_count) |
+                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8) |
+                    (@as(u32, if (c.is_optional) 1 else 0) << 24);
+                break :blk self.addNode(.method_call, loc, .{ .a = c.callee, .b = b_val });
+            },
+            .optional_call => blk: {
+                const c = node.data.call;
+                const b_val = @as(u32, c.args_count) | (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
+                break :blk self.addNode(.optional_call, loc, .{ .a = c.callee, .b = b_val });
+            },
+
+            // --- Object method/accessor ---
+            .object_method, .object_getter, .object_setter => blk: {
+                const p = node.data.property;
+                const flags: u32 = (@as(u32, if (p.is_computed) 1 else 0) << 24);
+                const b_val = @as(u32, @as(u24, @truncate(p.value))) | flags;
+                break :blk self.addNode(node.tag, loc, .{ .a = p.key, .b = b_val });
+            },
+
+            // --- Sequence/Comma ---
+            .sequence_expr, .comma_expr => blk: {
+                const arr = node.data.array;
+                break :blk self.addNode(node.tag, loc, .{
+                    .a = arr.elements_start,
+                    .b = @as(u32, arr.elements_count),
+                });
+            },
+
+            // --- Pattern default ---
+            .pattern_default => blk: {
+                const p = node.data.pattern_elem;
+                const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot;
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(p.kind),
+                    binding_packed,
+                    p.key,
+                    p.key_atom,
+                    p.default_value,
+                });
+                break :blk self.addNode(.pattern_default, loc, .{ .a = extra_start, .b = 0 });
+            },
+
+            // --- Import/Export variants ---
+            .import_default, .import_namespace => blk: {
+                const i = node.data.import_spec;
+                const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(i.kind),
+                    i.imported_atom,
+                    binding_packed,
+                });
+                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .export_specifier => blk: {
+                const e = node.data.export_decl;
+                const extra_start = try self.addExtra(&.{
+                    @intFromEnum(e.kind),
+                    e.declaration,
+                    e.specifiers_start,
+                    e.specifiers_count,
+                    e.from_module_idx,
+                });
+                break :blk self.addNode(.export_specifier, loc, .{ .a = extra_start, .b = 0 });
+            },
+            .export_default, .export_all => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+
+            // --- Internal markers (no data) ---
+            .param_list, .arg_list, .stmt_list => self.addNode(node.tag, loc, .{ .a = 0, .b = 0 }),
+        };
+    }
+
+    /// Get a Node struct from index (for compatibility during migration)
+    /// Note: This reconstructs the Node from SoA storage, less efficient than direct access
+    pub fn get(self: *const IRStore, idx: NodeIndex) ?Node {
+        if (idx >= self.tags.items.len) return null;
+        const tag = self.tags.items[idx];
+        const loc = self.locs.items[idx];
+        const d = self.data.items[idx];
+
+        return Node{
+            .tag = tag,
+            .loc = loc,
+            .data = switch (tag) {
+                .lit_int => .{ .int_value = d.toInt() },
+                .lit_float => .{ .float_idx = @truncate(d.a) },
+                .lit_string => .{ .string_idx = @truncate(d.a) },
+                .lit_bool => .{ .bool_value = d.a != 0 },
+                .lit_null, .lit_undefined, .this_expr, .empty_stmt, .debugger_stmt => .{ .none = {} },
+                .identifier => .{ .binding = self.getBinding(idx) },
+                .binary_op => blk: {
+                    const bin = d.toBinary();
+                    break :blk .{ .binary = .{ .op = bin.op, .left = bin.left, .right = bin.right } };
+                },
+                .unary_op => .{ .unary = .{ .op = @enumFromInt(@as(u4, @truncate(d.a))), .operand = d.b } },
+                .return_stmt, .throw_stmt, .expr_stmt, .spread, .object_spread,
+                .yield_expr, .await_expr, .template_part_expr, .jsx_expr_container,
+                => .{ .opt_value = if (d.a == null_node) null else d.a },
+                .block, .program => .{ .block = .{
+                    .stmts_start = d.a,
+                    .stmts_count = @truncate(d.b),
+                    .scope_id = @truncate(d.b >> 16),
+                } },
+                // For complex types, return minimal data - full reconstruction available via IrView
+                else => .{ .none = {} },
+            },
+        };
+    }
 };
 
 test "node creation" {
@@ -1085,4 +1547,637 @@ test "IRStore memory efficiency" {
 
     // NodeTag should be 1 byte
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(NodeTag));
+}
+
+// ============================================================================
+// Phase 8: IrView Abstraction Layer
+// ============================================================================
+
+/// Unified view for IR access - can be backed by NodeList (AoS) or IRStore (SoA).
+/// This abstraction enables safe migration from NodeList to IRStore without
+/// changing codegen code.
+///
+/// Usage:
+/// ```zig
+/// // With NodeList (current)
+/// var view = IrView.fromNodeList(&nodes, &ir_constants);
+///
+/// // With IRStore (future)
+/// var view = IrView.fromIRStore(&store, &ir_constants);
+///
+/// // Access is the same:
+/// const tag = view.getTag(idx);
+/// const binary = view.getBinary(idx);
+/// ```
+pub const IrView = struct {
+    impl: Impl,
+    ir_constants: *const ConstantPool,
+
+    const Impl = union(enum) {
+        node_list: *const NodeList,
+        ir_store: *const IRStore,
+    };
+
+    /// Create view from NodeList (Array-of-Structs)
+    pub fn fromNodeList(nodes: *const NodeList, constants: *const ConstantPool) IrView {
+        return .{
+            .impl = .{ .node_list = nodes },
+            .ir_constants = constants,
+        };
+    }
+
+    /// Create view from IRStore (Structure-of-Arrays)
+    pub fn fromIRStore(store: *const IRStore, constants: *const ConstantPool) IrView {
+        return .{
+            .impl = .{ .ir_store = store },
+            .ir_constants = constants,
+        };
+    }
+
+    // ============ Core Accessors ============
+
+    /// Get node tag
+    pub fn getTag(self: IrView, idx: NodeIndex) ?NodeTag {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.tag else null,
+            .ir_store => |ir| if (idx < ir.tags.items.len) ir.tags.items[idx] else null,
+        };
+    }
+
+    /// Get node source location
+    pub fn getLoc(self: IrView, idx: NodeIndex) ?SourceLocation {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.loc else null,
+            .ir_store => |ir| if (idx < ir.locs.items.len) ir.locs.items[idx] else null,
+        };
+    }
+
+    /// Check if node index is valid
+    pub fn isValid(self: IrView, idx: NodeIndex) bool {
+        if (idx == null_node) return false;
+        return switch (self.impl) {
+            .node_list => |nl| idx < nl.nodes.items.len,
+            .ir_store => |ir| idx < ir.tags.items.len,
+        };
+    }
+
+    /// Get index from list storage
+    pub fn getListIndex(self: IrView, list_start: NodeIndex, offset: u16) NodeIndex {
+        return switch (self.impl) {
+            .node_list => |nl| nl.getListIndex(list_start, offset),
+            .ir_store => |ir| ir.getListIndex(list_start, offset),
+        };
+    }
+
+    // ============ Literal Accessors ============
+
+    /// Get integer literal value
+    pub fn getIntValue(self: IrView, idx: NodeIndex) ?i32 {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.int_value else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) ir.data.items[idx].toInt() else null,
+        };
+    }
+
+    /// Get float literal index into constant pool
+    pub fn getFloatIdx(self: IrView, idx: NodeIndex) ?u16 {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.float_idx else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null,
+        };
+    }
+
+    /// Get string literal index into constant pool
+    pub fn getStringIdx(self: IrView, idx: NodeIndex) ?u16 {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.string_idx else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null,
+        };
+    }
+
+    /// Get boolean literal value
+    pub fn getBoolValue(self: IrView, idx: NodeIndex) ?bool {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.bool_value else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) ir.data.items[idx].a != 0 else null,
+        };
+    }
+
+    // ============ Expression Accessors ============
+
+    /// Get identifier/binding reference
+    pub fn getBinding(self: IrView, idx: NodeIndex) ?BindingRef {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.binding else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) ir.getBinding(idx) else null,
+        };
+    }
+
+    /// Get binary expression data
+    pub fn getBinary(self: IrView, idx: NodeIndex) ?Node.BinaryExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.binary else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const bin = ir.data.items[idx].toBinary();
+                break :blk .{
+                    .op = bin.op,
+                    .left = bin.left,
+                    .right = bin.right,
+                };
+            },
+        };
+    }
+
+    /// Get unary expression data
+    pub fn getUnary(self: IrView, idx: NodeIndex) ?Node.UnaryExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.unary else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .op = @enumFromInt(@as(u4, @truncate(d.a))),
+                    .operand = d.b,
+                };
+            },
+        };
+    }
+
+    /// Get ternary expression data
+    pub fn getTernary(self: IrView, idx: NodeIndex) ?Node.TernaryExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.ternary else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                // Ternary uses extra data: [condition, then, else]
+                const extra_start = d.a;
+                break :blk .{
+                    .condition = ir.extra.items[extra_start],
+                    .then_branch = ir.extra.items[extra_start + 1],
+                    .else_branch = ir.extra.items[extra_start + 2],
+                };
+            },
+        };
+    }
+
+    /// Get call expression data
+    pub fn getCall(self: IrView, idx: NodeIndex) ?Node.CallExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.call else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                // Call packed: a = callee, b[0:8] = args_count, b[8:24] = args_start, b[24] = is_optional
+                break :blk .{
+                    .callee = d.a,
+                    .args_start = @truncate(d.b >> 8),
+                    .args_count = @truncate(d.b),
+                    .is_optional = (d.b >> 24) != 0,
+                };
+            },
+        };
+    }
+
+    /// Get member access expression data
+    pub fn getMember(self: IrView, idx: NodeIndex) ?Node.MemberExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.member else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                // Member packed: a = object, b[0:16] = property, b[16:17] = is_optional
+                // computed stored in extra if present
+                break :blk .{
+                    .object = d.a,
+                    .property = @truncate(d.b),
+                    .computed = null_node, // TODO: handle computed in extra
+                    .is_optional = (d.b >> 16) != 0,
+                };
+            },
+        };
+    }
+
+    /// Get assignment expression data
+    pub fn getAssignment(self: IrView, idx: NodeIndex) ?Node.AssignExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.assignment else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                // Assignment: a = target, b[0:24] = value, b[24:32] = op (0 = none)
+                const op_byte: u8 = @truncate(d.b >> 24);
+                break :blk .{
+                    .target = d.a,
+                    .value = @truncate(d.b),
+                    .op = if (op_byte == 0) null else @enumFromInt(op_byte - 1),
+                };
+            },
+        };
+    }
+
+    /// Get array literal data
+    pub fn getArray(self: IrView, idx: NodeIndex) ?Node.ArrayExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.array else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .elements_start = d.a,
+                    .elements_count = @truncate(d.b),
+                    .has_spread = (d.b >> 16) != 0,
+                };
+            },
+        };
+    }
+
+    /// Get object literal data
+    pub fn getObject(self: IrView, idx: NodeIndex) ?Node.ObjectExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.object else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .properties_start = d.a,
+                    .properties_count = @truncate(d.b),
+                };
+            },
+        };
+    }
+
+    /// Get property expression data
+    pub fn getProperty(self: IrView, idx: NodeIndex) ?Node.PropertyExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.property else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                // Property: a = key, b[0:24] = value, b[24] = is_computed, b[25] = is_shorthand
+                break :blk .{
+                    .key = d.a,
+                    .value = @truncate(d.b),
+                    .is_computed = (d.b >> 24) & 1 != 0,
+                    .is_shorthand = (d.b >> 25) & 1 != 0,
+                };
+            },
+        };
+    }
+
+    /// Get function expression data
+    pub fn getFunction(self: IrView, idx: NodeIndex) ?Node.FunctionExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.function else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                // Function uses extra data for full structure
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                break :blk .{
+                    .scope_id = @truncate(extra[extra_start]),
+                    .name_atom = @truncate(extra[extra_start + 1]),
+                    .params_start = extra[extra_start + 2],
+                    .params_count = @truncate(extra[extra_start + 3]),
+                    .body = extra[extra_start + 4],
+                    .flags = @bitCast(@as(u8, @truncate(extra[extra_start + 5]))),
+                };
+            },
+        };
+    }
+
+    /// Get template literal data
+    pub fn getTemplate(self: IrView, idx: NodeIndex) ?Node.TemplateExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.template else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .parts_start = d.a,
+                    .parts_count = @truncate(d.b),
+                    .tag = @truncate(d.b >> 8),
+                };
+            },
+        };
+    }
+
+    // ============ Statement Accessors ============
+
+    /// Get variable declaration data
+    pub fn getVarDecl(self: IrView, idx: NodeIndex) ?Node.VarDecl {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.var_decl else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                // VarDecl in extra: [binding_packed, pattern, init, kind]
+                const binding_packed = extra[extra_start];
+                break :blk .{
+                    .binding = .{
+                        .scope_id = @truncate(binding_packed >> 16),
+                        .slot = @truncate(binding_packed),
+                        .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start + 3] >> 2))),
+                    },
+                    .pattern = extra[extra_start + 1],
+                    .init = extra[extra_start + 2],
+                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start + 3]))),
+                };
+            },
+        };
+    }
+
+    /// Get if statement data
+    pub fn getIfStmt(self: IrView, idx: NodeIndex) ?Node.IfStmt {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.if_stmt else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                break :blk .{
+                    .condition = extra[extra_start],
+                    .then_branch = extra[extra_start + 1],
+                    .else_branch = extra[extra_start + 2],
+                };
+            },
+        };
+    }
+
+    /// Get loop statement data
+    pub fn getLoop(self: IrView, idx: NodeIndex) ?Node.LoopStmt {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.loop else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                break :blk .{
+                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .init = extra[extra_start + 1],
+                    .condition = extra[extra_start + 2],
+                    .update = extra[extra_start + 3],
+                    .body = extra[extra_start + 4],
+                };
+            },
+        };
+    }
+
+    /// Get for-of/for-in statement data
+    pub fn getForIter(self: IrView, idx: NodeIndex) ?Node.ForIterStmt {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.for_iter else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                const binding_packed = extra[extra_start + 1];
+                const flags = extra[extra_start + 4];
+                break :blk .{
+                    .is_for_in = (flags & 1) != 0,
+                    .binding = .{
+                        .scope_id = @truncate(binding_packed >> 16),
+                        .slot = @truncate(binding_packed),
+                        .kind = @enumFromInt(@as(u2, @truncate(flags >> 2))),
+                    },
+                    .pattern = extra[extra_start + 2],
+                    .iterable = extra[extra_start + 3],
+                    .body = extra[extra_start + 5],
+                    .is_const = (flags >> 1) & 1 != 0,
+                };
+            },
+        };
+    }
+
+    /// Get switch statement data
+    pub fn getSwitchStmt(self: IrView, idx: NodeIndex) ?Node.SwitchStmt {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.switch_stmt else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .discriminant = d.a,
+                    .cases_start = @truncate(d.b),
+                    .cases_count = @truncate(d.b >> 16),
+                };
+            },
+        };
+    }
+
+    /// Get case clause data
+    pub fn getCaseClause(self: IrView, idx: NodeIndex) ?Node.CaseClause {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.case_clause else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .test_expr = d.a,
+                    .body_start = @truncate(d.b),
+                    .body_count = @truncate(d.b >> 16),
+                };
+            },
+        };
+    }
+
+    /// Get block data
+    pub fn getBlock(self: IrView, idx: NodeIndex) ?Node.BlockData {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.block else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .stmts_start = d.a,
+                    .stmts_count = @truncate(d.b),
+                    .scope_id = @truncate(d.b >> 16),
+                };
+            },
+        };
+    }
+
+    /// Get optional value (for return, expr_stmt, etc.)
+    pub fn getOptValue(self: IrView, idx: NodeIndex) ?NodeIndex {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.opt_value else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const val = ir.data.items[idx].a;
+                break :blk if (val == null_node) null else val;
+            },
+        };
+    }
+
+    // ============ JSX Accessors ============
+
+    /// Get JSX element data
+    pub fn getJsxElement(self: IrView, idx: NodeIndex) ?Node.JsxElement {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.jsx_element else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                const flags = extra[extra_start + 4];
+                break :blk .{
+                    .tag_atom = @truncate(extra[extra_start]),
+                    .is_component = (flags & 1) != 0,
+                    .props_start = extra[extra_start + 1],
+                    .props_count = @truncate(extra[extra_start + 2]),
+                    .children_start = extra[extra_start + 3],
+                    .children_count = @truncate(extra[extra_start + 4] >> 8),
+                    .self_closing = (flags >> 1) & 1 != 0,
+                };
+            },
+        };
+    }
+
+    /// Get JSX attribute data
+    pub fn getJsxAttr(self: IrView, idx: NodeIndex) ?Node.JsxAttr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.jsx_attr else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .name_atom = @truncate(d.a),
+                    .value = @truncate(d.b),
+                    .is_spread = (d.b >> 24) != 0,
+                };
+            },
+        };
+    }
+
+    /// Get JSX text index
+    pub fn getJsxText(self: IrView, idx: NodeIndex) ?u16 {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.jsx_text else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null,
+        };
+    }
+
+    // ============ Pattern Accessors ============
+
+    /// Get pattern element data
+    pub fn getPatternElem(self: IrView, idx: NodeIndex) ?Node.PatternElem {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.pattern_elem else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                const binding_packed = extra[extra_start + 1];
+                break :blk .{
+                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .binding = .{
+                        .scope_id = @truncate(binding_packed >> 16),
+                        .slot = @truncate(binding_packed),
+                        .kind = @enumFromInt(@as(u2, @truncate(binding_packed >> 30))),
+                    },
+                    .key = extra[extra_start + 2],
+                    .key_atom = @truncate(extra[extra_start + 3]),
+                    .default_value = extra[extra_start + 4],
+                };
+            },
+        };
+    }
+
+    // ============ Constant Pool Access ============
+
+    /// Get string from constant pool
+    pub fn getString(self: IrView, str_idx: u16) ?[]const u8 {
+        return self.ir_constants.getString(str_idx);
+    }
+
+    /// Get float from constant pool
+    pub fn getFloat(self: IrView, float_idx: u16) ?f64 {
+        return self.ir_constants.getFloat(float_idx);
+    }
+};
+
+test "IrView NodeList basic operations" {
+    const allocator = std.testing.allocator;
+
+    var nodes = NodeList.init(allocator);
+    defer nodes.deinit();
+
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+
+    // Add nodes
+    const int_idx = try nodes.add(Node.litInt(loc, 42));
+    const bool_idx = try nodes.add(Node.litBool(loc, true));
+    const left = try nodes.add(Node.litInt(loc, 10));
+    const right = try nodes.add(Node.litInt(loc, 20));
+    const binary_idx = try nodes.add(Node.binaryOp(loc, .add, left, right));
+
+    // Create view
+    const view = IrView.fromNodeList(&nodes, &constants);
+
+    // Test basic accessors
+    try std.testing.expectEqual(NodeTag.lit_int, view.getTag(int_idx).?);
+    try std.testing.expectEqual(@as(i32, 42), view.getIntValue(int_idx).?);
+
+    try std.testing.expectEqual(NodeTag.lit_bool, view.getTag(bool_idx).?);
+    try std.testing.expect(view.getBoolValue(bool_idx).?);
+
+    // Test binary expression
+    try std.testing.expectEqual(NodeTag.binary_op, view.getTag(binary_idx).?);
+    const binary = view.getBinary(binary_idx).?;
+    try std.testing.expectEqual(BinaryOp.add, binary.op);
+    try std.testing.expectEqual(left, binary.left);
+    try std.testing.expectEqual(right, binary.right);
+
+    // Test validity
+    try std.testing.expect(view.isValid(int_idx));
+    try std.testing.expect(!view.isValid(null_node));
+    try std.testing.expect(!view.isValid(999999));
+}
+
+test "IrView IRStore basic operations" {
+    const allocator = std.testing.allocator;
+
+    var store = IRStore.init(allocator);
+    defer store.deinit();
+
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+
+    // Add nodes using IRStore
+    const int_idx = try store.addLitInt(loc, 42);
+    const left = try store.addLitInt(loc, 10);
+    const right = try store.addLitInt(loc, 20);
+    const binary_idx = try store.addBinary(loc, .add, left, right);
+
+    // Create view
+    const view = IrView.fromIRStore(&store, &constants);
+
+    // Test basic accessors
+    try std.testing.expectEqual(NodeTag.lit_int, view.getTag(int_idx).?);
+    try std.testing.expectEqual(@as(i32, 42), view.getIntValue(int_idx).?);
+
+    // Test binary expression
+    try std.testing.expectEqual(NodeTag.binary_op, view.getTag(binary_idx).?);
+    const binary = view.getBinary(binary_idx).?;
+    try std.testing.expectEqual(BinaryOp.add, binary.op);
+    try std.testing.expectEqual(left, binary.left);
+    try std.testing.expectEqual(right, binary.right);
+
+    // Test validity
+    try std.testing.expect(view.isValid(int_idx));
+    try std.testing.expect(!view.isValid(null_node));
 }
