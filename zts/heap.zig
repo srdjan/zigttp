@@ -24,8 +24,9 @@ pub const MemTag = enum(u4) {
 pub const MemBlockHeader = packed struct {
     gc_mark: bool = false,
     tag: MemTag,
-    // Size in words (for variable-size blocks)
-    size_words: u27 = 0,
+    // Size in words (for variable-size blocks) - u26 supports up to 512MB objects
+    size_words: u26 = 0,
+    is_remembered: bool = false, // In GC remembered set (write barrier optimization)
 
     pub fn init(tag: MemTag, size_bytes: usize) MemBlockHeader {
         const words = (size_bytes + 7) / 8;
@@ -109,6 +110,7 @@ const LargeHeader = struct {
     size: usize,
     tag: MemTag,
     gc_mark: bool,
+    is_remembered: bool = false, // In GC remembered set (write barrier optimization)
 };
 
 /// Size class allocator with segregated free lists
@@ -347,6 +349,22 @@ pub const Heap = struct {
         const data_ptr: [*]u8 = @ptrCast(ptr);
         const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
         return header.gc_mark;
+    }
+
+    /// Set remembered set bit (for write barrier optimization)
+    pub fn setRemembered(self: *Heap, ptr: *anyopaque, remembered: bool) void {
+        _ = self;
+        const data_ptr: [*]u8 = @ptrCast(ptr);
+        const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
+        header.is_remembered = remembered;
+    }
+
+    /// Get remembered set bit
+    pub fn getRemembered(self: *Heap, ptr: *anyopaque) bool {
+        _ = self;
+        const data_ptr: [*]u8 = @ptrCast(ptr);
+        const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
+        return header.is_remembered;
     }
 
     /// Allocate a Float64 box (raw allocation without extra header)

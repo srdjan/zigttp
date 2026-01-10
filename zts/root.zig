@@ -46,6 +46,8 @@ pub const stripper = @import("stripper.zig");
 pub const comptime_eval = @import("comptime.zig");
 pub const intern_pool = @import("intern_pool.zig");
 pub const bytecode_cache = @import("bytecode_cache.zig");
+pub const bytecode_opt = @import("bytecode_opt.zig");
+pub const perf = @import("perf.zig");
 
 // Re-export main types for convenience
 pub const JSValue = value.JSValue;
@@ -79,6 +81,15 @@ pub const emitLiteral = comptime_eval.emitLiteral;
 pub const InternPool = intern_pool.InternPool;
 pub const InternPoolIndex = intern_pool.Index;
 pub const BytecodeCache = bytecode_cache.BytecodeCache;
+pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
+pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
+pub const OptStats = bytecode_opt.OptStats;
+pub const PerfReport = perf.PerfReport;
+pub const CompileStats = perf.CompileStats;
+pub const RuntimeStats = perf.RuntimeStats;
+pub const GCStats = perf.GCStats;
+pub const OpcodeProfile = perf.OpcodeProfile;
+pub const Timer = perf.Timer;
 
 /// Version information
 pub const version = struct {

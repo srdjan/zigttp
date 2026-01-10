@@ -169,10 +169,20 @@ pub const Opcode = enum(u8) {
     mul_2 = 0xAA, // Multiply by 2 (common pattern x * 2)
     mod_const = 0xAB, // +u16 divisor_const_idx: pop a; push a % divisor
 
+    // Inline i8 constant opcodes (no constant pool lookup)
+    mod_const_i8 = 0xAD, // +i8 divisor: pop a; push a % divisor
+    add_const_i8 = 0xAE, // +i8 value: pop a; push a + value
+    sub_const_i8 = 0xAF, // +i8 value: pop a; push a - value
+
     // Inline cache instructions
     get_field_ic = 0xB0, // +u16 atom_idx +u16 cache_idx
     put_field_ic = 0xB1, // +u16 atom_idx +u16 cache_idx
     call_ic = 0xB2, // +u8 argc +u16 cache_idx
+
+    // More inline i8 constant opcodes
+    mul_const_i8 = 0xB3, // +i8 value: pop a; push a * value
+    lt_const_i8 = 0xB4, // +i8 value: pop a; push a < value
+    le_const_i8 = 0xB5, // +i8 value: pop a; push a <= value
 
     // Closure operations
     get_upvalue = 0xC0, // +u8 upvalue_idx
@@ -331,10 +341,20 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .mul_2 => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "mul_2" },
         .mod_const => .{ .size = 3, .n_pop = 1, .n_push = 1, .name = "mod_const" },
 
+        // Inline i8 constant opcodes
+        .mod_const_i8 => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "mod_const_i8" },
+        .add_const_i8 => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "add_const_i8" },
+        .sub_const_i8 => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "sub_const_i8" },
+
         // Inline cache instructions
         .get_field_ic => .{ .size = 5, .n_pop = 1, .n_push = 1, .name = "get_field_ic" },
         .put_field_ic => .{ .size = 5, .n_pop = 2, .n_push = 0, .name = "put_field_ic" },
         .call_ic => .{ .size = 4, .n_pop = 0, .n_push = 1, .name = "call_ic" },
+
+        // More inline i8 constant opcodes
+        .mul_const_i8 => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "mul_const_i8" },
+        .lt_const_i8 => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "lt_const_i8" },
+        .le_const_i8 => .{ .size = 2, .n_pop = 1, .n_push = 1, .name = "le_const_i8" },
 
         // Closure operations
         .get_upvalue => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "get_upvalue" },

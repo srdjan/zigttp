@@ -1290,6 +1290,42 @@ pub const Interpreter = struct {
                     }
                 },
 
+                // Fused push_const + call: load constant and call in one dispatch
+                .push_const_call => {
+                    const const_idx = readU16(self.pc);
+                    const argc: u8 = self.pc[2];
+                    self.pc += 3;
+                    // Push the constant (function to call)
+                    try self.ctx.push(try self.getConstant(const_idx));
+                    // Call it
+                    try self.doCall(argc, false);
+                },
+
+                // Fused get_field + call_method: load method and call in one dispatch
+                .get_field_call => {
+                    const atom_idx = readU16(self.pc);
+                    const argc: u8 = self.pc[2];
+                    self.pc += 3;
+                    const atom: object.Atom = @enumFromInt(atom_idx);
+
+                    // Stack: [obj]
+                    // Need to: dup obj, get method, call_method
+                    const obj = self.ctx.peek();
+                    if (obj.isObject()) {
+                        const js_obj = object.JSObject.fromValue(obj);
+                        if (js_obj.getProperty(atom)) |method| {
+                            // Push method on stack (obj is still there)
+                            try self.ctx.push(method);
+                            // Call as method (will use obj as 'this')
+                            try self.doCall(argc, true);
+                            continue :dispatch;
+                        }
+                    }
+                    // Fallback: property not found, push undefined and call
+                    try self.ctx.push(value.JSValue.undefined_val);
+                    try self.doCall(argc, true);
+                },
+
                 // Fused arithmetic-modulo: (a op b) % divisor
                 // Uses i64 intermediate to avoid overflow, then modulo brings result back to i32 range
                 .add_mod => {
@@ -1525,6 +1561,129 @@ pub const Interpreter = struct {
                     // Fallback to helper (handles division by zero error)
                     self.ctx.stack[sp - 1] = try modValues(a, divisor_val);
                     continue :dispatch;
+                },
+
+                .mod_const_i8 => {
+                    // Modulo by inline i8 constant (no constant pool lookup)
+                    const divisor: i8 = @bitCast(self.pc[0]);
+                    self.pc += 1;
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt() and divisor != 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), divisor));
+                        continue :dispatch;
+                    }
+                    // Fallback
+                    self.ctx.stack[sp - 1] = try modValues(a, value.JSValue.fromInt(divisor));
+                },
+
+                .add_const_i8 => {
+                    // Add inline i8 constant
+                    const constant: i8 = @bitCast(self.pc[0]);
+                    self.pc += 1;
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt()) {
+                        @branchHint(.likely);
+                        const result = @addWithOverflow(a.getInt(), constant);
+                        if (result[1] == 0) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                            continue :dispatch;
+                        }
+                        // Overflow - convert to float
+                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(constant)));
+                        continue :dispatch;
+                    }
+                    // Fallback
+                    self.ctx.stack[sp - 1] = try self.addValues(a, value.JSValue.fromInt(constant));
+                },
+
+                .sub_const_i8 => {
+                    // Subtract inline i8 constant
+                    const constant: i8 = @bitCast(self.pc[0]);
+                    self.pc += 1;
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt()) {
+                        @branchHint(.likely);
+                        const result = @subWithOverflow(a.getInt(), constant);
+                        if (result[1] == 0) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                            continue :dispatch;
+                        }
+                        // Overflow - convert to float
+                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(constant)));
+                        continue :dispatch;
+                    }
+                    // Fallback
+                    self.ctx.stack[sp - 1] = try self.subValues(a, value.JSValue.fromInt(constant));
+                },
+
+                .mul_const_i8 => {
+                    // Multiply by inline i8 constant
+                    const constant: i8 = @bitCast(self.pc[0]);
+                    self.pc += 1;
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt()) {
+                        @branchHint(.likely);
+                        const ai: i64 = a.getInt();
+                        const result = ai * constant;
+                        if (result >= std.math.minInt(i32) and result <= std.math.maxInt(i32)) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intCast(result));
+                            continue :dispatch;
+                        }
+                        // Overflow - convert to float
+                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(result)));
+                        continue :dispatch;
+                    }
+                    // Fallback
+                    self.ctx.stack[sp - 1] = try self.mulValues(a, value.JSValue.fromInt(constant));
+                },
+
+                .lt_const_i8 => {
+                    // Less than inline i8 constant (common in loop conditions)
+                    const constant: i8 = @bitCast(self.pc[0]);
+                    self.pc += 1;
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt()) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 1] = if (a.getInt() < constant) value.JSValue.true_val else value.JSValue.false_val;
+                        continue :dispatch;
+                    }
+                    // Fallback for floats (null from toNumber = NaN, comparisons with NaN are false)
+                    const num = a.toNumber() orelse {
+                        self.ctx.stack[sp - 1] = value.JSValue.false_val;
+                        continue :dispatch;
+                    };
+                    self.ctx.stack[sp - 1] = if (num < @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
+                },
+
+                .le_const_i8 => {
+                    // Less than or equal to inline i8 constant
+                    const constant: i8 = @bitCast(self.pc[0]);
+                    self.pc += 1;
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+
+                    if (a.isInt()) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 1] = if (a.getInt() <= constant) value.JSValue.true_val else value.JSValue.false_val;
+                        continue :dispatch;
+                    }
+                    // Fallback for floats (null from toNumber = NaN, comparisons with NaN are false)
+                    const num = a.toNumber() orelse {
+                        self.ctx.stack[sp - 1] = value.JSValue.false_val;
+                        continue :dispatch;
+                    };
+                    self.ctx.stack[sp - 1] = if (num <= @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
                 },
 
                 // ========================================

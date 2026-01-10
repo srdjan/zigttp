@@ -669,41 +669,59 @@ pub const NodeList = struct {
 };
 
 /// Constant pool for strings and floats
+/// Uses hash maps for O(1) deduplication instead of O(n) linear scan
 pub const ConstantPool = struct {
     strings: std.ArrayList([]const u8),
     floats: std.ArrayList(f64),
     allocator: std.mem.Allocator,
+
+    // Hash maps for O(1) deduplication (keys point to indices in arrays)
+    string_index: std.StringHashMapUnmanaged(u16),
+    float_index: std.AutoHashMapUnmanaged(u64, u16),
 
     pub fn init(allocator: std.mem.Allocator) ConstantPool {
         return .{
             .strings = .empty,
             .floats = .empty,
             .allocator = allocator,
+            .string_index = .{},
+            .float_index = .{},
         };
     }
 
     pub fn deinit(self: *ConstantPool) void {
+        self.string_index.deinit(self.allocator);
+        self.float_index.deinit(self.allocator);
         self.strings.deinit(self.allocator);
         self.floats.deinit(self.allocator);
     }
 
     pub fn addString(self: *ConstantPool, str: []const u8) !u16 {
-        // Check for existing (simple dedup)
-        for (self.strings.items, 0..) |s, i| {
-            if (std.mem.eql(u8, s, str)) return @intCast(i);
+        // O(1) hash lookup for deduplication
+        const result = try self.string_index.getOrPut(self.allocator, str);
+        if (result.found_existing) {
+            return result.value_ptr.*;
         }
-        const idx = @as(u16, @intCast(self.strings.items.len));
+        // New string - add to array and update hash map
+        const idx: u16 = @intCast(self.strings.items.len);
         try self.strings.append(self.allocator, str);
+        result.value_ptr.* = idx;
         return idx;
     }
 
     pub fn addFloat(self: *ConstantPool, f: f64) !u16 {
-        // Check for existing
-        for (self.floats.items, 0..) |v, i| {
-            if (v == f) return @intCast(i);
+        // Use bit representation as key for stable hashing
+        const bits: u64 = @bitCast(f);
+
+        // O(1) hash lookup for deduplication
+        const result = try self.float_index.getOrPut(self.allocator, bits);
+        if (result.found_existing) {
+            return result.value_ptr.*;
         }
-        const idx = @as(u16, @intCast(self.floats.items.len));
+        // New float - add to array and update hash map
+        const idx: u16 = @intCast(self.floats.items.len);
         try self.floats.append(self.allocator, f);
+        result.value_ptr.* = idx;
         return idx;
     }
 
