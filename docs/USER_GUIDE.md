@@ -1202,6 +1202,20 @@ function handler(request) {
 
 ## Performance Tuning for FaaS
 
+### Benchmarks
+
+zts outperforms QuickJS on most operations relevant to FaaS workloads:
+
+| Operation | zts | QuickJS | Improvement |
+|-----------|-----|---------|-------------|
+| stringOps | 16.3M ops/s | 258K ops/s | 63x faster |
+| objectCreate | 8.1M ops/s | 1.7M ops/s | 4.8x faster |
+| propertyAccess | 13.2M ops/s | 3.4M ops/s | 3.9x faster |
+| httpHandler | 1.0M ops/s | 332K ops/s | 3.1x faster |
+| functionCalls | 12.4M ops/s | 5.1M ops/s | 2.4x faster |
+
+Run benchmarks: `./zig-out/bin/zigttp-bench`
+
 ### Memory Configuration
 
 ```bash
@@ -1221,6 +1235,17 @@ zigttp-server is optimized for FaaS cold starts:
 - Binary initialization: < 1ms
 - Handler loading: typically < 5ms
 - No JIT warm-up required
+
+### Hybrid Arena Allocation
+
+For request-scoped workloads, zts uses a hybrid memory model that eliminates GC latency spikes:
+
+- **Arena allocator**: All request-scoped objects are allocated from a contiguous memory region
+- **O(1) reset**: Between requests, the arena is reset in constant time (no per-object deallocation)
+- **No GC pauses**: Garbage collection is disabled during request handling
+- **Escape detection**: Write barriers prevent arena objects from leaking into persistent storage
+
+This design is ideal for FaaS environments where predictable latency matters more than throughput.
 
 ### Optimize Handler Code
 

@@ -299,6 +299,7 @@ zts uses a **generational garbage collector** with:
 1. NaN-boxing for efficient value representation (64-bit tagged values)
 2. Hidden classes for inline caching (V8-style optimization)
 3. RuntimePool for request isolation in FaaS environments
+4. Hybrid arena allocation for request-scoped memory with O(1) reset
 
 The Result<T> pattern throughout makes error handling explicit and prevents silent failures.
 
@@ -318,6 +319,7 @@ zigttp-server/
 │   ├── object.zig         # Hidden classes, object system
 │   ├── gc.zig             # Generational GC (nursery + tenured)
 │   ├── heap.zig           # Size-class segregated allocator
+│   ├── arena.zig          # Request-scoped arena allocator
 │   ├── http.zig           # HTTP/JSX runtime for SSR
 │   ├── pool.zig           # Lock-free runtime pooling
 │   ├── builtins.zig       # Built-in JavaScript functions
@@ -376,12 +378,41 @@ fn myNativeFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSVa
 
 See `src/bindings.zig` for examples of console, fetch, and Deno API implementations.
 
-## Performance for FaaS
+## Performance
+
+### Benchmarks vs QuickJS
+
+zts outperforms mquickjs (QuickJS baseline) on most operations:
+
+| Benchmark | zts | mquickjs | Ratio |
+|-----------|-----|----------|-------|
+| stringOps | 16.3M ops/s | 258K ops/s | **63x faster** |
+| objectCreate | 8.1M ops/s | 1.7M ops/s | **4.8x faster** |
+| propertyAccess | 13.2M ops/s | 3.4M ops/s | **3.9x faster** |
+| httpHandler | 1.0M ops/s | 332K ops/s | **3.1x faster** |
+| functionCalls | 12.4M ops/s | 5.1M ops/s | **2.4x faster** |
+| stringConcat | 8.3M ops/s | 6.2M ops/s | **1.3x faster** |
+| arrayOps | 8.7M ops/s | 6.6M ops/s | **1.3x faster** |
+| jsonOps | 77K ops/s | 71K ops/s | **1.1x faster** |
+
+Run benchmarks with: `./zig-out/bin/zigttp-bench`
+
+### FaaS Optimizations
 
 - **Cold start**: < 1ms to initialize runtime and load handler
 - **Warm invocations**: RuntimePool reuses pre-warmed contexts
 - **Memory**: 256KB default JS heap (configurable per function)
 - **Deployment size**: ~500KB binary, zero runtime dependencies
+
+### Hybrid Arena Allocation
+
+For request-scoped workloads, zts uses a hybrid memory model:
+
+- **Arena allocator**: O(1) bulk reset between requests, zero per-object overhead
+- **Escape detection**: Write barriers prevent arena objects from leaking into persistent storage
+- **GC disabled in hybrid mode**: No collection pauses during request handling
+
+This design eliminates GC latency spikes in FaaS environments while maintaining memory safety.
 
 ### Deployment Patterns
 

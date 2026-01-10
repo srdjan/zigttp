@@ -27,6 +27,9 @@ zig build run -- examples/handler.js -p 3000
 zig build test                      # All src/ tests
 zig build test-zts             # zts engine tests only
 zig build test-zruntime             # Native Zig runtime tests only
+
+# Benchmark
+./zig-out/bin/zigttp-bench          # Run benchmarks with mquickjs comparison
 ```
 
 ## Architecture
@@ -52,6 +55,7 @@ zig build test-zruntime             # Native Zig runtime tests only
 - **zts/context.zig** - JS execution context (globals, stack, atoms)
 - **zts/gc.zig** - Generational GC (nursery + tenured)
 - **zts/heap.zig** - Size-class segregated allocator
+- **zts/arena.zig** - Request-scoped arena allocator with O(1) reset
 - **zts/pool.zig** - Lock-free runtime pooling
 - **zts/builtins.zig** - Built-in JavaScript functions
 
@@ -78,7 +82,18 @@ zig build test-zruntime             # Native Zig runtime tests only
 
 ### Memory Model
 
-Generational GC with nursery (young generation) and tenured (old generation) heaps. Each runtime instance has isolated memory. Size-class segregated allocator for efficient small object allocation.
+**Generational GC**: Nursery (young generation) and tenured (old generation) heaps. Each runtime instance has isolated memory. Size-class segregated allocator for efficient small object allocation.
+
+**Hybrid Arena Allocation**: For FaaS workloads, zts supports a hybrid memory model where request-scoped objects are allocated from an arena:
+
+- `arena.zig` provides O(1) bulk reset between requests
+- `HybridAllocator` wraps arena with fallback to GC allocator
+- Objects track their allocation source via `is_arena` flag in ObjectFlags
+- `arena_ptr` field on JSObject enables arena-aware overflow slot allocation
+- Write barriers in `setProperty` detect arena escape (storing arena object into persistent object)
+- GC is disabled when `hybrid_mode` is true on the GC struct
+
+This eliminates per-object allocation overhead and GC pauses during request handling while preventing use-after-free through escape detection.
 
 ## JavaScript Runtime
 
