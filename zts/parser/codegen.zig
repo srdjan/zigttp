@@ -470,6 +470,36 @@ pub const CodeGen = struct {
             }
         }
 
+        // Pattern: x >> 1 - emit optimized shr_1 opcode
+        if (binary.op == .shr) {
+            if (self.tryGetConstantInt(binary.right)) |shift_amt| {
+                if (shift_amt == 1) {
+                    try self.emitNode(binary.left);
+                    try self.emit(.shr_1);
+                    return;
+                }
+            }
+        }
+
+        // Pattern: x * 2 - emit optimized mul_2 opcode
+        if (binary.op == .mul) {
+            if (self.tryGetConstantInt(binary.right)) |val| {
+                if (val == 2) {
+                    try self.emitNode(binary.left);
+                    try self.emit(.mul_2);
+                    return;
+                }
+            }
+            // Also check left operand: 2 * x
+            if (self.tryGetConstantInt(binary.left)) |val| {
+                if (val == 2) {
+                    try self.emitNode(binary.right);
+                    try self.emit(.mul_2);
+                    return;
+                }
+            }
+        }
+
         try self.emitNode(binary.left);
         try self.emitNode(binary.right);
 
@@ -1213,9 +1243,9 @@ pub const CodeGen = struct {
     }
 
     fn emitForIterLoop(self: *CodeGen, for_iter: Node.ForIterStmt) !void {
-        // For-of loop over arrays
-        // Uses stack layout: [array, index]
-        // The binding local is used for the current element
+        // For-of loop using optimized for_of_next superinstruction
+        // Stack layout: [iterable, index]
+        // for_of_next combines: bounds check + element fetch + index increment
 
         const loop_start = try self.createLabel();
         const loop_end = try self.createLabel();
@@ -1226,58 +1256,40 @@ pub const CodeGen = struct {
             .continue_label = continue_label,
         });
 
-        // Push array onto stack
+        // Push iterable and initial index (0)
         try self.emitNode(for_iter.iterable);
-        // Push initial index (0)
         try self.emit(.push_0);
         self.pushStack(1);
 
         // Loop start
-        // Stack: [array, index]
+        // Stack: [iterable, index]
         try self.placeLabel(loop_start);
 
-        // Check: index < array.length
-        // Stack: [array, index]
-        try self.emit(.dup2); // [array, index, array, index]
-        self.pushStack(2);
-        try self.emit(.swap); // [array, index, index, array]
-        try self.emit(.get_length); // [array, index, index, length]
-        try self.emit(.lt); // [array, index, (index < length)]
-        self.popStack(2);
-        try self.emitJump(.if_false, loop_end);
-        self.popStack(1);
-        // Stack: [array, index]
-
-        // Get current element: array[index]
-        try self.emit(.dup2); // [array, index, array, index]
-        self.pushStack(2);
-        try self.emit(.get_elem); // [array, index, element]
-        self.popStack(1);
+        // for_of_next: check bounds, push element, increment index
+        // If index >= length, jumps to loop_end
+        // Stack: [iterable, index] -> [iterable, index+1, element]
+        try self.emitJump(.for_of_next, loop_end);
+        self.pushStack(1); // Element pushed on success
 
         // Store element in loop binding
         try self.emitSetBinding(for_iter.binding);
-        // Stack: [array, index]
+        // Stack: [iterable, index]
 
         // Execute loop body
         try self.emitNode(for_iter.body);
 
-        // Continue label
+        // Continue label (for continue statements)
         try self.placeLabel(continue_label);
 
-        // Increment index: index = index + 1
-        // Stack: [array, index]
-        try self.emit(.inc);
-        // Stack: [array, index+1]
-
+        // Jump back to loop start (index already incremented by for_of_next)
         try self.emitJump(.goto, loop_start);
 
-        // Loop end
+        // Loop end - cleanup
         try self.placeLabel(loop_end);
-        // Stack: [array, index]
-        // Clean up both values
-        try self.emit(.drop);
+        // Stack: [iterable, index]
+        try self.emit(.drop); // drop index
         self.popStack(1);
-        try self.emit(.drop);
+        try self.emit(.drop); // drop iterable
         self.popStack(1);
 
         _ = self.loop_stack.pop();

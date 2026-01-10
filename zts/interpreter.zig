@@ -288,6 +288,7 @@ pub const Interpreter = struct {
     ///
     /// Public because native callbacks may need to call back into JS.
     pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
+        @setEvalBranchQuota(10000);
         dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
             const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
             self.pc += 1;
@@ -421,10 +422,12 @@ pub const Interpreter = struct {
                     const a = self.ctx.stack[sp - 2];
                     // Inline integer fast path
                     if (a.isInt() and b.isInt()) {
+                        @branchHint(.likely);
                         const ai = a.getInt();
                         const bi = b.getInt();
                         const result = @addWithOverflow(ai, bi);
                         if (result[1] == 0) {
+                            @branchHint(.likely);
                             self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
                             self.ctx.sp = sp - 1;
                             continue :dispatch;
@@ -433,10 +436,12 @@ pub const Interpreter = struct {
                         self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
                         self.ctx.sp = sp - 1;
                         continue :dispatch;
+                    } else {
+                        // Slow path for strings/floats
+                        @branchHint(.cold);
+                        self.ctx.sp = sp - 2;
+                        self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
                     }
-                    // Slow path for strings/floats
-                    self.ctx.sp = sp - 2;
-                    self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
                 },
 
                 .sub => {
@@ -444,10 +449,12 @@ pub const Interpreter = struct {
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
                     if (a.isInt() and b.isInt()) {
+                        @branchHint(.likely);
                         const ai = a.getInt();
                         const bi = b.getInt();
                         const result = @subWithOverflow(ai, bi);
                         if (result[1] == 0) {
+                            @branchHint(.likely);
                             self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
                             self.ctx.sp = sp - 1;
                             continue :dispatch;
@@ -456,9 +463,11 @@ pub const Interpreter = struct {
                         self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
                         self.ctx.sp = sp - 1;
                         continue :dispatch;
+                    } else {
+                        @branchHint(.cold);
+                        self.ctx.sp = sp - 2;
+                        self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
                     }
-                    self.ctx.sp = sp - 2;
-                    self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
                 },
 
                 .mul => {
@@ -466,10 +475,12 @@ pub const Interpreter = struct {
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
                     if (a.isInt() and b.isInt()) {
+                        @branchHint(.likely);
                         const ai = a.getInt();
                         const bi = b.getInt();
                         const result = @mulWithOverflow(ai, bi);
                         if (result[1] == 0) {
+                            @branchHint(.likely);
                             self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
                             self.ctx.sp = sp - 1;
                             continue :dispatch;
@@ -478,9 +489,11 @@ pub const Interpreter = struct {
                         self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
                         self.ctx.sp = sp - 1;
                         continue :dispatch;
+                    } else {
+                        @branchHint(.cold);
+                        self.ctx.sp = sp - 2;
+                        self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
                     }
-                    self.ctx.sp = sp - 2;
-                    self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
                 },
 
                 .div => {
@@ -494,8 +507,10 @@ pub const Interpreter = struct {
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
                     if (a.isInt() and b.isInt()) {
+                        @branchHint(.likely);
                         const bv = b.getInt();
                         if (bv != 0) {
+                            @branchHint(.likely);
                             self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(a.getInt(), bv));
                             self.ctx.sp = sp - 1;
                             continue :dispatch;
@@ -520,9 +535,11 @@ pub const Interpreter = struct {
                     const sp = self.ctx.sp;
                     const a = self.ctx.stack[sp - 1];
                     if (a.isInt()) {
+                        @branchHint(.likely);
                         const ai = a.getInt();
                         const result = @addWithOverflow(ai, 1);
                         if (result[1] == 0) {
+                            @branchHint(.likely);
                             self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
                             continue :dispatch;
                         }
@@ -625,12 +642,15 @@ pub const Interpreter = struct {
                     const a = self.ctx.stack[sp - 2];
                     // Inline integer fast path
                     if (a.isInt() and b.isInt()) {
+                        @branchHint(.likely);
                         self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() < b.getInt());
                         self.ctx.sp = sp - 1;
                         continue :dispatch;
+                    } else {
+                        @branchHint(.cold);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
+                        self.ctx.sp = sp - 1;
                     }
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
-                    self.ctx.sp = sp - 1;
                 },
 
                 .lte => {
@@ -1348,6 +1368,94 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 2;
                     const mul_result = try self.mulValues(a, b);
                     self.ctx.pushUnchecked(try modValues(mul_result, divisor_val));
+                },
+
+                // ========================================
+                // Loop Optimization Superinstructions
+                // ========================================
+                .for_of_next => {
+                    // Combined bounds check + element fetch + index increment
+                    // Stack: [iterable, index] -> [iterable, index+1] with element pushed
+                    // Or jumps to end_offset if iteration complete
+                    const end_offset = readI16(self.pc);
+                    self.pc += 2;
+                    const sp = self.ctx.sp;
+                    const idx_val = self.ctx.stack[sp - 1];
+                    const iter_val = self.ctx.stack[sp - 2];
+
+                    if (iter_val.isObject() and idx_val.isInt()) {
+                        @branchHint(.likely);
+                        const obj = object.JSObject.fromValue(iter_val);
+                        const idx = idx_val.getInt();
+                        if (idx >= 0) {
+                            @branchHint(.likely);
+                            const idx_u: u32 = @intCast(idx);
+                            // Array fast path
+                            if (obj.class_id == .array) {
+                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+                                if (idx_u < len) {
+                                    @branchHint(.likely);
+                                    // Push element, increment index in-place
+                                    try self.ctx.push(obj.getIndexUnchecked(idx_u));
+                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                    continue :dispatch;
+                                }
+                            }
+                            // Range iterator fast path
+                            else if (obj.class_id == .range_iterator) {
+                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+                                if (idx_u < len) {
+                                    @branchHint(.likely);
+                                    const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                                    const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                                    try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                    continue :dispatch;
+                                }
+                            }
+                        }
+                    }
+                    // Loop done - jump to cleanup
+                    self.offsetPc(end_offset);
+                },
+
+                // ========================================
+                // Specialized Constant Opcodes
+                // ========================================
+                .shr_1 => {
+                    // Optimized shift right by 1 (common pattern x >> 1)
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+                    if (a.isInt()) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(a.getInt() >> 1);
+                        continue :dispatch;
+                    }
+                    // Fallback for non-integer
+                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(toInt32(a) >> 1);
+                },
+
+                .mul_2 => {
+                    // Optimized multiply by 2 (common pattern x * 2)
+                    const sp = self.ctx.sp;
+                    const a = self.ctx.stack[sp - 1];
+                    if (a.isInt()) {
+                        const ai = a.getInt();
+                        // Use shift left with overflow check (multiply by 2 = shift left 1)
+                        const result = @shlWithOverflow(ai, 1);
+                        if (result[1] == 0) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                            continue :dispatch;
+                        }
+                        // Overflow - convert to float
+                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * 2.0);
+                        continue :dispatch;
+                    }
+                    // Float path
+                    if (a.isFloat64()) {
+                        self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() * 2.0);
+                        continue :dispatch;
+                    }
+                    return error.TypeError;
                 },
 
                 // ========================================

@@ -160,6 +160,13 @@ pub const Opcode = enum(u8) {
     sub_mod = 0xA6, // +u16 divisor_const_idx: pop a,b; push (a-b) % divisor
     mul_mod = 0xA7, // +u16 divisor_const_idx: pop a,b; push (a*b) % divisor
 
+    // Loop optimization superinstructions
+    for_of_next = 0xA8, // +i16 end_offset: check bounds, push element, increment index
+
+    // Specialized constant opcodes
+    shr_1 = 0xA9, // Shift right by 1 (common pattern x >> 1)
+    mul_2 = 0xAA, // Multiply by 2 (common pattern x * 2)
+
     // Inline cache instructions
     get_field_ic = 0xB0, // +u16 atom_idx +u16 cache_idx
     put_field_ic = 0xB1, // +u16 atom_idx +u16 cache_idx
@@ -312,6 +319,13 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .add_mod => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "add_mod" },
         .sub_mod => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "sub_mod" },
         .mul_mod => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "mul_mod" },
+
+        // Loop optimization superinstructions
+        .for_of_next => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "for_of_next" },
+
+        // Specialized constant opcodes
+        .shr_1 => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "shr_1" },
+        .mul_2 => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "mul_2" },
 
         // Inline cache instructions
         .get_field_ic => .{ .size = 5, .n_pop = 1, .n_push = 1, .name = "get_field_ic" },
