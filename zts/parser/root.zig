@@ -67,9 +67,9 @@ pub const ParseOptions = struct {
     strict_mode: bool = true,
 };
 
-/// Parse result containing bytecode and any errors
+/// Parse result containing IR and any errors
 pub const ParseResult = struct {
-    nodes: NodeList,
+    nodes: IRStore,
     constants: ConstantPool,
     scopes: ScopeAnalyzer,
     errors: ErrorList,

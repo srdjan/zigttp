@@ -1,401 +1,582 @@
-//! InternPool - Canonical storage for runtime constants
+//! InternPool - Canonical storage for interned values
 //!
-//! Provides O(1) equality checking and deduplication for:
-//! - Integers (small values inline, larger via storage)
-//! - Floats (deduplicated by bit pattern)
-//! - Strings (interned with O(1) comparison)
-//! - Atoms (property names)
+//! Every type and value gets a unique index; identical types/values map to
+//! the same index, enabling O(1) comparison. This is the foundation for
+//! bytecode caching and type comparison optimization.
 //!
-//! Well-known values like undefined, null, true, false, 0, 1 have
-//! pre-assigned indices that require no storage.
+//! Design inspired by Zig compiler's InternPool pattern:
+//! - Compact indices instead of pointers
+//! - Deduplication via hash maps
+//! - Well-known values for common constants
 
 const std = @import("std");
-const value = @import("value.zig");
-const object = @import("object.zig");
+
+/// First index for dynamically interned values
+pub const FIRST_DYNAMIC_INDEX: u32 = 16;
 
 /// Index into the InternPool
-/// Well-known values have fixed indices that don't require storage
+/// Well-known values have fixed indices for fast comparison
 pub const Index = enum(u32) {
-    // Well-known values (indices 0-15 reserved, no storage needed)
-    undefined = 0,
-    null_val = 1,
+    // Well-known values (no storage needed)
+    null_val = 0,
+    undefined_val = 1,
     true_val = 2,
     false_val = 3,
-    zero = 4,
-    one = 5,
-    neg_one = 6,
-    empty_string = 7,
-    nan = 8,
-    pos_inf = 9,
-    neg_inf = 10,
-    // Reserved for future well-known values
-    _reserved_11 = 11,
-    _reserved_12 = 12,
-    _reserved_13 = 13,
-    _reserved_14 = 14,
-    _reserved_15 = 15,
-    /// Dynamic indices
+    empty_string = 4,
+    zero_int = 5,
+    one_int = 6,
+    nan_val = 7,
+    pos_inf = 8,
+    neg_inf = 9,
     _,
 
-    /// First dynamically allocated index
-    pub const FIRST_DYNAMIC: u32 = 16;
-
-    /// Sentinel for "no value"
-    pub const none: Index = @enumFromInt(std.math.maxInt(u32));
-
+    /// Check if this is a well-known value
     pub fn isWellKnown(self: Index) bool {
-        return @intFromEnum(self) < FIRST_DYNAMIC;
+        return @intFromEnum(self) < FIRST_DYNAMIC_INDEX;
     }
 
-    pub fn isNone(self: Index) bool {
-        return self == none;
-    }
-
+    /// Get the raw index value
     pub fn toInt(self: Index) u32 {
         return @intFromEnum(self);
     }
-
-    pub fn fromInt(val: u32) Index {
-        return @enumFromInt(val);
-    }
-
-    /// Convert to JSValue
-    pub fn toValue(self: Index, pool: *const InternPool) value.JSValue {
-        return pool.getValue(self);
-    }
 };
 
-/// Item tag - determines interpretation of data field
+/// Tag for interned items
 pub const Tag = enum(u8) {
-    /// Signed 32-bit integer stored directly in data field
-    int32,
-    /// Float64 - data is index into float storage
-    float64,
-    /// String - data is start index into string_bytes, next u32 is length
-    string,
-    /// Atom (property name) - data is atom value
-    atom,
-    /// Function bytecode reference - data is index into function storage
-    function,
+    // Special well-known values (no extra storage)
+    well_known,
+
+    // Integer values
+    int_i32, // data is the i32 value directly
+    int_i64, // data is index into extra_data (8 bytes)
+
+    // Float values
+    float64, // data is index into extra_data (8 bytes)
+
+    // Strings
+    string, // data is offset into string_bytes, extra has length
+
+    // Future extensions for bytecode caching:
+    // function_sig,
+    // object_shape,
+    // array_type,
 };
 
-/// Single item in the pool
+/// Item stored in the InternPool
 pub const Item = struct {
     tag: Tag,
+    /// Payload data - interpretation depends on tag
+    /// For int_i32: the value itself
+    /// For float64/int_i64: index into extra_data
+    /// For string: offset into string_bytes
     data: u32,
 };
 
-/// Canonical storage for runtime constants
+/// InternPool for canonical value storage
 pub const InternPool = struct {
     allocator: std.mem.Allocator,
 
-    /// Items stored as structure-of-arrays
-    tags: std.ArrayListUnmanaged(Tag),
-    data: std.ArrayListUnmanaged(u32),
+    /// Items storage
+    items: std.ArrayListUnmanaged(Item),
 
-    /// Extra data for variable-length content
-    extra: std.ArrayListUnmanaged(u32),
+    /// Extra data for values that don't fit in 4 bytes
+    extra_data: std.ArrayListUnmanaged(u32),
 
-    /// String byte storage
+    /// String bytes storage (all interned strings concatenated)
     string_bytes: std.ArrayListUnmanaged(u8),
 
-    /// Float64 storage (separate for alignment)
-    floats: std.ArrayListUnmanaged(f64),
+    /// String lengths (parallel to string offsets)
+    string_lengths: std.ArrayListUnmanaged(u32),
 
-    /// String deduplication map: hash -> index
+    // Deduplication maps
     string_map: std.StringHashMapUnmanaged(Index),
+    float_map: std.AutoHashMapUnmanaged(u64, Index), // f64 bits -> index
+    int_map: std.AutoHashMapUnmanaged(i32, Index), // i32 -> index
 
-    /// Float deduplication map: bits -> index
-    float_map: std.AutoHashMapUnmanaged(u64, Index),
-
-    /// Integer deduplication for values outside i8 range
-    int_map: std.AutoHashMapUnmanaged(i32, Index),
+    /// Next index to allocate
+    next_index: u32,
 
     pub fn init(allocator: std.mem.Allocator) InternPool {
         return .{
             .allocator = allocator,
-            .tags = .empty,
-            .data = .empty,
-            .extra = .empty,
+            .items = .empty,
+            .extra_data = .empty,
             .string_bytes = .empty,
-            .floats = .empty,
+            .string_lengths = .empty,
             .string_map = .{},
             .float_map = .{},
             .int_map = .{},
+            .next_index = FIRST_DYNAMIC_INDEX,
         };
     }
 
     pub fn deinit(self: *InternPool) void {
-        self.tags.deinit(self.allocator);
-        self.data.deinit(self.allocator);
-        self.extra.deinit(self.allocator);
+        self.items.deinit(self.allocator);
+        self.extra_data.deinit(self.allocator);
         self.string_bytes.deinit(self.allocator);
-        self.floats.deinit(self.allocator);
+        self.string_lengths.deinit(self.allocator);
         self.string_map.deinit(self.allocator);
         self.float_map.deinit(self.allocator);
         self.int_map.deinit(self.allocator);
     }
 
-    /// Intern an integer, returning canonical index
-    pub fn internInt(self: *InternPool, val: i32) !Index {
-        // Check for well-known values
-        if (val == 0) return .zero;
-        if (val == 1) return .one;
-        if (val == -1) return .neg_one;
+    // ========================================================================
+    // Well-known value accessors
+    // ========================================================================
 
-        // Check dedup map for larger values
-        if (self.int_map.get(val)) |existing| {
-            return existing;
-        }
-
-        // Allocate new entry
-        const idx = try self.addItem(.int32, @bitCast(val));
-        try self.int_map.put(self.allocator, val, idx);
-        return idx;
+    pub fn getNullVal(_: *const InternPool) Index {
+        return .null_val;
     }
 
-    /// Intern a float64, returning canonical index
-    pub fn internFloat(self: *InternPool, val: f64) !Index {
-        const bits: u64 = @bitCast(val);
-
-        // Check for well-known values
-        if (std.math.isNan(val)) return .nan;
-        if (val == std.math.inf(f64)) return .pos_inf;
-        if (val == -std.math.inf(f64)) return .neg_inf;
-        if (bits == 0) return .zero; // +0.0
-
-        // Check dedup map
-        if (self.float_map.get(bits)) |existing| {
-            return existing;
-        }
-
-        // Store float and create entry
-        const float_idx = self.floats.items.len;
-        try self.floats.append(self.allocator, val);
-
-        const idx = try self.addItem(.float64, @intCast(float_idx));
-        try self.float_map.put(self.allocator, bits, idx);
-        return idx;
+    pub fn getUndefinedVal(_: *const InternPool) Index {
+        return .undefined_val;
     }
 
-    /// Intern a string, returning canonical index
+    pub fn getTrueVal(_: *const InternPool) Index {
+        return .true_val;
+    }
+
+    pub fn getFalseVal(_: *const InternPool) Index {
+        return .false_val;
+    }
+
+    pub fn getEmptyString(_: *const InternPool) Index {
+        return .empty_string;
+    }
+
+    pub fn getZeroInt(_: *const InternPool) Index {
+        return .zero_int;
+    }
+
+    pub fn getOneInt(_: *const InternPool) Index {
+        return .one_int;
+    }
+
+    pub fn getNaN(_: *const InternPool) Index {
+        return .nan_val;
+    }
+
+    // ========================================================================
+    // String interning
+    // ========================================================================
+
+    /// Intern a string, returning its canonical index
     pub fn internString(self: *InternPool, str: []const u8) !Index {
-        // Check for empty string
-        if (str.len == 0) return .empty_string;
+        // Check for empty string (well-known)
+        if (str.len == 0) {
+            return .empty_string;
+        }
 
-        // Check dedup map
+        // Check if already interned
         if (self.string_map.get(str)) |existing| {
             return existing;
         }
 
+        // Allocate new index
+        const idx = self.allocateIndex();
+
         // Store string bytes
-        const start = self.string_bytes.items.len;
+        const offset: u32 = @intCast(self.string_bytes.items.len);
         try self.string_bytes.appendSlice(self.allocator, str);
+        try self.string_lengths.append(self.allocator, @intCast(str.len));
 
-        // Store length in extra (for future use in retrieval)
-        _ = self.extra.items.len; // len_idx would be used for structured retrieval
-        try self.extra.append(self.allocator, @intCast(str.len));
+        // Store item
+        try self.items.append(self.allocator, .{
+            .tag = .string,
+            .data = offset,
+        });
 
-        // Create entry: data = start, extra[len_idx] = length
-        const idx = try self.addItem(.string, @intCast(start));
-
-        // We need to store the string for the hash map key
-        // The key points into string_bytes which we own
-        const stored_str = self.string_bytes.items[start..][0..str.len];
+        // Add to dedup map (key points into string_bytes)
+        const stored_str = self.string_bytes.items[offset..][0..str.len];
         try self.string_map.put(self.allocator, stored_str, idx);
 
         return idx;
     }
 
-    /// Intern an atom (property name)
-    pub fn internAtom(self: *InternPool, atom: object.Atom) !Index {
-        return self.addItem(.atom, @intFromEnum(atom));
-    }
-
-    /// Get the tag for an index
-    pub fn getTag(self: *const InternPool, idx: Index) Tag {
-        if (idx.isWellKnown()) {
-            return switch (idx) {
-                .undefined, .null_val => .int32, // Special handling in getValue
-                .true_val, .false_val => .int32,
-                .zero, .one, .neg_one => .int32,
-                .empty_string => .string,
-                .nan, .pos_inf, .neg_inf => .float64,
-                else => .int32,
-            };
-        }
-        const i = idx.toInt() - Index.FIRST_DYNAMIC;
-        return self.tags.items[i];
-    }
-
-    /// Get JSValue for an index
-    pub fn getValue(self: *const InternPool, idx: Index) value.JSValue {
-        // Handle well-known values
-        if (idx.isWellKnown()) {
-            return switch (idx) {
-                .undefined => value.JSValue.undefined_val,
-                .null_val => value.JSValue.null_val,
-                .true_val => value.JSValue.true_val,
-                .false_val => value.JSValue.false_val,
-                .zero => value.JSValue.fromInt(0),
-                .one => value.JSValue.fromInt(1),
-                .neg_one => value.JSValue.fromInt(-1),
-                .empty_string => value.JSValue.undefined_val, // Would need string table
-                .nan => value.JSValue.nan_val,
-                .pos_inf => value.JSValue.nan_val, // Floats need heap boxing
-                .neg_inf => value.JSValue.nan_val, // Floats need heap boxing
-                else => value.JSValue.undefined_val,
-            };
+    /// Get string value from index
+    pub fn getString(self: *const InternPool, idx: Index) ?[]const u8 {
+        if (idx == .empty_string) {
+            return "";
         }
 
-        const i = idx.toInt() - Index.FIRST_DYNAMIC;
-        const tag = self.tags.items[i];
-        const data = self.data.items[i];
+        const i = @intFromEnum(idx);
+        if (i < FIRST_DYNAMIC_INDEX or i >= self.next_index) {
+            return null;
+        }
 
-        return switch (tag) {
-            .int32 => value.JSValue.fromInt(@bitCast(data)),
-            .float64 => value.JSValue.nan_val, // Floats need heap boxing for full conversion
-            .string => value.JSValue.undefined_val, // Would need string conversion
-            .atom => value.JSValue.fromInt(@intCast(data)), // Atom as int for now
-            .function => value.JSValue.undefined_val, // Would need function handling
-        };
+        const item_idx = i - FIRST_DYNAMIC_INDEX;
+        if (item_idx >= self.items.items.len) {
+            return null;
+        }
+
+        const item = self.items.items[item_idx];
+        if (item.tag != .string) {
+            return null;
+        }
+
+        const offset = item.data;
+        const len = self.string_lengths.items[item_idx];
+        return self.string_bytes.items[offset..][0..len];
     }
 
-    /// Get integer value for an index
+    // ========================================================================
+    // Integer interning
+    // ========================================================================
+
+    /// Intern an i32 value
+    pub fn internInt(self: *InternPool, val: i32) !Index {
+        // Check well-known values
+        if (val == 0) return .zero_int;
+        if (val == 1) return .one_int;
+
+        // Check if already interned
+        if (self.int_map.get(val)) |existing| {
+            return existing;
+        }
+
+        // Allocate new index
+        const idx = self.allocateIndex();
+
+        // Store item (value fits directly in data field)
+        try self.items.append(self.allocator, .{
+            .tag = .int_i32,
+            .data = @bitCast(val),
+        });
+
+        // Add to dedup map
+        try self.int_map.put(self.allocator, val, idx);
+
+        return idx;
+    }
+
+    /// Get i32 value from index
     pub fn getInt(self: *const InternPool, idx: Index) ?i32 {
-        if (idx == .zero) return 0;
-        if (idx == .one) return 1;
-        if (idx == .neg_one) return -1;
+        // Check well-known values
+        if (idx == .zero_int) return 0;
+        if (idx == .one_int) return 1;
 
-        if (idx.isWellKnown()) return null;
+        const i = @intFromEnum(idx);
+        if (i < FIRST_DYNAMIC_INDEX or i >= self.next_index) {
+            return null;
+        }
 
-        const i = idx.toInt() - Index.FIRST_DYNAMIC;
-        if (self.tags.items[i] != .int32) return null;
-        return @bitCast(self.data.items[i]);
+        const item_idx = i - FIRST_DYNAMIC_INDEX;
+        if (item_idx >= self.items.items.len) {
+            return null;
+        }
+
+        const item = self.items.items[item_idx];
+        if (item.tag != .int_i32) {
+            return null;
+        }
+
+        return @bitCast(item.data);
     }
 
-    /// Get float value for an index
+    // ========================================================================
+    // Float interning
+    // ========================================================================
+
+    /// Intern an f64 value
+    pub fn internFloat(self: *InternPool, val: f64) !Index {
+        const bits: u64 = @bitCast(val);
+
+        // Check well-known values
+        if (std.math.isNan(val)) return .nan_val;
+        if (std.math.isPositiveInf(val)) return .pos_inf;
+        if (std.math.isNegativeInf(val)) return .neg_inf;
+
+        // Check if already interned
+        if (self.float_map.get(bits)) |existing| {
+            return existing;
+        }
+
+        // Allocate new index
+        const idx = self.allocateIndex();
+
+        // Store in extra_data (8 bytes = 2 u32s)
+        const extra_start: u32 = @intCast(self.extra_data.items.len);
+        try self.extra_data.append(self.allocator, @truncate(bits));
+        try self.extra_data.append(self.allocator, @truncate(bits >> 32));
+
+        // Store item
+        try self.items.append(self.allocator, .{
+            .tag = .float64,
+            .data = extra_start,
+        });
+
+        // Add to dedup map
+        try self.float_map.put(self.allocator, bits, idx);
+
+        return idx;
+    }
+
+    /// Get f64 value from index
     pub fn getFloat(self: *const InternPool, idx: Index) ?f64 {
-        if (idx == .zero) return 0.0;
-        if (idx == .nan) return std.math.nan(f64);
+        // Check well-known values
+        if (idx == .nan_val) return std.math.nan(f64);
         if (idx == .pos_inf) return std.math.inf(f64);
         if (idx == .neg_inf) return -std.math.inf(f64);
 
-        if (idx.isWellKnown()) return null;
-
-        const i = idx.toInt() - Index.FIRST_DYNAMIC;
-        if (self.tags.items[i] != .float64) return null;
-        return self.floats.items[self.data.items[i]];
-    }
-
-    /// Get string value for an index
-    pub fn getString(self: *const InternPool, idx: Index) ?[]const u8 {
-        if (idx == .empty_string) return "";
-
-        if (idx.isWellKnown()) return null;
-
-        const i = idx.toInt() - Index.FIRST_DYNAMIC;
-        if (self.tags.items[i] != .string) return null;
-
-        const start = self.data.items[i];
-        // Find the corresponding length in extra
-        // For now, scan string_bytes to find null terminator or use stored length
-        // This is a simplification - in practice we'd store length
-        var end = start;
-        while (end < self.string_bytes.items.len and self.string_bytes.items[end] != 0) {
-            end += 1;
+        const i = @intFromEnum(idx);
+        if (i < FIRST_DYNAMIC_INDEX or i >= self.next_index) {
+            return null;
         }
-        return self.string_bytes.items[start..end];
+
+        const item_idx = i - FIRST_DYNAMIC_INDEX;
+        if (item_idx >= self.items.items.len) {
+            return null;
+        }
+
+        const item = self.items.items[item_idx];
+        if (item.tag != .float64) {
+            return null;
+        }
+
+        const extra_start = item.data;
+        const low: u64 = self.extra_data.items[extra_start];
+        const high: u64 = self.extra_data.items[extra_start + 1];
+        const bits = low | (high << 32);
+        return @bitCast(bits);
     }
 
-    /// Add an item and return its index
-    fn addItem(self: *InternPool, tag: Tag, data: u32) !Index {
-        const local_idx = self.tags.items.len;
-        try self.tags.append(self.allocator, tag);
-        try self.data.append(self.allocator, data);
-        return Index.fromInt(@intCast(local_idx + Index.FIRST_DYNAMIC));
+    // ========================================================================
+    // Internal helpers
+    // ========================================================================
+
+    fn allocateIndex(self: *InternPool) Index {
+        const idx: Index = @enumFromInt(self.next_index);
+        self.next_index += 1;
+        return idx;
     }
 
-    /// Number of interned items (excluding well-known)
-    pub fn count(self: *const InternPool) usize {
-        return self.tags.items.len;
+    /// Get the tag for an index
+    pub fn getTag(self: *const InternPool, idx: Index) ?Tag {
+        const i = @intFromEnum(idx);
+        if (i < FIRST_DYNAMIC_INDEX) {
+            return .well_known;
+        }
+        if (i >= self.next_index) {
+            return null;
+        }
+        const item_idx = i - FIRST_DYNAMIC_INDEX;
+        if (item_idx >= self.items.items.len) {
+            return null;
+        }
+        return self.items.items[item_idx].tag;
+    }
+
+    /// Number of interned items (excluding well-known values)
+    pub fn count(self: *const InternPool) u32 {
+        return self.next_index - FIRST_DYNAMIC_INDEX;
+    }
+
+    // ========================================================================
+    // AtomTable Bridge - Converts between InternPool indices and Atoms
+    // ========================================================================
+
+    /// Bridge to AtomTable for shared string storage
+    /// Allows InternPool to serve as canonical string storage while
+    /// AtomTable provides fast property name lookups
+    pub const AtomBridge = struct {
+        pool: *InternPool,
+        atom_table: *@import("context.zig").AtomTable,
+
+        /// Intern a string in the pool and get its Atom for property access
+        /// Returns the Atom (from AtomTable) for the string
+        pub fn internAsAtom(self: *AtomBridge, str: []const u8) !@import("object.zig").Atom {
+            // First, intern in the pool for canonical storage
+            _ = try self.pool.internString(str);
+            // Then get/create the Atom for property operations
+            return self.atom_table.intern(str);
+        }
+
+        /// Get the InternPool index for an Atom's string
+        /// Useful when serializing bytecode with canonical indices
+        pub fn atomToIndex(self: *AtomBridge, atom: @import("object.zig").Atom) !?Index {
+            const name = self.atom_table.getName(atom) orelse return null;
+            return try self.pool.internString(name);
+        }
+
+        /// Bulk intern all Atom strings into the pool
+        /// Call this after parsing to populate the pool with all property names
+        pub fn syncFromAtoms(self: *AtomBridge) !void {
+            var it = self.atom_table.strings.iterator();
+            while (it.next()) |entry| {
+                _ = try self.pool.internString(entry.key_ptr.*);
+            }
+        }
+    };
+
+    /// Create a bridge to an AtomTable
+    pub fn bridge(self: *InternPool, atom_table: *@import("context.zig").AtomTable) AtomBridge {
+        return .{
+            .pool = self,
+            .atom_table = atom_table,
+        };
     }
 };
 
-test "InternPool well-known values" {
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "well-known values" {
     var pool = InternPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    // Well-known values should work without any interning
-    try std.testing.expectEqual(value.JSValue.undefined_val, Index.undefined.toValue(&pool));
-    try std.testing.expectEqual(value.JSValue.null_val, Index.null_val.toValue(&pool));
-    try std.testing.expectEqual(value.JSValue.true_val, Index.true_val.toValue(&pool));
-    try std.testing.expectEqual(value.JSValue.false_val, Index.false_val.toValue(&pool));
+    try std.testing.expectEqual(Index.null_val, pool.getNullVal());
+    try std.testing.expectEqual(Index.undefined_val, pool.getUndefinedVal());
+    try std.testing.expectEqual(Index.true_val, pool.getTrueVal());
+    try std.testing.expectEqual(Index.false_val, pool.getFalseVal());
+    try std.testing.expectEqual(Index.empty_string, pool.getEmptyString());
 }
 
-test "InternPool integer interning" {
+test "string interning" {
     var pool = InternPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    // Well-known integers
-    try std.testing.expectEqual(Index.zero, try pool.internInt(0));
-    try std.testing.expectEqual(Index.one, try pool.internInt(1));
-    try std.testing.expectEqual(Index.neg_one, try pool.internInt(-1));
+    // Empty string should return well-known index
+    const empty = try pool.internString("");
+    try std.testing.expectEqual(Index.empty_string, empty);
 
-    // Other integers should be deduplicated
-    const idx42_a = try pool.internInt(42);
-    const idx42_b = try pool.internInt(42);
-    try std.testing.expectEqual(idx42_a, idx42_b);
+    // Intern some strings
+    const hello = try pool.internString("hello");
+    const world = try pool.internString("world");
+    const hello2 = try pool.internString("hello"); // duplicate
 
-    // Different values should have different indices
-    const idx100 = try pool.internInt(100);
-    try std.testing.expect(idx42_a != idx100);
+    // Same string should return same index
+    try std.testing.expectEqual(hello, hello2);
+    try std.testing.expect(hello != world);
 
-    // Verify values
-    try std.testing.expectEqual(@as(?i32, 42), pool.getInt(idx42_a));
-    try std.testing.expectEqual(@as(?i32, 100), pool.getInt(idx100));
+    // Retrieve strings
+    try std.testing.expectEqualStrings("hello", pool.getString(hello).?);
+    try std.testing.expectEqualStrings("world", pool.getString(world).?);
+    try std.testing.expectEqualStrings("", pool.getString(.empty_string).?);
 }
 
-test "InternPool float interning" {
+test "int interning" {
     var pool = InternPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    // Well-known floats
-    try std.testing.expectEqual(Index.nan, try pool.internFloat(std.math.nan(f64)));
-    try std.testing.expectEqual(Index.pos_inf, try pool.internFloat(std.math.inf(f64)));
-    try std.testing.expectEqual(Index.neg_inf, try pool.internFloat(-std.math.inf(f64)));
+    // Well-known values
+    const zero = try pool.internInt(0);
+    const one = try pool.internInt(1);
+    try std.testing.expectEqual(Index.zero_int, zero);
+    try std.testing.expectEqual(Index.one_int, one);
 
-    // Regular floats should be deduplicated
-    const idx_pi_a = try pool.internFloat(3.14159);
-    const idx_pi_b = try pool.internFloat(3.14159);
-    try std.testing.expectEqual(idx_pi_a, idx_pi_b);
+    // Regular values
+    const val42 = try pool.internInt(42);
+    const val42_dup = try pool.internInt(42);
+    const val_neg = try pool.internInt(-100);
 
-    // Verify value
-    const retrieved = pool.getFloat(idx_pi_a);
-    try std.testing.expect(retrieved != null);
-    try std.testing.expectApproxEqRel(@as(f64, 3.14159), retrieved.?, 0.00001);
+    try std.testing.expectEqual(val42, val42_dup);
+    try std.testing.expect(val42 != val_neg);
+
+    // Retrieve values
+    try std.testing.expectEqual(@as(i32, 0), pool.getInt(.zero_int).?);
+    try std.testing.expectEqual(@as(i32, 1), pool.getInt(.one_int).?);
+    try std.testing.expectEqual(@as(i32, 42), pool.getInt(val42).?);
+    try std.testing.expectEqual(@as(i32, -100), pool.getInt(val_neg).?);
 }
 
-test "InternPool string interning" {
+test "float interning" {
     var pool = InternPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    // Empty string
-    try std.testing.expectEqual(Index.empty_string, try pool.internString(""));
+    // Well-known values
+    const nan = try pool.internFloat(std.math.nan(f64));
+    const inf = try pool.internFloat(std.math.inf(f64));
+    const neg_inf = try pool.internFloat(-std.math.inf(f64));
+    try std.testing.expectEqual(Index.nan_val, nan);
+    try std.testing.expectEqual(Index.pos_inf, inf);
+    try std.testing.expectEqual(Index.neg_inf, neg_inf);
 
-    // Regular strings should be deduplicated
-    const idx_hello_a = try pool.internString("hello");
-    const idx_hello_b = try pool.internString("hello");
-    try std.testing.expectEqual(idx_hello_a, idx_hello_b);
+    // Regular values
+    const pi = try pool.internFloat(3.14159);
+    const pi_dup = try pool.internFloat(3.14159);
+    const e = try pool.internFloat(2.71828);
 
-    // Different strings should have different indices
-    const idx_world = try pool.internString("world");
-    try std.testing.expect(idx_hello_a != idx_world);
+    try std.testing.expectEqual(pi, pi_dup);
+    try std.testing.expect(pi != e);
+
+    // Retrieve values
+    try std.testing.expect(std.math.isNan(pool.getFloat(.nan_val).?));
+    try std.testing.expect(std.math.isPositiveInf(pool.getFloat(.pos_inf).?));
+    try std.testing.expect(std.math.isNegativeInf(pool.getFloat(.neg_inf).?));
+    try std.testing.expectApproxEqRel(@as(f64, 3.14159), pool.getFloat(pi).?, 0.00001);
 }
 
-test "InternPool Index properties" {
-    try std.testing.expect(Index.undefined.isWellKnown());
-    try std.testing.expect(Index.zero.isWellKnown());
-    try std.testing.expect(!Index.fromInt(100).isWellKnown());
-    try std.testing.expect(Index.none.isNone());
+test "mixed interning" {
+    var pool = InternPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    // Intern various types
+    const str = try pool.internString("test");
+    const int = try pool.internInt(123);
+    const float = try pool.internFloat(1.5);
+
+    // All should have different indices
+    try std.testing.expect(str != int);
+    try std.testing.expect(int != float);
+    try std.testing.expect(str != float);
+
+    // Check tags
+    try std.testing.expectEqual(Tag.string, pool.getTag(str).?);
+    try std.testing.expectEqual(Tag.int_i32, pool.getTag(int).?);
+    try std.testing.expectEqual(Tag.float64, pool.getTag(float).?);
+    try std.testing.expectEqual(Tag.well_known, pool.getTag(.null_val).?);
+}
+
+test "AtomBridge integration" {
+    const context = @import("context.zig");
+
+    var pool = InternPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var atoms = context.AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+
+    var bridge_inst = pool.bridge(&atoms);
+
+    // Intern a string and get atom
+    const atom1 = try bridge_inst.internAsAtom("myProperty");
+    const atom2 = try bridge_inst.internAsAtom("myProperty");
+
+    // Same atom returned
+    try std.testing.expectEqual(atom1, atom2);
+
+    // String is in the pool
+    const idx = try bridge_inst.atomToIndex(atom1);
+    try std.testing.expect(idx != null);
+
+    // String can be retrieved from pool
+    const str = pool.getString(idx.?);
+    try std.testing.expect(str != null);
+    try std.testing.expectEqualStrings("myProperty", str.?);
+}
+
+test "AtomBridge syncFromAtoms" {
+    const context = @import("context.zig");
+
+    var pool = InternPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var atoms = context.AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+
+    // Add some atoms first
+    _ = try atoms.intern("propA");
+    _ = try atoms.intern("propB");
+    _ = try atoms.intern("propC");
+
+    // Pool should be empty initially
+    try std.testing.expectEqual(@as(u32, 0), pool.count());
+
+    // Sync atoms to pool
+    var bridge_inst = pool.bridge(&atoms);
+    try bridge_inst.syncFromAtoms();
+
+    // Pool should now have all the strings
+    try std.testing.expectEqual(@as(u32, 3), pool.count());
 }

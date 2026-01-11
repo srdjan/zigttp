@@ -9,12 +9,45 @@ const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
 const RuntimeConfig = zruntime.RuntimeConfig;
 
+pub const std_options: std.Options = .{
+    .log_level = .err,
+};
+
 const BenchmarkResult = struct {
     name: []const u8,
     iterations: u32,
     time_ms: f64,
     ops_per_sec: u64,
 };
+
+const Options = struct {
+    json: bool = false,
+    quiet: bool = false,
+    compare: bool = true,
+};
+
+fn parseOptions() Options {
+    var options = Options{};
+    var args = std.process.args();
+    _ = args.next();
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            options.json = true;
+        } else if (std.mem.eql(u8, arg, "--quiet")) {
+            options.quiet = true;
+        } else if (std.mem.eql(u8, arg, "--no-compare")) {
+            options.compare = false;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            _ = std.fs.File.stdout().writeAll(
+                "Usage: zigttp-bench [--json] [--quiet] [--no-compare]\n",
+            ) catch {};
+            std.process.exit(0);
+        }
+    }
+
+    return options;
+}
 
 fn println(msg: []const u8) void {
     std.fs.File.stdout().writeAll(msg) catch {};
@@ -237,6 +270,7 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
 };
 
 pub fn main() !void {
+    const options = parseOptions();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -248,9 +282,11 @@ pub fn main() !void {
         .enable_fs = false,
     };
 
-    println("");
-    println("=== zts JavaScript Engine Benchmarks ===");
-    println("");
+    if (!options.quiet and !options.json) {
+        println("");
+        println("=== zts JavaScript Engine Benchmarks ===");
+        println("");
+    }
 
     var results: [benchmarks.len]BenchmarkResult = undefined;
     var total_time_ns: u64 = 0;
@@ -287,12 +323,40 @@ pub fn main() !void {
             .ops_per_sec = ops_per_sec,
         };
 
-        printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, elapsed_ms, ops_per_sec });
+        if (!options.quiet and !options.json) {
+            printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, elapsed_ms, ops_per_sec });
+        }
     }
 
-    println("");
-    println("=== Comparison with Baseline (2026-01-10) ===");
-    println("");
+    if (options.json) {
+        var stdout = std.fs.File.stdout();
+        try stdout.writeAll("{\n  \"benchmarks\": [\n");
+        for (results, 0..) |result, i| {
+            var line_buf: [512]u8 = undefined;
+            const line = try std.fmt.bufPrint(
+                &line_buf,
+                "    {{\"name\":\"{s}\",\"iterations\":{},\"time_ms\":{d:.3},\"ops_per_sec\":{}}}",
+                .{ result.name, result.iterations, result.time_ms, result.ops_per_sec },
+            );
+            try stdout.writeAll(line);
+            if (i + 1 < results.len) {
+                try stdout.writeAll(",\n");
+            } else {
+                try stdout.writeAll("\n");
+            }
+        }
+        const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
+        var tail_buf: [128]u8 = undefined;
+        const tail = try std.fmt.bufPrint(&tail_buf, "  ],\n  \"total_ms\":{d:.3}\n}}\n", .{total_ms});
+        try stdout.writeAll(tail);
+        return;
+    }
+
+    if (!options.quiet and options.compare) {
+        println("");
+        println("=== Comparison with Baseline (2026-01-10) ===");
+        println("");
+    }
 
     // Baseline values from benchmarks/2026-01-10-mod-const-optimization.json
     const baseline = [_]struct { name: []const u8, ops_per_sec: u64 }{
@@ -310,28 +374,32 @@ pub fn main() !void {
         .{ .name = "forOfLoop", .ops_per_sec = 53210339 },
     };
 
-    printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "baseline", "Ratio" });
-    println("------------------------------------------------------------");
-
-    for (results, 0..) |result, i| {
-        if (i < baseline.len) {
-            const base_ops = baseline[i].ops_per_sec;
-            const ratio = if (base_ops > 0)
-                @as(f64, @floatFromInt(result.ops_per_sec)) / @as(f64, @floatFromInt(base_ops))
-            else
-                0.0;
-            const indicator: []const u8 = if (ratio >= 1.0) " " else " ";
-            printFmt("{s:<20} {d:>12}/s {d:>12}/s {d:>7.2}x{s}", .{
-                result.name,
-                result.ops_per_sec,
-                base_ops,
-                ratio,
-                indicator,
-            });
-        }
+    if (!options.quiet and options.compare) {
+        printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "baseline", "Ratio" });
+        println("------------------------------------------------------------");
     }
 
-    println("");
+    if (!options.quiet and options.compare) {
+        for (results, 0..) |result, i| {
+            if (i < baseline.len) {
+                const base_ops = baseline[i].ops_per_sec;
+                const ratio = if (base_ops > 0)
+                    @as(f64, @floatFromInt(result.ops_per_sec)) / @as(f64, @floatFromInt(base_ops))
+                else
+                    0.0;
+                const indicator: []const u8 = if (ratio >= 1.0) " " else " ";
+                printFmt("{s:<20} {d:>12}/s {d:>12}/s {d:>7.2}x{s}", .{
+                    result.name,
+                    result.ops_per_sec,
+                    base_ops,
+                    ratio,
+                    indicator,
+                });
+            }
+        }
+        println("");
+    }
+
     const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
     printFmt("Total time: {d:.1}ms", .{total_ms});
     println("");
