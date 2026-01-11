@@ -125,6 +125,11 @@ pub const Interpreter = struct {
     /// Each entry can cache up to 4 (hidden_class, slot_offset) pairs
     pic_cache: [IC_CACHE_SIZE]PolymorphicInlineCache,
 
+    // JIT profiling counters (Phase 11)
+    backedge_count: u32 = 0,        // Back-edge counter for hot loop detection
+    pic_hits: u32 = 0,              // PIC cache hits (type feedback)
+    pic_misses: u32 = 0,            // PIC cache misses (type feedback)
+
     pub fn init(ctx: *context.Context) Interpreter {
         return .{
             .ctx = ctx,
@@ -137,7 +142,35 @@ pub const Interpreter = struct {
             .state_stack = undefined,
             .state_depth = 0,
             .pic_cache = [_]PolymorphicInlineCache{.{}} ** IC_CACHE_SIZE,
+            .backedge_count = 0,
+            .pic_hits = 0,
+            .pic_misses = 0,
         };
+    }
+
+    /// Profile function entry: increment execution count, check for JIT threshold
+    /// Returns true if function should be promoted to JIT candidate
+    inline fn profileFunctionEntry(func: *bytecode.FunctionBytecode) bool {
+        // Use non-atomic increment for single-threaded interpreter
+        func.execution_count +%= 1;
+        if (func.execution_count == bytecode.JIT_THRESHOLD and func.tier == .interpreted) {
+            func.tier = .baseline_candidate;
+            return true;
+        }
+        return false;
+    }
+
+    /// Profile back-edge: increment counter, return true if loop is hot
+    inline fn profileBackedge(self: *Interpreter) bool {
+        self.backedge_count +%= 1;
+        return self.backedge_count >= bytecode.LOOP_THRESHOLD;
+    }
+
+    /// Reset profiling counters (for testing or new function)
+    pub fn resetProfilingCounters(self: *Interpreter) void {
+        self.backedge_count = 0;
+        self.pic_hits = 0;
+        self.pic_misses = 0;
     }
 
     /// Offset the program counter by a signed value
@@ -148,6 +181,10 @@ pub const Interpreter = struct {
 
     /// Run bytecode function
     pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
+        // Profile function entry (Phase 11)
+        // Cast away const for profiling counters - safe because counters are independent of execution
+        _ = profileFunctionEntry(@constCast(func));
+
         self.pc = func.code.ptr;
         self.code_end = func.code.ptr + func.code.len;
         self.constants = func.constants;
@@ -284,6 +321,9 @@ pub const Interpreter = struct {
         this_val: value.JSValue,
         args: []const value.JSValue,
     ) InterpreterError!value.JSValue {
+        // Profile function entry (Phase 11)
+        _ = profileFunctionEntry(@constCast(func_bc));
+
         try self.pushState();
         defer self.popState();
 
@@ -816,6 +856,8 @@ pub const Interpreter = struct {
                 .loop => {
                     const offset = readI16(self.pc);
                     self.pc += 2;
+                    // Profile back-edge for hot loop detection (Phase 11)
+                    _ = self.profileBackedge();
                     self.offsetPc(-offset);
                 },
 
@@ -938,11 +980,13 @@ pub const Interpreter = struct {
 
                         // PIC lookup: check all cached entries
                         if (pic.lookup(obj.hidden_class)) |slot_offset| {
+                            self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
                             try self.ctx.push(obj.getSlot(slot_offset));
                             continue :dispatch;
                         }
 
                         // Cache miss: full lookup and update PIC
+                        self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
                         if (obj.hidden_class.findProperty(atom)) |slot| {
                             _ = pic.update(obj.hidden_class, slot.offset);
                             try self.ctx.push(obj.getSlot(slot.offset));
@@ -988,11 +1032,13 @@ pub const Interpreter = struct {
 
                         // PIC lookup: check all cached entries
                         if (pic.lookup(obj.hidden_class)) |slot_offset| {
+                            self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
                             obj.setSlot(slot_offset, val);
                             continue :dispatch;
                         }
 
                         // Cache miss: check if property exists
+                        self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
                         if (obj.hidden_class.findProperty(atom)) |slot| {
                             // Property exists, update PIC and set value
                             _ = pic.update(obj.hidden_class, slot.offset);
@@ -4440,4 +4486,106 @@ test "End-to-end: polymorphic property access" {
     try std.testing.expect(result_val.isInt());
     // 1 + 10 + 100 + 1000 = 1111
     try std.testing.expectEqual(@as(i32, 1111), result_val.getInt());
+}
+
+test "JIT profiling: execution counting" {
+    // Test that function execution counting works correctly
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &.{},
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    // Initially at tier interpreted with zero count
+    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
+    try std.testing.expectEqual(@as(u32, 0), func.execution_count);
+
+    // Simulate function calls up to threshold - 1
+    var i: u32 = 0;
+    while (i < bytecode.JIT_THRESHOLD - 1) : (i += 1) {
+        const promoted = Interpreter.profileFunctionEntry(&func);
+        try std.testing.expect(!promoted);
+        try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
+    }
+    try std.testing.expectEqual(bytecode.JIT_THRESHOLD - 1, func.execution_count);
+
+    // One more call should hit threshold and promote to baseline_candidate
+    const promoted = Interpreter.profileFunctionEntry(&func);
+    try std.testing.expect(promoted);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
+    try std.testing.expectEqual(bytecode.JIT_THRESHOLD, func.execution_count);
+
+    // Subsequent calls don't re-promote
+    const promoted2 = Interpreter.profileFunctionEntry(&func);
+    try std.testing.expect(!promoted2);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
+}
+
+test "JIT profiling: back-edge counting" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Initially zero
+    try std.testing.expectEqual(@as(u32, 0), interp.backedge_count);
+
+    // Simulate back-edges up to threshold - 1
+    var i: u32 = 0;
+    while (i < bytecode.LOOP_THRESHOLD - 1) : (i += 1) {
+        const hot = interp.profileBackedge();
+        try std.testing.expect(!hot);
+    }
+
+    // One more should hit threshold
+    const hot = interp.profileBackedge();
+    try std.testing.expect(hot);
+    try std.testing.expectEqual(bytecode.LOOP_THRESHOLD, interp.backedge_count);
+
+    // Reset and verify
+    interp.resetProfilingCounters();
+    try std.testing.expectEqual(@as(u32, 0), interp.backedge_count);
+}
+
+test "JIT profiling: PIC hit/miss counting" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Initially zero
+    try std.testing.expectEqual(@as(u32, 0), interp.pic_hits);
+    try std.testing.expectEqual(@as(u32, 0), interp.pic_misses);
+
+    // Simulate some hits and misses
+    interp.pic_hits = 100;
+    interp.pic_misses = 10;
+
+    // Calculate hit rate
+    const total = interp.pic_hits + interp.pic_misses;
+    const hit_rate = @as(f32, @floatFromInt(interp.pic_hits)) / @as(f32, @floatFromInt(total));
+    try std.testing.expect(hit_rate > 0.9); // 90%+ hit rate
+
+    // Reset and verify
+    interp.resetProfilingCounters();
+    try std.testing.expectEqual(@as(u32, 0), interp.pic_hits);
+    try std.testing.expectEqual(@as(u32, 0), interp.pic_misses);
 }

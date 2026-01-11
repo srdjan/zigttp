@@ -383,6 +383,20 @@ pub const UpvalueInfo = struct {
     index: u8, // Index in parent's locals or upvalues array
 };
 
+/// Compilation tier for JIT profiling (Phase 11)
+pub const CompilationTier = enum(u8) {
+    interpreted,        // Running in bytecode interpreter
+    baseline_candidate, // Hit threshold, queued for compilation
+    baseline,           // Simple native code (dispatch elimination)
+    optimized,          // With type specialization
+};
+
+/// Call count threshold before a function becomes a JIT candidate
+pub const JIT_THRESHOLD: u32 = 100;
+
+/// Back-edge threshold for detecting hot loops
+pub const LOOP_THRESHOLD: u32 = 1000;
+
 /// Function bytecode structure
 pub const FunctionBytecode = struct {
     header: BytecodeHeader,
@@ -396,6 +410,11 @@ pub const FunctionBytecode = struct {
     code: []const u8,
     constants: []const value.JSValue,
     source_map: ?[]const u8,
+
+    // JIT profiling fields (Phase 11)
+    execution_count: u32 = 0,           // Incremented on each call
+    tier: CompilationTier = .interpreted,
+    compiled_code: ?*anyopaque = null,  // Pointer to CompiledCode when JIT'd
 };
 
 pub const FunctionFlags = packed struct {
