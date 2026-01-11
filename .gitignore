@@ -7,3 +7,10 @@ mquickjs/*.host.o
 mquickjs/*.host.d
 mquickjs/mqjs_stdlib
 size_check
+test_cc
+.gitignore
+test_mmap
+test_mmap2
+.gitignore
+test_mprotect
+test_prot
