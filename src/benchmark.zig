@@ -24,6 +24,7 @@ const Options = struct {
     json: bool = false,
     quiet: bool = false,
     compare: bool = true,
+    script_path: ?[]const u8 = null,
 };
 
 fn parseOptions() Options {
@@ -38,9 +39,17 @@ fn parseOptions() Options {
             options.quiet = true;
         } else if (std.mem.eql(u8, arg, "--no-compare")) {
             options.compare = false;
+        } else if (std.mem.eql(u8, arg, "--script")) {
+            const path = args.next() orelse {
+                _ = std.fs.File.stdout().writeAll(
+                    "Missing value for --script\nUsage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>]\n",
+                ) catch {};
+                std.process.exit(1);
+            };
+            options.script_path = path;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             _ = std.fs.File.stdout().writeAll(
-                "Usage: zigttp-bench [--json] [--quiet] [--no-compare]\n",
+                "Usage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>]\n",
             ) catch {};
             std.process.exit(0);
         }
@@ -247,6 +256,42 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         ,
     },
     .{
+        .name = "httpHandlerHeavy",
+        .iterations = 2000,
+        .code =
+        \\function runHttpHandlerHeavy(iterations) {
+        \\    let responses = 0;
+        \\    let baseHeaders = { 'content-type': 'application/json', 'cache-control': 'no-store' };
+        \\    let payload = JSON.stringify({ id: 1, name: 'User1', tags: ['alpha','beta','gamma'] });
+        \\    for (let i of range(iterations)) {
+        \\        let reqPath = (i % 3 === 0) ? '/api/users' : '/api/users/42';
+        \\        let query = (i % 2 === 0) ? '?limit=10&offset=5' : '?limit=25&offset=0';
+        \\        let limit = (query.indexOf('limit=25') !== -1) ? 25 : 10;
+        \\        let offset = (query.indexOf('offset=5') !== -1) ? 5 : 0;
+        \\        let bodyObj = null;
+        \\        if (reqPath.indexOf('/api/users') === 0) {
+        \\            bodyObj = JSON.parse(payload);
+        \\            bodyObj.limit = limit;
+        \\            bodyObj.offset = offset;
+        \\        }
+        \\        let headers = {
+        \\            'content-type': baseHeaders['content-type'],
+        \\            'cache-control': baseHeaders['cache-control'],
+        \\            'x-request-id': 'req-' + (i % 1000)
+        \\        };
+        \\        let response = {
+        \\            status: (reqPath === '/api/users') ? 200 : 201,
+        \\            headers: headers,
+        \\            body: JSON.stringify({ ok: true, path: reqPath, data: bodyObj })
+        \\        };
+        \\        responses = (responses + response.body.length + response.status) % 1000000;
+        \\    }
+        \\    return responses;
+        \\}
+        \\runHttpHandlerHeavy(2000);
+        ,
+    },
+    .{
         .name = "forOfLoop",
         .iterations = ITERATIONS,
         .code =
@@ -281,6 +326,23 @@ pub fn main() !void {
         .enable_fetch = false,
         .enable_fs = false,
     };
+
+    if (options.script_path) |script_path| {
+        const code = std.fs.cwd().readFileAlloc(script_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+            std.log.err("Failed to read script {s}: {}", .{ script_path, err });
+            return;
+        };
+        defer allocator.free(code);
+
+        const runtime = try Runtime.init(allocator, config);
+        defer runtime.deinit();
+
+        runtime.loadCode(code, script_path) catch |err| {
+            std.log.err("Failed to execute script {s}: {}", .{ script_path, err });
+            return;
+        };
+        return;
+    }
 
     if (!options.quiet and !options.json) {
         println("");
@@ -379,23 +441,30 @@ pub fn main() !void {
         println("------------------------------------------------------------");
     }
 
-    if (!options.quiet and options.compare) {
-        for (results, 0..) |result, i| {
-            if (i < baseline.len) {
-                const base_ops = baseline[i].ops_per_sec;
-                const ratio = if (base_ops > 0)
-                    @as(f64, @floatFromInt(result.ops_per_sec)) / @as(f64, @floatFromInt(base_ops))
-                else
-                    0.0;
-                const indicator: []const u8 = if (ratio >= 1.0) " " else " ";
-                printFmt("{s:<20} {d:>12}/s {d:>12}/s {d:>7.2}x{s}", .{
-                    result.name,
-                    result.ops_per_sec,
-                    base_ops,
-                    ratio,
-                    indicator,
-                });
+    const getBaseline = struct {
+        fn find(name: []const u8) ?u64 {
+            for (baseline) |entry| {
+                if (std.mem.eql(u8, entry.name, name)) return entry.ops_per_sec;
             }
+            return null;
+        }
+    }.find;
+
+    if (!options.quiet and options.compare) {
+        for (results) |result| {
+            const base_ops = getBaseline(result.name) orelse continue;
+            const ratio = if (base_ops > 0)
+                @as(f64, @floatFromInt(result.ops_per_sec)) / @as(f64, @floatFromInt(base_ops))
+            else
+                0.0;
+            const indicator: []const u8 = if (ratio >= 1.0) " " else " ";
+            printFmt("{s:<20} {d:>12}/s {d:>12}/s {d:>7.2}x{s}", .{
+                result.name,
+                result.ops_per_sec,
+                base_ops,
+                ratio,
+                indicator,
+            });
         }
         println("");
     }

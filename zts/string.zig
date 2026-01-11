@@ -277,9 +277,72 @@ fn scalarCompare(a: []const u8, b: []const u8) std.math.Order {
     return std.math.order(a.len, b.len);
 }
 
-/// Fast string equality check
+/// Fast string equality check (SIMD-accelerated for long strings)
 pub fn eqlStrings(a: []const u8, b: []const u8) bool {
-    return compareStrings(a, b) == .eq;
+    if (a.len != b.len) return false;
+    if (a.len == 0) return true;
+    if (a.ptr == b.ptr) return true; // Same pointer
+
+    const Vec = @Vector(32, u8);
+    var i: usize = 0;
+
+    // SIMD equality for 32-byte chunks
+    while (i + 32 <= a.len) : (i += 32) {
+        const va: Vec = a[i..][0..32].*;
+        const vb: Vec = b[i..][0..32].*;
+        if (@reduce(.Or, va != vb)) return false;
+    }
+
+    // Scalar fallback for remainder
+    return std.mem.eql(u8, a[i..], b[i..]);
+}
+
+/// SIMD-accelerated single-byte search (memchr equivalent)
+/// Returns index of first occurrence of needle in haystack, or null
+pub fn findByte(haystack: []const u8, needle: u8) ?usize {
+    const Vec = @Vector(32, u8);
+    const needle_vec: Vec = @splat(needle);
+    var i: usize = 0;
+
+    // SIMD search for 32-byte chunks
+    while (i + 32 <= haystack.len) : (i += 32) {
+        const chunk: Vec = haystack[i..][0..32].*;
+        const matches = chunk == needle_vec;
+        if (@reduce(.Or, matches)) {
+            // Found match, find exact position
+            const match_bytes: [32]u8 = @bitCast(@as(@Vector(32, u8), @intFromBool(matches)));
+            for (match_bytes, 0..) |m, j| {
+                if (m != 0) return i + j;
+            }
+        }
+    }
+
+    // Scalar fallback for remainder
+    for (haystack[i..], i..) |c, idx| {
+        if (c == needle) return idx;
+    }
+    return null;
+}
+
+/// SIMD-accelerated count of byte occurrences
+pub fn countByte(haystack: []const u8, needle: u8) usize {
+    const Vec = @Vector(32, u8);
+    const needle_vec: Vec = @splat(needle);
+    var count: usize = 0;
+    var i: usize = 0;
+
+    // SIMD count for 32-byte chunks
+    while (i + 32 <= haystack.len) : (i += 32) {
+        const chunk: Vec = haystack[i..][0..32].*;
+        const matches = chunk == needle_vec;
+        count += @popCount(@as(u32, @bitCast(@as(@Vector(32, u1), @intFromBool(matches)))));
+    }
+
+    // Scalar fallback for remainder
+    for (haystack[i..]) |c| {
+        if (c == needle) count += 1;
+    }
+    return count;
 }
 
 /// XXHash64 for string hashing
@@ -611,6 +674,54 @@ test "SIMD string comparison" {
     try std.testing.expectEqual(std.math.Order.lt, compareStrings("abc", "abd"));
     try std.testing.expectEqual(std.math.Order.gt, compareStrings("xyz", "abc"));
     try std.testing.expectEqual(std.math.Order.lt, compareStrings("short", "longer string"));
+}
+
+test "SIMD string equality" {
+    // Short strings
+    try std.testing.expect(eqlStrings("hello", "hello"));
+    try std.testing.expect(!eqlStrings("hello", "world"));
+    try std.testing.expect(!eqlStrings("hello", "hell"));
+
+    // Empty strings
+    try std.testing.expect(eqlStrings("", ""));
+
+    // Long strings (>32 bytes, exercises SIMD path)
+    const long1 = "This is a relatively long string that exceeds 32 bytes for SIMD testing";
+    const long2 = "This is a relatively long string that exceeds 32 bytes for SIMD testing";
+    const long3 = "This is a relatively long string that exceeds 32 bytes for SIMD DIFFER";
+    try std.testing.expect(eqlStrings(long1, long2));
+    try std.testing.expect(!eqlStrings(long1, long3));
+}
+
+test "SIMD findByte" {
+    // Basic cases
+    try std.testing.expectEqual(@as(?usize, 0), findByte("hello", 'h'));
+    try std.testing.expectEqual(@as(?usize, 4), findByte("hello", 'o'));
+    try std.testing.expectEqual(@as(?usize, null), findByte("hello", 'x'));
+
+    // Empty string
+    try std.testing.expectEqual(@as(?usize, null), findByte("", 'x'));
+
+    // Long string (>32 bytes) - 48 chars
+    const long = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+    try std.testing.expectEqual(@as(?usize, 10), findByte(long, 'A'));
+    try std.testing.expectEqual(@as(?usize, 8), findByte(long, '8')); // First '8' at position 8
+
+    // Find char that only appears after byte 32
+    const long2 = "________________________________X_______________"; // 'X' at position 32
+    try std.testing.expectEqual(@as(?usize, 32), findByte(long2, 'X'));
+}
+
+test "SIMD countByte" {
+    try std.testing.expectEqual(@as(usize, 2), countByte("hello", 'l'));
+    try std.testing.expectEqual(@as(usize, 1), countByte("hello", 'h'));
+    try std.testing.expectEqual(@as(usize, 0), countByte("hello", 'x'));
+    try std.testing.expectEqual(@as(usize, 0), countByte("", 'x'));
+
+    // Long string with multiple occurrences
+    const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 52 a's
+    try std.testing.expectEqual(@as(usize, 52), countByte(long, 'a'));
+    try std.testing.expectEqual(@as(usize, 0), countByte(long, 'b'));
 }
 
 test "string hashing" {

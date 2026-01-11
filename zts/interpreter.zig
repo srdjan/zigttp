@@ -13,7 +13,77 @@ const string = @import("string.zig");
 
 const empty_code: [0]u8 = .{};
 
-/// Inline cache entry for monomorphic property access
+/// Single entry in a polymorphic inline cache
+/// Stores hidden class and slot offset for one observed shape
+const PICEntry = struct {
+    hidden_class: *object.HiddenClass,
+    slot_offset: u16,
+};
+
+/// Number of entries in a polymorphic inline cache
+/// 4 entries provides good coverage for common polymorphic patterns
+/// while keeping memory overhead reasonable (40 bytes per IC site)
+pub const PIC_ENTRIES = 4;
+
+/// Polymorphic Inline Cache for property access optimization
+/// Caches up to 4 (hidden_class, slot_offset) pairs per access site
+/// Falls back to megamorphic mode when more than 4 shapes are observed
+pub const PolymorphicInlineCache = struct {
+    /// Cached entries (only first `count` are valid)
+    entries: [PIC_ENTRIES]PICEntry = undefined,
+    /// Number of valid entries (0-4)
+    count: u8 = 0,
+    /// Megamorphic flag: true when > PIC_ENTRIES shapes observed
+    /// When megamorphic, skip caching entirely (too polymorphic to benefit)
+    megamorphic: bool = false,
+
+    /// Lookup hidden class in cache, return slot offset if found
+    pub inline fn lookup(self: *const PolymorphicInlineCache, hidden_class: *object.HiddenClass) ?u16 {
+        // Linear search through valid entries
+        for (self.entries[0..self.count]) |entry| {
+            if (entry.hidden_class == hidden_class) {
+                return entry.slot_offset;
+            }
+        }
+        return null;
+    }
+
+    /// Update cache with new (hidden_class, slot_offset) pair
+    /// Returns true if entry was added, false if megamorphic
+    pub inline fn update(self: *PolymorphicInlineCache, hidden_class: *object.HiddenClass, slot_offset: u16) bool {
+        if (self.megamorphic) return false;
+
+        // Check if already cached (update existing entry)
+        for (self.entries[0..self.count]) |*entry| {
+            if (entry.hidden_class == hidden_class) {
+                entry.slot_offset = slot_offset;
+                return true;
+            }
+        }
+
+        // Add new entry if space available
+        if (self.count < PIC_ENTRIES) {
+            self.entries[self.count] = .{
+                .hidden_class = hidden_class,
+                .slot_offset = slot_offset,
+            };
+            self.count += 1;
+            return true;
+        }
+
+        // Cache full with new shape: transition to megamorphic
+        self.megamorphic = true;
+        return false;
+    }
+
+    /// Reset cache to initial state (for debugging/testing)
+    pub fn reset(self: *PolymorphicInlineCache) void {
+        self.count = 0;
+        self.megamorphic = false;
+    }
+};
+
+/// Legacy monomorphic inline cache entry (kept for reference)
 /// Caches the hidden class pointer and slot offset for fast subsequent lookups
 pub const InlineCacheEntry = struct {
     /// Cached hidden class pointer (null = cache miss/uninitialized)
@@ -50,9 +120,10 @@ pub const Interpreter = struct {
     open_upvalues: ?*object.Upvalue, // Linked list of open upvalues
     state_stack: [MAX_STATE_DEPTH]SavedState,
     state_depth: usize,
-    /// Inline cache for monomorphic property access optimization
+    /// Polymorphic inline cache for property access optimization
     /// Indexed by cache_idx from get_field_ic/put_field_ic instructions
-    ic_cache: [IC_CACHE_SIZE]InlineCacheEntry,
+    /// Each entry can cache up to 4 (hidden_class, slot_offset) pairs
+    pic_cache: [IC_CACHE_SIZE]PolymorphicInlineCache,
 
     pub fn init(ctx: *context.Context) Interpreter {
         return .{
@@ -65,7 +136,7 @@ pub const Interpreter = struct {
             .open_upvalues = null,
             .state_stack = undefined,
             .state_depth = 0,
-            .ic_cache = [_]InlineCacheEntry{.{}} ** IC_CACHE_SIZE,
+            .pic_cache = [_]PolymorphicInlineCache{.{}} ** IC_CACHE_SIZE,
         };
     }
 
@@ -851,8 +922,9 @@ pub const Interpreter = struct {
                     try self.ctx.push(val);
                 },
 
-                // Inline cache opcodes for optimized property access
+                // Polymorphic inline cache opcodes for optimized property access
                 // Format: +u16 atom_idx +u16 cache_idx
+                // Caches up to 4 (hidden_class, slot_offset) pairs per site
                 .get_field_ic => {
                     const atom_idx = readU16(self.pc);
                     const cache_idx = readU16(self.pc + 2);
@@ -862,18 +934,17 @@ pub const Interpreter = struct {
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
-                        const cache = &self.ic_cache[cache_idx];
+                        const pic = &self.pic_cache[cache_idx];
 
-                        // Cache hit: same hidden class, use cached slot offset
-                        if (cache.hidden_class == obj.hidden_class) {
-                            try self.ctx.push(obj.getSlot(cache.slot_offset));
+                        // PIC lookup: check all cached entries
+                        if (pic.lookup(obj.hidden_class)) |slot_offset| {
+                            try self.ctx.push(obj.getSlot(slot_offset));
                             continue :dispatch;
                         }
 
-                        // Cache miss: full lookup and update cache
+                        // Cache miss: full lookup and update PIC
                         if (obj.hidden_class.findProperty(atom)) |slot| {
-                            cache.hidden_class = obj.hidden_class;
-                            cache.slot_offset = slot.offset;
+                            _ = pic.update(obj.hidden_class, slot.offset);
                             try self.ctx.push(obj.getSlot(slot.offset));
                         } else if (obj.getProperty(atom)) |prop_val| {
                             // Property found in prototype chain (don't cache)
@@ -910,22 +981,21 @@ pub const Interpreter = struct {
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
-                        const cache = &self.ic_cache[cache_idx];
+                        const pic = &self.pic_cache[cache_idx];
                         if (self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
                             return error.ArenaObjectEscape;
                         }
 
-                        // Cache hit: same hidden class, use cached slot offset
-                        if (cache.hidden_class == obj.hidden_class) {
-                            obj.setSlot(cache.slot_offset, val);
+                        // PIC lookup: check all cached entries
+                        if (pic.lookup(obj.hidden_class)) |slot_offset| {
+                            obj.setSlot(slot_offset, val);
                             continue :dispatch;
                         }
 
                         // Cache miss: check if property exists
                         if (obj.hidden_class.findProperty(atom)) |slot| {
-                            // Property exists, update cache and set value
-                            cache.hidden_class = obj.hidden_class;
-                            cache.slot_offset = slot.offset;
+                            // Property exists, update PIC and set value
+                            _ = pic.update(obj.hidden_class, slot.offset);
                             obj.setSlot(slot.offset, val);
                         } else {
                             // Property doesn't exist, use full setProperty (may transition)
@@ -4219,4 +4289,155 @@ test "Interpreter push_i16" {
     var interp = Interpreter.init(ctx);
     const result = try interp.run(&func);
     try std.testing.expectEqual(@as(i32, 1000), result.getInt());
+}
+
+test "PolymorphicInlineCache unit tests" {
+    // Test PIC lookup and update
+    var pic = PolymorphicInlineCache{};
+
+    // Create fake hidden classes (just need distinct pointers)
+    var class1 = object.HiddenClass{
+        .properties = &.{},
+        .transitions = undefined,
+        .prototype = null,
+        .property_count = 1,
+    };
+    var class2 = object.HiddenClass{
+        .properties = &.{},
+        .transitions = undefined,
+        .prototype = null,
+        .property_count = 2,
+    };
+    var class3 = object.HiddenClass{
+        .properties = &.{},
+        .transitions = undefined,
+        .prototype = null,
+        .property_count = 3,
+    };
+    var class4 = object.HiddenClass{
+        .properties = &.{},
+        .transitions = undefined,
+        .prototype = null,
+        .property_count = 4,
+    };
+    var class5 = object.HiddenClass{
+        .properties = &.{},
+        .transitions = undefined,
+        .prototype = null,
+        .property_count = 5,
+    };
+
+    // Initially empty
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(u8, 0), pic.count);
+    try std.testing.expect(!pic.megamorphic);
+
+    // Add first entry
+    try std.testing.expect(pic.update(&class1, 10));
+    try std.testing.expectEqual(@as(u8, 1), pic.count);
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+
+    // Add second entry
+    try std.testing.expect(pic.update(&class2, 20));
+    try std.testing.expectEqual(@as(u8, 2), pic.count);
+    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(&class2));
+
+    // First entry still works
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+
+    // Add third and fourth entries
+    try std.testing.expect(pic.update(&class3, 30));
+    try std.testing.expect(pic.update(&class4, 40));
+    try std.testing.expectEqual(@as(u8, 4), pic.count);
+    try std.testing.expect(!pic.megamorphic);
+
+    // All four entries work
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(&class2));
+    try std.testing.expectEqual(@as(?u16, 30), pic.lookup(&class3));
+    try std.testing.expectEqual(@as(?u16, 40), pic.lookup(&class4));
+
+    // Fifth entry triggers megamorphic
+    try std.testing.expect(!pic.update(&class5, 50));
+    try std.testing.expect(pic.megamorphic);
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(&class5));
+
+    // Existing entries still work (megamorphic doesn't clear cache)
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+
+    // Update existing entry in megamorphic state - no change
+    try std.testing.expect(!pic.update(&class1, 100));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1)); // unchanged
+
+    // Reset test
+    pic.reset();
+    try std.testing.expectEqual(@as(u8, 0), pic.count);
+    try std.testing.expect(!pic.megamorphic);
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(&class1));
+}
+
+test "End-to-end: polymorphic property access" {
+    // Test that PIC handles multiple object shapes correctly
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var heap_state = heap_mod.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    // Test: access .x on objects with different shapes (polymorphic site)
+    // Each object has a different set of properties, so different hidden classes
+    const source =
+        \\function getX(obj) { return obj.x; }
+        \\let a = { x: 1 };
+        \\let b = { x: 10, y: 2 };
+        \\let c = { x: 100, y: 3, z: 4 };
+        \\let d = { w: 0, x: 1000 };
+        \\let result = getX(a) + getX(b) + getX(c) + getX(d);
+    ;
+
+    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    // Get result from global
+    const result_atom = try ctx.atoms.intern("result");
+    const result_opt = ctx.getGlobal(result_atom);
+    try std.testing.expect(result_opt != null);
+
+    const result_val = result_opt.?;
+    try std.testing.expect(result_val.isInt());
+    // 1 + 10 + 100 + 1000 = 1111
+    try std.testing.expectEqual(@as(i32, 1111), result_val.getInt());
 }
