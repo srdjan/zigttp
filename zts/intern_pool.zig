@@ -72,6 +72,46 @@ pub const Item = struct {
     data: u32,
 };
 
+/// String key for the deduplication map - stable across reallocations
+const StringKey = packed struct {
+    offset: u32,
+    length: u32,
+};
+
+/// Context for string map that uses string content for hashing/equality
+/// Requires access to string_bytes storage for key lookup
+const StringMapContext = struct {
+    string_bytes: *std.ArrayListUnmanaged(u8),
+
+    pub fn hash(self: @This(), key: StringKey) u64 {
+        const str = self.string_bytes.items[key.offset..][0..key.length];
+        return std.hash.Wyhash.hash(0, str);
+    }
+
+    pub fn eql(self: @This(), a: StringKey, b: StringKey) bool {
+        const a_str = self.string_bytes.items[a.offset..][0..a.length];
+        const b_str = self.string_bytes.items[b.offset..][0..b.length];
+        return std.mem.eql(u8, a_str, b_str);
+    }
+};
+
+/// Adapter for looking up strings using raw []const u8
+const StringLookupAdapter = struct {
+    string_bytes: *std.ArrayListUnmanaged(u8),
+
+    pub fn hash(_: @This(), key: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, key);
+    }
+
+    pub fn eql(self: @This(), a: []const u8, b: StringKey) bool {
+        const b_str = self.string_bytes.items[b.offset..][0..b.length];
+        return std.mem.eql(u8, a, b_str);
+    }
+};
+
+/// String map type using content-based hashing
+const StringMap = std.HashMapUnmanaged(StringKey, Index, StringMapContext, std.hash_map.default_max_load_percentage);
+
 /// InternPool for canonical value storage
 pub const InternPool = struct {
     allocator: std.mem.Allocator,
@@ -89,7 +129,8 @@ pub const InternPool = struct {
     string_lengths: std.ArrayListUnmanaged(u32),
 
     // Deduplication maps
-    string_map: std.StringHashMapUnmanaged(Index),
+    // Use StringKey (offset/length) instead of slices to avoid dangling pointers on reallocation
+    string_map: StringMap,
     float_map: std.AutoHashMapUnmanaged(u64, Index), // f64 bits -> index
     int_map: std.AutoHashMapUnmanaged(i32, Index), // i32 -> index
 
@@ -161,14 +202,20 @@ pub const InternPool = struct {
     // ========================================================================
 
     /// Intern a string, returning its canonical index
+    /// Get the context for string map operations
+    fn getStringMapContext(self: *InternPool) StringMapContext {
+        return .{ .string_bytes = &self.string_bytes };
+    }
+
     pub fn internString(self: *InternPool, str: []const u8) !Index {
         // Check for empty string (well-known)
         if (str.len == 0) {
             return .empty_string;
         }
 
-        // Check if already interned
-        if (self.string_map.get(str)) |existing| {
+        // Check if already interned using adapted lookup
+        const adapter = StringLookupAdapter{ .string_bytes = &self.string_bytes };
+        if (self.string_map.getAdapted(str, adapter)) |existing| {
             return existing;
         }
 
@@ -186,9 +233,10 @@ pub const InternPool = struct {
             .data = offset,
         });
 
-        // Add to dedup map (key points into string_bytes)
-        const stored_str = self.string_bytes.items[offset..][0..str.len];
-        try self.string_map.put(self.allocator, stored_str, idx);
+        // Add to dedup map using stable StringKey
+        const key = StringKey{ .offset = offset, .length = @intCast(str.len) };
+        const ctx = self.getStringMapContext();
+        try self.string_map.putContext(self.allocator, key, idx, ctx);
 
         return idx;
     }
@@ -579,4 +627,159 @@ test "AtomBridge syncFromAtoms" {
 
     // Pool should now have all the strings
     try std.testing.expectEqual(@as(u32, 3), pool.count());
+}
+
+// ============================================================================
+// Thread-Safe InternPool (Phase 15)
+// ============================================================================
+
+/// Thread-safe wrapper around InternPool for parallel compilation
+/// Uses simple mutex-based locking. Can be upgraded to sharded locks if
+/// contention becomes measurable.
+pub const ThreadSafeInternPool = struct {
+    inner: InternPool,
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator) ThreadSafeInternPool {
+        return .{
+            .inner = InternPool.init(allocator),
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *ThreadSafeInternPool) void {
+        self.inner.deinit();
+    }
+
+    /// Thread-safe string interning
+    pub fn internString(self: *ThreadSafeInternPool, str: []const u8) !Index {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.internString(str);
+    }
+
+    /// Thread-safe int interning
+    pub fn internInt(self: *ThreadSafeInternPool, val: i32) !Index {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.internInt(val);
+    }
+
+    /// Thread-safe float interning
+    pub fn internFloat(self: *ThreadSafeInternPool, val: f64) !Index {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.internFloat(val);
+    }
+
+    /// Thread-safe string lookup (read-only, still needs lock)
+    pub fn getString(self: *ThreadSafeInternPool, idx: Index) ?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.getString(idx);
+    }
+
+    /// Thread-safe int lookup
+    pub fn getInt(self: *ThreadSafeInternPool, idx: Index) ?i32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.getInt(idx);
+    }
+
+    /// Thread-safe float lookup
+    pub fn getFloat(self: *ThreadSafeInternPool, idx: Index) ?f64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.getFloat(idx);
+    }
+
+    /// Thread-safe count
+    pub fn count(self: *ThreadSafeInternPool) u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.inner.count();
+    }
+
+    // Well-known value accessors (no lock needed - static values)
+    pub fn getNullVal(_: *const ThreadSafeInternPool) Index {
+        return .null_val;
+    }
+
+    pub fn getUndefinedVal(_: *const ThreadSafeInternPool) Index {
+        return .undefined_val;
+    }
+
+    pub fn getTrueVal(_: *const ThreadSafeInternPool) Index {
+        return .true_val;
+    }
+
+    pub fn getFalseVal(_: *const ThreadSafeInternPool) Index {
+        return .false_val;
+    }
+
+    pub fn getEmptyString(_: *const ThreadSafeInternPool) Index {
+        return .empty_string;
+    }
+};
+
+test "ThreadSafeInternPool basic operations" {
+    var pool = ThreadSafeInternPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    // Intern some values
+    const str1 = try pool.internString("hello");
+    const str2 = try pool.internString("hello"); // duplicate
+    const str3 = try pool.internString("world");
+
+    // Same string returns same index
+    try std.testing.expectEqual(str1, str2);
+    try std.testing.expect(str1 != str3);
+
+    // Retrieve works
+    try std.testing.expectEqualStrings("hello", pool.getString(str1).?);
+    try std.testing.expectEqualStrings("world", pool.getString(str3).?);
+}
+
+test "ThreadSafeInternPool concurrent access" {
+    var pool = ThreadSafeInternPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    const Thread = std.Thread;
+    const num_threads = 4;
+    const iterations = 100;
+
+    const Worker = struct {
+        fn run(p: *ThreadSafeInternPool, thread_id: usize) void {
+            for (0..iterations) |i| {
+                // Each thread interns unique and shared strings
+                var buf: [32]u8 = undefined;
+                const unique = std.fmt.bufPrint(&buf, "thread{d}_iter{d}", .{ thread_id, i }) catch continue;
+                _ = p.internString(unique) catch continue;
+
+                // Also intern shared strings
+                _ = p.internString("shared_string_1") catch continue;
+                _ = p.internString("shared_string_2") catch continue;
+            }
+        }
+    };
+
+    // Spawn threads
+    var threads: [num_threads]Thread = undefined;
+    for (&threads, 0..) |*t, i| {
+        t.* = Thread.spawn(.{}, Worker.run, .{ &pool, i }) catch continue;
+    }
+
+    // Wait for all threads
+    for (&threads) |*t| {
+        t.join();
+    }
+
+    // Verify shared strings were deduplicated
+    const shared1 = try pool.internString("shared_string_1");
+    const shared2 = try pool.internString("shared_string_2");
+
+    // Getting them again should return same index
+    const shared1_again = try pool.internString("shared_string_1");
+    try std.testing.expectEqual(shared1, shared1_again);
+    try std.testing.expect(shared1 != shared2);
 }

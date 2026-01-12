@@ -872,3 +872,518 @@ test "constant serialization - mixed types" {
     try std.testing.expectEqualStrings("test", restored[3].toPtr(string.JSString).data());
     try std.testing.expect(restored[4].isTrue());
 }
+
+// ============================================================================
+// Phase 1c: Atom Serialization
+// ============================================================================
+//
+// Enables full cache hit path by serializing atom tables alongside bytecode.
+// On deserialization, atoms are re-interned in the target context and all
+// bytecode atom references are remapped.
+//
+// Approach:
+// - Predefined atoms (< FIRST_DYNAMIC) are stored as raw u32 IDs (same across contexts)
+// - Dynamic atoms store their string content for re-interning
+// - Bytecode is scanned for atom references and remapped after deserialization
+
+const object = @import("object.zig");
+const Context = @import("context.zig").Context;
+const AtomTable = @import("context.zig").AtomTable;
+
+/// Atom remapping table: source atom ID -> target atom ID
+pub const AtomRemap = struct {
+    /// Mapping from source atom to target atom
+    map: std.AutoHashMapUnmanaged(u32, u32),
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) AtomRemap {
+        return .{
+            .map = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *AtomRemap) void {
+        self.map.deinit(self.allocator);
+    }
+
+    /// Add a mapping from source to target atom
+    pub fn put(self: *AtomRemap, source: u32, target: u32) !void {
+        try self.map.put(self.allocator, source, target);
+    }
+
+    /// Get the target atom for a source atom, returns source if not mapped
+    pub fn get(self: *const AtomRemap, source: u32) u32 {
+        return self.map.get(source) orelse source;
+    }
+};
+
+/// Collect all atoms referenced in bytecode (for serialization)
+pub fn collectAtoms(func: *const bytecode.FunctionBytecode, allocator: std.mem.Allocator) ![]u32 {
+    var atoms = std.AutoHashMapUnmanaged(u32, void){};
+    defer atoms.deinit(allocator);
+
+    // Add function name atom
+    if (func.name_atom != 0) {
+        try atoms.put(allocator, func.name_atom, {});
+    }
+
+    // Scan bytecode for atom references
+    var pc: usize = 0;
+    while (pc < func.code.len) {
+        const op: bytecode.Opcode = @enumFromInt(func.code[pc]);
+        const info = bytecode.getOpcodeInfo(op);
+        pc += 1;
+
+        switch (op) {
+            // Property access opcodes with u16 atom index
+            .get_field,
+            .put_field,
+            .delete_field,
+            .put_field_keep,
+            .get_global,
+            .put_global,
+            .define_global,
+            => {
+                if (pc + 2 <= func.code.len) {
+                    const atom_idx = std.mem.readInt(u16, func.code[pc..][0..2], .little);
+                    // Atom index is into constants, but we need to check if it's actually an atom
+                    // For now, these opcodes use atom IDs directly, not constant indices
+                    try atoms.put(allocator, atom_idx, {});
+                }
+                pc += info.size - 1;
+            },
+            // Inline cache opcodes with u16 atom index
+            .get_field_ic,
+            .put_field_ic,
+            => {
+                if (pc + 2 <= func.code.len) {
+                    const atom_idx = std.mem.readInt(u16, func.code[pc..][0..2], .little);
+                    try atoms.put(allocator, atom_idx, {});
+                }
+                pc += info.size - 1;
+            },
+            else => {
+                pc += info.size - 1;
+            },
+        }
+    }
+
+    // Recursively collect atoms from nested functions in constants
+    for (func.constants) |constant| {
+        if (constant.isFunction()) {
+            const nested_func = constant.toPtr(bytecode.FunctionBytecode);
+            const nested_atoms = try collectAtoms(nested_func, allocator);
+            defer allocator.free(nested_atoms);
+            for (nested_atoms) |atom| {
+                try atoms.put(allocator, atom, {});
+            }
+        }
+    }
+
+    // Convert to sorted slice for deterministic serialization
+    const result = try allocator.alloc(u32, atoms.count());
+    var i: usize = 0;
+    var it = atoms.keyIterator();
+    while (it.next()) |key| {
+        result[i] = key.*;
+        i += 1;
+    }
+
+    // Sort for determinism
+    std.mem.sort(u32, result, {}, std.sort.asc(u32));
+
+    return result;
+}
+
+/// Serialize atoms to a writer
+/// Format: count(u16) + [atom_entry...]
+/// atom_entry for predefined: tag(0) + atom_id(u32)
+/// atom_entry for dynamic: tag(1) + atom_id(u32) + len(u16) + string_bytes
+pub fn serializeAtoms(
+    atoms: []const u32,
+    atom_table: *AtomTable,
+    writer: anytype,
+) !void {
+    try writer.writeInt(u16, @intCast(atoms.len), .little);
+
+    for (atoms) |atom_id| {
+        const atom: object.Atom = @enumFromInt(atom_id);
+
+        if (atom.isPredefined()) {
+            // Predefined atom: just store the ID
+            try writer.writeByte(0); // tag = predefined
+            try writer.writeInt(u32, atom_id, .little);
+        } else {
+            // Dynamic atom: store ID and string
+            try writer.writeByte(1); // tag = dynamic
+            try writer.writeInt(u32, atom_id, .little);
+
+            const name = atom_table.getName(atom) orelse "";
+            try writer.writeInt(u16, @intCast(name.len), .little);
+            try writer.writeAll(name);
+        }
+    }
+}
+
+/// Deserialize atoms and build remapping table
+/// Re-interns dynamic atoms in target context
+pub fn deserializeAtoms(
+    reader: anytype,
+    target_atoms: *AtomTable,
+    allocator: std.mem.Allocator,
+) !AtomRemap {
+    var remap = AtomRemap.init(allocator);
+    errdefer remap.deinit();
+
+    const count = try reader.readInt(u16, .little);
+
+    for (0..count) |_| {
+        const tag = try reader.readByte();
+        const source_id = try reader.readInt(u32, .little);
+
+        if (tag == 0) {
+            // Predefined atom: no remapping needed (same across contexts)
+            // But still add identity mapping for completeness
+            try remap.put(source_id, source_id);
+        } else {
+            // Dynamic atom: re-intern string and map old ID to new ID
+            const len = try reader.readInt(u16, .little);
+            const name_buf = try allocator.alloc(u8, len);
+            defer allocator.free(name_buf);
+
+            const read_count = try reader.readAll(name_buf);
+            if (read_count != len) return error.IncompleteRead;
+
+            const target_atom = try target_atoms.intern(name_buf);
+            try remap.put(source_id, @intFromEnum(target_atom));
+        }
+    }
+
+    return remap;
+}
+
+/// Remap all atom references in bytecode using the remapping table
+/// Modifies the bytecode in place (requires mutable bytecode buffer)
+pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRemap) void {
+    // Remap function name atom
+    if (func.name_atom != 0) {
+        func.name_atom = remap.get(func.name_atom);
+    }
+
+    // Cast code to mutable for modification (bytecode is owned memory after deserialization)
+    const code_mutable: []u8 = @constCast(func.code);
+
+    // Remap atoms in bytecode
+    var pc: usize = 0;
+    while (pc < code_mutable.len) {
+        const op: bytecode.Opcode = @enumFromInt(code_mutable[pc]);
+        const info = bytecode.getOpcodeInfo(op);
+        pc += 1;
+
+        switch (op) {
+            // Property access opcodes with u16 atom index
+            .get_field,
+            .put_field,
+            .delete_field,
+            .put_field_keep,
+            .get_global,
+            .put_global,
+            .define_global,
+            .get_field_ic,
+            .put_field_ic,
+            => {
+                if (pc + 2 <= code_mutable.len) {
+                    const old_atom = std.mem.readInt(u16, code_mutable[pc..][0..2], .little);
+                    const new_atom = remap.get(old_atom);
+                    // Safety: new_atom should fit in u16 for property atoms
+                    std.mem.writeInt(u16, code_mutable[pc..][0..2], @intCast(new_atom), .little);
+                }
+                pc += info.size - 1;
+            },
+            else => {
+                pc += info.size - 1;
+            },
+        }
+    }
+
+    // Recursively remap nested functions in constants
+    for (func.constants) |constant| {
+        if (constant.isFunction()) {
+            const nested_func = constant.toPtr(bytecode.FunctionBytecode);
+            remapBytecodeAtoms(nested_func, remap);
+        }
+    }
+}
+
+/// Full bytecode serialization with atom table (Phase 1c)
+/// Includes bytecode, constants, and atoms for complete cache hit path
+pub fn serializeBytecodeWithAtoms(
+    func: *const bytecode.FunctionBytecode,
+    atom_table: *AtomTable,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+) !void {
+    // Collect all referenced atoms
+    const atoms = try collectAtoms(func, allocator);
+    defer allocator.free(atoms);
+
+    // Write atoms first (needed for remapping on deserialize)
+    try serializeAtoms(atoms, atom_table, writer);
+
+    // Write bytecode and constants
+    try serializeFunctionBytecode(func, writer, allocator);
+}
+
+/// Full bytecode deserialization with atom remapping (Phase 1c)
+/// Re-interns atoms in target context and remaps all references
+pub fn deserializeBytecodeWithAtoms(
+    reader: anytype,
+    target_atoms: *AtomTable,
+    allocator: std.mem.Allocator,
+    strings_table: ?*string.StringTable,
+) !*bytecode.FunctionBytecode {
+    // Deserialize atoms and build remapping
+    var remap = try deserializeAtoms(reader, target_atoms, allocator);
+    defer remap.deinit();
+
+    // Deserialize bytecode
+    const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
+    errdefer {
+        allocator.free(func.code);
+        allocator.free(func.upvalue_info);
+        allocator.free(func.constants);
+        allocator.destroy(func);
+    }
+
+    // Remap all atom references
+    remapBytecodeAtoms(func, &remap);
+
+    return func;
+}
+
+// ============================================================================
+// Phase 1c Tests: Atom Serialization
+// ============================================================================
+
+test "atom collection - basic" {
+    const allocator = std.testing.allocator;
+
+    // Create simple bytecode with atom references
+    // get_global atom_42 -> push value from global "myVar"
+    // ret
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global), 0x2A, 0x00, // atom 42
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 300, // dynamic atom
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const atoms = try collectAtoms(&func, allocator);
+    defer allocator.free(atoms);
+
+    // Should contain atom 42 (from get_global) and 300 (name_atom)
+    try std.testing.expectEqual(@as(usize, 2), atoms.len);
+    // Sorted: 42, 300
+    try std.testing.expectEqual(@as(u32, 42), atoms[0]);
+    try std.testing.expectEqual(@as(u32, 300), atoms[1]);
+}
+
+test "atom serialization roundtrip - predefined only" {
+    const allocator = std.testing.allocator;
+
+    var source_atoms = AtomTable.init(allocator);
+    defer source_atoms.deinit();
+
+    var target_atoms = AtomTable.init(allocator);
+    defer target_atoms.deinit();
+
+    // Atoms to serialize (all predefined)
+    const atoms = [_]u32{ 4, 5, 7 }; // length, prototype, toString
+
+    // Serialize
+    var buffer: [256]u8 = undefined;
+    var writer = SliceWriter{ .buffer = &buffer };
+    try serializeAtoms(&atoms, &source_atoms, &writer);
+
+    // Deserialize
+    var reader = SliceReader{ .data = writer.getWritten() };
+    var remap = try deserializeAtoms(&reader, &target_atoms, allocator);
+    defer remap.deinit();
+
+    // Predefined atoms should map to themselves
+    try std.testing.expectEqual(@as(u32, 4), remap.get(4));
+    try std.testing.expectEqual(@as(u32, 5), remap.get(5));
+    try std.testing.expectEqual(@as(u32, 7), remap.get(7));
+}
+
+test "atom serialization roundtrip - dynamic atoms" {
+    const allocator = std.testing.allocator;
+
+    var source_atoms = AtomTable.init(allocator);
+    defer source_atoms.deinit();
+
+    var target_atoms = AtomTable.init(allocator);
+    defer target_atoms.deinit();
+
+    // Create dynamic atoms in source
+    const src_atom1 = try source_atoms.intern("myProperty");
+    const src_atom2 = try source_atoms.intern("anotherProp");
+
+    // Atoms to serialize
+    const atoms = [_]u32{
+        @intFromEnum(src_atom1),
+        @intFromEnum(src_atom2),
+    };
+
+    // Serialize
+    var buffer: [512]u8 = undefined;
+    var writer = SliceWriter{ .buffer = &buffer };
+    try serializeAtoms(&atoms, &source_atoms, &writer);
+
+    // Deserialize into fresh target context
+    var reader = SliceReader{ .data = writer.getWritten() };
+    var remap = try deserializeAtoms(&reader, &target_atoms, allocator);
+    defer remap.deinit();
+
+    // Get target atoms by name
+    const tgt_atom1 = try target_atoms.intern("myProperty");
+    const tgt_atom2 = try target_atoms.intern("anotherProp");
+
+    // Source atoms should map to target atoms
+    try std.testing.expectEqual(@intFromEnum(tgt_atom1), remap.get(@intFromEnum(src_atom1)));
+    try std.testing.expectEqual(@intFromEnum(tgt_atom2), remap.get(@intFromEnum(src_atom2)));
+}
+
+test "atom remapping in bytecode" {
+    const allocator = std.testing.allocator;
+
+    // Create bytecode with atom references that need remapping
+    var code = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global), 0xE0, 0x00, // atom 224 (dynamic)
+        @intFromEnum(bytecode.Opcode.put_field), 0xE1, 0x00, // atom 225 (dynamic)
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const constants = try allocator.alloc(value.JSValue, 0);
+    defer allocator.free(constants);
+
+    const code_owned = try allocator.dupe(u8, &code);
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 226,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = code_owned,
+        .constants = constants,
+        .source_map = null,
+    };
+    defer allocator.free(code_owned);
+
+    // Create remapping: 224->300, 225->301, 226->302
+    var remap = AtomRemap.init(allocator);
+    defer remap.deinit();
+    try remap.put(224, 300);
+    try remap.put(225, 301);
+    try remap.put(226, 302);
+
+    // Apply remapping
+    remapBytecodeAtoms(&func, &remap);
+
+    // Verify name_atom remapped
+    try std.testing.expectEqual(@as(u32, 302), func.name_atom);
+
+    // Verify bytecode atoms remapped
+    const remapped_atom1 = std.mem.readInt(u16, func.code[1..3], .little);
+    const remapped_atom2 = std.mem.readInt(u16, func.code[4..6], .little);
+    try std.testing.expectEqual(@as(u16, 300), remapped_atom1);
+    try std.testing.expectEqual(@as(u16, 301), remapped_atom2);
+}
+
+test "full bytecode with atoms roundtrip" {
+    const allocator = std.testing.allocator;
+
+    // Create source context atoms
+    var source_atoms = AtomTable.init(allocator);
+    defer source_atoms.deinit();
+
+    var target_atoms = AtomTable.init(allocator);
+    defer target_atoms.deinit();
+
+    // Create a dynamic atom in source
+    const src_global = try source_atoms.intern("myGlobal");
+    const src_global_id = @intFromEnum(src_global);
+
+    // Create bytecode referencing the dynamic atom
+    var code_buf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @truncate(src_global_id),
+        @truncate(src_global_id >> 8),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    const constants = try allocator.alloc(value.JSValue, 0);
+    const code = try allocator.dupe(u8, &code_buf);
+    const upvalue_info = try allocator.alloc(bytecode.UpvalueInfo, 0);
+
+    const func = try allocator.create(bytecode.FunctionBytecode);
+    func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = upvalue_info,
+        .code = code,
+        .constants = constants,
+        .source_map = null,
+    };
+    defer {
+        allocator.free(func.code);
+        allocator.free(func.constants);
+        allocator.free(func.upvalue_info);
+        allocator.destroy(func);
+    }
+
+    // Serialize with atoms
+    var buffer: [1024]u8 = undefined;
+    var writer = SliceWriter{ .buffer = &buffer };
+    try serializeBytecodeWithAtoms(func, &source_atoms, &writer, allocator);
+
+    // Deserialize with atom remapping
+    var reader = SliceReader{ .data = writer.getWritten() };
+    const restored = try deserializeBytecodeWithAtoms(&reader, &target_atoms, allocator, null);
+    defer {
+        allocator.free(restored.code);
+        allocator.free(restored.constants);
+        allocator.free(restored.upvalue_info);
+        allocator.destroy(restored);
+    }
+
+    // Get the target atom
+    const tgt_global = try target_atoms.intern("myGlobal");
+    const tgt_global_id = @intFromEnum(tgt_global);
+
+    // Verify bytecode atom was remapped
+    const restored_atom = std.mem.readInt(u16, restored.code[1..3], .little);
+    try std.testing.expectEqual(@as(u16, @truncate(tgt_global_id)), restored_atom);
+}

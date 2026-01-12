@@ -670,3 +670,359 @@ test "FunctionBytecodeCompact size calculation" {
     const medium_size = FunctionBytecodeCompact.calcSize(256, 16, 4);
     try std.testing.expect(medium_size < 512);
 }
+
+// ============================================================================
+// Phase 16: Code Versioning for Hot Reload
+// ============================================================================
+
+/// CodeVersion wraps bytecode with reference counting and epoch tracking
+/// for safe hot reload without use-after-free.
+pub const CodeVersion = struct {
+    /// The actual bytecode
+    bytecode: *FunctionBytecode,
+    /// Version number (epoch)
+    version: u32,
+    /// Reference count for safe deallocation
+    ref_count: std.atomic.Value(u32),
+    /// Allocator used to create this version
+    allocator: std.mem.Allocator,
+    /// Whether this version owns its bytecode (should free on destroy)
+    owns_bytecode: bool,
+
+    /// Create a new CodeVersion wrapping bytecode
+    pub fn create(
+        allocator: std.mem.Allocator,
+        bytecode_ptr: *FunctionBytecode,
+        version: u32,
+        owns_bytecode: bool,
+    ) !*CodeVersion {
+        const cv = try allocator.create(CodeVersion);
+        cv.* = .{
+            .bytecode = bytecode_ptr,
+            .version = version,
+            .ref_count = std.atomic.Value(u32).init(1),
+            .allocator = allocator,
+            .owns_bytecode = owns_bytecode,
+        };
+        return cv;
+    }
+
+    /// Increment reference count
+    pub fn retain(self: *CodeVersion) void {
+        _ = self.ref_count.fetchAdd(1, .monotonic);
+    }
+
+    /// Decrement reference count, destroy when it reaches 0
+    pub fn release(self: *CodeVersion) void {
+        // Use acq_rel to ensure all prior writes are visible before destruction
+        const prev = self.ref_count.fetchSub(1, .acq_rel);
+        if (prev == 1) {
+            // We were the last reference
+            self.destroy();
+        }
+    }
+
+    /// Get current reference count (for debugging/testing)
+    pub fn getRefCount(self: *const CodeVersion) u32 {
+        return self.ref_count.load(.acquire);
+    }
+
+    /// Destroy this CodeVersion
+    fn destroy(self: *CodeVersion) void {
+        if (self.owns_bytecode) {
+            // Free the bytecode
+            self.allocator.free(self.bytecode.code);
+            if (self.bytecode.constants.len > 0) {
+                self.allocator.free(self.bytecode.constants);
+            }
+            if (self.bytecode.upvalue_info.len > 0) {
+                self.allocator.free(self.bytecode.upvalue_info);
+            }
+            self.allocator.destroy(self.bytecode);
+        }
+        self.allocator.destroy(self);
+    }
+};
+
+/// VersionedFunction holds an atomically-swappable code version
+/// Used by function objects to support hot reload.
+pub const VersionedFunction = struct {
+    /// Atomic pointer to current code version
+    code: std.atomic.Value(*CodeVersion),
+    /// Name atom for identification
+    name_atom: u32,
+
+    /// Create a new versioned function
+    pub fn create(allocator: std.mem.Allocator, initial_code: *CodeVersion, name_atom: u32) !*VersionedFunction {
+        const vf = try allocator.create(VersionedFunction);
+        vf.* = .{
+            .code = std.atomic.Value(*CodeVersion).init(initial_code),
+            .name_atom = name_atom,
+        };
+        // Retain the initial code since we're storing a reference
+        initial_code.retain();
+        return vf;
+    }
+
+    /// Get current bytecode (for execution)
+    pub fn getBytecode(self: *VersionedFunction) *FunctionBytecode {
+        return self.code.load(.acquire).bytecode;
+    }
+
+    /// Get current code version
+    pub fn getCodeVersion(self: *VersionedFunction) *CodeVersion {
+        return self.code.load(.acquire);
+    }
+
+    /// Get current version number
+    pub fn getVersion(self: *VersionedFunction) u32 {
+        return self.code.load(.acquire).version;
+    }
+
+    /// Atomically update to a new code version
+    /// Returns the old version (caller should release it)
+    pub fn updateCode(self: *VersionedFunction, new_version: *CodeVersion) *CodeVersion {
+        new_version.retain();
+        const old = self.code.swap(new_version, .acq_rel);
+        return old;
+    }
+
+    /// Destroy this versioned function
+    pub fn destroy(self: *VersionedFunction, allocator: std.mem.Allocator) void {
+        // Release our reference to the code version
+        self.code.load(.acquire).release();
+        allocator.destroy(self);
+    }
+};
+
+/// HotReloadManager coordinates code updates across multiple runtimes
+pub const HotReloadManager = struct {
+    /// All registered code versions (for cleanup)
+    versions: std.ArrayListUnmanaged(*CodeVersion),
+    /// Current epoch number
+    current_epoch: u32,
+    /// Allocator
+    allocator: std.mem.Allocator,
+    /// Mutex for version list updates
+    mutex: std.Thread.Mutex,
+
+    pub fn init(allocator: std.mem.Allocator) HotReloadManager {
+        return .{
+            .versions = .{},
+            .current_epoch = 0,
+            .allocator = allocator,
+            .mutex = .{},
+        };
+    }
+
+    pub fn deinit(self: *HotReloadManager) void {
+        // Release all tracked versions
+        for (self.versions.items) |version| {
+            version.release();
+        }
+        self.versions.deinit(self.allocator);
+    }
+
+    /// Register a new code version
+    pub fn registerVersion(self: *HotReloadManager, version: *CodeVersion) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        version.retain();
+        try self.versions.append(self.allocator, version);
+    }
+
+    /// Create a new code version for hot reload
+    pub fn createVersion(
+        self: *HotReloadManager,
+        bytecode_ptr: *FunctionBytecode,
+        owns_bytecode: bool,
+    ) !*CodeVersion {
+        self.mutex.lock();
+        const epoch = self.current_epoch + 1;
+        self.current_epoch = epoch;
+        self.mutex.unlock();
+
+        const version = try CodeVersion.create(self.allocator, bytecode_ptr, epoch, owns_bytecode);
+        try self.registerVersion(version);
+        return version;
+    }
+
+    /// Get current epoch
+    pub fn getEpoch(self: *HotReloadManager) u32 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.current_epoch;
+    }
+
+    /// Cleanup unreferenced old versions
+    pub fn collectOldVersions(self: *HotReloadManager) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Remove versions with ref_count == 1 (only our reference)
+        var i: usize = 0;
+        while (i < self.versions.items.len) {
+            const version = self.versions.items[i];
+            if (version.getRefCount() == 1) {
+                // Only we hold a reference, safe to remove
+                _ = self.versions.swapRemove(i);
+                version.release();
+            } else {
+                i += 1;
+            }
+        }
+    }
+};
+
+// ============================================================================
+// Phase 16 Tests
+// ============================================================================
+
+test "CodeVersion reference counting" {
+    const allocator = std.testing.allocator;
+
+    // Create a simple bytecode
+    const code = try allocator.alloc(u8, 4);
+    code[0] = @intFromEnum(Opcode.push_1);
+    code[1] = @intFromEnum(Opcode.ret);
+    code[2] = 0;
+    code[3] = 0;
+
+    const constants = try allocator.alloc(value.JSValue, 0);
+    const upvalue_info = try allocator.alloc(UpvalueInfo, 0);
+
+    const bc = try allocator.create(FunctionBytecode);
+    bc.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = upvalue_info,
+        .code = code,
+        .constants = constants,
+        .source_map = null,
+    };
+
+    // Create code version (owns bytecode)
+    const cv = try CodeVersion.create(allocator, bc, 1, true);
+
+    // Initial ref count is 1
+    try std.testing.expectEqual(@as(u32, 1), cv.getRefCount());
+
+    // Retain increases count
+    cv.retain();
+    try std.testing.expectEqual(@as(u32, 2), cv.getRefCount());
+
+    // Release decreases count
+    cv.release();
+    try std.testing.expectEqual(@as(u32, 1), cv.getRefCount());
+
+    // Final release frees everything
+    cv.release();
+    // cv is now freed, test passes if no leak
+}
+
+test "VersionedFunction atomic update" {
+    const allocator = std.testing.allocator;
+
+    // Create initial bytecode v1
+    const code1 = try allocator.alloc(u8, 2);
+    code1[0] = @intFromEnum(Opcode.push_1);
+    code1[1] = @intFromEnum(Opcode.ret);
+    const bc1 = try allocator.create(FunctionBytecode);
+    bc1.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = code1,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const cv1 = try CodeVersion.create(allocator, bc1, 1, true);
+    defer cv1.release();
+
+    // Create new bytecode v2
+    const code2 = try allocator.alloc(u8, 2);
+    code2[0] = @intFromEnum(Opcode.push_2);
+    code2[1] = @intFromEnum(Opcode.ret);
+    const bc2 = try allocator.create(FunctionBytecode);
+    bc2.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = code2,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const cv2 = try CodeVersion.create(allocator, bc2, 2, true);
+    defer cv2.release();
+
+    // Create versioned function with v1
+    const vf = try VersionedFunction.create(allocator, cv1, 0);
+    defer vf.destroy(allocator);
+
+    // Check initial version
+    try std.testing.expectEqual(@as(u32, 1), vf.getVersion());
+    try std.testing.expectEqual(@intFromEnum(Opcode.push_1), vf.getBytecode().code[0]);
+
+    // Update to v2
+    const old = vf.updateCode(cv2);
+    old.release(); // Release the old version
+
+    // Check updated version
+    try std.testing.expectEqual(@as(u32, 2), vf.getVersion());
+    try std.testing.expectEqual(@intFromEnum(Opcode.push_2), vf.getBytecode().code[0]);
+}
+
+test "HotReloadManager epoch tracking" {
+    const allocator = std.testing.allocator;
+
+    var manager = HotReloadManager.init(allocator);
+    defer manager.deinit();
+
+    // Initial epoch is 0
+    try std.testing.expectEqual(@as(u32, 0), manager.getEpoch());
+
+    // Create version increments epoch
+    const code = try allocator.alloc(u8, 2);
+    code[0] = @intFromEnum(Opcode.push_0);
+    code[1] = @intFromEnum(Opcode.ret);
+    const bc = try allocator.create(FunctionBytecode);
+    bc.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const cv = try manager.createVersion(bc, true);
+    try std.testing.expectEqual(@as(u32, 1), cv.version);
+    try std.testing.expectEqual(@as(u32, 1), manager.getEpoch());
+
+    // Release our reference (manager still holds one)
+    cv.release();
+
+    // Collect should clean up (only manager reference remains)
+    manager.collectOldVersions();
+}

@@ -49,6 +49,7 @@ pub const bytecode_cache = @import("bytecode_cache.zig");
 pub const bytecode_opt = @import("bytecode_opt.zig");
 pub const perf = @import("perf.zig");
 pub const jit = @import("jit/root.zig");
+pub const compiler = @import("compiler.zig");
 
 // Re-export main types for convenience
 pub const JSValue = value.JSValue;
