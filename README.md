@@ -54,8 +54,11 @@ Options:
   -p, --port <PORT>     Port to listen on (default: 8080)
   -h, --host <HOST>     Host to bind to (default: 127.0.0.1)
   -e, --eval <CODE>     Evaluate inline JavaScript handler
-  -m, --memory <SIZE>   JS runtime memory limit (default: 256k)
+  -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
+  -n, --pool <N>        Runtime pool size (default: 8)
   -q, --quiet           Disable request logging
+  --cors                Enable CORS headers
+  --static <DIR>        Serve static files from directory
   --help                Show help message
 ```
 
@@ -78,9 +81,6 @@ returns a Response.
 ### Response Helpers
 
 ```javascript
-// Basic response
-new Response(body, { status: 200, headers: {} })
-
 // JSON response (sets Content-Type automatically)
 Response.json(data, init?)
 
@@ -117,6 +117,29 @@ function handler(request) {
     return Response.text("Not Found", { status: 404 });
 }
 ```
+
+## Advanced Server Configuration (Zig API)
+
+If you embed `Server` directly in Zig, these `ServerConfig` fields tune the new
+performance features:
+
+```zig
+const config = ServerConfig{
+    .pool_wait_timeout_ms = 5,
+    .pool_metrics_every = 1000,
+    .static_cache_max_bytes = 2 * 1024 * 1024,
+    .static_cache_max_file_size = 128 * 1024,
+};
+```
+
+When `pool_metrics_every` is set, logs include a line like:
+
+```
+Pool metrics: in_use=2/8 exhausted=0 avg_wait_us=3 max_wait_us=20 avg_exec_us=120 max_exec_us=500
+```
+
+Fields are the current in-use count, pool size, exhausted acquisitions, and
+average/max wait and execution time (microseconds).
 
 ## JSX Support
 

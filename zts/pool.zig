@@ -26,6 +26,8 @@ pub const PoolConfig = struct {
 pub const LockFreePool = struct {
     slots: []std.atomic.Value(?*Runtime),
     size: std.atomic.Value(usize),
+    /// Hint for next likely-free slot (reduces linear scanning)
+    free_hint: std.atomic.Value(usize),
     config: PoolConfig,
     allocator: std.mem.Allocator,
 
@@ -191,6 +193,7 @@ pub const LockFreePool = struct {
         return .{
             .slots = slots,
             .size = std.atomic.Value(usize).init(0),
+            .free_hint = std.atomic.Value(usize).init(0),
             .config = config,
             .allocator = allocator,
         };
@@ -208,15 +211,21 @@ pub const LockFreePool = struct {
 
     /// Acquire a runtime from pool (creates new if empty)
     pub fn acquire(self: *LockFreePool) !*Runtime {
-        // Try to grab from pool (fast path)
-        for (self.slots) |*slot| {
-            const current = slot.load(.acquire);
-            if (current) |runtime| {
-                // Try to claim this slot
-                if (slot.cmpxchgWeak(current, null, .release, .monotonic) == null) {
-                    runtime.in_use = true;
-                    return runtime;
-                }
+        const len = self.slots.len;
+        const hint = self.free_hint.load(.monotonic);
+
+        // Try hint position first (fast path)
+        if (self.tryAcquireSlot(hint)) |runtime| {
+            self.free_hint.store((hint + 1) % len, .monotonic);
+            return runtime;
+        }
+
+        // Scan from hint with wrap-around
+        for (1..len) |offset| {
+            const idx = (hint + offset) % len;
+            if (self.tryAcquireSlot(idx)) |runtime| {
+                self.free_hint.store((idx + 1) % len, .monotonic);
+                return runtime;
             }
         }
 
@@ -227,14 +236,33 @@ pub const LockFreePool = struct {
         return runtime;
     }
 
+    /// Try to acquire from a specific slot (returns null if slot empty or CAS fails)
+    fn tryAcquireSlot(self: *LockFreePool, idx: usize) ?*Runtime {
+        const slot = &self.slots[idx];
+        const current = slot.load(.acquire);
+        if (current) |runtime| {
+            if (slot.cmpxchgWeak(current, null, .release, .monotonic) == null) {
+                runtime.in_use = true;
+                return runtime;
+            }
+        }
+        return null;
+    }
+
     /// Release a runtime back to pool
     pub fn release(self: *LockFreePool, runtime: *Runtime) void {
         runtime.reset();
         runtime.in_use = false;
 
-        // Try to return to pool
-        for (self.slots) |*slot| {
-            if (slot.cmpxchgWeak(null, runtime, .release, .monotonic) == null) {
+        const len = self.slots.len;
+        const hint = self.free_hint.load(.monotonic);
+
+        // Try to return to pool, starting from hint
+        for (0..len) |offset| {
+            const idx = (hint + offset) % len;
+            if (self.slots[idx].cmpxchgWeak(null, runtime, .release, .monotonic) == null) {
+                // Update hint to point to this slot (next acquire will find it)
+                self.free_hint.store(idx, .monotonic);
                 return; // Successfully pooled
             }
         }
@@ -263,6 +291,19 @@ pub const LockFreePool = struct {
 
 /// Thread-local runtime cache for reduced pool contention
 pub threadlocal var thread_local_runtime: ?*LockFreePool.Runtime = null;
+
+/// Check if thread-local cache can satisfy an acquire (no pool access needed)
+pub fn hasAvailableThreadLocal() bool {
+    if (thread_local_runtime) |rt| {
+        return !rt.in_use;
+    }
+    return false;
+}
+
+/// Check if releasing this runtime will go to thread-local cache (no pool access needed)
+pub fn willReleaseToThreadLocal(runtime: *LockFreePool.Runtime) bool {
+    return thread_local_runtime == runtime;
+}
 
 /// Acquire runtime with thread-local caching
 pub fn acquireWithCache(pool: *LockFreePool) !*LockFreePool.Runtime {

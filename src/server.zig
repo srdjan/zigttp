@@ -15,6 +15,7 @@ const HandlerPool = zruntime.HandlerPool;
 const RuntimeConfig = zruntime.RuntimeConfig;
 const HttpRequest = zruntime.HttpRequest;
 const HttpResponse = zruntime.HttpResponse;
+const HttpHeader = zruntime.HttpHeader;
 
 // ============================================================================
 // Server Configuration
@@ -54,6 +55,12 @@ pub const ServerConfig = struct {
     /// Static file directory (null = disabled)
     static_dir: ?[]const u8 = null,
 
+    /// Max total bytes for static file cache (0 = disabled)
+    static_cache_max_bytes: usize = 1024 * 1024,
+
+    /// Max individual file size to cache
+    static_cache_max_file_size: usize = 64 * 1024,
+
     /// Enable HTTP keep-alive connections
     keep_alive: bool = true,
 
@@ -64,6 +71,12 @@ pub const ServerConfig = struct {
 
     /// Maximum requests per keep-alive connection (0 = unlimited)
     keep_alive_max_requests: u32 = 100,
+
+    /// Max time to wait for a runtime from the pool (0 = fail immediately)
+    pool_wait_timeout_ms: u32 = 0,
+
+    /// Log pool metrics every N requests (0 = disabled)
+    pool_metrics_every: u64 = 0,
 };
 
 pub const HandlerSource = union(enum) {
@@ -87,6 +100,7 @@ pub const Server = struct {
     pool: ?HandlerPool,
     handler_code: []const u8,
     handler_filename: []const u8,
+    static_cache: StaticFileCache,
     running: bool,
     request_count: std.atomic.Value(u64),
 
@@ -114,6 +128,11 @@ pub const Server = struct {
             .pool = null,
             .handler_code = handler_code,
             .handler_filename = handler_filename,
+            .static_cache = StaticFileCache.init(
+                allocator,
+                config.static_cache_max_bytes,
+                config.static_cache_max_file_size,
+            ),
             .running = false,
             .request_count = std.atomic.Value(u64).init(0),
         };
@@ -121,6 +140,7 @@ pub const Server = struct {
 
     pub fn deinit(self: *Self) void {
         if (self.pool) |*p| p.deinit();
+        self.static_cache.deinit();
         if (self.evented_ready) {
             const io = self.io_backend.io();
             if (self.listener) |*l| l.deinit(io);
@@ -145,6 +165,7 @@ pub const Server = struct {
             self.handler_code,
             self.handler_filename,
             self.config.pool_size,
+            self.config.pool_wait_timeout_ms,
         );
 
         // Parse address and create listener
@@ -245,11 +266,16 @@ pub const Server = struct {
     }
 
     fn handleConnection(self: *Self, stream: *net.Stream, io: Io) !void {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
         var requests_on_connection: u32 = 0;
 
         // Keep-alive loop: handle multiple requests on same connection
         while (true) {
-            const keep_alive = try self.handleSingleRequest(stream, io, requests_on_connection);
+            _ = arena.reset(.retain_capacity);
+            const req_allocator = arena.allocator();
+            const keep_alive = try self.handleSingleRequest(stream, io, requests_on_connection, req_allocator);
             requests_on_connection += 1;
 
             // Check if we should close the connection
@@ -265,12 +291,18 @@ pub const Server = struct {
     }
 
     /// Handle a single HTTP request. Returns true if connection should be kept alive.
-    fn handleSingleRequest(self: *Self, stream: *net.Stream, io: Io, request_num: u32) !bool {
+    fn handleSingleRequest(
+        self: *Self,
+        stream: *net.Stream,
+        io: Io,
+        request_num: u32,
+        req_allocator: std.mem.Allocator,
+    ) !bool {
         const start_instant = std.time.Instant.now() catch null;
 
         var request_started = false;
         // Parse HTTP request
-        var request = self.parseRequest(stream, io, &request_started) catch |err| {
+        var request = self.parseRequest(req_allocator, stream, io, &request_started) catch |err| {
             if (err == error.Canceled and request_started) {
                 return error.RequestTimedOut;
             }
@@ -280,11 +312,11 @@ pub const Server = struct {
             }
             return err;
         };
-        defer request.deinit(self.allocator);
+        defer request.deinit(req_allocator);
 
         // Determine if client wants keep-alive (HTTP/1.1 defaults to keep-alive)
         const client_wants_keep_alive = blk: {
-            if (request.headers.get("connection")) |conn| {
+            if (findHeaderValue(request.headers.items, "connection")) |conn| {
                 break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
             }
             // HTTP/1.1 defaults to keep-alive
@@ -304,7 +336,7 @@ pub const Server = struct {
 
         // Invoke JS handler via pool
         if (self.pool) |*pool| {
-            var response = pool.executeHandler(HttpRequest{
+            var handle = pool.executeHandlerBorrowed(HttpRequest{
                 .url = request.url,
                 .method = request.method,
                 .headers = request.headers,
@@ -324,17 +356,18 @@ pub const Server = struct {
                 try self.sendErrorResponse(stream, io, status, message);
                 return false; // Close connection on error
             };
-            defer response.deinit();
+            defer handle.deinit();
+            var response = &handle.response;
 
             // Add CORS headers if enabled
             if (self.config.enable_cors) {
-                try response.putHeader("Access-Control-Allow-Origin", "*");
-                try response.putHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-                try response.putHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+                try response.putHeaderBorrowed("Access-Control-Allow-Origin", "*");
+                try response.putHeaderBorrowed("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+                try response.putHeaderBorrowed("Access-Control-Allow-Headers", "Content-Type, Authorization");
             }
 
             // Send response
-            try self.sendResponse(stream, io, &response, keep_alive);
+            try self.sendResponse(stream, io, response, keep_alive);
 
             // Log request
             if (self.config.log_requests) {
@@ -352,6 +385,22 @@ pub const Server = struct {
                     elapsed_ms,
                     ka_indicator,
                 });
+
+                if (self.config.pool_metrics_every > 0 and count % self.config.pool_metrics_every == 0) {
+                    const metrics = pool.getMetrics();
+                    std.log.info(
+                        "Pool metrics: in_use={d}/{d} exhausted={d} avg_wait_us={d} max_wait_us={d} avg_exec_us={d} max_exec_us={d}",
+                        .{
+                            pool.getInUse(),
+                            pool.max_size,
+                            metrics.exhausted,
+                            metrics.avg_wait_ns / std.time.ns_per_us,
+                            metrics.max_wait_ns / std.time.ns_per_us,
+                            metrics.avg_exec_ns / std.time.ns_per_us,
+                            metrics.max_exec_ns / std.time.ns_per_us,
+                        },
+                    );
+                }
             }
 
             return keep_alive;
@@ -361,11 +410,17 @@ pub const Server = struct {
         }
     }
 
-    fn parseRequest(self: *Self, stream: *net.Stream, io: Io, request_started: *bool) !ParsedRequest {
-        var buf: [8192]u8 = undefined;
-        var reader_buf: [4096]u8 = undefined;
-        var headers = std.StringHashMap([]const u8).init(self.allocator);
-        errdefer headers.deinit();
+    fn parseRequest(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        stream: *net.Stream,
+        io: Io,
+        request_started: *bool,
+    ) !ParsedRequest {
+        var reader_buf: [8192]u8 = undefined;
+        var headers = std.ArrayListUnmanaged(HttpHeader){};
+        errdefer headers.deinit(allocator);
+        try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 
         // Use buffered reader for efficient parsing
         var reader = BufferedReader.init(stream, io, &reader_buf);
@@ -373,8 +428,8 @@ pub const Server = struct {
         // Batch string storage: single allocation for method, url, and all header strings
         // Typical request needs ~2-4KB; we allocate 8KB to cover most cases
         const storage_size: usize = 8192;
-        const string_storage = try self.allocator.alloc(u8, storage_size);
-        errdefer self.allocator.free(string_storage);
+        const string_storage = try allocator.alloc(u8, storage_size);
+        errdefer allocator.free(string_storage);
         var storage_offset: usize = 0;
 
         // Helper to copy string into batch storage
@@ -389,7 +444,7 @@ pub const Server = struct {
         }.copy;
 
         // Read request line
-        const request_line = try reader.readLine(&buf);
+        const request_line = try reader.readLine();
         request_started.* = true;
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
@@ -402,10 +457,11 @@ pub const Server = struct {
 
         // Read headers (with count limit for DOS protection)
         var header_count: usize = 0;
+        var content_length: ?usize = null;
         while (true) {
             if (header_count >= self.config.max_headers) return error.TooManyHeaders;
 
-            const line = try reader.readLine(&buf);
+            const line = try reader.readLine();
             if (line.len == 0) break;
 
             var header_parts = std.mem.splitSequence(u8, line, ": ");
@@ -418,17 +474,19 @@ pub const Server = struct {
             const key_lower = std.ascii.lowerString(key_lower_buf[0..key.len], key);
             const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
             const value_dup = try copyToStorage(string_storage, &storage_offset, value);
-            try headers.put(key_dup, value_dup);
+            try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
+            if (content_length == null and std.mem.eql(u8, key_lower, "content-length")) {
+                content_length = std.fmt.parseInt(usize, value, 10) catch 0;
+            }
             header_count += 1;
         }
 
         // Read body if Content-Length present (keys normalized to lowercase)
         var body: ?[]u8 = null;
-        if (headers.get("content-length")) |len_str| {
-            const content_length = std.fmt.parseInt(usize, len_str, 10) catch 0;
-            if (content_length > 0 and content_length <= self.config.max_body_size) {
-                body = try self.allocator.alloc(u8, content_length);
-                errdefer if (body) |b| self.allocator.free(b);
+        if (content_length) |len| {
+            if (len > 0 and len <= self.config.max_body_size) {
+                body = try allocator.alloc(u8, len);
+                errdefer if (body) |b| allocator.free(b);
 
                 try reader.readExact(body.?);
             }
@@ -449,26 +507,70 @@ pub const Server = struct {
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
 
-        // Status line
+        // Build headers into a single buffer to reduce tiny writes.
+        var header_buf: [2048]u8 = undefined;
+        var header_len: usize = 0;
         const status_text = getStatusText(response.status);
-        try out.print("HTTP/1.1 {d} {s}\r\n", .{ response.status, status_text });
 
-        // Headers
-        try out.print("Content-Length: {d}\r\n", .{response.body.len});
-        if (keep_alive) {
-            try out.writeAll("Connection: keep-alive\r\n");
+        const header_ok = blk: {
+            const line = std.fmt.bufPrint(
+                header_buf[header_len..],
+                "HTTP/1.1 {d} {s}\r\n",
+                .{ response.status, status_text },
+            ) catch break :blk false;
+            header_len += line.len;
+
+            const cl = std.fmt.bufPrint(
+                header_buf[header_len..],
+                "Content-Length: {d}\r\n",
+                .{response.body.len},
+            ) catch break :blk false;
+            header_len += cl.len;
+
+            const conn_line = if (keep_alive)
+                "Connection: keep-alive\r\n"
+            else
+                "Connection: close\r\n";
+            if (header_len + conn_line.len > header_buf.len) break :blk false;
+            @memcpy(header_buf[header_len..][0..conn_line.len], conn_line);
+            header_len += conn_line.len;
+
+            for (response.headers.items) |header| {
+                if (std.ascii.eqlIgnoreCase(header.key, "Content-Length")) continue;
+                if (std.ascii.eqlIgnoreCase(header.key, "Connection")) continue;
+                const hdr = std.fmt.bufPrint(
+                    header_buf[header_len..],
+                    "{s}: {s}\r\n",
+                    .{ header.key, header.value },
+                ) catch break :blk false;
+                header_len += hdr.len;
+            }
+
+            if (header_len + 2 > header_buf.len) break :blk false;
+            header_buf[header_len] = '\r';
+            header_buf[header_len + 1] = '\n';
+            header_len += 2;
+            break :blk true;
+        };
+
+        if (header_ok) {
+            try out.writeAll(header_buf[0..header_len]);
         } else {
-            try out.writeAll("Connection: close\r\n");
+            // Fallback: stream headers directly if buffer is too small.
+            try out.print("HTTP/1.1 {d} {s}\r\n", .{ response.status, status_text });
+            try out.print("Content-Length: {d}\r\n", .{response.body.len});
+            if (keep_alive) {
+                try out.writeAll("Connection: keep-alive\r\n");
+            } else {
+                try out.writeAll("Connection: close\r\n");
+            }
+            for (response.headers.items) |header| {
+                if (std.ascii.eqlIgnoreCase(header.key, "Content-Length")) continue;
+                if (std.ascii.eqlIgnoreCase(header.key, "Connection")) continue;
+                try out.print("{s}: {s}\r\n", .{ header.key, header.value });
+            }
+            try out.writeAll("\r\n");
         }
-
-        var header_iter = response.headers.iterator();
-        while (header_iter.next()) |entry| {
-            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "Content-Length")) continue;
-            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, "Connection")) continue;
-            try out.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-        }
-
-        try out.writeAll("\r\n");
 
         // Body
         if (response.body.len > 0) {
@@ -494,8 +596,6 @@ pub const Server = struct {
     }
 
     fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8, keep_alive: bool) !void {
-        _ = self;
-
         // Security: comprehensive path validation
         if (!isPathSafe(path)) {
             var out_buf: [256]u8 = undefined;
@@ -522,22 +622,68 @@ pub const Server = struct {
         const stat = try file.stat();
         const content_type = getContentType(path);
         const connection = if (keep_alive) "keep-alive" else "close";
+        const size = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
+
+        // Serve from cache if available
+        if (self.static_cache.get(full_path, size, stat.mtime)) |entry| {
+            var out_buf: [4096]u8 = undefined;
+            var writer = stream.writer(io, &out_buf);
+            const out = &writer.interface;
+            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
+                entry.data.len,
+                entry.content_type,
+                connection,
+            });
+            if (entry.data.len > 0) {
+                try out.writeAll(entry.data);
+            }
+            try writer.interface.flush();
+            return;
+        }
+
+        // Cache small files
+        if (self.static_cache.enabled() and size <= self.static_cache.max_file_size) {
+            const data = try self.allocator.alloc(u8, size);
+            errdefer self.allocator.free(data);
+            var read_buf: [4096]u8 = undefined;
+            var file_reader = file.reader(io, &read_buf);
+            try file_reader.interface.readSliceAll(data);
+
+            try self.static_cache.put(full_path, .{
+                .data = data,
+                .size = size,
+                .mtime = stat.mtime,
+                .content_type = content_type,
+            });
+
+            var out_buf: [4096]u8 = undefined;
+            var writer = stream.writer(io, &out_buf);
+            const out = &writer.interface;
+            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
+                size,
+                content_type,
+                connection,
+            });
+            if (size > 0) {
+                try out.writeAll(data);
+            }
+            try writer.interface.flush();
+            return;
+        }
 
         var out_buf: [4096]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
         try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
-            stat.size,
+            size,
             content_type,
             connection,
         });
 
-        // Stream file contents
-        var buf: [8192]u8 = undefined;
-        while (true) {
-            const bytes_read = file.read(&buf) catch break;
-            if (bytes_read == 0) break;
-            try out.writeAll(buf[0..bytes_read]);
+        if (size > 0) {
+            var file_buf: [16 * 1024]u8 = undefined;
+            var file_reader = file.reader(io, &file_buf);
+            _ = try out.sendFileAll(&file_reader, .limited(size));
         }
         try writer.interface.flush();
     }
@@ -546,7 +692,7 @@ pub const Server = struct {
 const ParsedRequest = struct {
     method: []const u8,
     url: []const u8,
-    headers: std.StringHashMap([]const u8),
+    headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]u8,
     /// Batch buffer holding method, url, and header strings (single allocation)
     string_storage: []u8,
@@ -555,8 +701,188 @@ const ParsedRequest = struct {
         if (self.body) |b| allocator.free(b);
         // Free single batch allocation instead of individual strings
         allocator.free(self.string_storage);
-        // Headers map only - strings are in string_storage
-        self.headers.deinit();
+        // Headers list only - strings are in string_storage
+        self.headers.deinit(allocator);
+    }
+};
+
+const CacheEntry = struct {
+    data: []u8,
+    size: usize,
+    mtime: Io.Timestamp,
+    content_type: []const u8,
+};
+
+/// LRU node for tracking access order (intrusive doubly-linked list)
+const LruNode = struct {
+    path: []const u8, // Points to the key in entries map
+    prev: ?*LruNode,
+    next: ?*LruNode,
+};
+
+const StaticFileCache = struct {
+    allocator: std.mem.Allocator,
+    entries: std.StringHashMapUnmanaged(CacheEntry),
+    /// Map from path to LRU node for O(1) lookup on access
+    lru_nodes: std.StringHashMapUnmanaged(*LruNode),
+    /// Most recently used (head of list)
+    lru_head: ?*LruNode,
+    /// Least recently used (tail of list)
+    lru_tail: ?*LruNode,
+    total_bytes: usize,
+    max_bytes: usize,
+    max_file_size: usize,
+
+    pub fn init(allocator: std.mem.Allocator, max_bytes: usize, max_file_size: usize) StaticFileCache {
+        return .{
+            .allocator = allocator,
+            .entries = .{},
+            .lru_nodes = .{},
+            .lru_head = null,
+            .lru_tail = null,
+            .total_bytes = 0,
+            .max_bytes = max_bytes,
+            .max_file_size = max_file_size,
+        };
+    }
+
+    pub fn deinit(self: *StaticFileCache) void {
+        self.clear();
+        self.entries.deinit(self.allocator);
+        self.lru_nodes.deinit(self.allocator);
+    }
+
+    fn enabled(self: *const StaticFileCache) bool {
+        return self.max_bytes > 0 and self.max_file_size > 0;
+    }
+
+    fn clear(self: *StaticFileCache) void {
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*.data);
+        }
+        self.entries.clearRetainingCapacity();
+        // Clear LRU nodes
+        var lru_it = self.lru_nodes.iterator();
+        while (lru_it.next()) |node_entry| {
+            self.allocator.destroy(node_entry.value_ptr.*);
+        }
+        self.lru_nodes.clearRetainingCapacity();
+        self.lru_head = null;
+        self.lru_tail = null;
+        self.total_bytes = 0;
+    }
+
+    fn remove(self: *StaticFileCache, path: []const u8) void {
+        if (self.entries.fetchRemove(path)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value.data);
+            self.total_bytes -= kv.value.data.len;
+        }
+        // Remove from LRU list
+        if (self.lru_nodes.fetchRemove(path)) |lru_kv| {
+            const node = lru_kv.value;
+            self.unlinkNode(node);
+            self.allocator.destroy(node);
+        }
+    }
+
+    /// Unlink a node from the LRU doubly-linked list
+    fn unlinkNode(self: *StaticFileCache, node: *LruNode) void {
+        if (node.prev) |prev| {
+            prev.next = node.next;
+        } else {
+            self.lru_head = node.next;
+        }
+        if (node.next) |next| {
+            next.prev = node.prev;
+        } else {
+            self.lru_tail = node.prev;
+        }
+        node.prev = null;
+        node.next = null;
+    }
+
+    /// Move a node to the front of the LRU list (most recently used)
+    fn touchNode(self: *StaticFileCache, node: *LruNode) void {
+        if (self.lru_head == node) return; // Already at front
+        self.unlinkNode(node);
+        // Insert at head
+        node.next = self.lru_head;
+        node.prev = null;
+        if (self.lru_head) |head| {
+            head.prev = node;
+        }
+        self.lru_head = node;
+        if (self.lru_tail == null) {
+            self.lru_tail = node;
+        }
+    }
+
+    /// Evict least recently used entries until we have enough space
+    fn evictLru(self: *StaticFileCache, needed_bytes: usize) void {
+        var freed: usize = 0;
+        while (freed < needed_bytes and self.lru_tail != null) {
+            const tail = self.lru_tail.?;
+            const path = tail.path;
+            // Get entry size before removing
+            const entry_size = if (self.entries.get(path)) |e| e.data.len else 0;
+            self.remove(path);
+            freed += entry_size;
+        }
+    }
+
+    fn get(self: *StaticFileCache, path: []const u8, size: usize, mtime: Io.Timestamp) ?CacheEntry {
+        if (!self.enabled()) return null;
+        if (self.entries.get(path)) |entry| {
+            if (entry.size == size and entry.mtime.nanoseconds == mtime.nanoseconds) {
+                // Update LRU on access
+                if (self.lru_nodes.get(path)) |node| {
+                    self.touchNode(node);
+                }
+                return entry;
+            }
+            self.remove(path);
+        }
+        return null;
+    }
+
+    fn put(self: *StaticFileCache, path: []const u8, entry: CacheEntry) !void {
+        if (!self.enabled()) {
+            self.allocator.free(entry.data);
+            return;
+        }
+        if (entry.data.len > self.max_file_size or entry.data.len > self.max_bytes) {
+            self.allocator.free(entry.data);
+            return;
+        }
+        // Evict LRU entries instead of clearing everything
+        if (self.total_bytes + entry.data.len > self.max_bytes) {
+            const needed = (self.total_bytes + entry.data.len) - self.max_bytes;
+            self.evictLru(needed);
+        }
+        const key_dup = try self.allocator.dupe(u8, path);
+        errdefer self.allocator.free(key_dup);
+        try self.entries.put(self.allocator, key_dup, entry);
+        self.total_bytes += entry.data.len;
+
+        // Create and insert LRU node at head (most recently used)
+        const node = try self.allocator.create(LruNode);
+        errdefer self.allocator.destroy(node);
+        node.* = .{
+            .path = key_dup,
+            .prev = null,
+            .next = self.lru_head,
+        };
+        if (self.lru_head) |head| {
+            head.prev = node;
+        }
+        self.lru_head = node;
+        if (self.lru_tail == null) {
+            self.lru_tail = node;
+        }
+        try self.lru_nodes.put(self.allocator, key_dup, node);
     }
 };
 
@@ -576,27 +902,12 @@ const BufferedReader = struct {
     }
 
     /// Read a line ending with \r\n or \n
-    pub fn readLine(self: *BufferedReader, out_buf: []u8) ![]const u8 {
-        var i: usize = 0;
-
-        while (i < out_buf.len - 1) {
-            const byte = self.reader.interface.takeByte() catch |err| {
-                if (i > 0) return out_buf[0..i];
-                return err;
-            };
-
-            if (byte == '\r') {
-                // Consume \n if present
-                _ = self.reader.interface.takeByte() catch {};
-                return out_buf[0..i];
-            }
-            if (byte == '\n') return out_buf[0..i];
-
-            out_buf[i] = byte;
-            i += 1;
+    pub fn readLine(self: *BufferedReader) ![]const u8 {
+        const line = try self.reader.interface.takeDelimiterExclusive('\n');
+        if (line.len > 0 and line[line.len - 1] == '\r') {
+            return line[0 .. line.len - 1];
         }
-
-        return out_buf[0..i];
+        return line;
     }
 
     /// Read exact number of bytes
@@ -604,6 +915,15 @@ const BufferedReader = struct {
         try self.reader.interface.readSliceAll(out);
     }
 };
+
+fn findHeaderValue(headers: []const HttpHeader, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.mem.eql(u8, header.key, name)) {
+            return header.value;
+        }
+    }
+    return null;
+}
 
 fn getStatusText(status: u16) []const u8 {
     return switch (status) {
@@ -733,4 +1053,33 @@ test "path safety validation" {
 
     // Unsafe: empty path
     try std.testing.expect(!isPathSafe(""));
+}
+
+test "static file cache hit and invalidation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var cache = StaticFileCache.init(allocator, 1024, 256);
+    defer cache.deinit();
+
+    const payload = try allocator.dupe(u8, "hello");
+    const mtime1: Io.Timestamp = .{ .nanoseconds = 123 };
+    const mtime2: Io.Timestamp = .{ .nanoseconds = 124 };
+    try cache.put("a.txt", .{
+        .data = payload,
+        .size = payload.len,
+        .mtime = mtime1,
+        .content_type = "text/plain",
+    });
+
+    const hit_opt = cache.get("a.txt", payload.len, mtime1);
+    try std.testing.expect(hit_opt != null);
+    const hit = hit_opt.?;
+    try std.testing.expectEqual(payload.len, hit.data.len);
+    try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
+
+    const miss = cache.get("a.txt", payload.len, mtime2);
+    try std.testing.expect(miss == null);
+    try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
 }

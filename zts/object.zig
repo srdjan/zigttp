@@ -232,6 +232,19 @@ pub const Atom = enum(u32) {
     mapErr = 205,
     // JSON methods
     tryParse = 206,
+    // Common HTTP header atoms (pre-interned for fast request object creation)
+    @"content-type" = 207,
+    @"content-length" = 208,
+    accept = 209,
+    host = 210,
+    @"user-agent" = 211,
+    authorization = 212,
+    @"cache-control" = 213,
+    connection = 214,
+    @"accept-encoding" = 215,
+    cookie = 216,
+    @"x-forwarded-for" = 217,
+    @"x-request-id" = 218,
     // Reserved for more builtins
     __count__ = 220,
 
@@ -320,6 +333,19 @@ pub const Atom = enum(u32) {
             .mapErr => "mapErr",
             // JSON methods
             .tryParse => "tryParse",
+            // HTTP headers
+            .@"content-type" => "content-type",
+            .@"content-length" => "content-length",
+            .accept => "accept",
+            .host => "host",
+            .@"user-agent" => "user-agent",
+            .authorization => "authorization",
+            .@"cache-control" => "cache-control",
+            .connection => "connection",
+            .@"accept-encoding" => "accept-encoding",
+            .cookie => "cookie",
+            .@"x-forwarded-for" => "x-forwarded-for",
+            .@"x-request-id" => "x-request-id",
             else => null,
         };
     }
@@ -519,6 +545,19 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "mapErr", .mapErr },
     // JSON methods
     .{ "tryParse", .tryParse },
+    // HTTP headers (pre-interned for fast request object creation)
+    .{ "content-type", .@"content-type" },
+    .{ "content-length", .@"content-length" },
+    .{ "accept", .accept },
+    .{ "host", .host },
+    .{ "user-agent", .@"user-agent" },
+    .{ "authorization", .authorization },
+    .{ "cache-control", .@"cache-control" },
+    .{ "connection", .connection },
+    .{ "accept-encoding", .@"accept-encoding" },
+    .{ "cookie", .cookie },
+    .{ "x-forwarded-for", .@"x-forwarded-for" },
+    .{ "x-request-id", .@"x-request-id" },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map

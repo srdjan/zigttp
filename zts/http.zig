@@ -129,6 +129,53 @@ pub fn createResponse(
     return resp_obj.toValue();
 }
 
+/// Create a Response object using an existing JSString body (avoids extra copy).
+pub fn createResponseFromString(
+    ctx: *context.Context,
+    body_str: *string.JSString,
+    status: u16,
+    content_type: []const u8,
+) !value.JSValue {
+    const resp_obj = try ctx.createObject(null);
+
+    // Set body using existing JSString
+    try ctx.setPropertyChecked(resp_obj, object.Atom.body, value.JSValue.fromPtr(body_str));
+
+    // Set status (using predefined atom)
+    try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
+
+    // Set statusText
+    const status_text_atom = try ctx.atoms.intern("statusText");
+    const status_text = switch (status) {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        else => "Unknown",
+    };
+    const status_text_str = try ctx.createString(status_text);
+    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_str);
+
+    // Set ok (status 200-299)
+    const ok_atom = try ctx.atoms.intern("ok");
+    try ctx.setPropertyChecked(resp_obj, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
+
+    // Set headers (using predefined atom)
+    const headers_obj = try ctx.createObject(null);
+    const ct_atom = try ctx.atoms.intern("Content-Type");
+    const ct_str = try ctx.createString(content_type);
+    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_str);
+    try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
+
+    return resp_obj.toValue();
+}
+
 /// Response.json(data) - Create JSON response
 pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
@@ -139,19 +186,18 @@ pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
     // Serialize the data to JSON
     const data = args[0];
-    const json_str = try valueToJson(ctx, data);
-    defer ctx.allocator.free(json_str);
+    const json_js = try valueToJsonString(ctx, data);
 
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
-        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, json_str, status, "application/json");
+        const status_atom = ctx.atoms.intern("status") catch return createResponseFromString(ctx, json_js, status, "application/json");
         if (init.getProperty(status_atom)) |s| {
             if (s.isInt()) status = @intCast(s.getInt());
         }
     }
 
-    return createResponse(ctx, json_str, status, "application/json");
+    return createResponseFromString(ctx, json_js, status, "application/json");
 }
 
 /// Response.text(text) - Create text response
@@ -696,14 +742,29 @@ fn writeInt(writer: *std.Io.Writer, val: i32) RenderError!void {
 
 /// Convert a JSValue to JSON string
 pub fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
-    const estimated = estimateJsonSize(val);
-    var buffer = try std.ArrayList(u8).initCapacity(ctx.allocator, estimated);
-    errdefer buffer.deinit(ctx.allocator);
+    const json = try valueToJsonScratch(ctx, val);
+    const owned = try ctx.allocator.dupe(u8, json);
+    ctx.json_writer.clearRetainingCapacity();
+    return owned;
+}
 
-    var aw: std.Io.Writer.Allocating = .fromArrayList(ctx.allocator, &buffer);
+/// Convert a JSValue to JSON in a reusable buffer (valid until next call).
+fn valueToJsonScratch(ctx: *context.Context, val: value.JSValue) ![]const u8 {
+    const estimated = estimateJsonSize(val);
+    var aw = &ctx.json_writer;
+    aw.clearRetainingCapacity();
+    try aw.ensureTotalCapacity(estimated);
     try writeJson(ctx, val, &aw.writer);
-    buffer = aw.toArrayList();
-    return buffer.toOwnedSlice(ctx.allocator);
+    return aw.written();
+}
+
+/// Convert a JSValue to a JS string using the reusable JSON buffer.
+pub fn valueToJsonString(ctx: *context.Context, val: value.JSValue) !*string.JSString {
+    const json = try valueToJsonScratch(ctx, val);
+    // Copy into JSString storage (buffer reused for subsequent calls).
+    const js_str = try string.createString(ctx.allocator, json);
+    ctx.json_writer.clearRetainingCapacity();
+    return js_str;
 }
 
 fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) RenderError!void {

@@ -240,11 +240,8 @@ pub fn jsonStringify(ctx: *context.Context, this: value.JSValue, args: []const v
     const val = args[0];
 
     // Use shared JSON serialization from http module
-    const json_str = http.valueToJson(ctx, val) catch return value.JSValue.undefined_val;
-    defer ctx.allocator.free(json_str);
-
-    // Create JS string from result
-    return ctx.createString(json_str) catch return value.JSValue.undefined_val;
+    const json_js = http.valueToJsonString(ctx, val) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(json_js);
 }
 // ============================================================================
 // Error methods
@@ -796,13 +793,6 @@ pub fn numberToString(ctx: *context.Context, this: value.JSValue, args: []const 
     return value.JSValue.fromPtr(str);
 }
 
-
-
-
-
-
-
-
 /// Global isNaN - coerces argument to number first (unlike Number.isNaN)
 pub fn globalIsNaN(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromBool(true); // isNaN(undefined) = true
@@ -1078,9 +1068,6 @@ pub fn mapClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
     return value.JSValue.undefined_val;
 }
 
-
-
-
 // ============================================================================
 // Set implementation
 // ============================================================================
@@ -1223,11 +1210,6 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
     return value.JSValue.undefined_val;
 }
-
-
-
-
-
 
 const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass, ArenaObjectEscape };
 
@@ -1631,8 +1613,6 @@ pub fn arrayOf(ctx: *context.Context, _: value.JSValue, args: []const value.JSVa
     }
     return result.toValue();
 }
-
-
 
 /// Array.prototype.push(...items) - Add elements to end, return new length
 pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -2536,8 +2516,6 @@ pub fn stringSearch(ctx: *context.Context, this: value.JSValue, args: []const va
     return value.JSValue.fromInt(-1);
 }
 
-
-
 /// String.fromCharCode(...charCodes) - Create string from char codes
 pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
@@ -2800,75 +2778,13 @@ fn printValue(writer: anytype, val: value.JSValue) !void {
 
 /// Wrapper to convert context.Context native function signature to object.NativeFn
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // Array method wrappers
 // ============================================================================
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ============================================================================
 // String method wrappers
 // ============================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// Helper to add a method using a dynamic atom name
 fn addMethodDynamic(
@@ -3294,7 +3210,6 @@ pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     return regexp_obj.toValue();
 }
 
-
 /// RegExp.prototype.test(string) - Returns true if pattern matches
 pub fn regExpTest(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject() or args.len < 1) return value.JSValue.false_val;
@@ -3326,7 +3241,6 @@ pub fn regExpTest(ctx: *context.Context, this: value.JSValue, args: []const valu
     const compiled = regex.Regex.compile(pattern, flags);
     return if (compiled.match(input)) value.JSValue.true_val else value.JSValue.false_val;
 }
-
 
 /// RegExp.prototype.exec(string) - Returns match array or null
 pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -3384,7 +3298,6 @@ pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const valu
     return value.JSValue.null_val;
 }
 
-
 /// Create a RegExp object from pattern and flags strings (used by parser for literals)
 pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []const u8) !*object.JSObject {
     const allocator = ctx.allocator;
@@ -3425,7 +3338,6 @@ pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []con
 /// Result slot layout:
 /// slot[0] = isOk (boolean)
 /// slot[1] = value (the ok or err value)
-
 /// Create a Result.ok(value)
 pub fn resultOk(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     const val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
@@ -3570,7 +3482,6 @@ pub fn symbolConstructor(ctx: *context.Context, _: value.JSValue, args: []const 
     return symbol;
 }
 
-
 /// Symbol.for(key) - Get or create a symbol in the global registry
 pub fn symbolFor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.undefined_val;
@@ -3597,7 +3508,6 @@ pub fn symbolFor(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     return symbol;
 }
 
-
 /// Symbol.keyFor(sym) - Get the key for a registered symbol
 pub fn symbolKeyFor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.undefined_val;
@@ -3620,7 +3530,6 @@ pub fn symbolKeyFor(ctx: *context.Context, _: value.JSValue, args: []const value
     return value.JSValue.undefined_val;
 }
 
-
 /// Symbol.prototype.toString() - Get symbol as string
 pub fn symbolToString(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
     if (!this.isSymbol()) return value.JSValue.undefined_val;
@@ -3636,7 +3545,6 @@ pub fn symbolToString(ctx: *context.Context, this: value.JSValue, _: []const val
     return ctx.createString("Symbol()") catch return value.JSValue.undefined_val;
 }
 
-
 /// Symbol.prototype.description getter
 pub fn symbolDescription(ctx: *context.Context, this: value.JSValue, _: []const value.JSValue) value.JSValue {
     if (!this.isSymbol()) return value.JSValue.undefined_val;
@@ -3648,7 +3556,6 @@ pub fn symbolDescription(ctx: *context.Context, this: value.JSValue, _: []const 
 
     return value.JSValue.undefined_val;
 }
-
 
 // ============================================================================
 // WeakMap implementation
@@ -3717,7 +3624,6 @@ pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     return weak_map.toValue();
 }
 
-
 /// WeakMap.prototype.get(key)
 pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.undefined_val;
@@ -3732,7 +3638,6 @@ pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.
 
     return data.get(args[0]) orelse value.JSValue.undefined_val;
 }
-
 
 /// WeakMap.prototype.set(key, value)
 pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -3750,7 +3655,6 @@ pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.
     return this; // Return the WeakMap for chaining
 }
 
-
 /// WeakMap.prototype.has(key)
 pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.false_val;
@@ -3766,7 +3670,6 @@ pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.
     return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-
 /// WeakMap.prototype.delete(key)
 pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.false_val;
@@ -3781,7 +3684,6 @@ pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const val
 
     return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
-
 
 // ============================================================================
 // WeakSet implementation
@@ -3843,7 +3745,6 @@ pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     return weak_set.toValue();
 }
 
-
 /// WeakSet.prototype.add(value)
 pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.undefined_val;
@@ -3860,7 +3761,6 @@ pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.
     return this; // Return the WeakSet for chaining
 }
 
-
 /// WeakSet.prototype.has(value)
 pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.false_val;
@@ -3876,7 +3776,6 @@ pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.
     return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
-
 /// WeakSet.prototype.delete(value)
 pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (!this.isObject()) return value.JSValue.false_val;
@@ -3891,7 +3790,6 @@ pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const val
 
     return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
-
 
 /// Initialize WeakMap and WeakSet built-ins
 pub fn initWeakCollections(ctx: *context.Context) !void {
@@ -5747,11 +5645,11 @@ test "Hybrid: Map and Set accept arena values" {
     _ = mapSet(ctx, map_val, &[_]value.JSValue{ key_obj.toValue(), val_obj.toValue() });
     try std.testing.expect(!ctx.hasException());
 
-    const got = mapGet(ctx, map_val, &[_]value.JSValue{ key_obj.toValue() });
+    const got = mapGet(ctx, map_val, &[_]value.JSValue{key_obj.toValue()});
     try std.testing.expect(got.strictEquals(val_obj.toValue()));
 
-    _ = setAdd(ctx, set_val, &[_]value.JSValue{ val_obj.toValue() });
-    const has = setHas(ctx, set_val, &[_]value.JSValue{ val_obj.toValue() });
+    _ = setAdd(ctx, set_val, &[_]value.JSValue{val_obj.toValue()});
+    const has = setHas(ctx, set_val, &[_]value.JSValue{val_obj.toValue()});
     try std.testing.expect(has.getBool() == true);
 }
 
@@ -5825,12 +5723,12 @@ test "Hybrid: WeakMap and WeakSet accept arena values" {
 
     const weak_map_val = weakMapConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
     _ = weakMapSet(ctx, weak_map_val, &[_]value.JSValue{ key_obj.toValue(), val_obj.toValue() });
-    const got = weakMapGet(ctx, weak_map_val, &[_]value.JSValue{ key_obj.toValue() });
+    const got = weakMapGet(ctx, weak_map_val, &[_]value.JSValue{key_obj.toValue()});
     try std.testing.expect(got.strictEquals(val_obj.toValue()));
 
     const weak_set_val = weakSetConstructor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
-    _ = weakSetAdd(ctx, weak_set_val, &[_]value.JSValue{ val_obj.toValue() });
-    const has = weakSetHas(ctx, weak_set_val, &[_]value.JSValue{ val_obj.toValue() });
+    _ = weakSetAdd(ctx, weak_set_val, &[_]value.JSValue{val_obj.toValue()});
+    const has = weakSetHas(ctx, weak_set_val, &[_]value.JSValue{val_obj.toValue()});
     try std.testing.expect(has.getBool() == true);
 }
 

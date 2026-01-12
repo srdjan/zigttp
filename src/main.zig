@@ -8,7 +8,7 @@
 //!   -p, --port <PORT>     Port to listen on (default: 8080)
 //!   -h, --host <HOST>     Host to bind to (default: 127.0.0.1)
 //!   -e, --eval <CODE>     Evaluate inline JavaScript handler
-//!   -m, --memory <SIZE>   JS runtime memory limit (default: 512k)
+//!   -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
 //!   -n, --pool <N>        Runtime pool size (default: 8)
 //!   -q, --quiet           Disable request logging
 //!   --cors                Enable CORS headers
@@ -18,7 +18,7 @@
 //! Handler API (Deno-compatible):
 //!   function handler(request) {
 //!       // request.url, request.method, request.headers, request.body
-//!       return new Response(body, { status, headers });
+//!       return Response.text(body, { status, headers });
 //!   }
 //!
 //! Available APIs:
@@ -160,9 +160,12 @@ fn printHelp() void {
         \\  -p, --port <PORT>     Port to listen on (default: 8080)
         \\  -h, --host <HOST>     Host to bind to (default: 127.0.0.1)
         \\  -e, --eval <CODE>     Evaluate inline JavaScript handler
-        \\  -m, --memory <SIZE>   JS runtime memory limit (default: 256k)
+        \\  -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
         \\                        Supports k/kb, m/mb, g/gb suffixes
+        \\  -n, --pool <N>        Runtime pool size (default: 8)
         \\  -q, --quiet           Disable request logging
+        \\  --cors                Enable CORS headers
+        \\  --static <DIR>        Serve static files from directory
         \\  --help                Show this help message
         \\
         \\Handler API:
@@ -172,26 +175,25 @@ fn printHelp() void {
         \\  Request object:
         \\    {
         \\      method: string,    // HTTP method (GET, POST, etc.)
-        \\      path: string,      // URL path
+        \\      url: string,       // URL path
         \\      headers: object,   // HTTP headers
         \\      body: string|null  // Request body
         \\    }
         \\
         \\  Response helpers:
-        \\    new Response(body, { status: 200, headers: {} })
         \\    Response.json(data, init?)
         \\    Response.text(text, init?)
         \\    Response.html(html, init?)
         \\
         \\Example handler.js:
         \\  function handler(request) {
-        \\      if (request.path === '/') {
+        \\      if (request.url === '/') {
         \\          return Response.html('<h1>Hello World</h1>');
         \\      }
-        \\      if (request.path === '/api/data') {
+        \\      if (request.url === '/api/data') {
         \\          return Response.json({ message: 'Hello', method: request.method });
         \\      }
-        \\      return new Response('Not Found', { status: 404 });
+        \\      return Response.text('Not Found', { status: 404 });
         \\  }
         \\
         \\Quick start:

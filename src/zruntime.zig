@@ -4,6 +4,7 @@
 //! Designed for FaaS with per-request isolation and fast cold starts.
 
 const std = @import("std");
+const ascii = std.ascii;
 
 // Import zts module
 const zq = @import("zts");
@@ -58,47 +59,66 @@ pub const RuntimeConfig = struct {
 pub const HttpRequest = struct {
     method: []const u8,
     url: []const u8,
-    headers: std.StringHashMap([]const u8),
+    headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
 
     pub fn deinit(self: *HttpRequest, allocator: std.mem.Allocator) void {
         allocator.free(self.method);
         allocator.free(self.url);
         if (self.body) |b| allocator.free(b);
-        var it = self.headers.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            allocator.free(entry.value_ptr.*);
+        for (self.headers.items) |header| {
+            allocator.free(header.key);
+            allocator.free(header.value);
         }
-        self.headers.deinit();
+        self.headers.deinit(allocator);
     }
+};
+
+pub const HttpHeader = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+pub const ResponseHeader = struct {
+    key: []const u8,
+    value: []const u8,
+    key_owned: bool,
+    value_owned: bool,
 };
 
 pub const HttpResponse = struct {
     status: u16,
-    headers: std.StringHashMap([]const u8),
+    headers: std.ArrayListUnmanaged(ResponseHeader),
     body: []const u8,
+    body_owned: bool,
+    body_owner: ?*zq.JSString,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) HttpResponse {
         return .{
             .status = 200,
-            .headers = std.StringHashMap([]const u8).init(allocator),
+            .headers = .{},
             .body = "",
+            .body_owned = false,
+            .body_owner = null,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *HttpResponse) void {
-        var it = self.headers.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
+        for (self.headers.items) |header| {
+            if (header.key_owned) {
+                self.allocator.free(header.key);
+            }
+            if (header.value_owned) {
+                self.allocator.free(header.value);
+            }
         }
-        self.headers.deinit();
-        if (self.body.len > 0) {
+        self.headers.deinit(self.allocator);
+        if (self.body.len > 0 and self.body_owned) {
             self.allocator.free(self.body);
         }
+        self.body_owner = null;
     }
 
     pub fn putHeader(self: *HttpResponse, key: []const u8, value: []const u8) !void {
@@ -106,7 +126,67 @@ pub const HttpResponse = struct {
         errdefer self.allocator.free(key_dup);
         const value_dup = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(value_dup);
-        try self.headers.put(key_dup, value_dup);
+        for (self.headers.items) |*header| {
+            if (ascii.eqlIgnoreCase(header.key, key)) {
+                if (header.key_owned) {
+                    self.allocator.free(header.key);
+                }
+                if (header.value_owned) {
+                    self.allocator.free(header.value);
+                }
+                header.* = .{
+                    .key = key_dup,
+                    .value = value_dup,
+                    .key_owned = true,
+                    .value_owned = true,
+                };
+                return;
+            }
+        }
+        try self.headers.append(self.allocator, .{
+            .key = key_dup,
+            .value = value_dup,
+            .key_owned = true,
+            .value_owned = true,
+        });
+    }
+
+    pub fn putHeaderBorrowed(self: *HttpResponse, key: []const u8, value: []const u8) !void {
+        for (self.headers.items) |*header| {
+            if (ascii.eqlIgnoreCase(header.key, key)) {
+                if (header.key_owned) {
+                    self.allocator.free(header.key);
+                }
+                if (header.value_owned) {
+                    self.allocator.free(header.value);
+                }
+                header.* = .{
+                    .key = key,
+                    .value = value,
+                    .key_owned = false,
+                    .value_owned = false,
+                };
+                return;
+            }
+        }
+        try self.headers.append(self.allocator, .{
+            .key = key,
+            .value = value,
+            .key_owned = false,
+            .value_owned = false,
+        });
+    }
+
+    fn setBodyOwned(self: *HttpResponse, bytes: []const u8) void {
+        self.body = bytes;
+        self.body_owned = true;
+        self.body_owner = null;
+    }
+
+    fn setBodyBorrowed(self: *HttpResponse, str: *zq.JSString) void {
+        self.body = str.data();
+        self.body_owned = false;
+        self.body_owner = str;
     }
 };
 
@@ -133,6 +213,7 @@ pub const Runtime = struct {
     config: RuntimeConfig,
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
+    last_request_body_len: usize,
 
     const Self = @This();
 
@@ -172,6 +253,7 @@ pub const Runtime = struct {
             .config = config,
             .owns_resources = true,
             .active_request_id = std.atomic.Value(u64).init(0),
+            .last_request_body_len = 0,
         };
 
         // Install built-in bindings
@@ -198,6 +280,7 @@ pub const Runtime = struct {
             .config = config,
             .owns_resources = false,
             .active_request_id = std.atomic.Value(u64).init(0),
+            .last_request_body_len = 0,
         };
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
@@ -327,11 +410,11 @@ pub const Runtime = struct {
             .source_map = null,
         };
 
-        // Serialize for caching if buffer provided
+        // Serialize for caching if buffer provided (includes atoms for true cache hit)
         var serialized: ?[]const u8 = null;
         if (cache_buffer) |buffer| {
             var writer = bytecode_cache.SliceWriter{ .buffer = buffer };
-            bytecode_cache.serializeFunctionBytecode(&func, &writer, self.allocator) catch {
+            bytecode_cache.serializeBytecodeWithAtoms(&func, &self.ctx.atoms, &writer, self.allocator) catch {
                 // Serialization failed (buffer too small), continue without caching
             };
             if (writer.pos > 0) {
@@ -350,12 +433,17 @@ pub const Runtime = struct {
         return self.loadCode(code, filename);
     }
 
-    /// Load from cached serialized bytecode (Phase 1b: cache hit path)
+    /// Load from cached serialized bytecode (Phase 1c: true cache hit with atoms)
     pub fn loadFromCachedBytecode(self: *Self, cached_data: []const u8) !void {
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
-        // Deserialize the FunctionBytecode, passing string table for interning
-        const func = try bytecode_cache.deserializeFunctionBytecode(&reader, self.allocator, &self.strings);
+        // Deserialize bytecode with atoms - skips parsing entirely
+        const func = try bytecode_cache.deserializeBytecodeWithAtoms(
+            &reader,
+            &self.ctx.atoms,
+            self.allocator,
+            &self.strings,
+        );
 
         // Execute the deserialized bytecode
         _ = try self.interpreter.run(func);
@@ -374,7 +462,22 @@ pub const Runtime = struct {
     }
 
     pub fn executeHandlerWithId(self: *Self, request: HttpRequest, request_id: u64) !HttpResponse {
+        return self.executeHandlerInternal(request, request_id, false);
+    }
+
+    /// Execute handler and return a response that borrows JS string bodies.
+    /// Caller must ensure the runtime is not reset or reused until after send.
+    pub fn executeHandlerBorrowed(self: *Self, request: HttpRequest) !HttpResponse {
+        return self.executeHandlerBorrowedWithId(request, 0);
+    }
+
+    pub fn executeHandlerBorrowedWithId(self: *Self, request: HttpRequest, request_id: u64) !HttpResponse {
+        return self.executeHandlerInternal(request, request_id, true);
+    }
+
+    fn executeHandlerInternal(self: *Self, request: HttpRequest, request_id: u64, borrow_body: bool) !HttpResponse {
         const handler_atom = self.handler_atom orelse return error.NoHandler;
+        self.last_request_body_len = if (request.body) |b| b.len else 0;
 
         // Get handler function from globals
         const handler_val = self.ctx.getGlobal(handler_atom) orelse {
@@ -408,7 +511,8 @@ pub const Runtime = struct {
             tracked = true;
         }
         defer if (tracked) self.active_request_id.store(0, .release);
-        defer self.resetForNextRequest();
+        var reset_after = true;
+        defer if (reset_after) self.resetForNextRequest();
 
         // Set thread-local runtime for native function callbacks (e.g., renderToString)
         current_runtime = self;
@@ -431,7 +535,10 @@ pub const Runtime = struct {
         };
 
         // Convert result to HttpResponse
-        const response = try self.extractResponse(result);
+        const response = try self.extractResponseInternal(result, borrow_body);
+        if (borrow_body) {
+            reset_after = false;
+        }
 
         return response;
     }
@@ -453,12 +560,11 @@ pub const Runtime = struct {
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
         }
 
-        if (request.headers.count() > 0) {
+        if (request.headers.items.len > 0) {
             const headers_obj = try self.ctx.createObject(null);
-            var it = request.headers.iterator();
-            while (it.next()) |entry| {
-                const key_atom = try self.ctx.atoms.intern(entry.key_ptr.*);
-                const value_str = try self.ctx.createString(entry.value_ptr.*);
+            for (request.headers.items) |header| {
+                const key_atom = try self.ctx.atoms.intern(header.key);
+                const value_str = try self.ctx.createString(header.value);
                 try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
             }
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
@@ -495,13 +601,22 @@ pub const Runtime = struct {
     }
 
     fn extractResponse(self: *Self, result: zq.JSValue) !HttpResponse {
+        return self.extractResponseInternal(result, false);
+    }
+
+    fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {
             // If result is a string, use it as body
             if (result.isString()) {
                 const str = result.toPtr(zq.JSString);
-                response.body = try self.allocator.dupe(u8, str.data());
+                if (borrow_body) {
+                    response.setBodyBorrowed(str);
+                } else {
+                    const owned = try self.allocator.dupe(u8, str.data());
+                    response.setBodyOwned(owned);
+                }
             }
             return response;
         }
@@ -519,7 +634,12 @@ pub const Runtime = struct {
         if (result_obj.getOwnProperty(zq.Atom.body)) |body_val| {
             if (body_val.isString()) {
                 const str = body_val.toPtr(zq.JSString);
-                response.body = try self.allocator.dupe(u8, str.data());
+                if (borrow_body) {
+                    response.setBodyBorrowed(str);
+                } else {
+                    const owned = try self.allocator.dupe(u8, str.data());
+                    response.setBodyOwned(owned);
+                }
             }
         }
 
@@ -534,7 +654,11 @@ pub const Runtime = struct {
                     const header_val = headers_obj.getOwnProperty(key_atom) orelse continue;
                     if (header_val.isString()) {
                         const str = header_val.toPtr(zq.JSString);
-                        try response.putHeader(key_name, str.data());
+                        if (borrow_body) {
+                            try response.putHeaderBorrowed(key_name, str.data());
+                        } else {
+                            try response.putHeader(key_name, str.data());
+                        }
                     }
                 }
             }
@@ -551,9 +675,14 @@ pub const Runtime = struct {
         self.ctx.clearException();
 
         // Trigger minor GC if nursery is half full
-        if (self.gc_state.nursery.used() > self.gc_state.config.nursery_size / 2) {
+        const used = self.gc_state.nursery.used();
+        const base_threshold = self.gc_state.config.nursery_size / 2;
+        const body_threshold = self.gc_state.config.nursery_size / 4;
+        const threshold = if (self.last_request_body_len >= base_threshold) body_threshold else base_threshold;
+        if (used > threshold) {
             self.gc_state.minorGC();
         }
+        self.last_request_body_len = 0;
 
         // Note: We do NOT clear user globals here. The handler code and all its
         // dependencies (functions, constants, component definitions) are loaded
@@ -623,12 +752,31 @@ pub const HandlerPool = struct {
     handler_code: []const u8,
     handler_filename: []const u8,
     max_size: usize,
+    acquire_timeout_ms: u32,
     in_use: std.atomic.Value(usize),
     request_seq: std.atomic.Value(u64),
+    total_wait_ns: std.atomic.Value(u64),
+    max_wait_ns: std.atomic.Value(u64),
+    total_exec_ns: std.atomic.Value(u64),
+    max_exec_ns: std.atomic.Value(u64),
+    exhausted_count: std.atomic.Value(u64),
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
 
     const Self = @This();
+
+    pub const ResponseHandle = struct {
+        response: HttpResponse,
+        runtime: *Runtime,
+        base_rt: *zq.LockFreePool.Runtime,
+        pool: *HandlerPool,
+
+        pub fn deinit(self: *ResponseHandle) void {
+            self.response.deinit();
+            self.runtime.resetForNextRequest();
+            self.pool.releaseForRequest(self.base_rt);
+        }
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -636,6 +784,7 @@ pub const HandlerPool = struct {
         handler_code: []const u8,
         handler_filename: []const u8,
         max_size: usize,
+        acquire_timeout_ms: u32,
     ) !Self {
         const pool = try zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
@@ -649,8 +798,14 @@ pub const HandlerPool = struct {
             .handler_code = handler_code,
             .handler_filename = handler_filename,
             .max_size = max_size,
+            .acquire_timeout_ms = acquire_timeout_ms,
             .in_use = std.atomic.Value(usize).init(0),
             .request_seq = std.atomic.Value(u64).init(0),
+            .total_wait_ns = std.atomic.Value(u64).init(0),
+            .max_wait_ns = std.atomic.Value(u64).init(0),
+            .total_exec_ns = std.atomic.Value(u64).init(0),
+            .max_exec_ns = std.atomic.Value(u64).init(0),
+            .exhausted_count = std.atomic.Value(u64).init(0),
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
         };
@@ -673,7 +828,28 @@ pub const HandlerPool = struct {
         }
 
         const rt = try self.ensureRuntime(base_rt);
+        var exec_timer = std.time.Timer.start() catch null;
+        defer if (exec_timer) |*t| self.recordExec(t.read());
         return rt.executeHandlerWithId(request, request_id);
+    }
+
+    /// Execute handler and return a response handle that borrows JS strings.
+    /// Caller must call handle.deinit() after sending the response.
+    pub fn executeHandlerBorrowed(self: *Self, request: HttpRequest) !ResponseHandle {
+        const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
+        const base_rt = try self.acquireForRequest();
+        errdefer self.releaseForRequest(base_rt);
+
+        const rt = try self.ensureRuntime(base_rt);
+        var exec_timer = std.time.Timer.start() catch null;
+        defer if (exec_timer) |*t| self.recordExec(t.read());
+        const response = try rt.executeHandlerBorrowedWithId(request, request_id);
+        return .{
+            .response = response,
+            .runtime = rt,
+            .base_rt = base_rt,
+            .pool = self,
+        };
     }
 
     pub fn getInUse(self: *const Self) usize {
@@ -700,26 +876,126 @@ pub const HandlerPool = struct {
     }
 
     fn acquireForRequest(self: *Self) !*zq.LockFreePool.Runtime {
-        if (self.max_size != 0) {
-            const prev = self.in_use.fetchAdd(1, .acq_rel);
-            if (prev >= self.max_size) {
-                _ = self.in_use.fetchSub(1, .acq_rel);
-                return error.PoolExhausted;
+        var wait_timer = std.time.Timer.start() catch null;
+        const timeout_ns: u64 = @as(u64, self.acquire_timeout_ms) * std.time.ns_per_ms;
+
+        // Adaptive backoff parameters:
+        // Phase 1: Spin without sleep (10 iterations)
+        // Phase 2: Sleep starting at 10us, cap at 1ms (faster than 50us-5ms)
+        // Phase 3: Fail fast after 100 retries (circuit breaker)
+        const spin_iterations: u32 = 10;
+        const max_retries: u32 = 100;
+        const initial_backoff_ns: u64 = 10 * std.time.ns_per_us;
+        const max_backoff_ns: u64 = 1 * std.time.ns_per_ms;
+
+        var retry_count: u32 = 0;
+        var backoff_ns: u64 = initial_backoff_ns;
+
+        while (true) {
+            if (self.max_size != 0) {
+                // Use monotonic ordering - counter is only for limit/metrics, not synchronization
+                const prev = self.in_use.fetchAdd(1, .monotonic);
+                if (prev < self.max_size) break;
+                _ = self.in_use.fetchSub(1, .monotonic);
+
+                retry_count += 1;
+
+                // Check timeout first
+                if (self.acquire_timeout_ms == 0) {
+                    _ = self.exhausted_count.fetchAdd(1, .monotonic);
+                    if (wait_timer) |*t| self.recordWait(t.read());
+                    return error.PoolExhausted;
+                }
+
+                if (wait_timer) |*t| {
+                    if (t.read() >= timeout_ns) {
+                        _ = self.exhausted_count.fetchAdd(1, .monotonic);
+                        self.recordWait(t.read());
+                        return error.PoolExhausted;
+                    }
+                }
+
+                // Circuit breaker: fail fast after max retries
+                if (retry_count > max_retries) {
+                    _ = self.exhausted_count.fetchAdd(1, .monotonic);
+                    if (wait_timer) |*t| self.recordWait(t.read());
+                    return error.PoolExhausted;
+                }
+
+                // Phase 1: Spin without sleep for brief contention
+                if (retry_count <= spin_iterations) {
+                    std.atomic.spinLoopHint();
+                    continue;
+                }
+
+                // Phase 2: Sleep with jitter to prevent thundering herd
+                // Jitter: randomize within +/- 25% of backoff
+                const jitter_range = backoff_ns / 4;
+                const jitter = if (jitter_range > 0)
+                    @as(u64, @truncate(@as(u128, retry_count * 7919) % (jitter_range * 2)))
+                else
+                    0;
+                const sleep_ns = backoff_ns -| jitter_range + jitter;
+                std.posix.nanosleep(0, sleep_ns);
+                backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
+                continue;
+            } else {
+                _ = self.in_use.fetchAdd(1, .monotonic);
+                break;
             }
-        } else {
-            _ = self.in_use.fetchAdd(1, .acq_rel);
         }
 
         const rt = zq.pool.acquireWithCache(&self.pool) catch |err| {
-            _ = self.in_use.fetchSub(1, .acq_rel);
+            _ = self.in_use.fetchSub(1, .monotonic);
+            if (wait_timer) |*t| self.recordWait(t.read());
             return err;
         };
+        if (wait_timer) |*t| self.recordWait(t.read());
         return rt;
     }
 
     fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
         zq.pool.releaseWithCache(&self.pool, rt);
-        _ = self.in_use.fetchSub(1, .acq_rel);
+        _ = self.in_use.fetchSub(1, .monotonic);
+    }
+
+    pub fn getMetrics(self: *const Self) struct {
+        requests: u64,
+        exhausted: u64,
+        avg_wait_ns: u64,
+        max_wait_ns: u64,
+        avg_exec_ns: u64,
+        max_exec_ns: u64,
+    } {
+        const requests = self.request_seq.load(.acquire);
+        const wait_total = self.total_wait_ns.load(.acquire);
+        const exec_total = self.total_exec_ns.load(.acquire);
+        return .{
+            .requests = requests,
+            .exhausted = self.exhausted_count.load(.acquire),
+            .avg_wait_ns = if (requests > 0) wait_total / requests else 0,
+            .max_wait_ns = self.max_wait_ns.load(.acquire),
+            .avg_exec_ns = if (requests > 0) exec_total / requests else 0,
+            .max_exec_ns = self.max_exec_ns.load(.acquire),
+        };
+    }
+
+    fn recordWait(self: *Self, ns: u64) void {
+        _ = self.total_wait_ns.fetchAdd(ns, .acq_rel);
+        updateMax(&self.max_wait_ns, ns);
+    }
+
+    fn recordExec(self: *Self, ns: u64) void {
+        _ = self.total_exec_ns.fetchAdd(ns, .acq_rel);
+        updateMax(&self.max_exec_ns, ns);
+    }
+
+    fn updateMax(target: *std.atomic.Value(u64), value: u64) void {
+        var current = target.load(.acquire);
+        while (value > current) {
+            if (target.cmpxchgStrong(current, value, .acq_rel, .acquire) == null) return;
+            current = target.load(.acquire);
+        }
     }
 
     fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*Runtime {
@@ -738,27 +1014,10 @@ pub const HandlerPool = struct {
     }
 
     fn loadHandlerCached(self: *Self, rt: *Runtime) !void {
-        const cache_key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
-
-        if (self.cache.getRaw(cache_key)) |_| {
-            // Cache hit - still parse to populate atoms, use cached bytecode for validation
-            // TODO: Skip parsing once atom serialization is implemented
-            try rt.loadHandler(self.handler_code, self.handler_filename);
-        } else {
-            // Cache miss - parse, serialize, and cache
-            var cache_buffer: [64 * 1024]u8 = undefined;
-            const serialized = try rt.loadCodeWithCaching(
-                self.handler_code,
-                self.handler_filename,
-                &cache_buffer,
-            );
-
-            if (serialized) |data| {
-                self.cache.putRaw(cache_key, data) catch {
-                    // Cache storage failed, continue without caching
-                };
-            }
-        }
+        // For now, always parse. The cache stores serialized bytecode but
+        // we need to parse to populate atoms in each runtime's atom table.
+        // TODO: Implement full atom serialization for true cache hit path.
+        try rt.loadHandler(self.handler_code, self.handler_filename);
     }
 
     fn runtimeUserDeinit(base_rt: *zq.LockFreePool.Runtime, allocator: std.mem.Allocator) void {
@@ -791,18 +1050,17 @@ test "HandlerPool basic operations" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const handler_code = "function handler(req) { return Response.text('ok'); }";
-    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2);
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
     defer {
         // Flush thread-local cache before deinit to avoid dangling pointer
         zq.pool.releaseThreadLocal(&pool.pool);
         pool.deinit();
     }
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);
@@ -817,7 +1075,7 @@ test "HandlerPool concurrent stress" {
     const allocator = std.heap.c_allocator;
 
     const handler_code = "function handler(req) { return Response.text('ok'); }";
-    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8);
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
     defer pool.deinit();
 
     const thread_count: usize = 8;
@@ -833,22 +1091,19 @@ test "HandlerPool concurrent stress" {
 
     const Worker = struct {
         fn run(ctx: *ThreadCtx) void {
-            var headers = std.StringHashMap([]const u8).init(ctx.allocator);
             const method = ctx.allocator.dupe(u8, "GET") catch {
-                headers.deinit();
                 _ = ctx.errors.fetchAdd(1, .acq_rel);
                 return;
             };
             const url = ctx.allocator.dupe(u8, "/") catch {
                 ctx.allocator.free(method);
-                headers.deinit();
                 _ = ctx.errors.fetchAdd(1, .acq_rel);
                 return;
             };
             var request = HttpRequest{
                 .method = method,
                 .url = url,
-                .headers = headers,
+                .headers = .{},
                 .body = null,
             };
             defer request.deinit(ctx.allocator);
@@ -899,11 +1154,10 @@ test "string prototype methods are callable" {
 
     try rt.loadHandler("function handler(req){ return Response.text(typeof ''.split); }", "<test>");
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);
@@ -926,11 +1180,10 @@ test "request body split works" {
     const simple_test = "function handler(req){ return Response.text('hello'); }";
     try rt.loadHandler(simple_test, "<test1>");
 
-    const headers1 = std.StringHashMap([]const u8).init(allocator);
     var req1 = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers1,
+        .headers = .{},
         .body = null,
     };
 
@@ -946,11 +1199,10 @@ test "request body split works" {
     const prop_test = "function handler(req){ return Response.text(req.method); }";
     try rt2.loadHandler(prop_test, "<test2>");
 
-    const headers2 = std.StringHashMap([]const u8).init(allocator);
     var req2 = HttpRequest{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers2,
+        .headers = .{},
         .body = try allocator.dupe(u8, "test"),
     };
 
@@ -966,11 +1218,10 @@ test "request body split works" {
     const typeof_split = "function handler(req){ return Response.text(typeof 'a&b'.split('&')); }";
     try rt3.loadHandler(typeof_split, "<test3>");
 
-    const headers3 = std.StringHashMap([]const u8).init(allocator);
     var req3 = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers3,
+        .headers = .{},
         .body = null,
     };
 
@@ -987,11 +1238,10 @@ test "request body split works" {
         "function handler(req){ let x = 'test'; return Response.text(x); }";
     try rt4.loadHandler(handler_code, "<test>");
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);
@@ -1014,11 +1264,10 @@ test "for loop locals preserve numeric values" {
         "function handler(req){ for (let i of range(1)) { return Response.text(typeof i); } return Response.text('none'); }";
     try rt.loadHandler(handler_code, "<test>");
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);
@@ -1047,11 +1296,10 @@ test "object property access works" {
     ;
     try rt.loadHandler(handler_code, "<test>");
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);
@@ -1081,11 +1329,10 @@ test "array indexing works" {
     ;
     try rt.loadHandler(handler_code, "<test>");
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);
@@ -1113,11 +1360,10 @@ test "JSX rendering works" {
     // Load as .jsx to enable JSX mode
     try rt.loadHandler(handler_code, "test.jsx");
 
-    const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = null,
     };
     defer request.deinit(allocator);

@@ -77,6 +77,8 @@ pub const Context = struct {
     /// Optional hybrid allocator for request-scoped allocation
     /// When set, ephemeral allocations use arena, persistent use standard allocator
     hybrid: ?*arena_mod.HybridAllocator,
+    /// Reusable buffer for JSON serialization to reduce allocations
+    json_writer: std.Io.Writer.Allocating,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -125,6 +127,7 @@ pub const Context = struct {
             .catch_depth = 0,
             .config = config,
             .hybrid = null,
+            .json_writer = std.Io.Writer.Allocating.init(allocator),
         };
 
         return ctx;
@@ -269,6 +272,7 @@ pub const Context = struct {
         if (self.hidden_class_pool) |pool| pool.deinit();
 
         self.atoms.deinit();
+        self.json_writer.deinit();
         self.allocator.free(self.call_stack);
         self.allocator.free(self.stack);
         self.allocator.destroy(self);

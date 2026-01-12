@@ -1339,6 +1339,26 @@ function handler(request) {
 
 ### Production Deployment
 
+#### Server Options
+
+CLI options for the standalone server:
+
+```bash
+zigttp-server -p 8080 -h 127.0.0.1 -n 8 --cors --static ./public handler.js
+```
+
+Advanced options are available through `ServerConfig` when embedding `Server`
+directly in Zig:
+
+```zig
+const config = ServerConfig{
+    .pool_wait_timeout_ms = 5,
+    .pool_metrics_every = 1000,
+    .static_cache_max_bytes = 2 * 1024 * 1024,
+    .static_cache_max_file_size = 128 * 1024,
+};
+```
+
 #### Standalone Server
 
 ```bash
