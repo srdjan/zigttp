@@ -288,6 +288,16 @@ pub fn releaseWithCache(pool: *LockFreePool, runtime: *LockFreePool.Runtime) voi
     pool.release(runtime);
 }
 
+/// Release the thread-local cached runtime back to the pool.
+/// Call this before a thread exits if you want pooled runtimes reclaimed.
+pub fn releaseThreadLocal(pool: *LockFreePool) void {
+    if (thread_local_runtime) |rt| {
+        if (rt.in_use) return;
+        thread_local_runtime = null;
+        pool.release(rt);
+    }
+}
+
 test "LockFreePool basic operations" {
     const allocator = std.testing.allocator;
 

@@ -132,6 +132,7 @@ pub const Runtime = struct {
     handler_atom: ?zq.Atom,
     config: RuntimeConfig,
     owns_resources: bool,
+    active_request_id: std.atomic.Value(u64),
 
     const Self = @This();
 
@@ -170,6 +171,7 @@ pub const Runtime = struct {
             .handler_atom = null,
             .config = config,
             .owns_resources = true,
+            .active_request_id = std.atomic.Value(u64).init(0),
         };
 
         // Install built-in bindings
@@ -195,6 +197,7 @@ pub const Runtime = struct {
             .handler_atom = null,
             .config = config,
             .owns_resources = false,
+            .active_request_id = std.atomic.Value(u64).init(0),
         };
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
@@ -367,6 +370,10 @@ pub const Runtime = struct {
 
     /// Execute the handler function with a request
     pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
+        return self.executeHandlerWithId(request, 0);
+    }
+
+    pub fn executeHandlerWithId(self: *Self, request: HttpRequest, request_id: u64) !HttpResponse {
         const handler_atom = self.handler_atom orelse return error.NoHandler;
 
         // Get handler function from globals
@@ -375,8 +382,33 @@ pub const Runtime = struct {
         };
 
         if (!handler_val.isCallable()) {
+            std.log.err(
+                "Handler not callable (int={any} bool={any} string={any} object={any} ptr={any})",
+                .{
+                    handler_val.isInt(),
+                    handler_val.isBool(),
+                    handler_val.isString(),
+                    handler_val.isObject(),
+                    handler_val.isPtr(),
+                },
+            );
             return error.HandlerNotCallable;
         }
+
+        var tracked = false;
+        if (request_id != 0) {
+            const prev = self.active_request_id.swap(request_id, .acq_rel);
+            if (prev != 0) {
+                std.log.err(
+                    "Runtime reused concurrently (prev={d} new={d} runtime=0x{x})",
+                    .{ prev, request_id, @intFromPtr(self) },
+                );
+                return error.RuntimeInUse;
+            }
+            tracked = true;
+        }
+        defer if (tracked) self.active_request_id.store(0, .release);
+        defer self.resetForNextRequest();
 
         // Set thread-local runtime for native function callbacks (e.g., renderToString)
         current_runtime = self;
@@ -399,7 +431,9 @@ pub const Runtime = struct {
         };
 
         // Convert result to HttpResponse
-        return self.extractResponse(result);
+        const response = try self.extractResponse(result);
+
+        return response;
     }
 
     fn createRequestObject(self: *Self, request: HttpRequest) !zq.JSValue {
@@ -590,6 +624,7 @@ pub const HandlerPool = struct {
     handler_filename: []const u8,
     max_size: usize,
     in_use: std.atomic.Value(usize),
+    request_seq: std.atomic.Value(u64),
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
 
@@ -615,6 +650,7 @@ pub const HandlerPool = struct {
             .handler_filename = handler_filename,
             .max_size = max_size,
             .in_use = std.atomic.Value(usize).init(0),
+            .request_seq = std.atomic.Value(u64).init(0),
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
         };
@@ -630,11 +666,18 @@ pub const HandlerPool = struct {
 
     /// Execute handler with a request (acquire, run, release)
     pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
+        const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
         const base_rt = try self.acquireForRequest();
-        defer self.releaseForRequest(base_rt);
+        defer {
+            self.releaseForRequest(base_rt);
+        }
 
         const rt = try self.ensureRuntime(base_rt);
-        return rt.executeHandler(request);
+        return rt.executeHandlerWithId(request, request_id);
+    }
+
+    pub fn getInUse(self: *const Self) usize {
+        return self.in_use.load(.acquire);
     }
 
     /// Get cache statistics
@@ -749,7 +792,11 @@ test "HandlerPool basic operations" {
     const allocator = arena.allocator();
     const handler_code = "function handler(req) { return Response.text('ok'); }";
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2);
-    defer pool.deinit();
+    defer {
+        // Flush thread-local cache before deinit to avoid dangling pointer
+        zq.pool.releaseThreadLocal(&pool.pool);
+        pool.deinit();
+    }
 
     const headers = std.StringHashMap([]const u8).init(allocator);
     var request = HttpRequest{
@@ -764,6 +811,78 @@ test "HandlerPool basic operations" {
     defer response.deinit();
 
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HandlerPool concurrent stress" {
+    const allocator = std.heap.c_allocator;
+
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8);
+    defer pool.deinit();
+
+    const thread_count: usize = 8;
+    const iterations: usize = 200;
+
+    var errors = std.atomic.Value(u32).init(0);
+
+    const ThreadCtx = struct {
+        pool: *HandlerPool,
+        allocator: std.mem.Allocator,
+        errors: *std.atomic.Value(u32),
+    };
+
+    const Worker = struct {
+        fn run(ctx: *ThreadCtx) void {
+            var headers = std.StringHashMap([]const u8).init(ctx.allocator);
+            const method = ctx.allocator.dupe(u8, "GET") catch {
+                headers.deinit();
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            const url = ctx.allocator.dupe(u8, "/") catch {
+                ctx.allocator.free(method);
+                headers.deinit();
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            var request = HttpRequest{
+                .method = method,
+                .url = url,
+                .headers = headers,
+                .body = null,
+            };
+            defer request.deinit(ctx.allocator);
+
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                var response = ctx.pool.executeHandler(request) catch {
+                    _ = ctx.errors.fetchAdd(1, .acq_rel);
+                    continue;
+                };
+                response.deinit();
+            }
+
+            // Flush thread-local runtime cache so pool can deinit cleanly in tests.
+            zq.pool.releaseThreadLocal(&ctx.pool.pool);
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    var contexts: [thread_count]ThreadCtx = undefined;
+    for (0..thread_count) |i| {
+        contexts[i] = .{
+            .pool = &pool,
+            .allocator = allocator,
+            .errors = &errors,
+        };
+        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
+    }
+    for (threads) |t| t.join();
+
+    // Flush main thread cache (if any).
+    zq.pool.releaseThreadLocal(&pool.pool);
+
+    try std.testing.expectEqual(@as(u32, 0), errors.load(.acquire));
 }
 
 test "string prototype methods are callable" {

@@ -126,9 +126,9 @@ pub const Interpreter = struct {
     pic_cache: [IC_CACHE_SIZE]PolymorphicInlineCache,
 
     // JIT profiling counters (Phase 11)
-    backedge_count: u32 = 0,        // Back-edge counter for hot loop detection
-    pic_hits: u32 = 0,              // PIC cache hits (type feedback)
-    pic_misses: u32 = 0,            // PIC cache misses (type feedback)
+    backedge_count: u32 = 0, // Back-edge counter for hot loop detection
+    pic_hits: u32 = 0, // PIC cache hits (type feedback)
+    pic_misses: u32 = 0, // PIC cache misses (type feedback)
 
     pub fn init(ctx: *context.Context) Interpreter {
         return .{
@@ -3577,8 +3577,7 @@ test "Interpreter unary negation" {
     // Push 42, negate it: -42
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 42,
-        @intFromEnum(bytecode.Opcode.neg),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.neg),     @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -3612,8 +3611,7 @@ test "Interpreter increment and decrement" {
     // Push 10, increment: 11
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.inc),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.inc),     @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -3716,7 +3714,8 @@ test "Interpreter power operator" {
     // 2 ** 10 = 1024
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_2),
-        @intFromEnum(bytecode.Opcode.push_i8), 10,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        10,
         @intFromEnum(bytecode.Opcode.pow),
         @intFromEnum(bytecode.Opcode.ret),
     };
@@ -3822,9 +3821,8 @@ test "Interpreter local variable get and put" {
 
     // Store 42 in local 0, then return it
     const code = [_]u8{
-        @intFromEnum(bytecode.Opcode.push_i8), 42,
-        @intFromEnum(bytecode.Opcode.put_loc_0),
-        @intFromEnum(bytecode.Opcode.get_loc_0),
+        @intFromEnum(bytecode.Opcode.push_i8),   42,
+        @intFromEnum(bytecode.Opcode.put_loc_0), @intFromEnum(bytecode.Opcode.get_loc_0),
         @intFromEnum(bytecode.Opcode.ret),
     };
 
@@ -3857,14 +3855,11 @@ test "Interpreter multiple locals" {
 
     // Store 10 in local 0, 20 in local 1, add them
     const code = [_]u8{
-        @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.put_loc_0),
-        @intFromEnum(bytecode.Opcode.push_i8), 20,
-        @intFromEnum(bytecode.Opcode.put_loc_1),
-        @intFromEnum(bytecode.Opcode.get_loc_0),
-        @intFromEnum(bytecode.Opcode.get_loc_1),
-        @intFromEnum(bytecode.Opcode.add),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_i8),   10,
+        @intFromEnum(bytecode.Opcode.put_loc_0), @intFromEnum(bytecode.Opcode.push_i8),
+        20,                                      @intFromEnum(bytecode.Opcode.put_loc_1),
+        @intFromEnum(bytecode.Opcode.get_loc_0), @intFromEnum(bytecode.Opcode.get_loc_1),
+        @intFromEnum(bytecode.Opcode.add),       @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -3969,8 +3964,7 @@ test "Interpreter typeof operations" {
     // typeof 42 should return "number"
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 42,
-        @intFromEnum(bytecode.Opcode.typeof),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.typeof),  @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -4004,8 +3998,7 @@ test "Interpreter modulo operation" {
     // 10 % 3 = 1
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.push_3),
-        @intFromEnum(bytecode.Opcode.mod),
+        @intFromEnum(bytecode.Opcode.push_3),  @intFromEnum(bytecode.Opcode.mod),
         @intFromEnum(bytecode.Opcode.ret),
     };
 
@@ -4039,8 +4032,7 @@ test "Interpreter inc dec roundtrip" {
     // 5 -> inc -> dec -> should be 5
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 5,
-        @intFromEnum(bytecode.Opcode.inc),
-        @intFromEnum(bytecode.Opcode.dec),
+        @intFromEnum(bytecode.Opcode.inc),     @intFromEnum(bytecode.Opcode.dec),
         @intFromEnum(bytecode.Opcode.ret),
     };
 
@@ -4074,8 +4066,7 @@ test "Interpreter negation" {
     // -42 should be -42
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 42,
-        @intFromEnum(bytecode.Opcode.neg),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.neg),     @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -4108,8 +4099,7 @@ test "Interpreter dup operation" {
     // Push 7, dup, add -> 14
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 7,
-        @intFromEnum(bytecode.Opcode.dup),
-        @intFromEnum(bytecode.Opcode.add),
+        @intFromEnum(bytecode.Opcode.dup),     @intFromEnum(bytecode.Opcode.add),
         @intFromEnum(bytecode.Opcode.ret),
     };
 
@@ -4144,8 +4134,7 @@ test "Interpreter drop operation" {
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 5,
         @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.drop),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.drop),    @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -4178,10 +4167,8 @@ test "Interpreter swap operation" {
     // Push 10, push 3, swap, sub -> 10 - 3 = 7
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_i8), 10,
-        @intFromEnum(bytecode.Opcode.push_3),
-        @intFromEnum(bytecode.Opcode.swap),
-        @intFromEnum(bytecode.Opcode.sub),
-        @intFromEnum(bytecode.Opcode.ret),
+        @intFromEnum(bytecode.Opcode.push_3),  @intFromEnum(bytecode.Opcode.swap),
+        @intFromEnum(bytecode.Opcode.sub),     @intFromEnum(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{

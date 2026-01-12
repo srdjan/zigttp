@@ -252,54 +252,57 @@ pub const Server = struct {
         }
 
         // Invoke JS handler via pool
-        var pool = self.pool orelse {
+        if (self.pool) |*pool| {
+            var response = pool.executeHandler(HttpRequest{
+                .url = request.url,
+                .method = request.method,
+                .headers = request.headers,
+                .body = request.body,
+            }) catch |err| {
+                // Return 503 Service Unavailable for pool exhaustion (allows load balancer retry)
+                // Return 500 for other errors
+                const status: u16 = if (err == error.PoolExhausted) 503 else 500;
+                const message = if (err == error.PoolExhausted)
+                    "Service Unavailable: Server at capacity, please retry"
+                else
+                    "Internal Server Error";
+                std.log.err(
+                    "Handler error: {} (responding with {}, in_use={d}/{d})",
+                    .{ err, status, pool.getInUse(), pool.max_size },
+                );
+                try self.sendErrorResponse(stream, io, status, message);
+                return;
+            };
+            defer response.deinit();
+
+            // Add CORS headers if enabled
+            if (self.config.enable_cors) {
+                try response.putHeader("Access-Control-Allow-Origin", "*");
+                try response.putHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+                try response.putHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+            }
+
+            // Send response
+            try self.sendResponse(stream, io, &response);
+
+            // Log request
+            if (self.config.log_requests) {
+                const elapsed_ms: i64 = if (start_instant) |start_time| blk: {
+                    const now = std.time.Instant.now() catch break :blk 0;
+                    break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
+                } else 0;
+                const count = self.request_count.fetchAdd(1, .monotonic) + 1;
+                std.log.info("[{d}] {s} {s} -> {d} ({d}ms)", .{
+                    count,
+                    request.method,
+                    request.url,
+                    response.status,
+                    elapsed_ms,
+                });
+            }
+        } else {
             try self.sendErrorResponse(stream, io, 503, "Service Unavailable: runtime pool not initialized");
             return;
-        };
-
-        var response = pool.executeHandler(HttpRequest{
-            .url = request.url,
-            .method = request.method,
-            .headers = request.headers,
-            .body = request.body,
-        }) catch |err| {
-            // Return 503 Service Unavailable for pool exhaustion (allows load balancer retry)
-            // Return 500 for other errors
-            const status: u16 = if (err == error.PoolExhausted) 503 else 500;
-            const message = if (err == error.PoolExhausted)
-                "Service Unavailable: Server at capacity, please retry"
-            else
-                "Internal Server Error";
-            std.log.err("Handler error: {} (responding with {})", .{ err, status });
-            try self.sendErrorResponse(stream, io, status, message);
-            return;
-        };
-        defer response.deinit();
-
-        // Add CORS headers if enabled
-        if (self.config.enable_cors) {
-            try response.putHeader("Access-Control-Allow-Origin", "*");
-            try response.putHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-            try response.putHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-        }
-
-        // Send response
-        try self.sendResponse(stream, io, &response);
-
-        // Log request
-        if (self.config.log_requests) {
-            const elapsed_ms: i64 = if (start_instant) |start_time| blk: {
-                const now = std.time.Instant.now() catch break :blk 0;
-                break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
-            } else 0;
-            const count = self.request_count.fetchAdd(1, .monotonic) + 1;
-            std.log.info("[{d}] {s} {s} -> {d} ({d}ms)", .{
-                count,
-                request.method,
-                request.url,
-                response.status,
-                elapsed_ms,
-            });
         }
     }
 

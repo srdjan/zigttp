@@ -30,50 +30,26 @@ zig build test                      # All src/ tests
 zig build test-zts                  # zts engine tests only
 zig build test-zruntime             # Native Zig runtime tests only
 
+# Run a single test by name
+zig build test 2>&1 | head -50      # See available tests
+zig build test -- --test-filter "runtime init"  # Filter by name
+
 # Benchmark
-zig build bench                     # Build and run benchmarks
+zig build bench                     # Build and run benchmarks (src/benchmark.zig)
 ```
 
 ## Architecture
 
-### Core Components (src/)
+### Two-Layer Design
 
-- **main.zig** - CLI argument parsing, creates ServerConfig, starts server
-- **server.zig** - HTTP listener, request parsing, connection handling, static file serving
-- **zruntime.zig** - Native Zig runtime: HandlerPool, JS context management, Request/Response conversion
+**Server layer (src/)**: HTTP listener, CLI, request routing, static file serving. Entry point is `main.zig`, HTTP handling in `server.zig`, JS runtime management in `zruntime.zig`.
 
-### zts Engine (Pure Zig)
-
-The JS engine uses a two-pass architecture: parse to IR, then generate bytecode.
-
-**Parser (zts/parser/):**
-- **root.zig** - Parser module entry point
-- **parse.zig** - Pratt parser, builds IR
-- **tokenizer.zig** - Lexical analysis
-- **ir.zig** - Intermediate representation
-- **codegen.zig** - IR to bytecode emission
-- **scope.zig** - Scope and variable tracking
-
-**Runtime (zts/):**
-- **root.zig** - Module entry point, re-exports main types
-- **interpreter.zig** - Stack-based bytecode VM
-- **bytecode.zig** - Opcode definitions and FunctionBytecode struct
-- **value.zig** - NaN-boxing value representation
-- **object.zig** - Hidden classes, Atom interning, inline caching
-- **string.zig** - JSString and StringTable for string interning
-- **context.zig** - JS execution context (globals, stack, atoms)
-- **builtins.zig** - Built-in JavaScript functions
-- **http.zig** - Request/Response classes, h() hyperscript, renderToString() for SSR
-
-**Memory Management (zts/):**
-- **gc.zig** - Generational GC (nursery + tenured)
-- **heap.zig** - Size-class segregated allocator
-- **arena.zig** - Request-scoped arena allocator with O(1) reset
-- **pool.zig** - Lock-free runtime pooling
-
-**TypeScript Support (zts/):**
-- **stripper.zig** - TypeScript/TSX type annotation removal
-- **comptime.zig** - Compile-time expression evaluator for `comptime()` calls
+**Engine layer (zts/)**: Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode). Key components:
+- Parser (`zts/parser/`): Pratt parser, tokenizer, IR, bytecode codegen, scope tracking
+- VM (`interpreter.zig`): Stack-based bytecode interpreter with JIT baseline compiler
+- Values (`value.zig`, `object.zig`): NaN-boxing, hidden classes, inline caching
+- Memory (`gc.zig`, `heap.zig`, `arena.zig`, `pool.zig`): Generational GC, arena allocator, lock-free pooling
+- TypeScript (`stripper.zig`, `comptime.zig`): Type stripping and compile-time evaluation
 
 ### Request Flow
 
@@ -90,43 +66,27 @@ The JS engine uses a two-pass architecture: parse to IR, then generate bytecode.
 
 **Result Type**: Functional error handling throughout - `Result(T)` union with `ok`/`err` variants. Maps JS exceptions to Zig errors.
 
-**NaN-Boxing**: zts uses NaN-boxing for efficient 64-bit tagged values. Allows storing integers, floats, and pointers in a single 64-bit word.
+**NaN-Boxing**: 64-bit tagged values storing integers, floats, and pointers in a single word.
 
 **Hidden Classes**: V8-style hidden class transitions for inline caching. Enables fast property access.
 
-**Thread-Local Runtime**: Native callbacks can access the current runtime via thread-local storage when needed.
-
-### Memory Model
-
-**Generational GC**: Nursery (young generation) and tenured (old generation) heaps. Each runtime instance has isolated memory. Size-class segregated allocator for efficient small object allocation.
-
-**Hybrid Arena Allocation**: For FaaS workloads, zts supports a hybrid memory model where request-scoped objects are allocated from an arena:
-
-- `arena.zig` provides O(1) bulk reset between requests
-- `HybridAllocator` wraps arena with fallback to GC allocator
-- Objects track their allocation source via `is_arena` flag in ObjectFlags
-- `arena_ptr` field on JSObject enables arena-aware overflow slot allocation
-- Write barriers in `setProperty` detect arena escape (storing arena object into persistent object)
-- GC is disabled when `hybrid_mode` is true on the GC struct
-
-This eliminates per-object allocation overhead and GC pauses during request handling while preventing use-after-free through escape detection.
+**Hybrid Arena Allocation**: Request-scoped arena with O(1) bulk reset. Write barriers detect arena escape. GC disabled in hybrid mode.
 
 ## TypeScript/TSX Support
 
-zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly without a separate build step.
+zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly.
 
 ### Compile-Time Evaluation
 
-The `comptime()` function evaluates expressions at load time and replaces them with literal values:
+The `comptime()` function evaluates expressions at load time:
 
 ```typescript
 const x = comptime(1 + 2 * 3);                 // -> const x = 7;
 const upper = comptime("hello".toUpperCase()); // -> const upper = "HELLO";
-const pi = comptime(Math.PI);                  // -> const pi = 3.141592653589793;
 const etag = comptime(hash("content-v1"));     // -> const etag = "a1b2c3d4";
 ```
 
-**Supported**: Literals, arithmetic, bitwise, comparison, logical operators, ternary, Math constants/functions, string methods, `parseInt`, `parseFloat`, `JSON.parse`, `hash`.
+**Supported**: Literals, arithmetic, bitwise, comparison, logical, ternary, Math, string methods, `parseInt`, `parseFloat`, `JSON.parse`, `hash`.
 
 **Disallowed**: Variables, `Date.now()`, `Math.random()`, closures, assignments.
 
@@ -138,7 +98,7 @@ See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for ful
 
 **Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API.
 
-**Response helpers** available in handlers:
+**Response helpers**:
 - `Response.json(data, init?)`
 - `Response.text(text, init?)`
 - `Response.html(html, init?)`
@@ -158,29 +118,26 @@ See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for ful
 
 ## JSX Support
 
-JSX/TSX is parsed directly by the zts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions in `zruntime.zig`). There is no separate transformer file.
-
-### Flow
-
-1. `Runtime.loadCode()` enables JSX mode for `.jsx`/`.tsx`
-2. Parser produces JSX nodes
-3. Codegen emits `h(tag, props, ...children)` calls
+JSX/TSX is parsed directly by the zts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions). No separate transformer.
 
 ### JSX Runtime (in zts/http.zig)
 
 - `h(tag, props, ...children)` - Creates virtual DOM nodes
 - `renderToString(node)` - Renders to HTML string
 - `Fragment` - For grouping without wrapper element
-- Void elements (br, img, input, etc.) rendered as self-closing
 
-## Security Features
+## Testing Guidelines
 
-**Path Traversal Prevention**: `isPathSafe()` in server.zig validates static file paths - blocks `..`, absolute paths, and Windows drive letters.
+Tests live alongside code using Zig `test "..."` blocks (no separate test directory). Run the relevant `zig build test*` step after changes.
 
 ## Code Quality Patterns
 
 **Memory Safety**: All allocations use `errdefer` for cleanup on failure paths. Header strings are duplicated to avoid use-after-free from GC.
 
-**Buffered I/O**: `BufferedReader` in server.zig reduces syscalls compared to byte-by-byte reading.
+**Safe Optional Handling**: Pool and listener access uses `orelse` pattern instead of `?` unwrap.
 
-**Safe Optional Handling**: Pool and listener access uses `orelse` pattern instead of `?` unwrap to handle uninitialized state gracefully.
+**Path Traversal Prevention**: `isPathSafe()` in server.zig validates static file paths.
+
+## Zig Idioms
+
+For Zig-specific patterns (allocators, error unions, comptime, data-oriented design), consult `.codex/skills/zig-expert/SKILL.md`.
