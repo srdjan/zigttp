@@ -816,7 +816,7 @@ test "request body split works" {
     };
 
     var resp1 = try rt.executeHandler(req1);
-    std.debug.print("\nSimple test body: '{s}'\n", .{resp1.body});
+    try std.testing.expectEqualStrings("hello", resp1.body);
     resp1.deinit();
     req1.deinit(allocator);
 
@@ -836,7 +836,7 @@ test "request body split works" {
     };
 
     var resp2 = try rt2.executeHandler(req2);
-    std.debug.print("Property test body: '{s}'\n", .{resp2.body});
+    try std.testing.expectEqualStrings("POST", resp2.body);
     resp2.deinit();
     req2.deinit(allocator);
 
@@ -856,7 +856,7 @@ test "request body split works" {
     };
 
     var resp3 = try rt3.executeHandler(req3);
-    std.debug.print("typeof direct split: '{s}'\n", .{resp3.body});
+    try std.testing.expectEqualStrings("object", resp3.body);
     resp3.deinit();
     req3.deinit(allocator);
 
@@ -878,7 +878,6 @@ test "request body split works" {
     defer request.deinit(allocator);
 
     var response = try rt4.executeHandler(request);
-    std.debug.print("simple var: '{s}'\n", .{response.body});
     defer response.deinit();
 
     try std.testing.expectEqualStrings("test", response.body);

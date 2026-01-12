@@ -378,11 +378,11 @@ See `zts/builtins.zig` for examples of core JS APIs and native function wiring.
 
 ## Performance
 
-### Benchmarks vs QuickJS
+### Benchmarks (QuickJS baseline)
 
-zts outperforms mquickjs (QuickJS baseline) on most operations:
+zts outperforms QuickJS in our historical benchmark runs (QuickJS is an external baseline; the legacy mquickjs compatibility layer is no longer part of this repo). See `benchmarks/*.json` for raw results.
 
-| Benchmark | zts | mquickjs | Ratio |
+| Benchmark | zts | QuickJS | Ratio |
 |-----------|-----|----------|-------|
 | stringOps | 16.3M ops/s | 258K ops/s | **63x faster** |
 | objectCreate | 8.1M ops/s | 1.7M ops/s | **4.8x faster** |

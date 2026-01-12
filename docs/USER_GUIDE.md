@@ -1204,7 +1204,7 @@ function handler(request) {
 
 ### Benchmarks
 
-zts outperforms QuickJS on most operations relevant to FaaS workloads:
+zts outperforms QuickJS in our historical benchmark runs (QuickJS is an external baseline; the legacy mquickjs compatibility layer is no longer part of this repo). See `benchmarks/*.json` for raw results.
 
 | Operation | zts | QuickJS | Improvement |
 |-----------|-----|---------|-------------|

@@ -3,21 +3,21 @@
   "description": "After Phase 1-4 optimizations: debug logging removal, sub/mul overflow fix, range length caching, unchecked stack/array ops, JSON buffer pre-sizing",
   "total_time_ms": 347.2,
   "benchmarks": [
-    { "name": "intArithmetic", "iterations": 50000, "time_ms": 7.904, "ops_per_sec": 6325543, "vs_mquickjs": 0.39 },
-    { "name": "stringConcat", "iterations": 50000, "time_ms": 9.759, "ops_per_sec": 5123519, "vs_mquickjs": 0.83 },
-    { "name": "stringOps", "iterations": 50000, "time_ms": 6.406, "ops_per_sec": 7804623, "vs_mquickjs": 30.20 },
-    { "name": "objectCreate", "iterations": 50000, "time_ms": 10.538, "ops_per_sec": 4744789, "vs_mquickjs": 2.80 },
-    { "name": "propertyAccess", "iterations": 50000, "time_ms": 8.216, "ops_per_sec": 6085810, "vs_mquickjs": 1.81 },
-    { "name": "arrayOps", "iterations": 50000, "time_ms": 11.177, "ops_per_sec": 4473605, "vs_mquickjs": 0.68 },
-    { "name": "functionCalls", "iterations": 50000, "time_ms": 8.016, "ops_per_sec": 6237233, "vs_mquickjs": 1.21 },
-    { "name": "recursion", "iterations": 25, "time_ms": 9.124, "ops_per_sec": 2740, "vs_mquickjs": 1.22 },
-    { "name": "jsonOps", "iterations": 5000, "time_ms": 71.266, "ops_per_sec": 70160, "vs_mquickjs": 0.99 },
-    { "name": "gcPressure", "iterations": 50000, "time_ms": 195.078, "ops_per_sec": 256307, "vs_mquickjs": 1.12 },
-    { "name": "httpHandler", "iterations": 5000, "time_ms": 5.479, "ops_per_sec": 912644, "vs_mquickjs": 2.75 },
-    { "name": "forOfLoop", "iterations": 50000, "time_ms": 4.204, "ops_per_sec": 11892489, "vs_mquickjs": 0.22 }
+    { "name": "intArithmetic", "iterations": 50000, "time_ms": 7.904, "ops_per_sec": 6325543, "vs_quickjs": 0.39 },
+    { "name": "stringConcat", "iterations": 50000, "time_ms": 9.759, "ops_per_sec": 5123519, "vs_quickjs": 0.83 },
+    { "name": "stringOps", "iterations": 50000, "time_ms": 6.406, "ops_per_sec": 7804623, "vs_quickjs": 30.20 },
+    { "name": "objectCreate", "iterations": 50000, "time_ms": 10.538, "ops_per_sec": 4744789, "vs_quickjs": 2.80 },
+    { "name": "propertyAccess", "iterations": 50000, "time_ms": 8.216, "ops_per_sec": 6085810, "vs_quickjs": 1.81 },
+    { "name": "arrayOps", "iterations": 50000, "time_ms": 11.177, "ops_per_sec": 4473605, "vs_quickjs": 0.68 },
+    { "name": "functionCalls", "iterations": 50000, "time_ms": 8.016, "ops_per_sec": 6237233, "vs_quickjs": 1.21 },
+    { "name": "recursion", "iterations": 25, "time_ms": 9.124, "ops_per_sec": 2740, "vs_quickjs": 1.22 },
+    { "name": "jsonOps", "iterations": 5000, "time_ms": 71.266, "ops_per_sec": 70160, "vs_quickjs": 0.99 },
+    { "name": "gcPressure", "iterations": 50000, "time_ms": 195.078, "ops_per_sec": 256307, "vs_quickjs": 1.12 },
+    { "name": "httpHandler", "iterations": 5000, "time_ms": 5.479, "ops_per_sec": 912644, "vs_quickjs": 2.75 },
+    { "name": "forOfLoop", "iterations": 50000, "time_ms": 4.204, "ops_per_sec": 11892489, "vs_quickjs": 0.22 }
   ],
   "summary": {
-    "faster_than_mquickjs": ["stringOps", "objectCreate", "propertyAccess", "functionCalls", "recursion", "gcPressure", "httpHandler"],
+    "faster_than_quickjs": ["stringOps", "objectCreate", "propertyAccess", "functionCalls", "recursion", "gcPressure", "httpHandler"],
     "at_parity": ["jsonOps"],
     "remaining_gaps": ["forOfLoop", "arrayOps", "intArithmetic", "stringConcat"]
   }

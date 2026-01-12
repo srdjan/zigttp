@@ -40,7 +40,6 @@ pub const builtins = @import("builtins.zig");
 pub const parser = @import("parser/root.zig");
 // Note: Legacy single-pass parser removed; use parser/root.zig
 pub const pool = @import("pool.zig");
-pub const c_abi = @import("c_abi.zig");
 pub const http = @import("http.zig");
 pub const stripper = @import("stripper.zig");
 pub const comptime_eval = @import("comptime.zig");

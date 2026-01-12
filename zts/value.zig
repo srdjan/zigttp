@@ -1,7 +1,7 @@
 //! JSValue NaN-boxing implementation
 //!
 //! 64-bit tagged value representation using NaN-boxing technique.
-//! Compatible with C mquickjs JSValue encoding.
+//! Compatible with QuickJS-style JSValue encoding.
 
 const std = @import("std");
 const heap = @import("heap.zig");
