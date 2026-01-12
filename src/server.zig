@@ -33,6 +33,9 @@ pub const ServerConfig = struct {
     /// Maximum request body size (default 1MB)
     max_body_size: usize = 1024 * 1024,
 
+    /// Maximum number of headers per request (DOS protection)
+    max_headers: usize = 64,
+
     /// Request timeout in milliseconds
     timeout_ms: u32 = 30_000,
 
@@ -50,6 +53,17 @@ pub const ServerConfig = struct {
 
     /// Static file directory (null = disabled)
     static_dir: ?[]const u8 = null,
+
+    /// Enable HTTP keep-alive connections
+    keep_alive: bool = true,
+
+    /// Keep-alive idle timeout in milliseconds (max time between requests)
+    /// Note: Currently the overall connection timeout (timeout_ms) applies to the entire
+    /// keep-alive session. This field is reserved for future per-request idle timeout.
+    keep_alive_timeout_ms: u32 = 5_000,
+
+    /// Maximum requests per keep-alive connection (0 = unlimited)
+    keep_alive_max_requests: u32 = 100,
 };
 
 pub const HandlerSource = union(enum) {
@@ -231,6 +245,27 @@ pub const Server = struct {
     }
 
     fn handleConnection(self: *Self, stream: *net.Stream, io: Io) !void {
+        var requests_on_connection: u32 = 0;
+
+        // Keep-alive loop: handle multiple requests on same connection
+        while (true) {
+            const keep_alive = try self.handleSingleRequest(stream, io, requests_on_connection);
+            requests_on_connection += 1;
+
+            // Check if we should close the connection
+            if (!keep_alive) break;
+
+            // Check max requests limit
+            if (self.config.keep_alive_max_requests > 0 and
+                requests_on_connection >= self.config.keep_alive_max_requests)
+            {
+                break;
+            }
+        }
+    }
+
+    /// Handle a single HTTP request. Returns true if connection should be kept alive.
+    fn handleSingleRequest(self: *Self, stream: *net.Stream, io: Io, request_num: u32) !bool {
         const start_instant = std.time.Instant.now() catch null;
 
         var request_started = false;
@@ -239,15 +274,31 @@ pub const Server = struct {
             if (err == error.Canceled and request_started) {
                 return error.RequestTimedOut;
             }
+            // Connection closed or parse error - don't keep alive
+            if (err == error.EndOfStream or err == error.ConnectionResetByPeer) {
+                return false;
+            }
             return err;
         };
         defer request.deinit(self.allocator);
 
+        // Determine if client wants keep-alive (HTTP/1.1 defaults to keep-alive)
+        const client_wants_keep_alive = blk: {
+            if (request.headers.get("connection")) |conn| {
+                break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
+            }
+            // HTTP/1.1 defaults to keep-alive
+            break :blk true;
+        };
+
+        // Only keep alive if both client wants it AND server has it enabled AND not first request timeout
+        const keep_alive = self.config.keep_alive and client_wants_keep_alive;
+
         // Handle static files if configured
         if (self.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.url, "/static/")) {
-                try self.serveStaticFile(stream, io, static_dir, request.url[7..]);
-                return;
+                try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive);
+                return keep_alive;
             }
         }
 
@@ -271,7 +322,7 @@ pub const Server = struct {
                     .{ err, status, pool.getInUse(), pool.max_size },
                 );
                 try self.sendErrorResponse(stream, io, status, message);
-                return;
+                return false; // Close connection on error
             };
             defer response.deinit();
 
@@ -283,7 +334,7 @@ pub const Server = struct {
             }
 
             // Send response
-            try self.sendResponse(stream, io, &response);
+            try self.sendResponse(stream, io, &response, keep_alive);
 
             // Log request
             if (self.config.log_requests) {
@@ -292,17 +343,21 @@ pub const Server = struct {
                     break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
                 } else 0;
                 const count = self.request_count.fetchAdd(1, .monotonic) + 1;
-                std.log.info("[{d}] {s} {s} -> {d} ({d}ms)", .{
+                const ka_indicator: []const u8 = if (keep_alive and request_num > 0) " [ka]" else "";
+                std.log.info("[{d}] {s} {s} -> {d} ({d}ms){s}", .{
                     count,
                     request.method,
                     request.url,
                     response.status,
                     elapsed_ms,
+                    ka_indicator,
                 });
             }
+
+            return keep_alive;
         } else {
             try self.sendErrorResponse(stream, io, 503, "Service Unavailable: runtime pool not initialized");
-            return;
+            return false;
         }
     }
 
@@ -310,27 +365,46 @@ pub const Server = struct {
         var buf: [8192]u8 = undefined;
         var reader_buf: [4096]u8 = undefined;
         var headers = std.StringHashMap([]const u8).init(self.allocator);
-        errdefer freeHeaderMap(self.allocator, &headers);
+        errdefer headers.deinit();
 
         // Use buffered reader for efficient parsing
         var reader = BufferedReader.init(stream, io, &reader_buf);
+
+        // Batch string storage: single allocation for method, url, and all header strings
+        // Typical request needs ~2-4KB; we allocate 8KB to cover most cases
+        const storage_size: usize = 8192;
+        const string_storage = try self.allocator.alloc(u8, storage_size);
+        errdefer self.allocator.free(string_storage);
+        var storage_offset: usize = 0;
+
+        // Helper to copy string into batch storage
+        const copyToStorage = struct {
+            fn copy(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
+                if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
+                const dest = storage[offset.*..][0..src.len];
+                @memcpy(dest, src);
+                offset.* += src.len;
+                return dest;
+            }
+        }.copy;
 
         // Read request line
         const request_line = try reader.readLine(&buf);
         request_started.* = true;
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
-        // Duplicate method and url immediately before reading headers
+        // Copy method and url into batch storage
         const method_slice = parts.next() orelse return error.InvalidRequest;
-        const method = try self.allocator.dupe(u8, method_slice);
-        errdefer self.allocator.free(method);
+        const method = try copyToStorage(string_storage, &storage_offset, method_slice);
 
         const url_slice = parts.next() orelse return error.InvalidRequest;
-        const url = try self.allocator.dupe(u8, url_slice);
-        errdefer self.allocator.free(url);
+        const url = try copyToStorage(string_storage, &storage_offset, url_slice);
 
-        // Read headers
+        // Read headers (with count limit for DOS protection)
+        var header_count: usize = 0;
         while (true) {
+            if (header_count >= self.config.max_headers) return error.TooManyHeaders;
+
             const line = try reader.readLine(&buf);
             if (line.len == 0) break;
 
@@ -338,19 +412,19 @@ pub const Server = struct {
             const key = header_parts.next() orelse continue;
             const value = header_parts.rest();
 
-            // Duplicate strings since they point into buf
-            const key_dup = try self.allocator.dupe(u8, key);
-            const value_dup = try self.allocator.dupe(u8, value);
-            headers.put(key_dup, value_dup) catch |err| {
-                self.allocator.free(key_dup);
-                self.allocator.free(value_dup);
-                return err;
-            };
+            // Normalize key to lowercase, then copy to batch storage
+            var key_lower_buf: [256]u8 = undefined;
+            if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
+            const key_lower = std.ascii.lowerString(key_lower_buf[0..key.len], key);
+            const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
+            const value_dup = try copyToStorage(string_storage, &storage_offset, value);
+            try headers.put(key_dup, value_dup);
+            header_count += 1;
         }
 
-        // Read body if Content-Length present (case-insensitive)
+        // Read body if Content-Length present (keys normalized to lowercase)
         var body: ?[]u8 = null;
-        if (findHeader(&headers, "Content-Length")) |len_str| {
+        if (headers.get("content-length")) |len_str| {
             const content_length = std.fmt.parseInt(usize, len_str, 10) catch 0;
             if (content_length > 0 and content_length <= self.config.max_body_size) {
                 body = try self.allocator.alloc(u8, content_length);
@@ -365,10 +439,11 @@ pub const Server = struct {
             .url = url,
             .headers = headers,
             .body = body,
+            .string_storage = string_storage,
         };
     }
 
-    fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse) !void {
+    fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse, keep_alive: bool) !void {
         _ = self;
         var out_buf: [4096]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
@@ -380,7 +455,11 @@ pub const Server = struct {
 
         // Headers
         try out.print("Content-Length: {d}\r\n", .{response.body.len});
-        try out.writeAll("Connection: close\r\n");
+        if (keep_alive) {
+            try out.writeAll("Connection: keep-alive\r\n");
+        } else {
+            try out.writeAll("Connection: close\r\n");
+        }
 
         var header_iter = response.headers.iterator();
         while (header_iter.next()) |entry| {
@@ -414,14 +493,14 @@ pub const Server = struct {
         try writer.interface.flush();
     }
 
-    fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8) !void {
+    fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8, keep_alive: bool) !void {
         _ = self;
 
         // Security: comprehensive path validation
         if (!isPathSafe(path)) {
             var out_buf: [256]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
-            try writer.interface.writeAll("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nForbidden");
+            try writer.interface.writeAll("HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nForbidden");
             try writer.interface.flush();
             return;
         }
@@ -434,7 +513,7 @@ pub const Server = struct {
         const file = std.fs.cwd().openFile(full_path, .{}) catch {
             var out_buf: [256]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
-            try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found");
+            try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found");
             try writer.interface.flush();
             return;
         };
@@ -442,13 +521,15 @@ pub const Server = struct {
 
         const stat = try file.stat();
         const content_type = getContentType(path);
+        const connection = if (keep_alive) "keep-alive" else "close";
 
         var out_buf: [4096]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
-        try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\n\r\n", .{
+        try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
             stat.size,
             content_type,
+            connection,
         });
 
         // Stream file contents
@@ -467,12 +548,15 @@ const ParsedRequest = struct {
     url: []const u8,
     headers: std.StringHashMap([]const u8),
     body: ?[]u8,
+    /// Batch buffer holding method, url, and header strings (single allocation)
+    string_storage: []u8,
 
     pub fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
-        allocator.free(self.method);
-        allocator.free(self.url);
         if (self.body) |b| allocator.free(b);
-        freeHeaderMap(allocator, &self.headers);
+        // Free single batch allocation instead of individual strings
+        allocator.free(self.string_storage);
+        // Headers map only - strings are in string_storage
+        self.headers.deinit();
     }
 };
 
@@ -520,16 +604,6 @@ const BufferedReader = struct {
         try self.reader.interface.readSliceAll(out);
     }
 };
-
-fn findHeader(headers: *std.StringHashMap([]const u8), name: []const u8) ?[]const u8 {
-    var it = headers.iterator();
-    while (it.next()) |entry| {
-        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) {
-            return entry.value_ptr.*;
-        }
-    }
-    return null;
-}
 
 fn getStatusText(status: u16) []const u8 {
     return switch (status) {
@@ -595,15 +669,6 @@ fn getContentType(path: []const u8) []const u8 {
     if (std.mem.eql(u8, ext, ".xml")) return "application/xml";
     if (std.mem.eql(u8, ext, ".pdf")) return "application/pdf";
     return "application/octet-stream";
-}
-
-fn freeHeaderMap(allocator: std.mem.Allocator, headers: *std.StringHashMap([]const u8)) void {
-    var it = headers.iterator();
-    while (it.next()) |entry| {
-        allocator.free(entry.key_ptr.*);
-        allocator.free(entry.value_ptr.*);
-    }
-    headers.deinit();
 }
 
 fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {

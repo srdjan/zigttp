@@ -640,7 +640,7 @@ pub const HandlerPool = struct {
         const pool = try zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
             .gc_config = .{ .nursery_size = config.nursery_size },
-            .use_hybrid_allocation = false,
+            .use_hybrid_allocation = true,
         });
 
         var self = Self{
