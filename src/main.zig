@@ -1,4 +1,4 @@
-//! zigttp-server - HTTP Server hosting MicroQuickJS JavaScript handlers
+//! zigttp-server - HTTP Server hosting zts JavaScript handlers
 //!
 //! Usage:
 //!   zigttp-server [options] <handler.js>
@@ -150,7 +150,7 @@ fn parseSize(str: []const u8) !usize {
 
 fn printHelp() void {
     const help =
-        \\zigttp-server - HTTP Server hosting MicroQuickJS JavaScript handlers
+        \\zigttp-server - HTTP Server hosting zts JavaScript handlers
         \\
         \\Usage:
         \\  zigttp-server [options] <handler.js>

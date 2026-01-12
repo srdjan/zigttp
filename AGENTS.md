@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - `build.zig` defines the build graph, executables, and test steps.
-- `src/` contains the runtime and server implementation (`main.zig`, `server.zig`, `zruntime.zig`, `bindings.zig`, `jsx.zig`).
+- `src/` contains the runtime and server implementation (`main.zig`, `server.zig`, `zruntime.zig`).
 - `zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, etc.).
 - `examples/` holds runnable handlers and demos (`.js`, `.jsx`).
 - `docs/` contains user-facing documentation.
@@ -21,7 +21,7 @@
 ## Coding Style & Naming Conventions
 - Format Zig code with `zig fmt` and follow existing patterns.
 - Zig identifiers: types in `UpperCamelCase`, functions and variables in `lowerCamelCase`.
-- Files are short, descriptive, and lowercase (e.g., `server.zig`, `bindings.zig`).
+- Files are short, descriptive, and lowercase (e.g., `server.zig`, `zruntime.zig`).
 - Keep APIs explicit: the project uses `Result(T)`-style error handling across the engine/runtime.
 
 ## Testing Guidelines
@@ -34,5 +34,5 @@
 - PRs should include: a clear summary, rationale, test commands run, and doc/example updates when behavior changes.
 
 ## Security & Configuration Notes
-- Preserve path traversal checks in `src/server.zig` and SSRF guards in `src/bindings.zig`.
-- Runtime isolation depends on `RuntimePool`; avoid introducing shared mutable state between requests.
+- Preserve path traversal checks in `src/server.zig`.
+- Runtime isolation depends on `HandlerPool`/`LockFreePool`; avoid introducing shared mutable state between requests.

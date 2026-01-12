@@ -39,11 +39,8 @@ zig build bench                     # Build and run benchmarks
 ### Core Components (src/)
 
 - **main.zig** - CLI argument parsing, creates ServerConfig, starts server
-- **server.zig** - HTTP listener, request parsing, connection handling, static file serving, JSX/TS detection
-- **zruntime.zig** - Native Zig runtime: RuntimePool, JS context management, Request/Response conversion
-- **bindings.zig** - Native API implementations (console, fetch, Deno namespace, timers)
-- **event_loop.zig** - Async operation management, microtask queue, Promise resolution
-- **jsx.zig** - JSX-to-JavaScript transformer for SSR
+- **server.zig** - HTTP listener, request parsing, connection handling, static file serving
+- **zruntime.zig** - Native Zig runtime: HandlerPool, JS context management, Request/Response conversion
 
 ### zts Engine (Pure Zig)
 
@@ -81,7 +78,7 @@ The JS engine uses a two-pass architecture: parse to IR, then generate bytecode.
 ### Request Flow
 
 1. Server accepts HTTP connection
-2. RuntimePool.acquire() gets an isolated JS context
+2. HandlerPool acquires an isolated runtime (LockFreePool-backed)
 3. Request parsed and converted to JS Request object
 4. Handler function invoked with Request
 5. JS Response extracted and sent as HTTP response
@@ -89,7 +86,7 @@ The JS engine uses a two-pass architecture: parse to IR, then generate bytecode.
 
 ### Key Patterns
 
-**Runtime Pool**: Pre-allocates JS contexts for per-request isolation. Mutex-protected acquire/release. Critical for FaaS warm instance reuse.
+**Handler Pool**: Pre-allocates JS contexts for per-request isolation using `LockFreePool`. Critical for FaaS warm instance reuse.
 
 **Result Type**: Functional error handling throughout - `Result(T)` union with `ok`/`err` variants. Maps JS exceptions to Zig errors.
 
@@ -97,7 +94,7 @@ The JS engine uses a two-pass architecture: parse to IR, then generate bytecode.
 
 **Hidden Classes**: V8-style hidden class transitions for inline caching. Enables fast property access.
 
-**Thread-Local Context**: Native callbacks access event loop via `threadlocal var current_loop`.
+**Thread-Local Runtime**: Native callbacks can access the current runtime via thread-local storage when needed.
 
 ### Memory Model
 
@@ -159,22 +156,15 @@ See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for ful
 --static <DIR>         Serve static files
 ```
 
-## JSX Transformer
+## JSX Support
 
-**jsx.zig** provides a native JSX-to-JavaScript transformer for SSR (Server-Side Rendering).
+JSX/TSX is parsed directly by the zts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions in `zruntime.zig`). There is no separate transformer file.
 
-### Architecture
+### Flow
 
-- Single-pass tokenizer/transformer (no AST)
-- Outputs `h(tag, props, ...children)` calls (hyperscript pattern)
-- ES5-compatible output (var, no arrow functions)
-
-### Transform Flow
-
-1. Server.init() detects `.jsx` or `.tsx` extension
-2. jsx.transform() processes source code
-3. JSX elements become h() calls, JS code passes through
-4. Transformed code loaded into RuntimePool
+1. `Runtime.loadCode()` enables JSX mode for `.jsx`/`.tsx`
+2. Parser produces JSX nodes
+3. Codegen emits `h(tag, props, ...children)` calls
 
 ### JSX Runtime (in zts/http.zig)
 
@@ -186,10 +176,6 @@ See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for ful
 ## Security Features
 
 **Path Traversal Prevention**: `isPathSafe()` in server.zig validates static file paths - blocks `..`, absolute paths, and Windows drive letters.
-
-**SSRF Prevention**: `isUrlAllowed()` in bindings.zig validates fetch URLs - blocks `file://`, localhost, 127.0.0.1, private IP ranges (10.x, 192.168.x, 172.16-31.x).
-
-**Deno API Sandboxing**: All file operations (readTextFile, writeTextFile, remove, mkdir, stat, readDir) validate paths with `isFilePathSafe()`.
 
 ## Code Quality Patterns
 
