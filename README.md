@@ -8,7 +8,7 @@ A serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases, powe
 
 - **Instant cold starts**: No JIT warm-up, predictable startup times
 - **Small deployment package**: Pure Zig, zero external dependencies
-- **Request isolation**: RuntimePool with pre-warmed contexts
+- **Request isolation**: LockFreePool-backed handler pool with pre-warmed contexts
 - **Functional API**: Response helpers similar to Deno/Fetch API
 - **Safe by default**: Strict mode JavaScript, sandboxed execution
 - **TypeScript/TSX**: Native type stripping with compile-time evaluation
@@ -280,7 +280,7 @@ Supported ES6+ features:
 │                     zigttp-server (Zig)                       │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ HTTP Server │──│ RuntimePool │──│  Native Bindings    │  │
+│  │ HTTP Server │──│ HandlerPool │──│  Native Bindings    │  │
 │  │  (std.net)  │  │  (contexts) │  │ (console, Response) │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
@@ -298,7 +298,7 @@ zts uses a **generational garbage collector** with:
 
 1. NaN-boxing for efficient value representation (64-bit tagged values)
 2. Hidden classes for inline caching (V8-style optimization)
-3. RuntimePool for request isolation in FaaS environments
+3. LockFreePool-backed handler pool for request isolation in FaaS environments
 4. Hybrid arena allocation for request-scoped memory with O(1) reset
 
 The Result<T> pattern throughout makes error handling explicit and prevents silent failures.
@@ -327,10 +327,8 @@ zigttp-server/
 │   └── comptime.zig       # Compile-time expression evaluator
 ├── src/
 │   ├── main.zig           # CLI entry point
-│   ├── zruntime.zig       # RuntimePool, JS context management
+│   ├── zruntime.zig       # HandlerPool, JS context management
 │   ├── server.zig         # HTTP server implementation
-│   ├── bindings.zig       # Native APIs (console, fetch, Deno)
-│   └── jsx.zig            # JSX transformer
 └── examples/
     ├── handler.jsx        # Example JSX handler
     ├── htmx-todo/         # HTMX Todo app example
@@ -366,7 +364,7 @@ zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"
 Add custom native functions callable from JavaScript by implementing the `NativeFn` signature in `zts/object.zig`:
 
 ```zig
-// In bindings.zig or a custom module:
+// In a custom module:
 
 fn myNativeFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
     // Your implementation
@@ -376,7 +374,7 @@ fn myNativeFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSVa
 // Register it via context.setGlobal()
 ```
 
-See `src/bindings.zig` for examples of console, fetch, and Deno API implementations.
+See `zts/builtins.zig` for examples of core JS APIs and native function wiring.
 
 ## Performance
 
@@ -400,7 +398,7 @@ Run benchmarks with: `./zig-out/bin/zigttp-bench`
 ### FaaS Optimizations
 
 - **Cold start**: < 1ms to initialize runtime and load handler
-- **Warm invocations**: RuntimePool reuses pre-warmed contexts
+- **Warm invocations**: HandlerPool reuses pre-warmed contexts
 - **Memory**: 256KB default JS heap (configurable per function)
 - **Deployment size**: ~500KB binary, zero runtime dependencies
 

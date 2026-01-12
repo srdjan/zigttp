@@ -2,7 +2,7 @@
 //!
 //! Architecture:
 //! - Evented I/O using Zig's std.Io with kqueue/io_uring backend
-//! - Per-request JS context isolation via RuntimePool
+//! - Per-request JS context isolation via LockFreePool-backed handler pool
 //! - Deno-compatible handler API
 
 const std = @import("std");
@@ -11,7 +11,7 @@ const Io = std.Io;
 const net = std.Io.net;
 const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
-const RuntimePool = zruntime.RuntimePool;
+const HandlerPool = zruntime.HandlerPool;
 const RuntimeConfig = zruntime.RuntimeConfig;
 const HttpRequest = zruntime.HttpRequest;
 const HttpResponse = zruntime.HttpResponse;
@@ -70,7 +70,7 @@ pub const Server = struct {
     io_backend: IoBackend,
     evented_ready: bool,
     listener: ?net.Server,
-    pool: ?RuntimePool,
+    pool: ?HandlerPool,
     handler_code: []const u8,
     handler_filename: []const u8,
     running: bool,
@@ -125,7 +125,7 @@ pub const Server = struct {
         const io = self.io_backend.io();
 
         // Initialize runtime pool
-        self.pool = try RuntimePool.init(
+        self.pool = try HandlerPool.init(
             self.allocator,
             self.config.runtime_config,
             self.handler_code,

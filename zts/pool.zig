@@ -48,6 +48,10 @@ pub const LockFreePool = struct {
         request_count: u64,
         peak_arena_usage: usize,
         overflow_count: u64,
+        /// Optional user data for higher-level runtime wrappers
+        user_data: ?*anyopaque,
+        /// Optional user-data cleanup hook (called before core runtime destroy)
+        user_deinit: ?*const fn (*Runtime, std.mem.Allocator) void,
 
         pub fn create(allocator: std.mem.Allocator, config: PoolConfig) !*Runtime {
             const rt = try allocator.create(Runtime);
@@ -93,6 +97,8 @@ pub const LockFreePool = struct {
                 .request_count = 0,
                 .peak_arena_usage = 0,
                 .overflow_count = 0,
+                .user_data = null,
+                .user_deinit = null,
             };
 
             // Wire up hybrid allocator to context
@@ -104,6 +110,9 @@ pub const LockFreePool = struct {
         }
 
         pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
+            if (self.user_deinit) |deinit_fn| {
+                deinit_fn(self, allocator);
+            }
             self.ctx.deinit();
             self.gc_state.deinit();
             self.heap_state.deinit();

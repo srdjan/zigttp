@@ -1747,14 +1747,28 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                // Member packed: a = object, b[0:16] = property, b[16:17] = is_optional
-                // computed stored in extra if present
-                break :blk .{
-                    .object = d.a,
-                    .property = @truncate(d.b),
-                    .computed = null_node, // TODO: handle computed in extra
-                    .is_optional = (d.b >> 16) != 0,
-                };
+                const tag = ir.tags.items[idx];
+                // Member packed formats differ by tag.
+                switch (tag) {
+                    .computed_access => {
+                        // Pack: a = object, b = computed | is_optional << 24
+                        break :blk .{
+                            .object = d.a,
+                            .property = 0,
+                            .computed = @truncate(d.b),
+                            .is_optional = (d.b >> 24) != 0,
+                        };
+                    },
+                    else => {
+                        // Member packed: a = object, b[0:16] = property, b[16:17] = is_optional
+                        break :blk .{
+                            .object = d.a,
+                            .property = @truncate(d.b),
+                            .computed = null_node,
+                            .is_optional = (d.b >> 16) != 0,
+                        };
+                    },
+                }
             },
         };
     }

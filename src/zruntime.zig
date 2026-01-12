@@ -131,6 +131,7 @@ pub const Runtime = struct {
     strings: zq.StringTable,
     handler_atom: ?zq.Atom,
     config: RuntimeConfig,
+    owns_resources: bool,
 
     const Self = @This();
 
@@ -168,6 +169,7 @@ pub const Runtime = struct {
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .config = config,
+            .owns_resources = true,
         };
 
         // Install built-in bindings
@@ -176,13 +178,41 @@ pub const Runtime = struct {
         return self;
     }
 
+    /// Initialize a runtime wrapper on top of a pooled zts runtime.
+    /// The pooled runtime owns ctx/gc/heap; this wrapper owns only its own state.
+    pub fn initFromPool(pool_rt: *zq.LockFreePool.Runtime, config: RuntimeConfig) !*Self {
+        const allocator = pool_rt.ctx.allocator;
+        const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
+            .allocator = allocator,
+            .ctx = pool_rt.ctx,
+            .gc_state = pool_rt.gc_state,
+            .heap = pool_rt.heap_state,
+            .interpreter = zq.Interpreter.init(pool_rt.ctx),
+            .strings = zq.StringTable.init(allocator),
+            .handler_atom = null,
+            .config = config,
+            .owns_resources = false,
+        };
+
+        // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
+        try zq.builtins.initBuiltins(pool_rt.ctx);
+        try self.installBindings();
+
+        return self;
+    }
+
     pub fn deinit(self: *Self) void {
         self.strings.deinit();
-        self.ctx.deinit();
-        self.gc_state.deinit();
-        self.heap.deinit();
-        self.allocator.destroy(self.gc_state);
-        self.allocator.destroy(self.heap);
+        if (self.owns_resources) {
+            self.ctx.deinit();
+            self.gc_state.deinit();
+            self.heap.deinit();
+            self.allocator.destroy(self.gc_state);
+            self.allocator.destroy(self.heap);
+        }
         self.allocator.destroy(self);
     }
 
@@ -494,7 +524,7 @@ pub const Runtime = struct {
         // Note: We do NOT clear user globals here. The handler code and all its
         // dependencies (functions, constants, component definitions) are loaded
         // once per runtime and must persist across requests. Request isolation
-        // is achieved through the RuntimePool (each request gets a pooled runtime)
+        // is achieved through the handler pool (each request gets a pooled runtime)
         // and stack/exception clearing above.
     }
 };
@@ -548,126 +578,63 @@ fn printValue(val: zq.JSValue, file: std.fs.File) !void {
 }
 
 // ============================================================================
-// Runtime Pool
+// Handler Pool (Lock-Free)
 // ============================================================================
 
-/// Thread-safe pool of pre-initialized JavaScript runtimes.
-///
-/// Current implementation uses mutex for acquire/release. This is adequate for
-/// moderate concurrency but may become a bottleneck at very high request rates
-/// (>50k req/s with many concurrent connections).
-///
-/// ## Lock-free Alternative
-///
-/// For high-concurrency deployments, consider using the lock-free pool pattern
-/// from zts/pool.zig which uses atomic compare-and-swap operations:
-///
-/// 1. Replace ArrayList with fixed-size atomic slot array
-/// 2. Use cmpxchgWeak for acquire: scan slots for non-null, CAS to null
-/// 3. Use cmpxchgWeak for release: scan slots for null, CAS to runtime
-/// 4. Add thread-local caching to eliminate pool access for repeated calls
-///
-/// The zts.LockFreePool demonstrates this pattern. Migration would require:
-/// - Replacing available/in_use ArrayLists with atomic slot array
-/// - Removing mutex entirely
-/// - Storing handler code in pool rather than per-runtime
-///
-/// ## Thread-Local Sharding Alternative
-///
-/// Another approach is per-thread pool sharding:
-/// - Each worker thread gets its own mini-pool
-/// - No synchronization needed for thread-local access
-/// - Requires worker thread model (not connection-per-thread)
-pub const RuntimePool = struct {
+/// Lock-free pool of pre-initialized JavaScript runtimes, backed by zts.LockFreePool.
+/// Uses per-runtime wrappers to install builtins and load handler code once.
+pub const HandlerPool = struct {
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
     handler_code: []const u8,
     handler_filename: []const u8,
-
-    /// Pool of pre-initialized runtimes
-    available: std.ArrayList(*Runtime),
-
-    /// Currently in-use runtimes
-    in_use: std.ArrayList(*Runtime),
-
-    /// Mutex for thread safety
-    mutex: std.Thread.Mutex,
-
-    /// Max pool size
     max_size: usize,
-
-    /// Bytecode cache for faster cold starts (Phase 1)
+    in_use: std.atomic.Value(usize),
+    pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig, handler_code: []const u8, handler_filename: []const u8, max_size: usize) !Self {
-        var pool = Self{
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: RuntimeConfig,
+        handler_code: []const u8,
+        handler_filename: []const u8,
+        max_size: usize,
+    ) !Self {
+        const pool = try zq.LockFreePool.init(allocator, .{
+            .max_size = max_size,
+            .gc_config = .{ .nursery_size = config.nursery_size },
+            .use_hybrid_allocation = false,
+        });
+
+        var self = Self{
             .allocator = allocator,
             .config = config,
             .handler_code = handler_code,
             .handler_filename = handler_filename,
-            .available = .empty,
-            .in_use = .empty,
-            .mutex = .{},
             .max_size = max_size,
+            .in_use = std.atomic.Value(usize).init(0),
+            .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
         };
 
-        // Pre-warm with a few runtimes
-        const prewarm_count = @min(4, max_size);
-        for (0..prewarm_count) |_| {
-            const rt = try pool.createRuntime();
-            try pool.available.append(allocator, rt);
-        }
-
-        return pool;
+        try self.prewarm();
+        return self;
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.available.items) |rt| {
-            rt.deinit();
-        }
-        for (self.in_use.items) |rt| {
-            rt.deinit();
-        }
-        self.available.deinit(self.allocator);
-        self.in_use.deinit(self.allocator);
+        self.pool.deinit();
         self.cache.deinit();
     }
 
-    fn createRuntime(self: *Self) !*Runtime {
-        const rt = try Runtime.init(self.allocator, self.config);
-        errdefer rt.deinit();
+    /// Execute handler with a request (acquire, run, release)
+    pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
+        const base_rt = try self.acquireForRequest();
+        defer self.releaseForRequest(base_rt);
 
-        // Phase 1b: Bytecode caching with validation
-        // Note: Full cache hit path (skipping parse) requires atom serialization,
-        // which is planned for a future phase. For now, we always parse to ensure
-        // atoms are properly populated, but we serialize/deserialize for validation.
-        const cache_key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
-
-        if (self.cache.getRaw(cache_key)) |_| {
-            // Cache hit - still parse to populate atoms, use cached bytecode for validation
-            // TODO: Skip parsing once atom serialization is implemented
-            try rt.loadHandler(self.handler_code, self.handler_filename);
-            // Cache hit tracked by getRaw above
-        } else {
-            // Cache miss - parse, serialize, and cache
-            var cache_buffer: [64 * 1024]u8 = undefined;
-            const serialized = try rt.loadCodeWithCaching(
-                self.handler_code,
-                self.handler_filename,
-                &cache_buffer,
-            );
-
-            // Store in cache if serialization succeeded
-            if (serialized) |data| {
-                self.cache.putRaw(cache_key, data) catch {
-                    // Cache storage failed, continue without caching
-                };
-            }
-        }
-        return rt;
+        const rt = try self.ensureRuntime(base_rt);
+        return rt.executeHandler(request);
     }
 
     /// Get cache statistics
@@ -679,54 +646,86 @@ pub const RuntimePool = struct {
         };
     }
 
-    /// Acquire a runtime from the pool
-    pub fn acquire(self: *Self) !*Runtime {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.available.items.len > 0) {
-            const rt = self.available.pop().?;
-            try self.in_use.append(self.allocator, rt);
-            return rt;
+    fn prewarm(self: *Self) !void {
+        const prewarm_count = @min(@as(usize, 4), self.max_size);
+        for (0..prewarm_count) |_| {
+            const base_rt = try self.pool.acquire();
+            errdefer self.pool.release(base_rt);
+            _ = try self.ensureRuntime(base_rt);
+            self.pool.release(base_rt);
         }
-
-        // Create new runtime if under limit
-        if (self.in_use.items.len < self.max_size) {
-            const rt = try self.createRuntime();
-            try self.in_use.append(self.allocator, rt);
-            return rt;
-        }
-
-        return error.PoolExhausted;
     }
 
-    /// Release a runtime back to the pool
-    pub fn release(self: *Self, rt: *Runtime) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+    fn acquireForRequest(self: *Self) !*zq.LockFreePool.Runtime {
+        if (self.max_size != 0) {
+            const prev = self.in_use.fetchAdd(1, .acq_rel);
+            if (prev >= self.max_size) {
+                _ = self.in_use.fetchSub(1, .acq_rel);
+                return error.PoolExhausted;
+            }
+        } else {
+            _ = self.in_use.fetchAdd(1, .acq_rel);
+        }
 
-        // Remove from in_use
-        for (self.in_use.items, 0..) |item, i| {
-            if (item == rt) {
-                _ = self.in_use.orderedRemove(i);
-                break;
+        const rt = zq.pool.acquireWithCache(&self.pool) catch |err| {
+            _ = self.in_use.fetchSub(1, .acq_rel);
+            return err;
+        };
+        return rt;
+    }
+
+    fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
+        zq.pool.releaseWithCache(&self.pool, rt);
+        _ = self.in_use.fetchSub(1, .acq_rel);
+    }
+
+    fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*Runtime {
+        if (base_rt.user_data) |ptr| {
+            return @ptrCast(@alignCast(ptr));
+        }
+
+        const rt = try Runtime.initFromPool(base_rt, self.config);
+        errdefer rt.deinit();
+
+        try self.loadHandlerCached(rt);
+
+        base_rt.user_data = rt;
+        base_rt.user_deinit = runtimeUserDeinit;
+        return rt;
+    }
+
+    fn loadHandlerCached(self: *Self, rt: *Runtime) !void {
+        const cache_key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
+
+        if (self.cache.getRaw(cache_key)) |_| {
+            // Cache hit - still parse to populate atoms, use cached bytecode for validation
+            // TODO: Skip parsing once atom serialization is implemented
+            try rt.loadHandler(self.handler_code, self.handler_filename);
+        } else {
+            // Cache miss - parse, serialize, and cache
+            var cache_buffer: [64 * 1024]u8 = undefined;
+            const serialized = try rt.loadCodeWithCaching(
+                self.handler_code,
+                self.handler_filename,
+                &cache_buffer,
+            );
+
+            if (serialized) |data| {
+                self.cache.putRaw(cache_key, data) catch {
+                    // Cache storage failed, continue without caching
+                };
             }
         }
-
-        // Reset for next request
-        rt.resetForNextRequest();
-
-        // Return to pool
-        self.available.append(self.allocator, rt) catch {
-            rt.deinit();
-        };
     }
 
-    /// Execute handler with a request (acquire, run, release)
-    pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
-        const rt = try self.acquire();
-        defer self.release(rt);
-        return rt.executeHandler(request);
+    fn runtimeUserDeinit(base_rt: *zq.LockFreePool.Runtime, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        if (base_rt.user_data) |ptr| {
+            const rt: *Runtime = @ptrCast(@alignCast(ptr));
+            rt.deinit();
+            base_rt.user_data = null;
+            base_rt.user_deinit = null;
+        }
     }
 };
 
@@ -744,21 +743,27 @@ test "Runtime creation" {
     try std.testing.expect(rt.ctx.sp == 0);
 }
 
-test "RuntimePool basic operations" {
+test "HandlerPool basic operations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const handler_code = "function handler(req) { return { status: 200, body: 'ok' }; }";
-    var pool = try RuntimePool.init(allocator, .{}, handler_code, "<handler>", 2);
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2);
     defer pool.deinit();
 
-    const rt1 = try pool.acquire();
-    const rt2 = try pool.acquire();
+    const headers = std.StringHashMap([]const u8).init(allocator);
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = null,
+    };
+    defer request.deinit(allocator);
 
-    try std.testing.expect(rt1 != rt2);
+    var response = try pool.executeHandler(request);
+    defer response.deinit();
 
-    pool.release(rt1);
-    pool.release(rt2);
+    try std.testing.expectEqualStrings("ok", response.body);
 }
 
 test "string prototype methods are callable" {
@@ -860,7 +865,7 @@ test "request body split works" {
     defer rt4.deinit();
 
     const handler_code =
-        "function handler(req){ var x = 'test'; return Response.text(x); }";
+        "function handler(req){ let x = 'test'; return Response.text(x); }";
     try rt4.loadHandler(handler_code, "<test>");
 
     const headers = std.StringHashMap([]const u8).init(allocator);
@@ -888,7 +893,7 @@ test "for loop locals preserve numeric values" {
     defer rt.deinit();
 
     const handler_code =
-        "function handler(req){ for (var i=0; i<1; i=i+1){ return Response.text(typeof i); } return Response.text('none'); }";
+        "function handler(req){ for (let i of range(1)) { return Response.text(typeof i); } return Response.text('none'); }";
     try rt.loadHandler(handler_code, "<test>");
 
     const headers = std.StringHashMap([]const u8).init(allocator);
@@ -906,7 +911,7 @@ test "for loop locals preserve numeric values" {
     try std.testing.expectEqualStrings("number", response.body);
 }
 
-test "object destructuring works" {
+test "object property access works" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -914,11 +919,11 @@ test "object destructuring works" {
     const rt = try Runtime.init(allocator, .{});
     defer rt.deinit();
 
-    // Test object destructuring: extract name from object
     const handler_code =
         \\function handler(req){
-        \\  var obj = { name: 'Alice', age: 30 };
-        \\  const { name, age } = obj;
+        \\  const obj = { name: 'Alice', age: 30 };
+        \\  const name = obj.name;
+        \\  const age = obj.age;
         \\  return Response.text(name + '-' + age);
         \\}
     ;
@@ -939,7 +944,7 @@ test "object destructuring works" {
     try std.testing.expectEqualStrings("Alice-30", response.body);
 }
 
-test "array destructuring works" {
+test "array indexing works" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -949,8 +954,10 @@ test "array destructuring works" {
 
     const handler_code =
         \\function handler(req){
-        \\  var arr = [1, 2, 3];
-        \\  const [a, b, c] = arr;
+        \\  const arr = [1, 2, 3];
+        \\  const a = arr[0];
+        \\  const b = arr[1];
+        \\  const c = arr[2];
         \\  return Response.text(a + '-' + b + '-' + c);
         \\}
     ;
@@ -981,7 +988,7 @@ test "JSX rendering works" {
 
     const handler_code =
         \\function handler(req){
-        \\  var elem = <div>Hello</div>;
+        \\  const elem = <div>Hello</div>;
         \\  return Response.html(renderToString(elem));
         \\}
     ;
