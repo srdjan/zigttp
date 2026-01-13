@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const zruntime = @import("zruntime.zig");
+const zq = @import("zts");
 const Runtime = zruntime.Runtime;
 const RuntimeConfig = zruntime.RuntimeConfig;
 
@@ -25,7 +26,26 @@ const Options = struct {
     quiet: bool = false,
     compare: bool = true,
     script_path: ?[]const u8 = null,
+    bench: bool = false,
+    bench_fn: []const u8 = "run",
+    bench_iterations: u32 = 200000,
+    warmup_rounds: u32 = 120,
+    warmup_iterations: u32 = 200,
 };
+
+const usage =
+    "Usage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>] [--bench]\n" ++
+    "                   [--bench-fn <name>] [--iterations <n>] [--warmup <n>] [--warmup-iters <n>]\n";
+
+fn parseU32(arg: []const u8, flag: []const u8) u32 {
+    return std.fmt.parseInt(u32, arg, 10) catch {
+        _ = std.fs.File.stdout().writeAll("Invalid value for ") catch {};
+        _ = std.fs.File.stdout().writeAll(flag) catch {};
+        _ = std.fs.File.stdout().writeAll("\n") catch {};
+        _ = std.fs.File.stdout().writeAll(usage) catch {};
+        std.process.exit(1);
+    };
+}
 
 fn parseOptions() Options {
     var options = Options{};
@@ -42,15 +62,44 @@ fn parseOptions() Options {
         } else if (std.mem.eql(u8, arg, "--script")) {
             const path = args.next() orelse {
                 _ = std.fs.File.stdout().writeAll(
-                    "Missing value for --script\nUsage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>]\n",
+                    "Missing value for --script\n",
                 ) catch {};
+                _ = std.fs.File.stdout().writeAll(usage) catch {};
                 std.process.exit(1);
             };
             options.script_path = path;
+        } else if (std.mem.eql(u8, arg, "--bench")) {
+            options.bench = true;
+        } else if (std.mem.eql(u8, arg, "--bench-fn")) {
+            const name = args.next() orelse {
+                _ = std.fs.File.stdout().writeAll("Missing value for --bench-fn\n") catch {};
+                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                std.process.exit(1);
+            };
+            options.bench_fn = name;
+        } else if (std.mem.eql(u8, arg, "--iterations")) {
+            const value = args.next() orelse {
+                _ = std.fs.File.stdout().writeAll("Missing value for --iterations\n") catch {};
+                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                std.process.exit(1);
+            };
+            options.bench_iterations = parseU32(value, "--iterations");
+        } else if (std.mem.eql(u8, arg, "--warmup")) {
+            const value = args.next() orelse {
+                _ = std.fs.File.stdout().writeAll("Missing value for --warmup\n") catch {};
+                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                std.process.exit(1);
+            };
+            options.warmup_rounds = parseU32(value, "--warmup");
+        } else if (std.mem.eql(u8, arg, "--warmup-iters")) {
+            const value = args.next() orelse {
+                _ = std.fs.File.stdout().writeAll("Missing value for --warmup-iters\n") catch {};
+                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                std.process.exit(1);
+            };
+            options.warmup_iterations = parseU32(value, "--warmup-iters");
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            _ = std.fs.File.stdout().writeAll(
-                "Usage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>]\n",
-            ) catch {};
+            _ = std.fs.File.stdout().writeAll(usage) catch {};
             std.process.exit(0);
         }
     }
@@ -341,6 +390,58 @@ pub fn main() !void {
             std.log.err("Failed to execute script {s}: {}", .{ script_path, err });
             return;
         };
+
+        if (options.bench) {
+            const max_i32 = std.math.maxInt(i32);
+            if (options.bench_iterations > max_i32 or options.warmup_iterations > max_i32) {
+                std.log.err("Iterations exceed i32 range", .{});
+                return;
+            }
+
+            const warmup_arg = zq.JSValue.fromInt(@intCast(options.warmup_iterations));
+            const warmup_args = [_]zq.JSValue{warmup_arg};
+            var warm_idx: u32 = 0;
+            while (warm_idx < options.warmup_rounds) : (warm_idx += 1) {
+                _ = runtime.callGlobalFunction(options.bench_fn, &warmup_args) catch |err| {
+                    std.log.err("Warmup call failed: {}", .{err});
+                    return;
+                };
+            }
+
+            const run_arg = zq.JSValue.fromInt(@intCast(options.bench_iterations));
+            const run_args = [_]zq.JSValue{run_arg};
+
+            const start = std.time.Instant.now() catch {
+                std.log.err("Timer not available", .{});
+                return;
+            };
+            _ = runtime.callGlobalFunction(options.bench_fn, &run_args) catch |err| {
+                std.log.err("Benchmark call failed: {}", .{err});
+                return;
+            };
+            const end = std.time.Instant.now() catch {
+                std.log.err("Timer not available", .{});
+                return;
+            };
+
+            const elapsed_ns = end.since(start);
+            const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+            const ops_per_sec: u64 = if (elapsed_ns > 0)
+                @intFromFloat(@as(f64, @floatFromInt(options.bench_iterations)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_ns)))
+            else
+                0;
+
+            const name = std.fs.path.basename(script_path);
+            printFmt("bench {s}::{s} iters={} warmup={} ms={d:.3} ops/s={}", .{
+                name,
+                options.bench_fn,
+                options.bench_iterations,
+                options.warmup_rounds,
+                elapsed_ms,
+                ops_per_sec,
+            });
+            return;
+        }
         return;
     }
 

@@ -433,6 +433,16 @@ pub const Runtime = struct {
         return self.loadCode(code, filename);
     }
 
+    /// Call a global function by name with the provided arguments.
+    /// Returns the function result or error.NotCallable if missing or not callable.
+    pub fn callGlobalFunction(self: *Self, name: []const u8, args: []const zq.JSValue) !zq.JSValue {
+        const atom = zq.object.lookupPredefinedAtom(name) orelse try self.ctx.atoms.intern(name);
+        const func_val = self.ctx.getGlobal(atom) orelse return error.NotCallable;
+        if (!func_val.isCallable()) return error.NotCallable;
+        const func_obj = func_val.toPtr(zq.JSObject);
+        return try self.callFunction(func_obj, args);
+    }
+
     /// Load from cached serialized bytecode (Phase 1c: true cache hit with atoms)
     pub fn loadFromCachedBytecode(self: *Self, cached_data: []const u8) !void {
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
