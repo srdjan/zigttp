@@ -379,6 +379,64 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// LSL Xd, Xn, #imm (logical shift left by immediate)
+    pub fn lslRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
+        // UBFM Xd, Xn, #(-shift MOD 64), #(63-shift) (LSL is an alias)
+        // For 64-bit: sf=1, opc=10, N=1
+        const shift = @as(u6, @intCast((@as(u7, 64) - @as(u7, imm)) & 63));
+        const imms: u6 = 63 - imm;
+        const inst: u32 = 0xD3400000 |
+            (@as(u32, shift) << 16) |
+            (@as(u32, imms) << 10) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// LSL Xd, Xn, Xm (logical shift left by register)
+    pub fn lslRegReg(self: *Arm64Emitter, dst: Register, src: Register, shift_reg: Register) !void {
+        // LSLV Xd, Xn, Xm
+        const inst: u32 = 0x9AC02000 |
+            (@as(u32, shift_reg.encode()) << 16) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// ASR Xd, Xn, Xm (arithmetic shift right by register)
+    pub fn asrRegReg(self: *Arm64Emitter, dst: Register, src: Register, shift_reg: Register) !void {
+        // ASRV Xd, Xn, Xm
+        const inst: u32 = 0x9AC02800 |
+            (@as(u32, shift_reg.encode()) << 16) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// LSR Xd, Xn, Xm (logical shift right by register)
+    pub fn lsrRegReg(self: *Arm64Emitter, dst: Register, src: Register, shift_reg: Register) !void {
+        // LSRV Xd, Xn, Xm
+        const inst: u32 = 0x9AC02400 |
+            (@as(u32, shift_reg.encode()) << 16) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// AND Xd, Xn, #imm (AND with immediate)
+    /// Note: ARM64 AND immediate uses a bitmask encoding, this only supports simple masks
+    pub fn andRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
+        // For simple masks like 0x1F (5 bits), use UBFX or manual AND
+        // For 0x1F (5 bits set): N=1, immr=0, imms=4 gives a 5-bit mask
+        // AND Xd, Xn, #0x1F
+        const imms: u6 = imm; // For mask 0x1F, imms=4 (5-1 bits)
+        const inst: u32 = 0x92400000 |
+            (@as(u32, imms) << 10) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     // ========================================
     // Comparison instructions
     // ========================================

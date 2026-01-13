@@ -309,6 +309,15 @@ pub const BaselineCompiler = struct {
                 try self.emitJump(target, false);
             },
 
+            // Bitwise operations
+            .bit_and => try self.emitBitwiseOp(.@"and"),
+            .bit_or => try self.emitBitwiseOp(.@"or"),
+            .bit_xor => try self.emitBitwiseOp(.xor),
+            .bit_not => try self.emitBitwiseNot(),
+            .shl => try self.emitShift(.shl),
+            .shr => try self.emitShift(.shr),
+            .ushr => try self.emitShift(.ushr),
+
             else => {
                 return CompileError.UnsupportedOpcode;
             },
@@ -620,6 +629,146 @@ pub const BaselineCompiler = struct {
             // Conditionally select: for strict_eq use .eq, for strict_neq use .ne
             const cond: arm64.Condition = if (negate) .ne else .eq;
             self.emitter.csel(.x9, .x12, .x11, cond) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    const BitwiseOp = enum { @"and", @"or", xor };
+
+    /// Emit bitwise operation (AND, OR, XOR)
+    /// For NaN-boxed integers: extract int32, apply op, re-encode
+    fn emitBitwiseOp(self: *BaselineCompiler, op: BitwiseOp) CompileError!void {
+        if (is_x86_64) {
+            // Pop right operand into rcx, left into rax
+            self.emitter.popReg(.rcx) catch return CompileError.OutOfMemory;
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory;
+
+            // Extract integers (shift right by 1)
+            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.sarRegImm(.rcx, 1) catch return CompileError.OutOfMemory;
+
+            // Apply bitwise operation
+            switch (op) {
+                .@"and" => self.emitter.andRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+                .@"or" => self.emitter.orRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+                .xor => self.emitter.xorRegReg(.rax, .rcx) catch return CompileError.OutOfMemory,
+            }
+
+            // Re-encode as JSValue (shift left by 1)
+            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop right operand into x10, left into x9
+            self.emitter.ldrPostIndex(.x10, .x29, 8) catch return CompileError.OutOfMemory;
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory;
+
+            // Extract integers (shift right by 1)
+            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.asrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+
+            // Apply bitwise operation
+            switch (op) {
+                .@"and" => self.emitter.andRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .@"or" => self.emitter.orrRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .xor => self.emitter.eorRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+            }
+
+            // Re-encode as JSValue (shift left by 1)
+            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    /// Emit bitwise NOT
+    fn emitBitwiseNot(self: *BaselineCompiler) CompileError!void {
+        if (is_x86_64) {
+            // Pop operand into rax
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory;
+
+            // Extract integer (shift right by 1)
+            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+
+            // Apply NOT
+            self.emitter.notReg(.rax) catch return CompileError.OutOfMemory;
+
+            // Re-encode as JSValue (shift left by 1)
+            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop operand into x9
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory;
+
+            // Extract integer (shift right by 1)
+            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+
+            // Apply NOT
+            self.emitter.mvnReg(.x9, .x9) catch return CompileError.OutOfMemory;
+
+            // Re-encode as JSValue (shift left by 1)
+            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    const ShiftOp = enum { shl, shr, ushr };
+
+    /// Emit shift operation (SHL, SHR, USHR)
+    fn emitShift(self: *BaselineCompiler, op: ShiftOp) CompileError!void {
+        if (is_x86_64) {
+            // Pop shift amount into rcx, value into rax
+            self.emitter.popReg(.rcx) catch return CompileError.OutOfMemory;
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory;
+
+            // Extract integers (shift right by 1)
+            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.sarRegImm(.rcx, 1) catch return CompileError.OutOfMemory;
+
+            // Mask shift amount to 5 bits (0x1F) - JS spec
+            self.emitter.andRegImm32(.rcx, 0x1F) catch return CompileError.OutOfMemory;
+
+            // Apply shift (rcx holds the count)
+            switch (op) {
+                .shl => self.emitter.shlRegCl(.rax) catch return CompileError.OutOfMemory,
+                .shr => self.emitter.sarRegCl(.rax) catch return CompileError.OutOfMemory,
+                .ushr => self.emitter.shrRegCl(.rax) catch return CompileError.OutOfMemory,
+            }
+
+            // Re-encode as JSValue (shift left by 1)
+            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop shift amount into x10, value into x9
+            self.emitter.ldrPostIndex(.x10, .x29, 8) catch return CompileError.OutOfMemory;
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory;
+
+            // Extract integers (shift right by 1)
+            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.asrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+
+            // Mask shift amount to 5 bits (0x1F) - JS spec
+            self.emitter.andRegImm(.x10, .x10, 0x1F) catch return CompileError.OutOfMemory;
+
+            // Apply shift
+            switch (op) {
+                .shl => self.emitter.lslRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .shr => self.emitter.asrRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+                .ushr => self.emitter.lsrRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory,
+            }
+
+            // Re-encode as JSValue (shift left by 1)
+            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
 
             // Push result
             self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
@@ -1033,4 +1182,101 @@ test "baseline: compile comparison with conditional jump" {
 
     const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
     try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile bitwise operations" {
+    const testing = std.testing;
+
+    // Test all bitwise binary operations: push 1, push 2, op, ret
+    const bitwise_ops = [_]Opcode{ .bit_and, .bit_or, .bit_xor };
+
+    for (bitwise_ops) |bit_op| {
+        const code = [_]u8{
+            @intFromEnum(Opcode.push_1),
+            @intFromEnum(Opcode.push_2),
+            @intFromEnum(bit_op),
+            @intFromEnum(Opcode.ret),
+        };
+
+        var func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = 0,
+            .stack_size = 2,
+            .flags = .{},
+            .code = &code,
+            .constants = &.{},
+            .source_map = null,
+        };
+
+        var code_alloc = CodeAllocator.init(testing.allocator);
+        defer code_alloc.deinit();
+
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        try testing.expect(compiled.code.len > 0);
+    }
+}
+
+test "baseline: compile bitwise NOT" {
+    const testing = std.testing;
+
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.bit_not),
+        @intFromEnum(Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile shift operations" {
+    const testing = std.testing;
+
+    // Test all shift operations: push value, push shift amount, op, ret
+    const shift_ops = [_]Opcode{ .shl, .shr, .ushr };
+
+    for (shift_ops) |shift_op| {
+        const code = [_]u8{
+            @intFromEnum(Opcode.push_i8),
+            16, // value = 16
+            @intFromEnum(Opcode.push_2), // shift by 2
+            @intFromEnum(shift_op),
+            @intFromEnum(Opcode.ret),
+        };
+
+        var func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = 0,
+            .stack_size = 2,
+            .flags = .{},
+            .code = &code,
+            .constants = &.{},
+            .source_map = null,
+        };
+
+        var code_alloc = CodeAllocator.init(testing.allocator);
+        defer code_alloc.deinit();
+
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        try testing.expect(compiled.code.len > 0);
+    }
 }

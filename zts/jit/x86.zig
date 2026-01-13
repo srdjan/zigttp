@@ -409,8 +409,41 @@ pub const X86Emitter = struct {
         } else {
             try self.buffer.append(self.allocator, 0xC1);
             try self.emitModRM(0b11, 7, reg.low3());
-            try self.buffer.append(self.allocator,imm);
+            try self.buffer.append(self.allocator, imm);
         }
+    }
+
+    /// SHL r64, CL (shift left by CL register)
+    pub fn shlRegCl(self: *X86Emitter, reg: Register) !void {
+        try self.emitRex(true, false, false, reg.isExtended());
+        try self.buffer.append(self.allocator, 0xD3); // SHL r/m64, CL
+        try self.emitModRM(0b11, 4, reg.low3());
+    }
+
+    /// SHR r64, CL (logical shift right by CL register)
+    pub fn shrRegCl(self: *X86Emitter, reg: Register) !void {
+        try self.emitRex(true, false, false, reg.isExtended());
+        try self.buffer.append(self.allocator, 0xD3); // SHR r/m64, CL
+        try self.emitModRM(0b11, 5, reg.low3());
+    }
+
+    /// SAR r64, CL (arithmetic shift right by CL register)
+    pub fn sarRegCl(self: *X86Emitter, reg: Register) !void {
+        try self.emitRex(true, false, false, reg.isExtended());
+        try self.buffer.append(self.allocator, 0xD3); // SAR r/m64, CL
+        try self.emitModRM(0b11, 7, reg.low3());
+    }
+
+    /// AND r64, imm32 (sign-extended)
+    pub fn andRegImm32(self: *X86Emitter, reg: Register, imm: i32) !void {
+        try self.emitRex(true, false, false, reg.isExtended());
+        if (reg == .rax) {
+            try self.buffer.append(self.allocator, 0x25); // AND RAX, imm32
+        } else {
+            try self.buffer.append(self.allocator, 0x81); // AND r/m64, imm32
+            try self.emitModRM(0b11, 4, reg.low3());
+        }
+        try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(imm)));
     }
 
     // ========================================
