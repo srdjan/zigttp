@@ -88,7 +88,7 @@ pub const X86Emitter = struct {
     /// Reserve space and return offset for later patching
     pub fn reserve(self: *X86Emitter, n: usize) !usize {
         const off = self.offset();
-        try self.buffer.appendNTimes(self.allocator,0, n);
+        try self.buffer.appendNTimes(self.allocator, 0, n);
         return off;
     }
 
@@ -114,7 +114,7 @@ pub const X86Emitter = struct {
             (@as(u8, @intFromBool(x)) << 1) |
             @as(u8, @intFromBool(b));
         if (rex != 0x40) {
-            try self.buffer.append(self.allocator,rex);
+            try self.buffer.append(self.allocator, rex);
         }
     }
 
@@ -132,12 +132,12 @@ pub const X86Emitter = struct {
     /// reg: register or opcode extension
     /// rm: register or memory operand
     fn emitModRM(self: *X86Emitter, mod: u2, reg: u3, rm: u3) !void {
-        try self.buffer.append(self.allocator,(@as(u8, mod) << 6) | (@as(u8, reg) << 3) | rm);
+        try self.buffer.append(self.allocator, (@as(u8, mod) << 6) | (@as(u8, reg) << 3) | rm);
     }
 
     /// Emit SIB byte (Scale-Index-Base)
     fn emitSIB(self: *X86Emitter, scale: u2, index: u3, base: u3) !void {
-        try self.buffer.append(self.allocator,(@as(u8, scale) << 6) | (@as(u8, index) << 3) | base);
+        try self.buffer.append(self.allocator, (@as(u8, scale) << 6) | (@as(u8, index) << 3) | base);
     }
 
     // ========================================
@@ -167,6 +167,20 @@ pub const X86Emitter = struct {
         try self.emitRexW(src, dst);
         try self.buffer.append(self.allocator, 0x89);
         try self.emitModRM(0b11, src.low3(), dst.low3());
+    }
+
+    /// MOV r32, r32 (zero-extends into r64)
+    pub fn movRegReg32(self: *X86Emitter, dst: Register, src: Register) !void {
+        try self.emitRex(false, src.isExtended(), false, dst.isExtended());
+        try self.buffer.append(self.allocator, 0x89);
+        try self.emitModRM(0b11, src.low3(), dst.low3());
+    }
+
+    /// MOVSXD r64, r/m32 (sign-extend 32-bit to 64-bit)
+    pub fn movsxdRegReg(self: *X86Emitter, dst: Register, src: Register) !void {
+        try self.emitRex(true, dst.isExtended(), false, src.isExtended());
+        try self.buffer.append(self.allocator, 0x63);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
     }
 
     /// MOV r64, [base + offset]
@@ -383,7 +397,7 @@ pub const X86Emitter = struct {
         } else {
             try self.buffer.append(self.allocator, 0xC1); // SHL r/m64, imm8
             try self.emitModRM(0b11, 4, reg.low3());
-            try self.buffer.append(self.allocator,imm);
+            try self.buffer.append(self.allocator, imm);
         }
     }
 
@@ -396,7 +410,7 @@ pub const X86Emitter = struct {
         } else {
             try self.buffer.append(self.allocator, 0xC1);
             try self.emitModRM(0b11, 5, reg.low3());
-            try self.buffer.append(self.allocator,imm);
+            try self.buffer.append(self.allocator, imm);
         }
     }
 

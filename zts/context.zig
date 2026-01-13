@@ -5,6 +5,7 @@
 const std = @import("std");
 const value = @import("value.zig");
 const gc = @import("gc.zig");
+const heap = @import("heap.zig");
 const object = @import("object.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
@@ -299,6 +300,298 @@ pub const Context = struct {
     pub fn jitTypeOf(self: *Context, val: value.JSValue) value.JSValue {
         const type_str = val.typeOf();
         return self.createString(type_str) catch value.JSValue.undefined_val;
+    }
+
+    /// JIT helper: convert value to boolean without allocation
+    /// Returns a native bool for branch decisions
+    pub fn jitToBoolean(_: *Context, val: value.JSValue) bool {
+        return val.toBoolean();
+    }
+
+    /// JIT helper: add two values with full JS semantics.
+    /// On error, sets exception and returns exception_val.
+    pub fn jitAdd(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        if (a.isInt() and b.isInt()) {
+            const result = @addWithOverflow(a.getInt(), b.getInt());
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
+        }
+        if (a.isString() or b.isString()) {
+            const str_a = self.jitValueToString(a) catch return self.jitThrow();
+            const str_b = self.jitValueToString(b) catch return self.jitThrow();
+            if (self.hybrid == null) {
+                defer if (!a.isString()) string.freeString(self.allocator, str_a);
+                defer if (!b.isString()) string.freeString(self.allocator, str_b);
+            }
+            const result = string.concatStrings(self.allocator, str_a, str_b) catch return self.jitThrow();
+            return value.JSValue.fromPtr(result);
+        }
+        const an = a.toNumber() orelse return self.jitThrow();
+        const bn = b.toNumber() orelse return self.jitThrow();
+        return self.jitAllocFloat(an + bn);
+    }
+
+    /// JIT helper: subtract two values.
+    pub fn jitSub(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        if (a.isInt() and b.isInt()) {
+            const result = @subWithOverflow(a.getInt(), b.getInt());
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
+        }
+        const an = a.toNumber() orelse return self.jitThrow();
+        const bn = b.toNumber() orelse return self.jitThrow();
+        return self.jitAllocFloat(an - bn);
+    }
+
+    /// JIT helper: multiply two values.
+    pub fn jitMul(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        if (a.isInt() and b.isInt()) {
+            const result = @mulWithOverflow(a.getInt(), b.getInt());
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));
+        }
+        const an = a.toNumber() orelse return self.jitThrow();
+        const bn = b.toNumber() orelse return self.jitThrow();
+        return self.jitAllocFloat(an * bn);
+    }
+
+    /// JIT helper: negate a value.
+    pub fn jitNeg(self: *Context, a: value.JSValue) value.JSValue {
+        if (a.isInt()) {
+            const v = a.getInt();
+            if (v == std.math.minInt(i32)) {
+                return self.jitAllocFloat(-@as(f64, @floatFromInt(v)));
+            }
+            return value.JSValue.fromInt(-v);
+        }
+        if (a.isFloat64()) {
+            return self.jitAllocFloat(-a.getFloat64());
+        }
+        return self.jitThrow();
+    }
+
+    /// JIT helper: divide two values (always produces float)
+    pub fn jitDiv(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        const an = a.toNumber() orelse return self.jitThrow();
+        const bn = b.toNumber() orelse return self.jitThrow();
+        return self.jitAllocFloat(an / bn);
+    }
+
+    /// JIT helper: modulo two values (integer-only fast path)
+    pub fn jitMod(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        if (a.isInt() and b.isInt()) {
+            const bv = b.getInt();
+            if (bv == 0) return self.jitThrow();
+            return value.JSValue.fromInt(@rem(a.getInt(), bv));
+        }
+        return self.jitThrow();
+    }
+
+    /// JIT helper: exponentiation
+    pub fn jitPow(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        const an = a.toNumber() orelse return self.jitThrow();
+        const bn = b.toNumber() orelse return self.jitThrow();
+        return self.jitAllocFloat(std.math.pow(f64, an, bn));
+    }
+
+    /// JIT helper: increment
+    pub fn jitInc(self: *Context, a: value.JSValue) value.JSValue {
+        if (a.isInt()) {
+            const result = @addWithOverflow(a.getInt(), 1);
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) + 1.0);
+        }
+        if (a.isFloat64()) {
+            return self.jitAllocFloat(a.getFloat64() + 1.0);
+        }
+        return self.jitThrow();
+    }
+
+    /// JIT helper: decrement
+    pub fn jitDec(self: *Context, a: value.JSValue) value.JSValue {
+        if (a.isInt()) {
+            const result = @subWithOverflow(a.getInt(), 1);
+            if (result[1] == 0) {
+                return value.JSValue.fromInt(result[0]);
+            }
+            return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) - 1.0);
+        }
+        if (a.isFloat64()) {
+            return self.jitAllocFloat(a.getFloat64() - 1.0);
+        }
+        return self.jitThrow();
+    }
+
+    fn jitToInt32(val: value.JSValue) i32 {
+        if (val.isInt()) return val.getInt();
+        if (val.isFloat64()) {
+            const f = val.getFloat64();
+            if (std.math.isNan(f) or std.math.isInf(f) or f == 0) return 0;
+            const int_val: i64 = @intFromFloat(@trunc(f));
+            return @truncate(int_val);
+        }
+        return 0;
+    }
+
+    /// JIT helpers: bitwise operations
+    pub fn jitBitAnd(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return value.JSValue.fromInt(jitToInt32(a) & jitToInt32(b));
+    }
+
+    pub fn jitBitOr(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return value.JSValue.fromInt(jitToInt32(a) | jitToInt32(b));
+    }
+
+    pub fn jitBitXor(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return value.JSValue.fromInt(jitToInt32(a) ^ jitToInt32(b));
+    }
+
+    pub fn jitBitNot(_: *Context, a: value.JSValue) value.JSValue {
+        return value.JSValue.fromInt(~jitToInt32(a));
+    }
+
+    /// JIT helpers: shift operations
+    pub fn jitShiftShl(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitShift(a, b, .shl);
+    }
+
+    pub fn jitShiftShr(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitShift(a, b, .shr);
+    }
+
+    pub fn jitShiftUShr(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitShift(a, b, .ushr);
+    }
+
+    fn jitShift(_: *Context, a: value.JSValue, b: value.JSValue, op: enum { shl, shr, ushr }) value.JSValue {
+        const shift: u5 = @intCast(@as(u32, @bitCast(jitToInt32(b))) & 0x1F);
+        const ai = jitToInt32(a);
+        const result: i32 = switch (op) {
+            .shl => ai << shift,
+            .shr => ai >> shift,
+            .ushr => @bitCast(@as(u32, @bitCast(ai)) >> shift),
+        };
+        return value.JSValue.fromInt(result);
+    }
+
+    /// JIT helper: strict equality (===)
+    pub fn jitStrictEquals(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return value.JSValue.fromBool(a.strictEquals(b));
+    }
+
+    /// JIT helper: loose equality (==)
+    pub fn jitLooseEquals(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        if (a.raw == b.raw) return value.JSValue.true_val;
+        if ((a.isNull() and b.isUndefined()) or (a.isUndefined() and b.isNull())) {
+            return value.JSValue.true_val;
+        }
+        if (a.isNumber() and b.isNumber()) {
+            const an = a.toNumber() orelse return value.JSValue.false_val;
+            const bn = b.toNumber() orelse return value.JSValue.false_val;
+            if (std.math.isNan(an) or std.math.isNan(bn)) return value.JSValue.false_val;
+            return value.JSValue.fromBool(an == bn);
+        }
+        return value.JSValue.false_val;
+    }
+
+    /// JIT helpers: relational comparisons
+    pub fn jitCompareLt(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitCompare(a, b, .lt);
+    }
+
+    pub fn jitCompareLte(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitCompare(a, b, .lte);
+    }
+
+    pub fn jitCompareGt(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitCompare(a, b, .gt);
+    }
+
+    pub fn jitCompareGte(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+        return self.jitCompare(a, b, .gte);
+    }
+
+    fn jitCompare(self: *Context, a: value.JSValue, b: value.JSValue, op: enum { lt, lte, gt, gte }) value.JSValue {
+        if (a.isInt() and b.isInt()) {
+            const ai = a.getInt();
+            const bi = b.getInt();
+            const result = switch (op) {
+                .lt => ai < bi,
+                .lte => ai <= bi,
+                .gt => ai > bi,
+                .gte => ai >= bi,
+            };
+            return value.JSValue.fromBool(result);
+        }
+        const an = a.toNumber() orelse return self.jitThrow();
+        const bn = b.toNumber() orelse return self.jitThrow();
+        if (std.math.isNan(an) or std.math.isNan(bn)) return self.jitThrow();
+        const result = switch (op) {
+            .lt => an < bn,
+            .lte => an <= bn,
+            .gt => an > bn,
+            .gte => an >= bn,
+        };
+        return value.JSValue.fromBool(result);
+    }
+
+    fn jitAllocFloat(self: *Context, v: f64) value.JSValue {
+        if (self.hybrid) |h| {
+            const box = h.arena.createAligned(value.JSValue.Float64Box) orelse return self.jitThrow();
+            box.* = .{
+                .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
+                ._pad = 0,
+                .value = v,
+            };
+            return value.JSValue.fromPtr(box);
+        }
+        const box = self.gc_state.allocFloat(v) catch return self.jitThrow();
+        return value.JSValue.fromPtr(box);
+    }
+
+    fn jitValueToString(self: *Context, val: value.JSValue) !*string.JSString {
+        if (val.isString()) {
+            return val.toPtr(string.JSString);
+        }
+        if (val.isInt()) {
+            var buf: [32]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return self.createStringPtr("0");
+            return try self.createStringPtr(slice);
+        }
+        if (val.isNull()) {
+            return try self.createStringPtr("null");
+        }
+        if (val.isUndefined()) {
+            return try self.createStringPtr("undefined");
+        }
+        if (val.isTrue()) {
+            return try self.createStringPtr("true");
+        }
+        if (val.isFalse()) {
+            return try self.createStringPtr("false");
+        }
+        if (val.isObject()) {
+            return try self.createStringPtr("[object Object]");
+        }
+        if (val.toNumber()) |n| {
+            var buf: [64]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return self.createStringPtr("NaN");
+            return try self.createStringPtr(slice);
+        }
+        return try self.createStringPtr("undefined");
+    }
+
+    fn jitThrow(self: *Context) value.JSValue {
+        self.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
     }
 
     /// Get or create the JIT code allocator (lazy initialization)

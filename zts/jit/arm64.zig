@@ -17,6 +17,7 @@
 const std = @import("std");
 
 /// ARM64 64-bit registers (x0-x30, sp)
+/// Note: encoding 31 is SP in load/store and add/sub immediate forms, and XZR in many others.
 pub const Register = enum(u5) {
     x0 = 0,
     x1 = 1,
@@ -49,7 +50,7 @@ pub const Register = enum(u5) {
     x28 = 28,
     x29 = 29, // fp (frame pointer)
     x30 = 30, // lr (link register)
-    // Note: sp uses encoding 31 in some contexts but is separate
+    sp = 31, // stack pointer (only valid for specific encodings)
 
     pub fn encode(self: Register) u5 {
         return @intFromEnum(self);
@@ -324,6 +325,15 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// ADDS Xd, Xn, Xm (sets flags)
+    pub fn addsRegReg(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0xAB000000 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     /// ADD Xd, Xn, #imm12
     pub fn addRegImm12(self: *Arm64Emitter, dst: Register, src: Register, imm12: u12) !void {
         const inst: u32 = 0x91000000 |
@@ -336,6 +346,15 @@ pub const Arm64Emitter = struct {
     /// SUB Xd, Xn, Xm
     pub fn subRegReg(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
         const inst: u32 = 0xCB000000 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// SUBS Xd, Xn, Xm (sets flags)
+    pub fn subsRegReg(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0xEB000000 |
             (@as(u32, src2.encode()) << 16) |
             (@as(u32, src1.encode()) << 5) |
             @as(u32, dst.encode());
@@ -368,6 +387,14 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// NEGS Xd, Xm (alias for SUBS Xd, XZR, Xm)
+    pub fn negsReg(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0xEB0003E0 |
+            (@as(u32, src.encode()) << 16) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     /// ASR Xd, Xn, #imm (arithmetic shift right by immediate)
     pub fn asrRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
         // SBFM Xd, Xn, #shift, #63 (ASR is an alias)
@@ -388,6 +415,16 @@ pub const Arm64Emitter = struct {
         const inst: u32 = 0xD3400000 |
             (@as(u32, shift) << 16) |
             (@as(u32, imms) << 10) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// LSR Xd, Xn, #imm (logical shift right by immediate)
+    pub fn lsrRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
+        // UBFM Xd, Xn, #shift, #63 (LSR is an alias)
+        const inst: u32 = 0xD340FC00 |
+            (@as(u32, imm) << 16) |
             (@as(u32, src.encode()) << 5) |
             @as(u32, dst.encode());
         try self.emit32(inst);
@@ -672,9 +709,9 @@ test "Arm64Emitter: stp and ldp" {
     defer emitter.deinit();
 
     // Standard prologue pattern
-    try emitter.stpPreIndex(.x29, .x30, .x29, -16);
+    try emitter.stpPreIndex(.x29, .x30, .sp, -16);
     // Standard epilogue pattern
-    try emitter.ldpPostIndex(.x29, .x30, .x29, 16);
+    try emitter.ldpPostIndex(.x29, .x30, .sp, 16);
 
     const code = emitter.getCode();
     try testing.expectEqual(@as(usize, 8), code.len);

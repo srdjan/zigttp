@@ -376,13 +376,15 @@ pub const Parser = struct {
                 return try self.nodes.add(.{
                     .tag = .pattern_element,
                     .loc = loc,
-                    .data = .{ .pattern_elem = .{
-                        .kind = .object,
-                        .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
-                        .key = nested, // Nested pattern
-                        .key_atom = key_str_idx, // Use string constant index for get_field
-                        .default_value = null_node,
-                    } },
+                    .data = .{
+                        .pattern_elem = .{
+                            .kind = .object,
+                            .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                            .key = nested, // Nested pattern
+                            .key_atom = key_str_idx, // Use string constant index for get_field
+                            .default_value = null_node,
+                        },
+                    },
                 });
             } else if (self.check(.lbracket)) {
                 const nested = try self.parseArrayPattern();
@@ -390,13 +392,15 @@ pub const Parser = struct {
                 return try self.nodes.add(.{
                     .tag = .pattern_element,
                     .loc = loc,
-                    .data = .{ .pattern_elem = .{
-                        .kind = .array,
-                        .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
-                        .key = nested, // Nested pattern
-                        .key_atom = key_str_idx, // Use string constant index for get_field
-                        .default_value = null_node,
-                    } },
+                    .data = .{
+                        .pattern_elem = .{
+                            .kind = .array,
+                            .binding = .{ .scope_id = 0, .slot = 255, .kind = .local },
+                            .key = nested, // Nested pattern
+                            .key_atom = key_str_idx, // Use string constant index for get_field
+                            .default_value = null_node,
+                        },
+                    },
                 });
             }
 
@@ -425,13 +429,15 @@ pub const Parser = struct {
         return try self.nodes.add(.{
             .tag = .pattern_element,
             .loc = loc,
-            .data = .{ .pattern_elem = .{
-                .kind = .simple,
-                .binding = binding,
-                .key = null_node,
-                .key_atom = key_str_idx, // Use string constant index for get_field
-                .default_value = default_value,
-            } },
+            .data = .{
+                .pattern_elem = .{
+                    .kind = .simple,
+                    .binding = binding,
+                    .key = null_node,
+                    .key_atom = key_str_idx, // Use string constant index for get_field
+                    .default_value = default_value,
+                },
+            },
         });
     }
 
@@ -590,6 +596,14 @@ pub const Parser = struct {
             self.errorAtCurrent("too many local variables");
             return error.TooManyLocals;
         };
+
+        if (std.posix.getenv("ZTS_TRACE_FUN_DECL") != null) {
+            const scope = self.scopes.getCurrentScope();
+            std.debug.print(
+                "[fun_decl] name={s} scope={} kind={s}\n",
+                .{ name.text(self.source), self.scopes.current_scope, @tagName(scope.kind) },
+            );
+        }
 
         // Parse function body
         const func_node = try self.parseFunctionBody(name_atom, flags);
@@ -848,7 +862,7 @@ pub const Parser = struct {
                 if (self.check(.kw_in)) {
                     // for-in is not supported - only for-of
                     self.errors.addErrorAt(.unsupported_feature, self.current, "'for-in' is not supported; use 'for-of' to iterate over values instead");
-                        self.scopes.popScope();
+                    self.scopes.popScope();
                     return error.ParseError;
                 } else if (self.check(.kw_of)) {
                     is_for_of = true;
@@ -2975,17 +2989,52 @@ pub const Parser = struct {
         _ = self;
         return switch (token_type) {
             // JavaScript keywords that can be used as property names
-            .kw_break, .kw_case, .kw_catch, .kw_continue, .kw_debugger,
-            .kw_default, .kw_delete, .kw_do, .kw_else, .kw_finally,
-            .kw_for, .kw_function, .kw_if, .kw_in, .kw_instanceof,
-            .kw_new, .kw_return, .kw_switch, .kw_this, .kw_throw,
-            .kw_try, .kw_typeof, .kw_var, .kw_void, .kw_while,
-            .kw_with, .kw_class, .kw_const, .kw_export, .kw_extends,
-            .kw_import, .kw_super, .kw_let, .kw_static, .kw_yield,
-            .kw_async, .kw_await, .kw_get, .kw_set, .kw_of, .kw_from,
+            .kw_break,
+            .kw_case,
+            .kw_catch,
+            .kw_continue,
+            .kw_debugger,
+            .kw_default,
+            .kw_delete,
+            .kw_do,
+            .kw_else,
+            .kw_finally,
+            .kw_for,
+            .kw_function,
+            .kw_if,
+            .kw_in,
+            .kw_instanceof,
+            .kw_new,
+            .kw_return,
+            .kw_switch,
+            .kw_this,
+            .kw_throw,
+            .kw_try,
+            .kw_typeof,
+            .kw_var,
+            .kw_void,
+            .kw_while,
+            .kw_with,
+            .kw_class,
+            .kw_const,
+            .kw_export,
+            .kw_extends,
+            .kw_import,
+            .kw_super,
+            .kw_let,
+            .kw_static,
+            .kw_yield,
+            .kw_async,
+            .kw_await,
+            .kw_get,
+            .kw_set,
+            .kw_of,
+            .kw_from,
             .kw_as,
             // Literals that look like keywords
-            .true_lit, .false_lit, .null_lit,
+            .true_lit,
+            .false_lit,
+            .null_lit,
             => true,
             else => false,
         };
