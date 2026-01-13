@@ -18,7 +18,9 @@ pub const baseline = @import("baseline.zig");
 pub const CodeAllocator = alloc.CodeAllocator;
 pub const CodePage = alloc.CodePage;
 pub const CompiledCode = alloc.CompiledCode;
+pub const CompiledFn = alloc.CompiledFn;
 pub const BaselineCompiler = baseline.BaselineCompiler;
+pub const CompileError = baseline.CompileError;
 pub const compileFunction = baseline.compileFunction;
 
 // Architecture detection

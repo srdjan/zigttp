@@ -368,6 +368,17 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// ASR Xd, Xn, #imm (arithmetic shift right by immediate)
+    pub fn asrRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
+        // SBFM Xd, Xn, #shift, #63 (ASR is an alias)
+        // sf=1, opc=00, N=1, immr=shift, imms=63
+        const inst: u32 = 0x9340FC00 |
+            (@as(u32, imm) << 16) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     // ========================================
     // Comparison instructions
     // ========================================
@@ -385,6 +396,17 @@ pub const Arm64Emitter = struct {
         const inst: u32 = 0xF100001F |
             (@as(u32, imm12) << 10) |
             (@as(u32, rn.encode()) << 5);
+        try self.emit32(inst);
+    }
+
+    /// CSEL Xd, Xn, Xm, cond (conditional select)
+    /// If cond is true, Xd = Xn; else Xd = Xm
+    pub fn csel(self: *Arm64Emitter, dst: Register, src_true: Register, src_false: Register, cond: Condition) !void {
+        const inst: u32 = 0x9A800000 |
+            (@as(u32, src_false.encode()) << 16) |
+            (@as(u32, @intFromEnum(cond)) << 12) |
+            (@as(u32, src_true.encode()) << 5) |
+            @as(u32, dst.encode());
         try self.emit32(inst);
     }
 

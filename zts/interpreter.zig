@@ -10,6 +10,7 @@ const context = @import("context.zig");
 const heap = @import("heap.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
+const jit = @import("jit/root.zig");
 
 const empty_code: [0]u8 = .{};
 
@@ -173,6 +174,33 @@ pub const Interpreter = struct {
         self.pic_misses = 0;
     }
 
+    /// Try to compile a function using the baseline JIT compiler.
+    /// On success, stores compiled code in func.compiled_code and sets tier to .baseline.
+    /// On UnsupportedOpcode, marks the function as interpreted (won't retry).
+    /// Other errors are propagated.
+    fn tryCompileBaseline(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
+        // Get or create the JIT code allocator
+        const code_alloc = try self.ctx.getOrCreateCodeAllocator();
+
+        // Try to compile
+        const compiled = jit.compileFunction(self.ctx.allocator, code_alloc, func) catch |err| {
+            switch (err) {
+                jit.CompileError.UnsupportedOpcode => {
+                    // Function uses opcodes we can't compile yet - stay interpreted
+                    func.tier = .interpreted;
+                    return;
+                },
+                else => return err,
+            }
+        };
+
+        // Allocate CompiledCode struct on heap and store it
+        const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
+        compiled_ptr.* = compiled;
+        func.compiled_code = compiled_ptr;
+        func.tier = .baseline;
+    }
+
     /// Offset the program counter by a signed value
     /// Consolidates the verbose type-casting pattern used throughout dispatch
     inline fn offsetPc(self: *Interpreter, offset: i16) void {
@@ -181,14 +209,16 @@ pub const Interpreter = struct {
 
     /// Run bytecode function
     pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
-        // Profile function entry (Phase 11)
-        // Cast away const for profiling counters - safe because counters are independent of execution
-        _ = profileFunctionEntry(@constCast(func));
+        // Cast away const for profiling/JIT - safe because we only modify profiling fields
+        const func_mut = @constCast(func);
 
-        self.pc = func.code.ptr;
-        self.code_end = func.code.ptr + func.code.len;
-        self.constants = func.constants;
-        self.current_func = func;
+        // Profile function entry and potentially trigger JIT compilation
+        const is_candidate = profileFunctionEntry(func_mut);
+        if (is_candidate) {
+            self.tryCompileBaseline(func_mut) catch {
+                // Compilation failed - continue with interpreter
+            };
+        }
 
         // Allocate space for locals
         const local_count = func.local_count;
@@ -196,6 +226,21 @@ pub const Interpreter = struct {
         for (0..local_count) |_| {
             try self.ctx.push(value.JSValue.undefined_val);
         }
+
+        // Check if function is JIT-compiled and execute via JIT
+        if (func.tier == .baseline) {
+            if (func.compiled_code) |cc_opaque| {
+                const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
+                const result_raw = cc.execute(self.ctx);
+                return value.JSValue{ .raw = result_raw };
+            }
+        }
+
+        // Fall back to interpreter
+        self.pc = func.code.ptr;
+        self.code_end = func.code.ptr + func.code.len;
+        self.constants = func.constants;
+        self.current_func = func;
 
         return self.dispatch();
     }
@@ -321,8 +366,17 @@ pub const Interpreter = struct {
         this_val: value.JSValue,
         args: []const value.JSValue,
     ) InterpreterError!value.JSValue {
-        // Profile function entry (Phase 11)
-        _ = profileFunctionEntry(@constCast(func_bc));
+        // Cast away const for profiling/JIT - safe because we only modify profiling fields
+        const func_bc_mut = @constCast(func_bc);
+
+        // Profile function entry and potentially trigger JIT compilation
+        const is_candidate = profileFunctionEntry(func_bc_mut);
+        if (is_candidate) {
+            // Function hit JIT threshold - try to compile
+            self.tryCompileBaseline(func_bc_mut) catch {
+                // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
+            };
+        }
 
         try self.pushState();
         defer self.popState();
@@ -347,7 +401,20 @@ pub const Interpreter = struct {
             }
         }
 
-        // Execute the function bytecode
+        // Check if function is JIT-compiled and execute via JIT
+        if (func_bc.tier == .baseline) {
+            if (func_bc.compiled_code) |cc_opaque| {
+                const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
+                const result_raw = cc.execute(self.ctx);
+                const result = value.JSValue{ .raw = result_raw };
+
+                self.closeUpvaluesAbove(0);
+                _ = self.ctx.popFrame();
+                return result;
+            }
+        }
+
+        // Fall back to interpreter
         self.pc = func_bc.code.ptr;
         self.code_end = func_bc.code.ptr + func_bc.code.len;
         self.constants = func_bc.constants;
@@ -4575,4 +4642,105 @@ test "JIT profiling: PIC hit/miss counting" {
     interp.resetProfilingCounters();
     try std.testing.expectEqual(@as(u32, 0), interp.pic_hits);
     try std.testing.expectEqual(@as(u32, 0), interp.pic_misses);
+}
+
+test "JIT integration: tryCompileBaseline triggers on threshold" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Create a simple bytecode function that can be JIT-compiled
+    // push_1 + ret is supported by the baseline compiler
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_1),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+        .execution_count = 0,
+        .tier = .interpreted,
+        .compiled_code = null,
+    };
+
+    // Initially interpreted
+    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
+    try std.testing.expect(func.compiled_code == null);
+
+    // Simulate calls up to threshold - 1
+    func.execution_count = bytecode.JIT_THRESHOLD - 1;
+
+    // Next call should trigger JIT compilation
+    const is_candidate = Interpreter.profileFunctionEntry(&func);
+    try std.testing.expect(is_candidate);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
+
+    // Try to compile
+    try interp.tryCompileBaseline(&func);
+
+    // Should now be compiled
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline, func.tier);
+    try std.testing.expect(func.compiled_code != null);
+
+    // Clean up the compiled code
+    if (func.compiled_code) |cc_opaque| {
+        const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
+        allocator.destroy(cc);
+    }
+}
+
+test "JIT integration: unsupported opcodes stay interpreted" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Create a bytecode function with unsupported opcode (call)
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.call),
+        0, // argc
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+        .execution_count = bytecode.JIT_THRESHOLD - 1,
+        .tier = .baseline_candidate,
+        .compiled_code = null,
+    };
+
+    // Try to compile - should fail with UnsupportedOpcode and revert to interpreted
+    try interp.tryCompileBaseline(&func);
+
+    // Should stay interpreted (not baseline)
+    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
+    try std.testing.expect(func.compiled_code == null);
 }

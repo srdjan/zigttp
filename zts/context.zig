@@ -8,6 +8,7 @@ const gc = @import("gc.zig");
 const object = @import("object.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
+const jit = @import("jit/root.zig");
 
 /// Context configuration
 pub const ContextConfig = struct {
@@ -79,6 +80,9 @@ pub const Context = struct {
     hybrid: ?*arena_mod.HybridAllocator,
     /// Reusable buffer for JSON serialization to reduce allocations
     json_writer: std.Io.Writer.Allocating,
+    /// JIT code allocator for compiled functions (Phase 11)
+    /// Lazily initialized when first JIT compilation is requested
+    code_allocator: ?*jit.CodeAllocator,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -128,6 +132,7 @@ pub const Context = struct {
             .config = config,
             .hybrid = null,
             .json_writer = std.Io.Writer.Allocating.init(allocator),
+            .code_allocator = null,
         };
 
         return ctx;
@@ -271,11 +276,32 @@ pub const Context = struct {
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
         if (self.hidden_class_pool) |pool| pool.deinit();
 
+        // Clean up JIT code allocator
+        if (self.code_allocator) |ca| {
+            ca.deinit();
+            self.allocator.destroy(ca);
+        }
+
         self.atoms.deinit();
         self.json_writer.deinit();
         self.allocator.free(self.call_stack);
         self.allocator.free(self.stack);
         self.allocator.destroy(self);
+    }
+
+    // ========================================================================
+    // JIT Support
+    // ========================================================================
+
+    /// Get or create the JIT code allocator (lazy initialization)
+    pub fn getOrCreateCodeAllocator(self: *Context) !*jit.CodeAllocator {
+        if (self.code_allocator) |ca| {
+            return ca;
+        }
+        const ca = try self.allocator.create(jit.CodeAllocator);
+        ca.* = jit.CodeAllocator.init(self.allocator);
+        self.code_allocator = ca;
+        return ca;
     }
 
     // ========================================================================

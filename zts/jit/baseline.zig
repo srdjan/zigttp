@@ -14,10 +14,18 @@ const arm64 = @import("arm64.zig");
 const alloc = @import("alloc.zig");
 const bytecode = @import("../bytecode.zig");
 const value_mod = @import("../value.zig");
+const context_mod = @import("../context.zig");
 
 const CodeAllocator = alloc.CodeAllocator;
 const CompiledCode = alloc.CompiledCode;
 const Opcode = bytecode.Opcode;
+const Context = context_mod.Context;
+
+// Context field offsets for JIT code generation
+// These are computed at compile time using @offsetOf
+const CTX_STACK_PTR_OFF: i32 = @intCast(@offsetOf(Context, "stack"));
+const CTX_SP_OFF: i32 = @intCast(@offsetOf(Context, "sp"));
+const CTX_FP_OFF: i32 = @intCast(@offsetOf(Context, "fp"));
 
 // Architecture-specific types selected at compile time
 pub const Arch = builtin.cpu.arch;
@@ -118,12 +126,16 @@ pub const BaselineCompiler = struct {
             self.emitter.pushReg(.rbp) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rbp, .rsp) catch return CompileError.OutOfMemory;
             self.emitter.pushReg(.rbx) catch return CompileError.OutOfMemory;
+            // Save context pointer (rdi) to rbx for later use
+            self.emitter.movRegReg(.rbx, .rdi) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
             // ARM64 prologue: save frame pointer and link register
             self.emitter.stpPreIndex(.x29, .x30, .x29, -16) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x29, .x29) catch return CompileError.OutOfMemory; // Set frame pointer
             // Save callee-saved registers we use
             self.emitter.stpPreIndex(.x19, .x20, .x29, -16) catch return CompileError.OutOfMemory;
+            // Save context pointer (x0) to x19 for later use
+            self.emitter.movRegReg(.x19, .x0) catch return CompileError.OutOfMemory;
         }
     }
 
@@ -207,6 +219,29 @@ pub const BaselineCompiler = struct {
                 try self.emitDrop();
             },
 
+            // Local variable access
+            .get_loc => {
+                const idx = code[new_pc];
+                new_pc += 1;
+                try self.emitGetLocal(idx);
+            },
+
+            .get_loc_0 => try self.emitGetLocal(0),
+            .get_loc_1 => try self.emitGetLocal(1),
+            .get_loc_2 => try self.emitGetLocal(2),
+            .get_loc_3 => try self.emitGetLocal(3),
+
+            .put_loc => {
+                const idx = code[new_pc];
+                new_pc += 1;
+                try self.emitPutLocal(idx);
+            },
+
+            .put_loc_0 => try self.emitPutLocal(0),
+            .put_loc_1 => try self.emitPutLocal(1),
+            .put_loc_2 => try self.emitPutLocal(2),
+            .put_loc_3 => try self.emitPutLocal(3),
+
             .add => {
                 try self.emitBinaryOp(.add);
             },
@@ -252,6 +287,26 @@ pub const BaselineCompiler = struct {
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
                 try self.emitConditionalJump(target, false);
+            },
+
+            // Comparison opcodes (integer fast path)
+            .lt => try self.emitComparison(.lt),
+            .lte => try self.emitComparison(.lte),
+            .gt => try self.emitComparison(.gt),
+            .gte => try self.emitComparison(.gte),
+
+            // Equality opcodes
+            .eq => try self.emitComparison(.eq),
+            .neq => try self.emitComparison(.neq),
+            .strict_eq => try self.emitStrictEquality(false),
+            .strict_neq => try self.emitStrictEquality(true),
+
+            // Loop back-edge
+            .loop => {
+                const offset: i16 = @bitCast(readU16(code, new_pc));
+                new_pc += 2;
+                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                try self.emitJump(target, false);
             },
 
             else => {
@@ -358,6 +413,215 @@ pub const BaselineCompiler = struct {
         } else if (is_aarch64) {
             self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory;
             self.emitter.negReg(.x9, .x9) catch return CompileError.OutOfMemory;
+            self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    /// Emit code to get a local variable and push it onto the JS operand stack
+    /// Local variables are stored at ctx->stack[ctx->fp + idx]
+    fn emitGetLocal(self: *BaselineCompiler, idx: u8) CompileError!void {
+        if (is_x86_64) {
+            // rbx = ctx pointer (saved in prologue)
+            // 1. Load ctx->fp into rax
+            self.emitter.movRegMem(.rax, .rbx, CTX_FP_OFF) catch return CompileError.OutOfMemory;
+            // 2. Add local index to get total offset
+            if (idx > 0) {
+                self.emitter.addRegImm32(.rax, idx) catch return CompileError.OutOfMemory;
+            }
+            // 3. Load ctx->stack.ptr into rcx
+            self.emitter.movRegMem(.rcx, .rbx, CTX_STACK_PTR_OFF) catch return CompileError.OutOfMemory;
+            // 4. Load value from stack[fp + idx] into rax
+            // Address = rcx + rax * 8 (but we need scaled addressing)
+            // Use: rax = rcx + rax * 8, then load [rax]
+            self.emitter.shlRegImm(.rax, 3) catch return CompileError.OutOfMemory; // rax *= 8
+            self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory; // rax = stack_ptr + offset*8
+            self.emitter.movRegMem(.rax, .rax, 0) catch return CompileError.OutOfMemory; // rax = [rax]
+            // 5. Push onto operand stack
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // x19 = ctx pointer (saved in prologue)
+            // 1. Load ctx->fp into x9
+            self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            // 2. Add local index
+            if (idx > 0) {
+                self.emitter.addRegImm12(.x9, .x9, idx) catch return CompileError.OutOfMemory;
+            }
+            // 3. Load ctx->stack.ptr into x10
+            self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+            // 4. Load value from stack[fp + idx]
+            // Address = x10 + x9 * 8
+            self.emitter.addRegReg(.x9, .x10, .x9) catch return CompileError.OutOfMemory; // Can't do scaled add directly
+            // Need: x9 = x10 + x9 * 8. Use shift then add.
+            // Actually, let's recalculate: x9 = fp + idx, need x10 + x9 * 8
+            // Redo: shift x9 by 3, then add x10
+            self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            if (idx > 0) {
+                self.emitter.addRegImm12(.x9, .x9, idx) catch return CompileError.OutOfMemory;
+            }
+            // x9 = x9 << 3 (multiply by 8)
+            // ARM64 doesn't have shift by immediate in the emitter, use add with shifted register
+            // For now, use multiple adds as a workaround or load with scaled offset
+            // Actually, ldrImm supports scaled offset. Let's use: x10 + x9 * 8
+            // We need ldr x11, [x10, x9, lsl #3] but we don't have that instruction
+            // Workaround: manually compute address
+            self.emitter.addRegReg(.x11, .x9, .x9) catch return CompileError.OutOfMemory; // x11 = x9 * 2
+            self.emitter.addRegReg(.x11, .x11, .x11) catch return CompileError.OutOfMemory; // x11 = x9 * 4
+            self.emitter.addRegReg(.x11, .x11, .x11) catch return CompileError.OutOfMemory; // x11 = x9 * 8
+            self.emitter.addRegReg(.x11, .x10, .x11) catch return CompileError.OutOfMemory; // x11 = stack_ptr + offset*8
+            self.emitter.ldrImm(.x9, .x11, 0) catch return CompileError.OutOfMemory; // x9 = [x11]
+            // 5. Push onto operand stack
+            self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    /// Emit code to pop a value from the JS operand stack and store it in a local variable
+    /// Local variables are stored at ctx->stack[ctx->fp + idx]
+    fn emitPutLocal(self: *BaselineCompiler, idx: u8) CompileError!void {
+        if (is_x86_64) {
+            // Pop value from operand stack into rax
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory;
+            // rbx = ctx pointer
+            // 1. Load ctx->fp into rcx
+            self.emitter.movRegMem(.rcx, .rbx, CTX_FP_OFF) catch return CompileError.OutOfMemory;
+            // 2. Add local index
+            if (idx > 0) {
+                self.emitter.addRegImm32(.rcx, idx) catch return CompileError.OutOfMemory;
+            }
+            // 3. Load ctx->stack.ptr into rdx
+            self.emitter.movRegMem(.rdx, .rbx, CTX_STACK_PTR_OFF) catch return CompileError.OutOfMemory;
+            // 4. Compute address: stack_ptr + (fp + idx) * 8
+            self.emitter.shlRegImm(.rcx, 3) catch return CompileError.OutOfMemory; // rcx *= 8
+            self.emitter.addRegReg(.rcx, .rdx) catch return CompileError.OutOfMemory; // rcx = address
+            // 5. Store value
+            self.emitter.movMemReg(.rcx, 0, .rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop value from operand stack into x9
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory;
+            // x19 = ctx pointer
+            // 1. Load ctx->fp into x10
+            self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            // 2. Add local index
+            if (idx > 0) {
+                self.emitter.addRegImm12(.x10, .x10, idx) catch return CompileError.OutOfMemory;
+            }
+            // 3. Load ctx->stack.ptr into x11
+            self.emitter.ldrImm(.x11, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+            // 4. Compute address: stack_ptr + (fp + idx) * 8
+            self.emitter.addRegReg(.x12, .x10, .x10) catch return CompileError.OutOfMemory; // x12 = x10 * 2
+            self.emitter.addRegReg(.x12, .x12, .x12) catch return CompileError.OutOfMemory; // x12 = x10 * 4
+            self.emitter.addRegReg(.x12, .x12, .x12) catch return CompileError.OutOfMemory; // x12 = x10 * 8
+            self.emitter.addRegReg(.x12, .x11, .x12) catch return CompileError.OutOfMemory; // x12 = address
+            // 5. Store value
+            self.emitter.strImm(.x9, .x12, 0) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    const ComparisonOp = enum { lt, lte, gt, gte, eq, neq };
+
+    /// Emit integer comparison with fast path
+    /// Compares two values on the operand stack (both must be integers)
+    /// Result is pushed as JSValue.true_val or JSValue.false_val
+    fn emitComparison(self: *BaselineCompiler, op: ComparisonOp) CompileError!void {
+        if (is_x86_64) {
+            // Pop right operand into rcx, left into rax
+            self.emitter.popReg(.rcx) catch return CompileError.OutOfMemory; // right
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory; // left
+
+            // For integer values: raw >> 1 gives the signed integer
+            // Shift both by 1 to get actual integer values
+            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.sarRegImm(.rcx, 1) catch return CompileError.OutOfMemory;
+
+            // Compare
+            self.emitter.cmpRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+
+            // Load true and false values
+            self.emitter.movRegImm64(.rax, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rdx, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
+
+            // Conditionally select based on comparison result
+            const cond: x86.X86Emitter.Condition = switch (op) {
+                .lt => .l,
+                .lte => .le,
+                .gt => .g,
+                .gte => .ge,
+                .eq => .e,
+                .neq => .ne,
+            };
+            self.emitter.cmovcc(cond, .rax, .rdx) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop right operand into x10, left into x9
+            self.emitter.ldrPostIndex(.x10, .x29, 8) catch return CompileError.OutOfMemory; // right
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory; // left
+
+            // Shift both by 1 to get actual integer values
+            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.asrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+
+            // Compare
+            self.emitter.cmpRegReg(.x9, .x10) catch return CompileError.OutOfMemory;
+
+            // Load true and false values
+            self.emitter.movRegImm64(.x11, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
+
+            // Conditionally select based on comparison result
+            const cond: arm64.Condition = switch (op) {
+                .lt => .lt,
+                .lte => .le,
+                .gt => .gt,
+                .gte => .ge,
+                .eq => .eq,
+                .neq => .ne,
+            };
+            self.emitter.csel(.x9, .x12, .x11, cond) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    /// Emit strict equality comparison
+    /// For strict equality, we can compare raw values directly (same type and value)
+    fn emitStrictEquality(self: *BaselineCompiler, negate: bool) CompileError!void {
+        if (is_x86_64) {
+            // Pop right operand into rcx, left into rax
+            self.emitter.popReg(.rcx) catch return CompileError.OutOfMemory; // right
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory; // left
+
+            // Compare raw values
+            self.emitter.cmpRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+
+            // Load true and false values
+            self.emitter.movRegImm64(.rax, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rdx, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
+
+            // Conditionally select: for strict_eq use .e, for strict_neq use .ne
+            const cond: x86.X86Emitter.Condition = if (negate) .ne else .e;
+            self.emitter.cmovcc(cond, .rax, .rdx) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop right operand into x10, left into x9
+            self.emitter.ldrPostIndex(.x10, .x29, 8) catch return CompileError.OutOfMemory; // right
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory; // left
+
+            // Compare raw values
+            self.emitter.cmpRegReg(.x9, .x10) catch return CompileError.OutOfMemory;
+
+            // Load true and false values
+            self.emitter.movRegImm64(.x11, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
+
+            // Conditionally select: for strict_eq use .eq, for strict_neq use .ne
+            const cond: arm64.Condition = if (negate) .ne else .eq;
+            self.emitter.csel(.x9, .x12, .x11, cond) catch return CompileError.OutOfMemory;
+
+            // Push result
             self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
         }
     }
@@ -601,4 +865,172 @@ test "baseline: verify generated code size" {
     if (is_aarch64) {
         try testing.expect(@mod(compiled.code.len, 4) == 0);
     }
+}
+
+test "baseline: compile local variable access" {
+    const testing = std.testing;
+
+    // Bytecode for: let x = 1; let y = 2; return x + y;
+    // push_1, put_loc_0, push_2, put_loc_1, get_loc_0, get_loc_1, add, ret
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.put_loc_0),
+        @intFromEnum(Opcode.push_2),
+        @intFromEnum(Opcode.put_loc_1),
+        @intFromEnum(Opcode.get_loc_0),
+        @intFromEnum(Opcode.get_loc_1),
+        @intFromEnum(Opcode.add),
+        @intFromEnum(Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 2,
+        .stack_size = 4,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile get_loc with index" {
+    const testing = std.testing;
+
+    // Bytecode using get_loc with explicit index
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.put_loc),
+        5, // local index 5
+        @intFromEnum(Opcode.get_loc),
+        5, // local index 5
+        @intFromEnum(Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 6,
+        .stack_size = 8,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile comparison opcodes" {
+    const testing = std.testing;
+
+    // Test all comparison opcodes: push 1, push 2, compare, ret
+    const comparisons = [_]Opcode{ .lt, .lte, .gt, .gte, .eq, .neq, .strict_eq, .strict_neq };
+
+    for (comparisons) |cmp_op| {
+        const code = [_]u8{
+            @intFromEnum(Opcode.push_1),
+            @intFromEnum(Opcode.push_2),
+            @intFromEnum(cmp_op),
+            @intFromEnum(Opcode.ret),
+        };
+
+        var func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = 0,
+            .stack_size = 2,
+            .flags = .{},
+            .code = &code,
+            .constants = &.{},
+            .source_map = null,
+        };
+
+        var code_alloc = CodeAllocator.init(testing.allocator);
+        defer code_alloc.deinit();
+
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        try testing.expect(compiled.code.len > 0);
+    }
+}
+
+test "baseline: compile loop opcode" {
+    const testing = std.testing;
+
+    // Simple loop: push 1, loop back to start (loop offset -3)
+    // Bytecode: push_1, loop -3
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.loop),
+        0xFD, // -3 as i16 little endian
+        0xFF,
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile comparison with conditional jump" {
+    const testing = std.testing;
+
+    // Simple if: push 1, push 2, lt, if_true +1, push_0, ret
+    // After if_true reads its 2-byte offset, pc is at 6. Jump target = 6 + 1 = 7 (the ret)
+    // This tests comparisons work correctly with conditionals
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_1), // 0
+        @intFromEnum(Opcode.push_2), // 1
+        @intFromEnum(Opcode.lt), // 2
+        @intFromEnum(Opcode.if_true), // 3
+        0x01, // +1 offset (little endian) // 4
+        0x00, // 5
+        @intFromEnum(Opcode.push_0), // 6
+        @intFromEnum(Opcode.ret), // 7
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 2,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
 }

@@ -462,6 +462,14 @@ pub const X86Emitter = struct {
         try self.buffer.append(self.allocator, @bitCast(target));
     }
 
+    /// CMOVcc r64, r64 (conditional move)
+    pub fn cmovcc(self: *X86Emitter, cond: Condition, dst: Register, src: Register) !void {
+        try self.emitRex(true, dst.isExtended(), false, src.isExtended());
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x40 + @as(u8, @intFromEnum(cond)));
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
     /// CALL rel32
     pub fn call(self: *X86Emitter, target: i32) !void {
         try self.buffer.append(self.allocator, 0xE8);

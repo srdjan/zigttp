@@ -218,12 +218,16 @@ extern "c" fn pthread_jit_write_protect_np(enabled: bool) void;
 // Compiled code structure
 // ============================================================================
 
+/// Compiled function entry point signature
+/// Takes context pointer, returns JS value (u64)
+pub const CompiledFn = *const fn (ctx: *anyopaque) callconv(.c) u64;
+
 /// Represents a compiled function that can be executed
 pub const CompiledCode = struct {
     /// Pointer to the machine code
     code: []const u8,
-    /// Entry point function pointer
-    entry: *const fn () callconv(.c) u64,
+    /// Entry point function pointer (takes context, returns JSValue as u64)
+    entry: CompiledFn,
 
     /// Create from a code slice (must already be executable)
     pub fn fromSlice(code: []const u8) CompiledCode {
@@ -233,9 +237,9 @@ pub const CompiledCode = struct {
         };
     }
 
-    /// Execute the compiled code
-    pub fn execute(self: *const CompiledCode) u64 {
-        return self.entry();
+    /// Execute the compiled code with context
+    pub fn execute(self: *const CompiledCode, ctx: *anyopaque) u64 {
+        return self.entry(ctx);
     }
 };
 
