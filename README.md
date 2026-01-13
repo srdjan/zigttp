@@ -443,6 +443,17 @@ in `zts/` but are not enabled by default.
 - **Memory**: 256KB default JS heap (configurable per function)
 - **Deployment size**: ~500KB binary, zero runtime dependencies
 
+### Request Pipeline Optimizations
+
+The server includes several optimizations for low-latency request handling:
+
+- **O(1) pool slot acquisition**: `free_hint` atomic tracks likely-free slots, avoiding linear scan
+- **Pre-interned HTTP atoms**: Common headers (content-type, host, user-agent, etc.) use predefined atoms for O(1) lookup
+- **LRU static cache**: Doubly-linked list eviction instead of clear-all eliminates latency spikes
+- **Adaptive backoff**: Three-phase contention handling (spin, sleep with jitter, circuit breaker)
+- **Zero-copy response**: Borrowed mode for body and headers avoids memcpy
+- **Relaxed atomics**: Metrics-only counters use `.monotonic` ordering
+
 ### Hybrid Arena Allocation
 
 For request-scoped workloads, zts uses a hybrid memory model:

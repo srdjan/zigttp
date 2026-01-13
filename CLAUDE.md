@@ -72,6 +72,25 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 
 **Hybrid Arena Allocation**: Request-scoped arena with O(1) bulk reset. Write barriers detect arena escape. GC disabled in hybrid mode.
 
+### Performance Optimizations
+
+The request pipeline includes several optimizations for low-latency FaaS workloads:
+
+**Pool Slot Hint** (`zts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
+
+**Pre-interned HTTP Atoms** (`zts/object.zig`): Common HTTP headers (content-type, content-length, accept, host, user-agent, authorization, cache-control, connection, accept-encoding, cookie, x-forwarded-for, x-request-id) are predefined atoms for O(1) lookup.
+
+**Relaxed Atomic Ordering** (`src/zruntime.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
+
+**LRU Static Cache** (`src/server.zig`): Static file cache uses doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
+
+**Adaptive Backoff** (`src/zruntime.zig`): Three-phase backoff for pool contention:
+- Phase 1: 10 spin iterations using `spinLoopHint`
+- Phase 2: Sleep 10us-1ms with jitter (prevents thundering herd)
+- Phase 3: Circuit breaker fails fast after 100 retries
+
+**Zero-Copy Response** (`src/zruntime.zig`): Borrowed mode for both body and headers avoids memcpy when arena lifetime is guaranteed.
+
 ## TypeScript/TSX Support
 
 zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly.
