@@ -293,6 +293,14 @@ pub const Context = struct {
     // JIT Support
     // ========================================================================
 
+    /// JIT helper: get typeof result as JSValue string
+    /// Called from JIT-compiled code via function pointer
+    /// Returns pre-created string for the type name
+    pub fn jitTypeOf(self: *Context, val: value.JSValue) value.JSValue {
+        const type_str = val.typeOf();
+        return self.createString(type_str) catch value.JSValue.undefined_val;
+    }
+
     /// Get or create the JIT code allocator (lazy initialization)
     pub fn getOrCreateCodeAllocator(self: *Context) !*jit.CodeAllocator {
         if (self.code_allocator) |ca| {

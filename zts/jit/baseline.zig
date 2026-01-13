@@ -318,6 +318,12 @@ pub const BaselineCompiler = struct {
             .shr => try self.emitShift(.shr),
             .ushr => try self.emitShift(.ushr),
 
+            // Type operators
+            .typeof => try self.emitTypeOf(),
+
+            // Logical NOT
+            .not => try self.emitLogicalNot(),
+
             else => {
                 return CompileError.UnsupportedOpcode;
             },
@@ -772,6 +778,110 @@ pub const BaselineCompiler = struct {
 
             // Push result
             self.emitter.strPreIndex(.x9, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitTypeOf(self: *BaselineCompiler) CompileError!void {
+        // typeof pops a value and pushes a string describing its type
+        // We call Context.jitTypeOf(ctx, value) which returns a JSValue string
+
+        const fn_ptr = @intFromPtr(&Context.jitTypeOf);
+
+        if (is_x86_64) {
+            // Pop value into rsi (second argument)
+            self.emitter.popReg(.rsi) catch return CompileError.OutOfMemory;
+            // Move context pointer from rbx to rdi (first argument)
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            // Load function address into rax and call it
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            // Push result (rax contains JSValue)
+            self.emitter.pushReg(.rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop value into x1 (second argument)
+            self.emitter.ldrPostIndex(.x1, .x29, 8) catch return CompileError.OutOfMemory;
+            // Move context pointer from x19 to x0 (first argument)
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            // Load function address and call it
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            // Push result (x0 contains JSValue)
+            self.emitter.strPreIndex(.x0, .x29, -8) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitLogicalNot(self: *BaselineCompiler) CompileError!void {
+        // Logical NOT: convert value to boolean and negate
+        // For baseline JIT, we implement a simple version:
+        // - falsy values (false, null, undefined, 0, NaN) -> true
+        // - truthy values -> false
+        //
+        // Simple approach: compare to known falsy values
+
+        if (is_x86_64) {
+            // Pop value into rax
+            self.emitter.popReg(.rax) catch return CompileError.OutOfMemory;
+
+            // Load true and false values for result
+            self.emitter.movRegImm64(.rcx, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rdx, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
+
+            // Check if value is false_val (most common falsy case)
+            self.emitter.cmpRegReg(.rax, .rdx) catch return CompileError.OutOfMemory;
+            // If equal to false, result is true; otherwise false
+            // Use cmove (conditional move if equal)
+            self.emitter.cmovcc(.e, .rdx, .rcx) catch return CompileError.OutOfMemory; // rdx = (rax == false_val) ? true : false
+
+            // Check other falsy values: null
+            self.emitter.movRegImm64(.r8, @bitCast(value_mod.JSValue.null_val)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rax, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.cmovcc(.e, .rdx, .rcx) catch return CompileError.OutOfMemory;
+
+            // Check undefined
+            self.emitter.movRegImm64(.r8, @bitCast(value_mod.JSValue.undefined_val)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rax, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.cmovcc(.e, .rdx, .rcx) catch return CompileError.OutOfMemory;
+
+            // Check integer 0 (encoded as 0 << 1 = 0)
+            self.emitter.movRegImm64(.r8, @bitCast(value_mod.JSValue.fromInt(0))) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rax, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.cmovcc(.e, .rdx, .rcx) catch return CompileError.OutOfMemory;
+
+            // For non-matching values, default to false (truthy -> false)
+            // rdx now contains the result
+            self.emitter.pushReg(.rdx) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop value into x9
+            self.emitter.ldrPostIndex(.x9, .x29, 8) catch return CompileError.OutOfMemory;
+
+            // Load true and false values
+            self.emitter.movRegImm64(.x10, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
+
+            // Result starts as false (assuming truthy input)
+            self.emitter.movRegReg(.x12, .x11) catch return CompileError.OutOfMemory;
+
+            // Check if value is false_val
+            self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
+            self.emitter.csel(.x12, .x10, .x12, .eq) catch return CompileError.OutOfMemory;
+
+            // Check null
+            self.emitter.movRegImm64(.x13, @bitCast(value_mod.JSValue.null_val)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            self.emitter.csel(.x12, .x10, .x12, .eq) catch return CompileError.OutOfMemory;
+
+            // Check undefined
+            self.emitter.movRegImm64(.x13, @bitCast(value_mod.JSValue.undefined_val)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            self.emitter.csel(.x12, .x10, .x12, .eq) catch return CompileError.OutOfMemory;
+
+            // Check integer 0
+            self.emitter.movRegImm64(.x13, @bitCast(value_mod.JSValue.fromInt(0))) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            self.emitter.csel(.x12, .x10, .x12, .eq) catch return CompileError.OutOfMemory;
+
+            // Push result
+            self.emitter.strPreIndex(.x12, .x29, -8) catch return CompileError.OutOfMemory;
         }
     }
 
@@ -1267,6 +1377,141 @@ test "baseline: compile shift operations" {
             .arg_count = 0,
             .local_count = 0,
             .stack_size = 2,
+            .flags = .{},
+            .code = &code,
+            .constants = &.{},
+            .source_map = null,
+        };
+
+        var code_alloc = CodeAllocator.init(testing.allocator);
+        defer code_alloc.deinit();
+
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        try testing.expect(compiled.code.len > 0);
+    }
+}
+
+test "baseline: compile typeof operation" {
+    const testing = std.testing;
+
+    // typeof integer: push_1, typeof, ret
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.typeof),
+        @intFromEnum(Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile typeof with different values" {
+    const testing = std.testing;
+
+    // Test typeof with different value types
+    const test_cases = [_]Opcode{
+        .push_null, // typeof null -> "object"
+        .push_undefined, // typeof undefined -> "undefined"
+        .push_true, // typeof true -> "boolean"
+        .push_false, // typeof false -> "boolean"
+        .push_0, // typeof 0 -> "number"
+    };
+
+    for (test_cases) |push_op| {
+        const code = [_]u8{
+            @intFromEnum(push_op),
+            @intFromEnum(Opcode.typeof),
+            @intFromEnum(Opcode.ret),
+        };
+
+        var func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = 0,
+            .stack_size = 1,
+            .flags = .{},
+            .code = &code,
+            .constants = &.{},
+            .source_map = null,
+        };
+
+        var code_alloc = CodeAllocator.init(testing.allocator);
+        defer code_alloc.deinit();
+
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        try testing.expect(compiled.code.len > 0);
+    }
+}
+
+test "baseline: compile logical NOT operation" {
+    const testing = std.testing;
+
+    // !true -> false: push_true, not, ret
+    const code = [_]u8{
+        @intFromEnum(Opcode.push_true),
+        @intFromEnum(Opcode.not),
+        @intFromEnum(Opcode.ret),
+    };
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    var code_alloc = CodeAllocator.init(testing.allocator);
+    defer code_alloc.deinit();
+
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    try testing.expect(compiled.code.len > 0);
+}
+
+test "baseline: compile logical NOT with falsy values" {
+    const testing = std.testing;
+
+    // Test !falsy values should produce true
+    const falsy_ops = [_]Opcode{
+        .push_false, // !false -> true
+        .push_null, // !null -> true
+        .push_undefined, // !undefined -> true
+        .push_0, // !0 -> true
+    };
+
+    for (falsy_ops) |push_op| {
+        const code = [_]u8{
+            @intFromEnum(push_op),
+            @intFromEnum(Opcode.not),
+            @intFromEnum(Opcode.ret),
+        };
+
+        var func = bytecode.FunctionBytecode{
+            .header = .{},
+            .name_atom = 0,
+            .arg_count = 0,
+            .local_count = 0,
+            .stack_size = 1,
             .flags = .{},
             .code = &code,
             .constants = &.{},
