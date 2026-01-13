@@ -170,6 +170,22 @@ pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.J
     return allocFloat(ctx, @floatFromInt(ms));
 }
 
+var perf_time_origin: ?std.time.Instant = null;
+
+/// performance.now() - Returns milliseconds since time origin (monotonic)
+pub fn performanceNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = this;
+    _ = args;
+    const now = std.time.Instant.now() catch return value.JSValue.undefined_val;
+    if (perf_time_origin == null) {
+        perf_time_origin = now;
+        return allocFloat(ctx, 0);
+    }
+    const elapsed_ns = now.since(perf_time_origin.?);
+    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+    return allocFloat(ctx, elapsed_ms);
+}
+
 // ============================================================================
 // JSON methods
 // ============================================================================
@@ -3047,6 +3063,12 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const date_obj = try object.JSObject.create(allocator, root_class, null);
     try addMethodDynamic(ctx, date_obj, "now", wrap(dateNow), 0);
     try ctx.setGlobal(.Date, date_obj.toValue());
+
+    // Register performance object with performance.now()
+    const performance_obj = try object.JSObject.create(allocator, root_class, null);
+    try addMethodDynamic(ctx, performance_obj, "now", wrap(performanceNow), 0);
+    const performance_atom = try ctx.atoms.intern("performance");
+    try ctx.setGlobal(performance_atom, performance_obj.toValue());
 
     // ========================================================================
     // Array.prototype

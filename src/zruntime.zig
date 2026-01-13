@@ -1084,6 +1084,11 @@ test "HandlerPool basic operations" {
 test "HandlerPool concurrent stress" {
     const allocator = std.heap.c_allocator;
 
+    // Allow disabling JIT for this test via env var during debugging.
+    if (std.posix.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
+        zq.interpreter.disableJitForTests();
+    }
+
     const handler_code = "function handler(req) { return Response.text('ok'); }";
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
     defer pool.deinit();

@@ -297,19 +297,19 @@ pub const Context = struct {
     /// JIT helper: get typeof result as JSValue string
     /// Called from JIT-compiled code via function pointer
     /// Returns pre-created string for the type name
-    pub fn jitTypeOf(self: *Context, val: value.JSValue) value.JSValue {
+    pub fn jitTypeOf(self: *Context, val: value.JSValue) callconv(.c) value.JSValue {
         const type_str = val.typeOf();
         return self.createString(type_str) catch value.JSValue.undefined_val;
     }
 
     /// JIT helper: convert value to boolean without allocation
     /// Returns a native bool for branch decisions
-    pub fn jitToBoolean(_: *Context, val: value.JSValue) bool {
+    pub fn jitToBoolean(_: *Context, val: value.JSValue) callconv(.c) bool {
         return val.toBoolean();
     }
 
     /// JIT helper: get property by atom index
-    pub fn jitGetField(self: *Context, obj_val: value.JSValue, atom_idx: u16) value.JSValue {
+    pub fn jitGetField(self: *Context, obj_val: value.JSValue, atom_idx: u16) callconv(.c) value.JSValue {
         const atom: object.Atom = @enumFromInt(atom_idx);
         if (obj_val.isObject()) {
             const obj = object.JSObject.fromValue(obj_val);
@@ -328,27 +328,27 @@ pub const Context = struct {
     }
 
     /// JIT helper: get global by atom index
-    pub fn jitGetGlobal(self: *Context, atom_idx: u16) value.JSValue {
+    pub fn jitGetGlobal(self: *Context, atom_idx: u16) callconv(.c) value.JSValue {
         const atom: object.Atom = @enumFromInt(atom_idx);
         return self.getGlobal(atom) orelse value.JSValue.undefined_val;
     }
 
     /// JIT helper: set global by atom index
     /// Returns the assigned value (or exception_val on error).
-    pub fn jitPutGlobal(self: *Context, atom_idx: u16, val: value.JSValue) value.JSValue {
+    pub fn jitPutGlobal(self: *Context, atom_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
         const atom: object.Atom = @enumFromInt(atom_idx);
         self.setGlobal(atom, val) catch return self.jitThrow();
         return val;
     }
 
     /// JIT helper: create a new object
-    pub fn jitNewObject(self: *Context) value.JSValue {
+    pub fn jitNewObject(self: *Context) callconv(.c) value.JSValue {
         const obj = self.createObject(null) catch return self.jitThrow();
         return obj.toValue();
     }
 
     /// JIT helper: create a new array with length
-    pub fn jitNewArray(self: *Context, length: u16) value.JSValue {
+    pub fn jitNewArray(self: *Context, length: u16) callconv(.c) value.JSValue {
         const root_class = self.root_class orelse return self.jitThrow();
         const obj = if (self.hybrid) |h|
             object.JSObject.createArrayWithArena(h.arena, root_class) orelse return self.jitThrow()
@@ -361,7 +361,7 @@ pub const Context = struct {
 
     /// JIT helper: set property by atom index
     /// Returns the assigned value (or exception_val on error).
-    pub fn jitPutField(self: *Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue) value.JSValue {
+    pub fn jitPutField(self: *Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
         if (obj_val.isObject()) {
             const obj = object.JSObject.fromValue(obj_val);
             self.setPropertyChecked(obj, @enumFromInt(atom_idx), val) catch return self.jitThrow();
@@ -371,7 +371,7 @@ pub const Context = struct {
     }
 
     /// JIT helper: get element by index
-    pub fn jitGetElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue) value.JSValue {
+    pub fn jitGetElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue) callconv(.c) value.JSValue {
         if (obj_val.isObject() and index_val.isInt()) {
             const obj = object.JSObject.fromValue(obj_val);
             const idx = index_val.getInt();
@@ -404,7 +404,7 @@ pub const Context = struct {
 
     /// JIT helper: set element by index
     /// Returns the assigned value (or exception_val on error).
-    pub fn jitPutElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue, val: value.JSValue) value.JSValue {
+    pub fn jitPutElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue, val: value.JSValue) callconv(.c) value.JSValue {
         if (obj_val.isObject() and index_val.isInt()) {
             const obj = object.JSObject.fromValue(obj_val);
             const idx = index_val.getInt();
@@ -424,7 +424,7 @@ pub const Context = struct {
 
     /// JIT helper: for_of_next superinstruction
     /// Returns true if iteration should continue, false if loop ends.
-    pub fn jitForOfNext(self: *Context) bool {
+    pub fn jitForOfNext(self: *Context) callconv(.c) bool {
         if (self.sp < 2) {
             _ = self.jitThrow();
             return false;
@@ -468,7 +468,7 @@ pub const Context = struct {
 
     /// JIT helper: for_of_next_put_loc superinstruction
     /// Returns true if iteration should continue, false if loop ends.
-    pub fn jitForOfNextPutLoc(self: *Context, local_idx: u8) bool {
+    pub fn jitForOfNextPutLoc(self: *Context, local_idx: u8) callconv(.c) bool {
         if (self.sp < 2) {
             _ = self.jitThrow();
             return false;
@@ -506,7 +506,7 @@ pub const Context = struct {
 
     /// JIT helper: add two values with full JS semantics.
     /// On error, sets exception and returns exception_val.
-    pub fn jitAdd(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitAdd(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
             const result = @addWithOverflow(a.getInt(), b.getInt());
             if (result[1] == 0) {
@@ -530,7 +530,7 @@ pub const Context = struct {
     }
 
     /// JIT helper: subtract two values.
-    pub fn jitSub(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitSub(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
             const result = @subWithOverflow(a.getInt(), b.getInt());
             if (result[1] == 0) {
@@ -544,7 +544,7 @@ pub const Context = struct {
     }
 
     /// JIT helper: multiply two values.
-    pub fn jitMul(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitMul(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
             const result = @mulWithOverflow(a.getInt(), b.getInt());
             if (result[1] == 0) {
@@ -558,7 +558,7 @@ pub const Context = struct {
     }
 
     /// JIT helper: negate a value.
-    pub fn jitNeg(self: *Context, a: value.JSValue) value.JSValue {
+    pub fn jitNeg(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt()) {
             const v = a.getInt();
             if (v == std.math.minInt(i32)) {
@@ -573,14 +573,14 @@ pub const Context = struct {
     }
 
     /// JIT helper: divide two values (always produces float)
-    pub fn jitDiv(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitDiv(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         const an = a.toNumber() orelse return self.jitThrow();
         const bn = b.toNumber() orelse return self.jitThrow();
         return self.jitAllocFloat(an / bn);
     }
 
     /// JIT helper: modulo two values (integer-only fast path)
-    pub fn jitMod(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitMod(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
             const bv = b.getInt();
             if (bv == 0) return self.jitThrow();
@@ -590,14 +590,14 @@ pub const Context = struct {
     }
 
     /// JIT helper: exponentiation
-    pub fn jitPow(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitPow(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         const an = a.toNumber() orelse return self.jitThrow();
         const bn = b.toNumber() orelse return self.jitThrow();
         return self.jitAllocFloat(std.math.pow(f64, an, bn));
     }
 
     /// JIT helper: increment
-    pub fn jitInc(self: *Context, a: value.JSValue) value.JSValue {
+    pub fn jitInc(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt()) {
             const result = @addWithOverflow(a.getInt(), 1);
             if (result[1] == 0) {
@@ -612,7 +612,7 @@ pub const Context = struct {
     }
 
     /// JIT helper: decrement
-    pub fn jitDec(self: *Context, a: value.JSValue) value.JSValue {
+    pub fn jitDec(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt()) {
             const result = @subWithOverflow(a.getInt(), 1);
             if (result[1] == 0) {
@@ -638,32 +638,32 @@ pub const Context = struct {
     }
 
     /// JIT helpers: bitwise operations
-    pub fn jitBitAnd(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitBitAnd(_: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return value.JSValue.fromInt(jitToInt32(a) & jitToInt32(b));
     }
 
-    pub fn jitBitOr(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitBitOr(_: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return value.JSValue.fromInt(jitToInt32(a) | jitToInt32(b));
     }
 
-    pub fn jitBitXor(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitBitXor(_: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return value.JSValue.fromInt(jitToInt32(a) ^ jitToInt32(b));
     }
 
-    pub fn jitBitNot(_: *Context, a: value.JSValue) value.JSValue {
+    pub fn jitBitNot(_: *Context, a: value.JSValue) callconv(.c) value.JSValue {
         return value.JSValue.fromInt(~jitToInt32(a));
     }
 
     /// JIT helpers: shift operations
-    pub fn jitShiftShl(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitShiftShl(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitShift(a, b, .shl);
     }
 
-    pub fn jitShiftShr(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitShiftShr(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitShift(a, b, .shr);
     }
 
-    pub fn jitShiftUShr(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitShiftUShr(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitShift(a, b, .ushr);
     }
 
@@ -679,12 +679,12 @@ pub const Context = struct {
     }
 
     /// JIT helper: strict equality (===)
-    pub fn jitStrictEquals(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitStrictEquals(_: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return value.JSValue.fromBool(a.strictEquals(b));
     }
 
     /// JIT helper: loose equality (==)
-    pub fn jitLooseEquals(_: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitLooseEquals(_: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.raw == b.raw) return value.JSValue.true_val;
         if ((a.isNull() and b.isUndefined()) or (a.isUndefined() and b.isNull())) {
             return value.JSValue.true_val;
@@ -699,19 +699,19 @@ pub const Context = struct {
     }
 
     /// JIT helpers: relational comparisons
-    pub fn jitCompareLt(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitCompareLt(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitCompare(a, b, .lt);
     }
 
-    pub fn jitCompareLte(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitCompareLte(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitCompare(a, b, .lte);
     }
 
-    pub fn jitCompareGt(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitCompareGt(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitCompare(a, b, .gt);
     }
 
-    pub fn jitCompareGte(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
+    pub fn jitCompareGte(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         return self.jitCompare(a, b, .gte);
     }
 

@@ -24,6 +24,12 @@ var call_guard_cache: usize = 0;
 var call_guard_cached = false;
 var call_trace_count: usize = 0;
 
+/// Force-disable JIT in the current process (used by tests that exercise
+/// multithreaded runtime behavior without JIT stability guarantees yet).
+pub fn disableJitForTests() void {
+    jit_disabled_cache = true;
+}
+
 fn jitDisabled() bool {
     if (jit_disabled_cache) |cached| return cached;
     const disabled = std.posix.getenv("ZTS_DISABLE_JIT") != null;
