@@ -1,0 +1,24 @@
+# JIT benchmark baseline (phase 5: superinstructions/const ops)
+date: 2026-01-13
+command: benchmarks/jit/run.sh
+
+== arith.js::run ==
+bench arith.js::run iters=200000 warmup=120 ms=17.595 ops/s=11367188
+
+== branch.js::run ==
+bench branch.js::run iters=200000 warmup=120 ms=15.787 ops/s=12668283
+
+== object.js::run ==
+bench object.js::run iters=100000 warmup=120 ms=8.371 ops/s=11946004
+
+== pic.js::runMono ==
+bench pic.js::runMono iters=150000 warmup=120 ms=5.706 ops/s=26289269
+
+== pic.js::runPoly ==
+bench pic.js::runPoly iters=150000 warmup=120 ms=10.785 ops/s=13907615
+
+== call.js::runFunc ==
+bench call.js::runFunc iters=50000 warmup=120 ms=2.014 ops/s=24827239
+
+== call.js::runMethod ==
+bench call.js::runMethod iters=50000 warmup=120 ms=2.020 ops/s=24755539

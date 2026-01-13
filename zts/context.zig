@@ -308,6 +308,202 @@ pub const Context = struct {
         return val.toBoolean();
     }
 
+    /// JIT helper: get property by atom index
+    pub fn jitGetField(self: *Context, obj_val: value.JSValue, atom_idx: u16) value.JSValue {
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        if (obj_val.isObject()) {
+            const obj = object.JSObject.fromValue(obj_val);
+            return obj.getProperty(atom) orelse value.JSValue.undefined_val;
+        }
+        if (obj_val.isString()) {
+            if (atom == .length) {
+                const str = obj_val.toPtr(string.JSString);
+                return value.JSValue.fromInt(@intCast(str.len));
+            }
+            if (self.string_prototype) |proto| {
+                return proto.getProperty(atom) orelse value.JSValue.undefined_val;
+            }
+        }
+        return value.JSValue.undefined_val;
+    }
+
+    /// JIT helper: get global by atom index
+    pub fn jitGetGlobal(self: *Context, atom_idx: u16) value.JSValue {
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        return self.getGlobal(atom) orelse value.JSValue.undefined_val;
+    }
+
+    /// JIT helper: set global by atom index
+    /// Returns the assigned value (or exception_val on error).
+    pub fn jitPutGlobal(self: *Context, atom_idx: u16, val: value.JSValue) value.JSValue {
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        self.setGlobal(atom, val) catch return self.jitThrow();
+        return val;
+    }
+
+    /// JIT helper: create a new object
+    pub fn jitNewObject(self: *Context) value.JSValue {
+        const obj = self.createObject(null) catch return self.jitThrow();
+        return obj.toValue();
+    }
+
+    /// JIT helper: create a new array with length
+    pub fn jitNewArray(self: *Context, length: u16) value.JSValue {
+        const root_class = self.root_class orelse return self.jitThrow();
+        const obj = if (self.hybrid) |h|
+            object.JSObject.createArrayWithArena(h.arena, root_class) orelse return self.jitThrow()
+        else
+            object.JSObject.createArray(self.allocator, root_class) catch return self.jitThrow();
+        obj.prototype = self.array_prototype;
+        obj.setArrayLength(@intCast(length));
+        return obj.toValue();
+    }
+
+    /// JIT helper: set property by atom index
+    /// Returns the assigned value (or exception_val on error).
+    pub fn jitPutField(self: *Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue) value.JSValue {
+        if (obj_val.isObject()) {
+            const obj = object.JSObject.fromValue(obj_val);
+            self.setPropertyChecked(obj, @enumFromInt(atom_idx), val) catch return self.jitThrow();
+        }
+        // Non-object assignment silently fails in non-strict mode
+        return val;
+    }
+
+    /// JIT helper: get element by index
+    pub fn jitGetElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue) value.JSValue {
+        if (obj_val.isObject() and index_val.isInt()) {
+            const obj = object.JSObject.fromValue(obj_val);
+            const idx = index_val.getInt();
+            if (idx >= 0) {
+                const idx_u: u32 = @intCast(idx);
+                if (obj.class_id == .array) {
+                    const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
+                    if (idx_u < len) {
+                        return obj.getIndexUnchecked(idx_u);
+                    }
+                    return value.JSValue.undefined_val;
+                } else if (obj.class_id == .range_iterator) {
+                    const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt()));
+                    if (idx_u < len) {
+                        const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                        const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                        return value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
+                    }
+                    return value.JSValue.undefined_val;
+                } else {
+                    var idx_buf: [32]u8 = undefined;
+                    const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return value.JSValue.undefined_val;
+                    const atom = self.atoms.intern(idx_slice) catch return value.JSValue.undefined_val;
+                    return obj.getProperty(atom) orelse value.JSValue.undefined_val;
+                }
+            }
+        }
+        return value.JSValue.undefined_val;
+    }
+
+    /// JIT helper: set element by index
+    /// Returns the assigned value (or exception_val on error).
+    pub fn jitPutElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue, val: value.JSValue) value.JSValue {
+        if (obj_val.isObject() and index_val.isInt()) {
+            const obj = object.JSObject.fromValue(obj_val);
+            const idx = index_val.getInt();
+            if (idx >= 0) {
+                if (obj.class_id == .array) {
+                    self.setIndexChecked(obj, @intCast(idx), val) catch return self.jitThrow();
+                } else {
+                    var idx_buf: [32]u8 = undefined;
+                    const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return val;
+                    const atom = self.atoms.intern(idx_slice) catch return val;
+                    self.setPropertyChecked(obj, atom, val) catch return self.jitThrow();
+                }
+            }
+        }
+        return val;
+    }
+
+    /// JIT helper: for_of_next superinstruction
+    /// Returns true if iteration should continue, false if loop ends.
+    pub fn jitForOfNext(self: *Context) bool {
+        if (self.sp < 2) {
+            _ = self.jitThrow();
+            return false;
+        }
+        const sp = self.sp;
+        const idx_val = self.stack[sp - 1];
+        const iter_val = self.stack[sp - 2];
+
+        if (iter_val.isObject() and idx_val.isInt()) {
+            const obj = object.JSObject.fromValue(iter_val);
+            const idx = idx_val.getInt();
+            if (idx >= 0) {
+                const idx_u: u32 = @intCast(idx);
+                if (obj.class_id == .array) {
+                    const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+                    if (idx_u < len) {
+                        self.push(obj.getIndexUnchecked(idx_u)) catch {
+                            _ = self.jitThrow();
+                            return false;
+                        };
+                        self.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                        return true;
+                    }
+                } else if (obj.class_id == .range_iterator) {
+                    const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+                    if (idx_u < len) {
+                        const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                        const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                        self.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step)) catch {
+                            _ = self.jitThrow();
+                            return false;
+                        };
+                        self.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /// JIT helper: for_of_next_put_loc superinstruction
+    /// Returns true if iteration should continue, false if loop ends.
+    pub fn jitForOfNextPutLoc(self: *Context, local_idx: u8) bool {
+        if (self.sp < 2) {
+            _ = self.jitThrow();
+            return false;
+        }
+        const sp = self.sp;
+        const idx_val = self.stack[sp - 1];
+        const iter_val = self.stack[sp - 2];
+
+        if (iter_val.isObject() and idx_val.isInt()) {
+            const obj = object.JSObject.fromValue(iter_val);
+            const idx = idx_val.getInt();
+            if (idx >= 0) {
+                const idx_u: u32 = @intCast(idx);
+                if (obj.class_id == .array) {
+                    const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+                    if (idx_u < len) {
+                        self.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
+                        self.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                        return true;
+                    }
+                } else if (obj.class_id == .range_iterator) {
+                    const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+                    if (idx_u < len) {
+                        const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                        const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                        self.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                        self.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     /// JIT helper: add two values with full JS semantics.
     /// On error, sets exception and returns exception_val.
     pub fn jitAdd(self: *Context, a: value.JSValue, b: value.JSValue) value.JSValue {
