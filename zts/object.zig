@@ -5,6 +5,7 @@
 const std = @import("std");
 const heap = @import("heap.zig");
 const value = @import("value.zig");
+const string = @import("string.zig");
 const arena_mod = @import("arena.zig");
 
 /// Atom - interned property name identifier
@@ -1206,6 +1207,76 @@ pub const JSObject = extern struct {
             allocator.free(slots[0..self.overflow_capacity]);
         }
         allocator.destroy(self);
+    }
+
+    /// Destroy object including internal data (e.g., NativeFunctionData, BytecodeFunctionData)
+    /// Use this for builtin objects that won't be GC'd
+    pub fn destroyFull(self: *JSObject, allocator: std.mem.Allocator) void {
+        // Free function data if this is a function
+        if (self.class_id == .function and self.flags.is_callable) {
+            const is_bytecode_val = self.inline_slots[Slots.FUNC_IS_BYTECODE];
+            const data_val = self.inline_slots[Slots.FUNC_DATA];
+            if (is_bytecode_val.isUndefined()) {
+                // Native function - free the NativeFunctionData
+                if (data_val.isPtr()) {
+                    const data = data_val.toPtr(NativeFunctionData);
+                    allocator.destroy(data);
+                }
+            } else if (data_val.isPtr()) {
+                // Bytecode function - free the BytecodeFunctionData and FunctionBytecode internals
+                const jit = @import("jit/alloc.zig");
+                const bc_data = data_val.toPtr(BytecodeFunctionData);
+                const bc = bc_data.bytecode;
+                // Free JIT compiled code struct if present (code slice is freed by CodeAllocator)
+                if (bc.compiled_code) |cc| {
+                    const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
+                    allocator.destroy(compiled);
+                }
+                // Free bytecode internal allocations
+                if (bc.code.len > 0) allocator.free(@constCast(bc.code));
+                if (bc.constants.len > 0) allocator.free(@constCast(bc.constants));
+                if (bc.upvalue_info.len > 0) allocator.free(@constCast(bc.upvalue_info));
+                if (bc.source_map) |sm| allocator.free(@constCast(sm));
+                // Free the FunctionBytecode struct
+                allocator.destroy(@constCast(bc));
+                // Free the BytecodeFunctionData
+                allocator.destroy(bc_data);
+            }
+        }
+        // Free overflow slots and object
+        self.destroy(allocator);
+    }
+
+    /// Destroy a builtin object and all its function properties
+    /// Used for cleaning up Math, JSON, Object, etc. during Context.deinit
+    pub fn destroyBuiltin(self: *JSObject, allocator: std.mem.Allocator) void {
+        // Get properties from hidden class
+        const props = self.hidden_class.properties;
+        for (props) |slot| {
+            // Get property value using slot offset
+            const slot_idx = slot.offset;
+            const val = if (slot_idx < INLINE_SLOT_COUNT)
+                self.inline_slots[slot_idx]
+            else if (self.overflow_slots) |slots|
+                slots[slot_idx - INLINE_SLOT_COUNT]
+            else
+                continue;
+
+            // If property is a function object, destroy it recursively
+            // (functions like Response constructor may have their own method properties)
+            if (val.isObject()) {
+                const obj = val.toPtr(JSObject);
+                if (obj.class_id == .function) {
+                    obj.destroyBuiltin(allocator);
+                }
+            } else if (val.isString()) {
+                // Free string values (e.g., Fragment constant)
+                const str = val.toPtr(string.JSString);
+                string.freeString(allocator, str);
+            }
+        }
+        // Destroy the builtin object itself (use destroyFull to handle NativeFunctionData)
+        self.destroyFull(allocator);
     }
 
     /// Create a native function object

@@ -84,6 +84,9 @@ pub const Context = struct {
     /// JIT code allocator for compiled functions (Phase 11)
     /// Lazily initialized when first JIT compilation is requested
     code_allocator: ?*jit.CodeAllocator,
+    /// Builtin objects registered during initialization (Math, JSON, etc.)
+    /// Tracked for proper cleanup in deinit
+    builtin_objects: std.ArrayList(*object.JSObject),
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -134,6 +137,7 @@ pub const Context = struct {
             .hybrid = null,
             .json_writer = std.Io.Writer.Allocating.init(allocator),
             .code_allocator = null,
+            .builtin_objects = .{},
         };
 
         return ctx;
@@ -267,13 +271,24 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
-        if (self.array_prototype) |proto| proto.destroy(self.allocator);
-        if (self.string_prototype) |proto| proto.destroy(self.allocator);
-        if (self.object_prototype) |proto| proto.destroy(self.allocator);
-        if (self.function_prototype) |proto| proto.destroy(self.allocator);
-        if (self.generator_prototype) |proto| proto.destroy(self.allocator);
-        if (self.result_prototype) |proto| proto.destroy(self.allocator);
-        if (self.global_obj) |g| g.destroy(self.allocator);
+        // Destroy prototypes with destroyBuiltin to clean up their method properties
+        if (self.array_prototype) |proto| proto.destroyBuiltin(self.allocator);
+        if (self.string_prototype) |proto| proto.destroyBuiltin(self.allocator);
+        if (self.object_prototype) |proto| proto.destroyBuiltin(self.allocator);
+        if (self.function_prototype) |proto| proto.destroyBuiltin(self.allocator);
+        if (self.generator_prototype) |proto| proto.destroyBuiltin(self.allocator);
+        if (self.result_prototype) |proto| proto.destroyBuiltin(self.allocator);
+
+        // Destroy registered builtin objects (Math, JSON, console, etc.)
+        // Each builtin is destroyed with destroyBuiltin which also cleans up its function properties
+        for (self.builtin_objects.items) |obj| {
+            obj.destroyBuiltin(self.allocator);
+        }
+        self.builtin_objects.deinit(self.allocator);
+
+        // Destroy global object with destroyBuiltin to clean up function properties
+        // (parseFloat, parseInt, isNaN, isFinite, range, etc.)
+        if (self.global_obj) |g| g.destroyBuiltin(self.allocator);
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
         if (self.hidden_class_pool) |pool| pool.deinit();
 

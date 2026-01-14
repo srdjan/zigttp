@@ -2846,6 +2846,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, console_obj, root_class, .log, wrap(consoleLog), 0);
     // Note: .warn and .error atoms don't exist in predefined atoms, use .log for now
     // In full implementation would add dynamic atoms
+    try ctx.builtin_objects.append(allocator,console_obj);
 
     // Register console on global
     try ctx.setGlobal(.console, console_obj.toValue());
@@ -2871,6 +2872,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const pi_box = try ctx.gc_state.allocFloat(math_constants.PI);
     try ctx.setPropertyChecked(math_obj, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromPtr(pi_box));
     // Note: Would need to add "PI", "E" etc as dynamic atoms for full implementation
+    try ctx.builtin_objects.append(allocator,math_obj);
 
     // Register Math on global
     try ctx.setGlobal(.Math, math_obj.toValue());
@@ -2880,6 +2882,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, json_obj, root_class, .parse, wrap(jsonParse), 1);
     try addMethod(ctx, allocator, json_obj, root_class, .tryParse, wrap(jsonTryParse), 1);
     try addMethod(ctx, allocator, json_obj, root_class, .stringify, wrap(jsonStringify), 1);
+    try ctx.builtin_objects.append(allocator,json_obj);
 
     // Register JSON on global
     try ctx.setGlobal(.JSON, json_obj.toValue());
@@ -2893,6 +2896,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, object_obj, "hasOwn", wrap(objectHasOwn), 2);
     try addMethodDynamic(ctx, object_obj, "freeze", wrap(objectFreeze), 1);
     try addMethodDynamic(ctx, object_obj, "isFrozen", wrap(objectIsFrozen), 1);
+    try ctx.builtin_objects.append(allocator,object_obj);
 
     // Register Object on global
     try ctx.setGlobal(.Object, object_obj.toValue());
@@ -2900,8 +2904,10 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Create Error prototype with toString method
     const error_proto = try object.JSObject.create(allocator, root_class, null);
     try addMethodDynamic(ctx, error_proto, "toString", wrap(errorToString), 0);
+    try ctx.builtin_objects.append(allocator,error_proto);
 
     // Create Error constructor
+    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     const error_ctor_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(errorConstructor), .Error, 1);
     try ctx.setPropertyChecked(error_ctor_func, .prototype, error_proto.toValue());
     try ctx.setGlobal(.Error, error_ctor_func.toValue());
@@ -2930,8 +2936,10 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const promise_proto = try object.JSObject.create(allocator, root_class, null);
     try addMethodDynamic(ctx, promise_proto, "then", wrap(promiseThen), 2);
     try addMethodDynamic(ctx, promise_proto, "catch", wrap(promiseCatch), 1);
+    try ctx.builtin_objects.append(allocator,promise_proto);
 
     // Create Promise constructor with static methods
+    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     const promise_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(promiseConstructor), .Promise, 1);
     try ctx.setPropertyChecked(promise_ctor, .prototype, promise_proto.toValue());
 
@@ -2968,11 +2976,14 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const neg_inf_atom = try ctx.atoms.intern("NEGATIVE_INFINITY");
     const neg_inf_box = try ctx.gc_state.allocFloat(-std.math.inf(f64));
     try ctx.setPropertyChecked(number_obj, neg_inf_atom, value.JSValue.fromPtr(neg_inf_box));
+    try ctx.builtin_objects.append(allocator,number_obj);
 
     // Register Number on global (predefined atom)
     try ctx.setGlobal(.Number, number_obj.toValue());
 
     // Also register parseFloat and parseInt globally (JS convention)
+    // Note: these are functions directly on global, not container objects.
+    // They will be destroyed by global_obj.destroyBuiltin, so don't add to builtin_objects.
     const global_parse_float_atom = try ctx.atoms.intern("parseFloat");
     const parse_float_func = try object.JSObject.createNativeFunction(allocator, root_class, wrap(numberParseFloat), global_parse_float_atom, 1);
     try ctx.setGlobal(global_parse_float_atom, parse_float_func.toValue());
@@ -3002,8 +3013,10 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, map_proto, "has", wrap(mapHas), 1);
     try addMethodDynamic(ctx, map_proto, "delete", wrap(mapDelete), 1);
     try addMethodDynamic(ctx, map_proto, "clear", wrap(mapClear), 0);
+    try ctx.builtin_objects.append(allocator,map_proto);
 
     // Create Map constructor
+    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     const map_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(mapConstructor), .Map, 0);
     try ctx.setPropertyChecked(map_ctor, .prototype, map_proto.toValue());
     try ctx.setGlobal(.Map, map_ctor.toValue());
@@ -3014,8 +3027,10 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, set_proto, "has", wrap(setHas), 1);
     try addMethodDynamic(ctx, set_proto, "delete", wrap(setDelete), 1);
     try addMethodDynamic(ctx, set_proto, "clear", wrap(setClear), 0);
+    try ctx.builtin_objects.append(allocator,set_proto);
 
     // Create Set constructor
+    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     const set_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(setConstructor), .Set, 0);
     try ctx.setPropertyChecked(set_ctor, .prototype, set_proto.toValue());
     try ctx.setGlobal(.Set, set_ctor.toValue());
@@ -3042,14 +3057,17 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setPropertyChecked(response_ctor, redirect_atom, redirect_func.toValue());
 
     // Register Response on global (predefined atom)
+    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     try ctx.setGlobal(.Response, response_ctor.toValue());
 
     // Register h() - hyperscript function for JSX
+    // Standalone function on global - destroyed by global_obj.destroyBuiltin
     const h_atom: object.Atom = .h;
     const h_func = try object.JSObject.createNativeFunction(allocator, root_class, http.h, h_atom, 2);
     try ctx.setGlobal(h_atom, h_func.toValue());
 
     // Register renderToString() for SSR
+    // Standalone function on global - destroyed by global_obj.destroyBuiltin
     const render_atom: object.Atom = .renderToString;
     const render_func = try object.JSObject.createNativeFunction(allocator, root_class, http.renderToString, render_atom, 1);
     try ctx.setGlobal(render_atom, render_func.toValue());
@@ -3062,11 +3080,13 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Register Date object with Date.now()
     const date_obj = try object.JSObject.create(allocator, root_class, null);
     try addMethodDynamic(ctx, date_obj, "now", wrap(dateNow), 0);
+    try ctx.builtin_objects.append(allocator,date_obj);
     try ctx.setGlobal(.Date, date_obj.toValue());
 
     // Register performance object with performance.now()
     const performance_obj = try object.JSObject.create(allocator, root_class, null);
     try addMethodDynamic(ctx, performance_obj, "now", wrap(performanceNow), 0);
+    try ctx.builtin_objects.append(allocator,performance_obj);
     const performance_atom = try ctx.atoms.intern("performance");
     try ctx.setGlobal(performance_atom, performance_obj.toValue());
 
@@ -3103,6 +3123,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_ctor, "isArray", wrap(arrayIsArray), 1);
     try addMethodDynamic(ctx, array_ctor, "from", wrap(arrayFrom), 1);
     try addMethodDynamic(ctx, array_ctor, "of", wrap(arrayOf), 0);
+    try ctx.builtin_objects.append(allocator,array_ctor);
     try ctx.setGlobal(.Array, array_ctor.toValue());
 
     // ========================================================================
@@ -3136,14 +3157,17 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const string_ctor = try object.JSObject.create(allocator, root_class, null);
     // String.fromCharCode static method
     try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrap(stringFromCharCode), 1);
+    try ctx.builtin_objects.append(allocator,string_ctor);
     try ctx.setGlobal(.String, string_ctor.toValue());
 
     // Create RegExp prototype with test/exec methods
     const regexp_proto = try object.JSObject.create(allocator, root_class, null);
     try addMethodDynamic(ctx, regexp_proto, "test", wrap(regExpTest), 1);
     try addMethodDynamic(ctx, regexp_proto, "exec", wrap(regExpExec), 1);
+    try ctx.builtin_objects.append(allocator,regexp_proto);
 
     // Create RegExp constructor
+    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     const regexp_ctor = try object.JSObject.createNativeFunction(allocator, root_class, wrap(regExpConstructor), .RegExp, 2);
     try ctx.setPropertyChecked(regexp_ctor, .prototype, regexp_proto.toValue());
     try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
@@ -3164,6 +3188,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, result_obj, root_class, .ok, wrap(resultOk), 1);
     try addMethod(ctx, allocator, result_obj, root_class, .err, wrap(resultErr), 1);
     try ctx.setPropertyChecked(result_obj, .prototype, result_proto.toValue());
+    try ctx.builtin_objects.append(allocator,result_obj);
     try ctx.setGlobal(.Result, result_obj.toValue());
 
     // Store Result prototype on context for creating Result instances

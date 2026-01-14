@@ -385,6 +385,9 @@ pub const Runtime = struct {
         );
         try console_obj.setProperty(self.allocator, error_atom, error_func.toValue());
 
+        // Track for cleanup in Context.deinit
+        try self.ctx.builtin_objects.append(self.allocator, console_obj);
+
         // Register on global
         try self.ctx.setGlobal(.console, console_obj.toValue());
     }
