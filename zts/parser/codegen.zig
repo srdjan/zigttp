@@ -162,12 +162,45 @@ pub const CodeGen = struct {
     }
 
     pub fn deinit(self: *CodeGen) void {
+        // Free heap-allocated objects stored in constants before freeing the array
+        self.freeConstantsContents(self.constants.items);
         self.code.deinit(self.allocator);
         self.constants.deinit(self.allocator);
         self.upvalue_info.deinit(self.allocator);
         self.labels.deinit(self.allocator);
         self.pending_jumps.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
+    }
+
+    /// Free heap-allocated objects stored in constants array (FunctionBytecode, Float64Box)
+    fn freeConstantsContents(self: *CodeGen, constants: []const JSValue) void {
+        for (constants) |val| {
+            if (!val.isPtr()) continue;
+
+            // Check if it's a FunctionBytecode (nested function)
+            if (val.isFunction()) {
+                const func_bc = val.toPtr(FunctionBytecode);
+                // Recursively free nested constants
+                self.freeConstantsContents(func_bc.constants);
+                // Free the duped slices
+                if (func_bc.code.len > 0) {
+                    self.allocator.free(func_bc.code);
+                }
+                if (func_bc.constants.len > 0) {
+                    self.allocator.free(func_bc.constants);
+                }
+                if (func_bc.upvalue_info.len > 0) {
+                    self.allocator.free(func_bc.upvalue_info);
+                }
+                // Free the FunctionBytecode struct itself
+                self.allocator.destroy(func_bc);
+            } else if (val.isFloat64()) {
+                // Free Float64Box allocations
+                const float_box = val.toPtr(JSValue.Float64Box);
+                self.allocator.destroy(float_box);
+            }
+            // Note: Strings are managed by StringTable, don't free them here
+        }
     }
 
     /// Generate bytecode for the entire program
@@ -219,7 +252,7 @@ pub const CodeGen = struct {
         // Get upvalue info from scope
         const scope = self.scopes.getScope(scope_id);
         var upvalue_info_list: std.ArrayList(UpvalueInfo) = .empty;
-        defer upvalue_info_list.deinit(self.allocator);
+        errdefer upvalue_info_list.deinit(self.allocator);
 
         for (scope.upvalues.items) |uv| {
             try upvalue_info_list.append(self.allocator, .{
@@ -227,6 +260,10 @@ pub const CodeGen = struct {
                 .index = uv.outer_slot,
             });
         }
+
+        // Dupe to heap-owned slice to avoid dangling pointer after deinit
+        const upvalue_copy = try self.allocator.dupe(UpvalueInfo, upvalue_info_list.items);
+        upvalue_info_list.deinit(self.allocator);
 
         return .{
             .header = .{ .flags = .{ .optimized = enable_peephole_opt } },
@@ -240,7 +277,7 @@ pub const CodeGen = struct {
                 .has_rest = func.flags.has_rest_param,
             },
             .upvalue_count = @intCast(scope.upvalues.items.len),
-            .upvalue_info = upvalue_info_list.items,
+            .upvalue_info = upvalue_copy,
             .code = self.code.items,
             .constants = self.constants.items,
             .source_map = null,
@@ -1037,10 +1074,16 @@ pub const CodeGen = struct {
             });
         }
 
-        // Create FunctionBytecode on heap
+        // Create FunctionBytecode on heap with errdefer cleanup for error paths
         const func_bc = try self.allocator.create(FunctionBytecode);
+        errdefer self.allocator.destroy(func_bc);
+
         const code_copy = try self.allocator.dupe(u8, self.code.items);
+        errdefer self.allocator.free(code_copy);
+
         const consts_copy = try self.allocator.dupe(JSValue, self.constants.items);
+        errdefer self.allocator.free(consts_copy);
+
         const upvalue_copy = try self.allocator.dupe(UpvalueInfo, upvalue_info_list.items);
 
         func_bc.* = .{

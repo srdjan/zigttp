@@ -79,6 +79,9 @@ pub const Context = struct {
     /// Optional hybrid allocator for request-scoped allocation
     /// When set, ephemeral allocations use arena, persistent use standard allocator
     hybrid: ?*arena_mod.HybridAllocator,
+    /// Whether to enforce arena escape checking (default true for HTTP handlers)
+    /// Set to false for scripts/benchmarks where arena lifetime matches script lifetime
+    enforce_arena_escape: bool = true,
     /// Reusable buffer for JSON serialization to reduce allocations
     json_writer: std.Io.Writer.Allocating,
     /// JIT code allocator for compiled functions (Phase 11)
@@ -135,6 +138,7 @@ pub const Context = struct {
             .catch_depth = 0,
             .config = config,
             .hybrid = null,
+            .enforce_arena_escape = true,
             .json_writer = std.Io.Writer.Allocating.init(allocator),
             .code_allocator = null,
             .builtin_objects = .{},
@@ -247,8 +251,9 @@ pub const Context = struct {
     }
 
     /// Set property with arena escape protection (reject-on-escape)
+    /// Escape checking can be disabled via enforce_arena_escape for scripts/benchmarks
     pub fn setPropertyChecked(self: *Context, obj: *object.JSObject, name: object.Atom, val: value.JSValue) !void {
-        if (self.hybrid != null and !obj.flags.is_arena and self.isEphemeralValue(val)) {
+        if (self.enforce_arena_escape and self.hybrid != null and !obj.flags.is_arena and self.isEphemeralValue(val)) {
             self.throwException(value.JSValue.exception_val);
             return error.ArenaObjectEscape;
         }
@@ -259,8 +264,9 @@ pub const Context = struct {
     }
 
     /// Set array index with arena escape protection (reject-on-escape)
+    /// Escape checking can be disabled via enforce_arena_escape for scripts/benchmarks
     pub fn setIndexChecked(self: *Context, obj: *object.JSObject, index: u32, val: value.JSValue) !void {
-        if (self.hybrid != null and !obj.flags.is_arena and self.isEphemeralValue(val)) {
+        if (self.enforce_arena_escape and self.hybrid != null and !obj.flags.is_arena and self.isEphemeralValue(val)) {
             self.throwException(value.JSValue.exception_val);
             return error.ArenaObjectEscape;
         }

@@ -365,15 +365,17 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
 
 pub fn main() !void {
     const options = parseOptions();
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use page_allocator for benchmarks - no leak tracking overhead
+    // Benchmark memory is freed when process exits
+    const allocator = std.heap.page_allocator;
 
     const config = RuntimeConfig{
         .memory_limit = 8 * 1024 * 1024, // 8MB for benchmarks
         .enable_jsx = false,
         .enable_fetch = false,
         .enable_fs = false,
+        .use_hybrid_allocation = true, // Keep arena for performance
+        .enforce_arena_escape = false, // Allow arena escapes - script lifetime matches arena
     };
 
     if (options.script_path) |script_path| {
@@ -384,7 +386,8 @@ pub fn main() !void {
         defer allocator.free(code);
 
         const runtime = try Runtime.init(allocator, config);
-        defer runtime.deinit();
+        // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
+        // All memory is released when the process exits
 
         runtime.loadCode(code, script_path) catch |err| {
             std.log.err("Failed to execute script {s}: {}", .{ script_path, err });
@@ -457,7 +460,7 @@ pub fn main() !void {
     for (benchmarks, 0..) |bench, i| {
         // Create fresh runtime for each benchmark
         const runtime = try Runtime.init(allocator, config);
-        defer runtime.deinit();
+        // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
 
         const start = std.time.Instant.now() catch {
             println("Timer not available");

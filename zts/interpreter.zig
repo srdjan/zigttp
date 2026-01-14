@@ -1226,7 +1226,7 @@ pub const Interpreter = struct {
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
                         const pic = &self.pic_cache[cache_idx];
-                        if (self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
+                        if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
                             return error.ArenaObjectEscape;
                         }
 
@@ -1485,7 +1485,7 @@ pub const Interpreter = struct {
                                 // Copy each element from source to target
                                 for (0..src_len) |i| {
                                     const elem = source.getSlot(@intCast(i));
-                                    if (self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
+                                    if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
                                         return error.ArenaObjectEscape;
                                     }
                                     target.setSlot(@intCast(idx), elem);

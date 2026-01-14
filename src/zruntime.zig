@@ -57,6 +57,10 @@ pub const RuntimeConfig = struct {
 
     /// Arena size when hybrid allocation is enabled (default 1MB)
     arena_size: usize = 1024 * 1024,
+
+    /// Enforce arena escape checking (default: true for HTTP handlers)
+    /// Set to false for scripts/benchmarks where arena lifetime matches script lifetime
+    enforce_arena_escape: bool = true,
 };
 
 // ============================================================================
@@ -248,6 +252,9 @@ pub const Runtime = struct {
         // Initialize context
         const ctx = try zq.Context.init(allocator, gc_state, .{});
         errdefer ctx.deinit();
+
+        // Configure arena escape checking (disabled for scripts/benchmarks)
+        ctx.enforce_arena_escape = config.enforce_arena_escape;
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(ctx);

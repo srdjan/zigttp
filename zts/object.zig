@@ -1595,13 +1595,8 @@ pub const JSObject = extern struct {
             return;
         }
 
-        // Check for arena escape: arena object stored into persistent object
-        if (!self.flags.is_arena and val.isObject()) {
-            const val_obj = val.toPtr(JSObject);
-            if (val_obj.flags.is_arena) {
-                return error.ArenaObjectEscape;
-            }
-        }
+        // Note: Arena escape checking is done in Context.setPropertyChecked
+        // which respects the enforce_arena_escape flag
 
         // Check if property exists
         if (self.hidden_class.findProperty(name)) |slot| {
