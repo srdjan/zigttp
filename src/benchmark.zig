@@ -374,7 +374,6 @@ pub fn main() !void {
         .enable_jsx = false,
         .enable_fetch = false,
         .enable_fs = false,
-        .use_hybrid_allocation = true, // Enable arena for leak-free benchmarks
     };
 
     if (options.script_path) |script_path| {

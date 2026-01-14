@@ -51,8 +51,9 @@ pub const RuntimeConfig = struct {
     /// GC nursery size
     nursery_size: usize = 64 * 1024,
 
-    /// Use hybrid arena allocation for ephemeral values (recommended for benchmarks)
-    use_hybrid_allocation: bool = false,
+    /// Use hybrid arena allocation for ephemeral values (default: true)
+    /// Set to false only if you need GC-managed strings (note: has leak issues)
+    use_hybrid_allocation: bool = true,
 
     /// Arena size when hybrid allocation is enabled (default 1MB)
     arena_size: usize = 1024 * 1024,
