@@ -45,6 +45,7 @@ pub const comptime_eval = @import("comptime.zig");
 pub const intern_pool = @import("intern_pool.zig");
 pub const bytecode_cache = @import("bytecode_cache.zig");
 pub const bytecode_opt = @import("bytecode_opt.zig");
+pub const arena = @import("arena.zig");
 // Optional/experimental modules (not wired into runtime by default)
 pub const perf = @import("perf.zig");
 pub const jit = @import("jit/root.zig");
@@ -141,10 +142,10 @@ test "version" {
 }
 
 test "create and destroy context" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
 
-    const allocator = arena.allocator();
+    const allocator = test_arena.allocator();
     const ctx = try createContext(allocator, .{ .nursery_size = 4096 });
     defer destroyContext(ctx);
 

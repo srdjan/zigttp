@@ -50,6 +50,12 @@ pub const RuntimeConfig = struct {
     // Internal zts settings
     /// GC nursery size
     nursery_size: usize = 64 * 1024,
+
+    /// Use hybrid arena allocation for ephemeral values (recommended for benchmarks)
+    use_hybrid_allocation: bool = false,
+
+    /// Arena size when hybrid allocation is enabled (default 1MB)
+    arena_size: usize = 1024 * 1024,
 };
 
 // ============================================================================
@@ -214,6 +220,9 @@ pub const Runtime = struct {
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
     last_request_body_len: usize,
+    // Hybrid allocation support
+    arena_state: ?*zq.arena.Arena,
+    hybrid_state: ?*zq.arena.HybridAllocator,
 
     const Self = @This();
 
@@ -242,6 +251,25 @@ pub const Runtime = struct {
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(ctx);
 
+        // Initialize hybrid allocation if enabled
+        var arena_state: ?*zq.arena.Arena = null;
+        var hybrid_state: ?*zq.arena.HybridAllocator = null;
+
+        if (config.use_hybrid_allocation) {
+            arena_state = try allocator.create(zq.arena.Arena);
+            errdefer allocator.destroy(arena_state.?);
+            arena_state.?.* = try zq.arena.Arena.init(allocator, .{ .size = config.arena_size });
+            errdefer arena_state.?.deinit();
+
+            hybrid_state = try allocator.create(zq.arena.HybridAllocator);
+            errdefer allocator.destroy(hybrid_state.?);
+            hybrid_state.?.* = .{
+                .persistent = allocator,
+                .arena = arena_state.?,
+            };
+            ctx.setHybridAllocator(hybrid_state.?);
+        }
+
         self.* = .{
             .allocator = allocator,
             .ctx = ctx,
@@ -254,6 +282,8 @@ pub const Runtime = struct {
             .owns_resources = true,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
+            .arena_state = arena_state,
+            .hybrid_state = hybrid_state,
         };
 
         // Install built-in bindings
@@ -281,6 +311,9 @@ pub const Runtime = struct {
             .owns_resources = false,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
+            // Pool runtimes manage their own hybrid allocation
+            .arena_state = null,
+            .hybrid_state = null,
         };
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
@@ -293,6 +326,14 @@ pub const Runtime = struct {
     pub fn deinit(self: *Self) void {
         self.strings.deinit();
         if (self.owns_resources) {
+            // Clean up hybrid allocation state
+            if (self.arena_state) |a| {
+                a.deinit();
+                self.allocator.destroy(a);
+            }
+            if (self.hybrid_state) |h| {
+                self.allocator.destroy(h);
+            }
             self.ctx.deinit();
             self.gc_state.deinit();
             self.heap.deinit();

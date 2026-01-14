@@ -2198,11 +2198,19 @@ pub const Interpreter = struct {
     fn concatToString(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Convert a to string
         const str_a = try self.valueToString(a);
-        defer if (!a.isString()) string.freeString(self.ctx.allocator, str_a);
+        // Only free temp strings in non-hybrid mode (arena handles cleanup in hybrid mode)
+        defer if (self.ctx.hybrid == null and !a.isString()) string.freeString(self.ctx.allocator, str_a);
 
         // Convert b to string
         const str_b = try self.valueToString(b);
-        defer if (!b.isString()) string.freeString(self.ctx.allocator, str_b);
+        defer if (self.ctx.hybrid == null and !b.isString()) string.freeString(self.ctx.allocator, str_b);
+
+        // Use arena when hybrid mode is enabled
+        if (self.ctx.hybrid) |h| {
+            const result = string.concatStringsWithArena(h.arena, str_a, str_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
 
         // Concatenate
         const result = try string.concatStrings(self.ctx.allocator, str_a, str_b);

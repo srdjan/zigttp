@@ -535,6 +535,35 @@ pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString 
     return str;
 }
 
+/// Concatenate two strings using arena allocation
+pub fn concatStringsWithArena(arena: *arena_mod.Arena, a: *const JSString, b: *const JSString) ?*JSString {
+    const total_len = a.len + b.len;
+    const total_size = @sizeOf(JSString) + total_len;
+    const mem = arena.alloc(total_size) orelse return null;
+
+    const str: *JSString = @ptrCast(@alignCast(mem));
+    const data_a = a.data();
+    const data_b = b.data();
+
+    str.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = a.flags.is_ascii and b.flags.is_ascii,
+            .is_numeric = false,
+        },
+        .len = total_len,
+        .hash = 0,
+    };
+
+    const data_mut = str.dataMut();
+    @memcpy(data_mut[0..a.len], data_a);
+    @memcpy(data_mut[a.len..], data_b);
+    str.hash = hashString(str.data());
+
+    return str;
+}
+
 /// Concatenate two strings
 pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
     const total_len = a.len + b.len;

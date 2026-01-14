@@ -762,7 +762,8 @@ fn valueToJsonScratch(ctx: *context.Context, val: value.JSValue) ![]const u8 {
 pub fn valueToJsonString(ctx: *context.Context, val: value.JSValue) !*string.JSString {
     const json = try valueToJsonScratch(ctx, val);
     // Copy into JSString storage (buffer reused for subsequent calls).
-    const js_str = try string.createString(ctx.allocator, json);
+    // Use arena when hybrid mode is enabled.
+    const js_str = try ctx.createStringPtr(json);
     ctx.json_writer.clearRetainingCapacity();
     return js_str;
 }

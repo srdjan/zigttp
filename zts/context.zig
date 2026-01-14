@@ -517,10 +517,14 @@ pub const Context = struct {
         if (a.isString() or b.isString()) {
             const str_a = self.jitValueToString(a) catch return self.jitThrow();
             const str_b = self.jitValueToString(b) catch return self.jitThrow();
-            if (self.hybrid == null) {
-                defer if (!a.isString()) string.freeString(self.allocator, str_a);
-                defer if (!b.isString()) string.freeString(self.allocator, str_b);
+            // Use arena when available
+            if (self.hybrid) |h| {
+                const result = string.concatStringsWithArena(h.arena, str_a, str_b) orelse return self.jitThrow();
+                return value.JSValue.fromPtr(result);
             }
+            // Non-hybrid: clean up temp strings and use raw allocator
+            defer if (!a.isString()) string.freeString(self.allocator, str_a);
+            defer if (!b.isString()) string.freeString(self.allocator, str_b);
             const result = string.concatStrings(self.allocator, str_a, str_b) catch return self.jitThrow();
             return value.JSValue.fromPtr(result);
         }
