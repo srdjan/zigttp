@@ -26,6 +26,75 @@ This document maps the proposed high-performance architecture to the existing co
 - **Profiling hooks**: Execution count drives compilation. Back-edge counting (`LOOP_THRESHOLD = 1000`) is tracked but not used for compilation. PIC hit/miss counters are interpreter-only.
 - **Controls**: JIT can be disabled with `ZTS_DISABLE_JIT`. Tests can disable via `ZTS_DISABLE_JIT_TESTS` / `disableJitForTests()` (multi-threaded stability caution).
 
+### Baseline JIT Supported Opcodes (compileOpcode switch)
+
+Any opcode not listed below triggers `UnsupportedOpcode` and the function stays interpreted.
+
+| Category | Opcodes |
+| --- | --- |
+| Stack/constants | `nop`, `push_const`, `push_0`, `push_1`, `push_2`, `push_3`, `push_i8`, `push_null`, `push_undefined`, `push_true`, `push_false`, `dup`, `dup2`, `drop`, `swap`, `rot3` |
+| Locals | `get_loc`, `get_loc_0`, `get_loc_1`, `get_loc_2`, `get_loc_3`, `put_loc`, `put_loc_0`, `put_loc_1`, `put_loc_2`, `put_loc_3` |
+| Arithmetic | `add`, `sub`, `mul`, `div`, `mod`, `pow`, `neg`, `inc`, `dec` |
+| Comparisons | `lt`, `lte`, `gt`, `gte`, `eq`, `neq`, `strict_eq`, `strict_neq` |
+| Control flow | `goto`, `if_true`, `if_false`, `loop`, `ret`, `ret_undefined` |
+| Objects/fields | `new_object`, `new_array`, `get_field`, `get_field_ic`, `put_field`, `put_field_keep`, `put_field_ic`, `get_elem`, `put_elem`, `get_global`, `put_global`, `get_field_call` |
+| Calls | `call`, `call_method`, `tail_call`, `push_const_call` |
+| Bitwise/type/logical | `bit_and`, `bit_or`, `bit_xor`, `bit_not`, `shl`, `shr`, `ushr`, `typeof`, `not` |
+| Iteration | `for_of_next`, `for_of_next_put_loc` |
+| Super/inline ops | `get_loc_add`, `get_loc_get_loc_add`, `if_false_goto`, `add_mod`, `sub_mod`, `mul_mod`, `mod_const`, `mod_const_i8`, `add_const_i8`, `sub_const_i8`, `mul_const_i8`, `lt_const_i8`, `le_const_i8`, `shr_1`, `mul_2` |
+
+### Coverage Gaps (still interpreted)
+
+The following opcodes are present in `zts/bytecode.zig` but not compiled by the baseline JIT today:
+
+- **Stack/fast-path**: `push_i16`, `halt`, `get_length`.
+- **Delete/define**: `delete_field`, `delete_elem`, `define_global`.
+- **Functions/closures**: `make_function`, `get_upvalue`, `put_upvalue`, `close_upvalue`, `make_closure`.
+- **Spread & dynamic call**: `array_spread`, `call_spread`, `call_ic`.
+- **Type & modules**: `instanceof`, `import_module`, `import_name`, `import_default`, `export_name`, `export_default`.
+- **Async**: `await_val`, `make_async`.
+
+Impact: any function using these opcodes will remain interpreted (even after hitting the JIT threshold), so hot paths should avoid them until baseline coverage expands.
+
+### Performance Counters and Benchmark Expectations
+
+- **Instrumentation**: `zts/perf.zig` provides `CompileStats` and `RuntimeStats`, gated by compile-time flags (`enable_perf_stats`, `enable_opcode_profiling`). Use this for compile-time cost breakdown and runtime instruction/call counts.
+- **JIT microbenchmarks**: `benchmarks/jit/` contains focused scripts with a runner (`benchmarks/jit/run.sh`) and recorded baselines (see `benchmarks/jit/baseline-2026-01-13*.txt`). These are machine-specific; compare relative deltas, not absolute numbers.
+- **Expected behavior**:
+  - Cold start: JIT rarely triggers (threshold 100 calls). Favor bytecode cache for latency.
+  - Warm path: tight arithmetic, simple branches, property access, and call-heavy loops should benefit once baseline JIT compiles.
+  - Mixed features (closures, modules, async, spread): stay interpreted until baseline coverage expands.
+
+### Common JS Patterns -> Likely Gaps
+
+These patterns *may* emit unsupported opcodes and therefore stay interpreted under the current baseline JIT:
+
+| JS pattern | Likely opcode(s) |
+| --- | --- |
+| Large integer literal or tight loops with wide immediates | `push_i16` |
+| `.length` fast path on arrays/strings/ranges | `get_length` |
+| `delete obj.prop` / `delete obj[key]` | `delete_field`, `delete_elem` |
+| `let f = function() {}` / `() => {}` / nested functions | `make_function` |
+| Closures capturing outer locals | `make_closure`, `get_upvalue`, `put_upvalue`, `close_upvalue` |
+| `arr = [...other]` or `[...a, ...b]` | `array_spread` |
+| `fn(...args)` / `obj.method(...args)` | `call_spread` |
+| Heavily polymorphic call sites (inline call cache) | `call_ic` |
+| `value instanceof Ctor` | `instanceof` |
+| `async function` / `await` | `make_async`, `await_val` |
+| `import` / `export` in modules | `import_module`, `import_name`, `import_default`, `export_name`, `export_default` |
+
+Guidance: For hot FaaS paths, keep handlers simple (no closures/async/spread) and prefer straight-line arithmetic and property access until baseline JIT coverage expands.
+
+### JIT-Friendly Handler Style Guide (FaaS Hot Path)
+
+- Keep handlers **flat**: avoid nested functions and closures for the hot path.
+- Avoid `async/await` in latency-sensitive handlers; prefer sync logic or move async work behind feature flags.
+- Prefer direct calls (`fn(x)`) over spread (`fn(...args)`).
+- Avoid `delete` and `instanceof` in tight loops.
+- Use simple loops and straight-line math; avoid large immediate constants that force `push_i16`.
+- Prefer property access with fixed keys over highly dynamic access patterns.
+- Keep object shapes stable (avoid adding/removing fields after creation).
+
 ## Target Architecture
 
 ### 1) I/O + Concurrency
