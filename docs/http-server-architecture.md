@@ -11,9 +11,20 @@ This document maps the proposed high-performance architecture to the existing co
 
 ## Baseline (Current Code)
 
-- `src/server.zig`: evented IO with `std.Io`, per-connection arena reset; HTTP/1.1 parser uses line reads; static cache implemented with LRU.
-- `src/zruntime.zig`: lock-free runtime pool backed by `zts.LockFreePool`, hybrid allocation, bytecode cache placeholder.
-- `zts/*`: GC, parser, bytecode cache, intern pool already present.
+- `src/server.zig`: evented IO via `std.Io` on non-Apple targets; threaded IO on Apple platforms. Keep-alive loop with per-connection arena reset. HTTP/1.1 parser uses buffered line reads + batch string storage. Static file cache with LRU and `sendFileAll` streaming for large files.
+- `src/zruntime.zig`: lock-free runtime pool (`zts.LockFreePool`) with prewarm, adaptive backoff on acquire, and per-request GC reset. Borrowed-response path is already wired in the server. Hybrid allocation is enabled for request-scoped memory.
+- `zts/bytecode_cache.zig`: supports atom-aware serialization/deserialization. `Runtime.loadFromCachedBytecode()` exists, but `HandlerPool` still parses on every runtime init (cache not wired into pool yet).
+- `zts/*`: GC, parser, intern pool, and baseline JIT (Phase 11) are present.
+
+## JIT Implementation (Current State)
+
+- **Tiering**: Bytecode functions start in `.interpreted`, move to `.baseline_candidate` at `JIT_THRESHOLD = 100` calls, and compile to `.baseline` if supported. `.optimized` is defined but not implemented.
+- **Compiler**: Baseline JIT eliminates interpreter dispatch only (no type specialization). Unsupported opcodes return `UnsupportedOpcode` and the function remains interpreted.
+- **Architectures**: x86-64 (SysV ABI) and AArch64 (Apple ABI) emitters. Other architectures are compile errors for JIT.
+- **Executable memory**: Per-context `CodeAllocator` (lazy init). macOS uses `MAP_JIT` + `pthread_jit_write_protect_np` for W^X compliance; Linux uses `mprotect` RW↔RX.
+- **Semantics**: Compiled code calls `Context` helpers (`jitAdd`, `jitGetField`, `jitCall`, etc.) for full JS semantics. No inline caches in JIT yet.
+- **Profiling hooks**: Execution count drives compilation. Back-edge counting (`LOOP_THRESHOLD = 1000`) is tracked but not used for compilation. PIC hit/miss counters are interpreter-only.
+- **Controls**: JIT can be disabled with `ZTS_DISABLE_JIT`. Tests can disable via `ZTS_DISABLE_JIT_TESTS` / `disableJitForTests()` (multi-threaded stability caution).
 
 ## Target Architecture
 
@@ -24,7 +35,7 @@ This document maps the proposed high-performance architecture to the existing co
 - Prefer per-thread pools and queues; avoid global locks in hot path.
 
 Implementation mapping:
-- `src/server.zig`: add backend selection by platform, add per-thread runtime pool shard, and use `Io.Group` per reactor.
+- `src/server.zig`: backend selection by platform already present; add per-thread runtime pool shard and per-reactor `Io.Group`.
 - `src/zruntime.zig`: add `HandlerPoolShard` (one per core) with local lock-free queues.
 
 ### 2) HTTP Parsing (Zero-Copy, SIMD-aware)
@@ -44,8 +55,8 @@ Implementation mapping:
 - Prepare for true bytecode cache hits: serialized bytecode + atoms.
 
 Implementation mapping:
-- `src/zruntime.zig`: shard pool by core; add `executeHandlerBorrowed` as default in server; implement bytecode cache with atoms.
-- `zts/bytecode_cache.zig`: expose a fast deserialization path that bypasses parser.
+- `src/zruntime.zig`: shard pool by core; borrowed-response path is already the server default; wire bytecode cache into `HandlerPool`.
+- `zts/bytecode_cache.zig`: atom-aware fast deserialization exists; integrate into runtime initialization.
 
 ### 4) Allocation Strategy (Predictable)
 
@@ -73,6 +84,17 @@ Implementation mapping:
 Implementation mapping:
 - `src/zruntime.zig`: expose a request-local GC hint; update thresholds based on request size and runtime memory pressure.
 - `zts/gc.zig`: optional API to update nursery thresholds dynamically.
+
+### 7) JIT Strategy (FaaS-Aware)
+
+- Keep baseline JIT as a warm-path accelerator; avoid JIT compilation on cold start unless handler is long-lived.
+- Use bytecode cache for cold start, then allow JIT promotion on hot paths (post-first request).
+- Expand supported opcode set and use PIC feedback for a future optimized tier.
+
+Implementation mapping:
+- `zts/interpreter.zig`: decide whether to allow JIT promotion on first request (configurable).
+- `zts/jit/baseline.zig`: expand opcode coverage; add lightweight guards for common hot paths.
+- `src/zruntime.zig`: expose JIT policy knobs (disable, threshold override, warmup).
 
 ## Concrete Code Patterns
 
@@ -140,8 +162,8 @@ const Shard = struct {
    - Files: `src/server.zig`.
 
 2) **Borrowed response default**
-   - Switch server to `executeHandlerBorrowed` and delay runtime reset.
-   - Ensure response send happens before release.
+   - Already in place: server uses `executeHandlerBorrowed` and releases after send.
+   - Audit edge cases (error paths) to ensure runtime reset happens after response send.
    - Files: `src/server.zig`, `src/zruntime.zig`.
 
 3) **Pool sharding + fast acquire**
@@ -150,9 +172,9 @@ const Shard = struct {
    - Files: `src/server.zig`, `src/zruntime.zig`.
 
 4) **Bytecode cache true hit path**
-   - Serialize bytecode + atoms at compile time; cache per handler hash.
-   - On cold start, load bytecode without parsing.
-   - Files: `zts/bytecode_cache.zig`, `src/zruntime.zig`.
+   - Atom-aware serialization/deserialization exists; wire it into `HandlerPool`.
+   - Use `Runtime.loadFromCachedBytecode()` on cache hit.
+   - Files: `src/zruntime.zig`, `zts/bytecode_cache.zig`.
 
 5) **Static file improvements**
    - ETag/Last-Modified; handle 304.
@@ -163,6 +185,12 @@ const Shard = struct {
    - Add API to set per-request GC thresholds.
    - Adjust nursery size based on request body length.
    - Files: `zts/gc.zig`, `src/zruntime.zig`.
+
+7) **JIT policy + coverage**
+   - Add runtime config for JIT enable/threshold (override `JIT_THRESHOLD` per deployment).
+   - Defer JIT promotion during cold start; enable after N requests or warmup.
+   - Expand baseline opcode coverage and consider PIC-driven optimized tier.
+   - Files: `zts/interpreter.zig`, `zts/jit/baseline.zig`, `src/zruntime.zig`.
 
 ## Trade-Offs (FaaS-Oriented)
 

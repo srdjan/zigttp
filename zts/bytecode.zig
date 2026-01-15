@@ -709,7 +709,8 @@ pub const CodeVersion = struct {
 
     /// Increment reference count
     pub fn retain(self: *CodeVersion) void {
-        _ = self.ref_count.fetchAdd(1, .monotonic);
+        // Use acq_rel to match release() and ensure visibility across threads
+        _ = self.ref_count.fetchAdd(1, .acq_rel);
     }
 
     /// Decrement reference count, destroy when it reaches 0
@@ -1025,4 +1026,71 @@ test "HotReloadManager epoch tracking" {
 
     // Collect should clean up (only manager reference remains)
     manager.collectOldVersions();
+}
+
+test "CodeVersion concurrent retain/release" {
+    const allocator = std.testing.allocator;
+
+    // Create bytecode
+    const code = try allocator.alloc(u8, 2);
+    code[0] = @intFromEnum(Opcode.push_0);
+    code[1] = @intFromEnum(Opcode.ret);
+
+    const bc = try allocator.create(FunctionBytecode);
+    bc.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    // Create CodeVersion with initial ref_count = 1
+    const cv = try CodeVersion.create(allocator, bc, 1, true);
+
+    // We need an extra reference to keep cv alive during the test
+    cv.retain(); // ref_count = 2
+
+    const thread_count: usize = 8;
+    const iterations: usize = 100;
+
+    const ThreadCtx = struct {
+        cv: *CodeVersion,
+    };
+
+    const Worker = struct {
+        fn run(ctx: *ThreadCtx) void {
+            for (0..iterations) |_| {
+                ctx.cv.retain();
+                // Small delay to increase chance of interleaving
+                std.atomic.spinLoopHint();
+                ctx.cv.release();
+            }
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    var contexts: [thread_count]ThreadCtx = undefined;
+    for (0..thread_count) |i| {
+        contexts[i] = .{ .cv = cv };
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{&contexts[i]}) catch unreachable;
+    }
+    for (threads) |t| t.join();
+
+    // After all threads complete, ref_count should be exactly 2
+    // (initial + our extra retain)
+    const final_count = cv.getRefCount();
+    try std.testing.expectEqual(@as(u32, 2), final_count);
+
+    // Release our extra reference
+    cv.release(); // ref_count = 1
+
+    // Release the original reference (should trigger destroy)
+    cv.release(); // ref_count = 0, destroyed
 }

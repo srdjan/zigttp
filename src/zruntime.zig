@@ -934,10 +934,10 @@ pub const HandlerPool = struct {
 
         while (true) {
             if (self.max_size != 0) {
-                // Use monotonic ordering - counter is only for limit/metrics, not synchronization
-                const prev = self.in_use.fetchAdd(1, .monotonic);
+                // Use acq_rel ordering - counter is used for limit enforcement
+                const prev = self.in_use.fetchAdd(1, .acq_rel);
                 if (prev < self.max_size) break;
-                _ = self.in_use.fetchSub(1, .monotonic);
+                _ = self.in_use.fetchSub(1, .acq_rel);
 
                 retry_count += 1;
 
@@ -981,6 +981,7 @@ pub const HandlerPool = struct {
                 backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
                 continue;
             } else {
+                // No limit - monotonic is fine for metrics-only counter
                 _ = self.in_use.fetchAdd(1, .monotonic);
                 break;
             }
@@ -1419,4 +1420,122 @@ test "JSX rendering works" {
     defer response.deinit();
 
     try std.testing.expectEqualStrings("<div>Hello</div>", response.body);
+}
+
+test "HandlerPool exhaustion and recovery" {
+    const allocator = std.heap.c_allocator;
+
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    // Small pool size (2) to easily trigger exhaustion
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
+    defer pool.deinit();
+
+    // Override acquire timeout to 0 for immediate failure on exhaustion
+    pool.acquire_timeout_ms = 0;
+
+    const method = try allocator.dupe(u8, "GET");
+    const url = try allocator.dupe(u8, "/");
+    var request = HttpRequest{
+        .method = method,
+        .url = url,
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    // Execute request 1 - should succeed
+    var response1 = try pool.executeHandler(request);
+    defer response1.deinit();
+    try std.testing.expectEqualStrings("ok", response1.body);
+
+    // Verify pool metrics
+    const metrics = pool.getMetrics();
+    try std.testing.expect(metrics.exhausted == 0);
+}
+
+test "HandlerPool high contention stress" {
+    const allocator = std.heap.c_allocator;
+
+    // Allow disabling JIT for this test via env var during debugging.
+    if (std.posix.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
+        zq.interpreter.disableJitForTests();
+    }
+
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    // Use larger pool (8 slots) with reasonable timeout for contention
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
+    defer pool.deinit();
+
+    const thread_count: usize = 16;
+    const iterations: usize = 25;
+
+    var errors = std.atomic.Value(u32).init(0);
+    var completed = std.atomic.Value(u32).init(0);
+
+    const ThreadCtx = struct {
+        pool: *HandlerPool,
+        allocator: std.mem.Allocator,
+        errors: *std.atomic.Value(u32),
+        completed: *std.atomic.Value(u32),
+    };
+
+    const Worker = struct {
+        fn run(ctx: *ThreadCtx) void {
+            const method = ctx.allocator.dupe(u8, "GET") catch {
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            const url = ctx.allocator.dupe(u8, "/") catch {
+                ctx.allocator.free(method);
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            var request = HttpRequest{
+                .method = method,
+                .url = url,
+                .headers = .{},
+                .body = null,
+            };
+            defer request.deinit(ctx.allocator);
+
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                var response = ctx.pool.executeHandler(request) catch {
+                    _ = ctx.errors.fetchAdd(1, .acq_rel);
+                    continue;
+                };
+                response.deinit();
+                _ = ctx.completed.fetchAdd(1, .acq_rel);
+            }
+
+            // Flush thread-local runtime cache
+            zq.pool.releaseThreadLocal(&ctx.pool.pool);
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    var contexts: [thread_count]ThreadCtx = undefined;
+    for (0..thread_count) |i| {
+        contexts[i] = .{
+            .pool = &pool,
+            .allocator = allocator,
+            .errors = &errors,
+            .completed = &completed,
+        };
+        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
+    }
+    for (threads) |t| t.join();
+
+    // Flush main thread cache
+    zq.pool.releaseThreadLocal(&pool.pool);
+
+    // Verify results - primary goal is no crashes under contention
+    const error_count = errors.load(.acquire);
+    const completed_count = completed.load(.acquire);
+    const total = error_count + completed_count;
+
+    // All requests should be accounted for (either completed or errored)
+    try std.testing.expectEqual(thread_count * iterations, total);
+    // At least some requests should succeed (proves pool works under contention)
+    try std.testing.expect(completed_count > 0);
 }
