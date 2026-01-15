@@ -145,7 +145,7 @@ fn freeExecutablePage(memory: []align(PAGE_SIZE) u8) void {
 }
 
 fn makePageExecutable(memory: []align(PAGE_SIZE) u8) !void {
-    const prot_rx = std.posix.PROT.READ | std.posix.PROT.EXEC;
+    const prot_rx: std.c.PROT = .{ .READ = true, .EXEC = true };
     if (builtin.os.tag == .macos) {
         // On macOS with MAP_JIT, we need to use pthread_jit_write_protect_np
         // to toggle between write and execute permissions
@@ -154,21 +154,21 @@ fn makePageExecutable(memory: []align(PAGE_SIZE) u8) !void {
             pthread_jit_write_protect_np(true);
         }
         // Also update via mprotect for x86_64 or as fallback
-        std.posix.mprotect(memory, prot_rx) catch return error.MprotectFailed;
+        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rx) != 0) return error.MprotectFailed;
     } else {
-        std.posix.mprotect(memory, prot_rx) catch return error.MprotectFailed;
+        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rx) != 0) return error.MprotectFailed;
     }
 }
 
 fn makePageWritable(memory: []align(PAGE_SIZE) u8) !void {
-    const prot_rw = std.posix.PROT.READ | std.posix.PROT.WRITE;
+    const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     if (builtin.os.tag == .macos) {
         if (builtin.cpu.arch == .aarch64) {
             pthread_jit_write_protect_np(false);
         }
-        std.posix.mprotect(memory, prot_rw) catch return error.MprotectFailed;
+        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rw) != 0) return error.MprotectFailed;
     } else {
-        std.posix.mprotect(memory, prot_rw) catch return error.MprotectFailed;
+        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rw) != 0) return error.MprotectFailed;
     }
 }
 
@@ -184,7 +184,7 @@ fn allocExecutablePageMacOS() ![]align(PAGE_SIZE) u8 {
     const MAP_JIT: u32 = 0x0800;
     const flags_with_jit = @as(u32, @bitCast(flags)) | MAP_JIT;
 
-    const prot_rw = std.posix.PROT.READ | std.posix.PROT.WRITE;
+    const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     const result = std.posix.mmap(
         null,
         PAGE_SIZE,
@@ -198,7 +198,7 @@ fn allocExecutablePageMacOS() ![]align(PAGE_SIZE) u8 {
 }
 
 fn allocExecutablePageLinux() ![]align(PAGE_SIZE) u8 {
-    const prot_rw = std.posix.PROT.READ | std.posix.PROT.WRITE;
+    const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     const result = std.posix.mmap(
         null,
         PAGE_SIZE,

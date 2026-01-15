@@ -2751,66 +2751,57 @@ pub const math_constants = struct {
 pub fn consoleLog(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
-    const stdout = std.fs.File.stdout();
-    var buffer: [1024]u8 = undefined;
-    var file_writer = stdout.writer(&buffer);
-    const writer = &file_writer.interface;
     for (args, 0..) |arg, i| {
-        if (i > 0) writer.writeAll(" ") catch {};
-        printValue(writer, arg) catch {};
+        if (i > 0) writeToFd(std.c.STDOUT_FILENO, " ");
+        printValue(std.c.STDOUT_FILENO, arg);
     }
-    writer.writeAll("\n") catch {};
-    writer.flush() catch {};
+    writeToFd(std.c.STDOUT_FILENO, "\n");
     return value.JSValue.undefined_val;
 }
 
 pub fn consoleWarn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
-    const stderr = std.fs.File.stderr();
-    var buffer: [1024]u8 = undefined;
-    var file_writer = stderr.writer(&buffer);
-    const writer = &file_writer.interface;
-    writer.writeAll("[WARN] ") catch {};
+    writeToFd(std.c.STDERR_FILENO, "[WARN] ");
     for (args, 0..) |arg, i| {
-        if (i > 0) writer.writeAll(" ") catch {};
-        printValue(writer, arg) catch {};
+        if (i > 0) writeToFd(std.c.STDERR_FILENO, " ");
+        printValue(std.c.STDERR_FILENO, arg);
     }
-    writer.writeAll("\n") catch {};
-    writer.flush() catch {};
+    writeToFd(std.c.STDERR_FILENO, "\n");
     return value.JSValue.undefined_val;
 }
 
 pub fn consoleError(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
-    const stderr = std.fs.File.stderr();
-    var buffer: [1024]u8 = undefined;
-    var file_writer = stderr.writer(&buffer);
-    const writer = &file_writer.interface;
-    writer.writeAll("[ERROR] ") catch {};
+    writeToFd(std.c.STDERR_FILENO, "[ERROR] ");
     for (args, 0..) |arg, i| {
-        if (i > 0) writer.writeAll(" ") catch {};
-        printValue(writer, arg) catch {};
+        if (i > 0) writeToFd(std.c.STDERR_FILENO, " ");
+        printValue(std.c.STDERR_FILENO, arg);
     }
-    writer.writeAll("\n") catch {};
-    writer.flush() catch {};
+    writeToFd(std.c.STDERR_FILENO, "\n");
     return value.JSValue.undefined_val;
 }
 
-fn printValue(writer: anytype, val: value.JSValue) !void {
+fn writeToFd(fd: std.c.fd_t, data: []const u8) void {
+    _ = std.c.write(fd, data.ptr, data.len);
+}
+
+fn printValue(fd: std.c.fd_t, val: value.JSValue) void {
     if (val.isInt()) {
-        try writer.print("{d}", .{val.getInt()});
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return;
+        writeToFd(fd, s);
     } else if (val.isNull()) {
-        try writer.writeAll("null");
+        writeToFd(fd, "null");
     } else if (val.isUndefined()) {
-        try writer.writeAll("undefined");
+        writeToFd(fd, "undefined");
     } else if (val.isTrue()) {
-        try writer.writeAll("true");
+        writeToFd(fd, "true");
     } else if (val.isFalse()) {
-        try writer.writeAll("false");
+        writeToFd(fd, "false");
     } else {
-        try writer.writeAll("[object]");
+        writeToFd(fd, "[object]");
     }
 }
 

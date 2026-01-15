@@ -9,6 +9,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 const net = std.Io.net;
+const Dir = std.Io.Dir;
 const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
 const HandlerPool = zruntime.HandlerPool;
@@ -16,6 +17,34 @@ const RuntimeConfig = zruntime.RuntimeConfig;
 const HttpRequest = zruntime.HttpRequest;
 const HttpResponse = zruntime.HttpResponse;
 const HttpHeader = zruntime.HttpHeader;
+
+/// Read a file synchronously using posix operations (for use before Io is initialized)
+fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.posix.close(fd);
+
+    // Get file size using fstat
+    const stat = try std.posix.fstat(fd);
+    const file_size: usize = @intCast(@max(0, stat.size));
+
+    if (file_size > max_size) return error.FileTooBig;
+
+    // Allocate buffer and read
+    const buffer = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(buffer);
+
+    var total_read: usize = 0;
+    while (total_read < file_size) {
+        const bytes_read = try std.posix.read(fd, buffer[total_read..]);
+        if (bytes_read == 0) break;
+        total_read += bytes_read;
+    }
+
+    return buffer[0..total_read];
+}
 
 // ============================================================================
 // Fast Header Normalization
@@ -68,6 +97,269 @@ fn findHeaderEnd(buf: []const u8) ?usize {
     }
     return null;
 }
+
+// ============================================================================
+// Connection Thread Pool (for macOS threaded backend)
+// ============================================================================
+
+/// Thread pool for handling connections without spawning threads per-connection.
+/// Used on macOS where evented I/O is unavailable.
+const ConnectionPool = struct {
+    workers: []std.Thread,
+    queue: BoundedQueue,
+    running: std.atomic.Value(bool),
+    server: *Server,
+    allocator: std.mem.Allocator,
+
+    const QUEUE_SIZE = 256;
+
+    const WorkItem = struct {
+        stream_fd: std.posix.fd_t,
+    };
+
+    const BoundedQueue = struct {
+        items: [QUEUE_SIZE]WorkItem,
+        head: std.atomic.Value(usize),
+        tail: std.atomic.Value(usize),
+        count: std.atomic.Value(usize),
+        mutex: std.Thread.Mutex,
+        not_empty: std.Thread.Condition,
+        not_full: std.Thread.Condition,
+
+        fn init() BoundedQueue {
+            return .{
+                .items = undefined,
+                .head = std.atomic.Value(usize).init(0),
+                .tail = std.atomic.Value(usize).init(0),
+                .count = std.atomic.Value(usize).init(0),
+                .mutex = .{},
+                .not_empty = .{},
+                .not_full = .{},
+            };
+        }
+
+        fn push(self: *BoundedQueue, item: WorkItem) bool {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // Wait for space (with timeout to check running)
+            while (self.count.load(.acquire) >= QUEUE_SIZE) {
+                self.not_full.timedWait(&self.mutex, 10 * std.time.ns_per_ms) catch {};
+                return false; // Queue full, reject connection
+            }
+
+            const tail = self.tail.load(.acquire);
+            self.items[tail] = item;
+            self.tail.store((tail + 1) % QUEUE_SIZE, .release);
+            _ = self.count.fetchAdd(1, .release);
+            self.not_empty.signal();
+            return true;
+        }
+
+        fn pop(self: *BoundedQueue, running: *std.atomic.Value(bool)) ?WorkItem {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            while (self.count.load(.acquire) == 0) {
+                if (!running.load(.acquire)) return null;
+                self.not_full.timedWait(&self.mutex, 100 * std.time.ns_per_ms) catch {};
+            }
+
+            if (self.count.load(.acquire) == 0) return null;
+
+            const head = self.head.load(.acquire);
+            const item = self.items[head];
+            self.head.store((head + 1) % QUEUE_SIZE, .release);
+            _ = self.count.fetchSub(1, .release);
+            self.not_full.signal();
+            return item;
+        }
+    };
+
+    fn init(allocator: std.mem.Allocator, server: *Server, worker_count: usize) !*ConnectionPool {
+        const self = try allocator.create(ConnectionPool);
+        errdefer allocator.destroy(self);
+
+        self.* = .{
+            .workers = try allocator.alloc(std.Thread, worker_count),
+            .queue = BoundedQueue.init(),
+            .running = std.atomic.Value(bool).init(true),
+            .server = server,
+            .allocator = allocator,
+        };
+
+        // Spawn workers
+        for (self.workers, 0..) |*worker, i| {
+            worker.* = std.Thread.spawn(.{}, workerFn, .{self}) catch {
+                // If spawn fails, clean up already spawned workers
+                self.running.store(false, .release);
+                for (self.workers[0..i]) |w| w.join();
+                allocator.free(self.workers);
+                allocator.destroy(self);
+                return error.ThreadSpawnFailed;
+            };
+        }
+
+        return self;
+    }
+
+    fn deinit(self: *ConnectionPool) void {
+        self.running.store(false, .release);
+        // Wake all workers
+        self.queue.mutex.lock();
+        self.queue.not_empty.broadcast();
+        self.queue.not_full.broadcast();
+        self.queue.mutex.unlock();
+
+        for (self.workers) |w| w.join();
+        self.allocator.free(self.workers);
+        self.allocator.destroy(self);
+    }
+
+    fn submit(self: *ConnectionPool, stream_fd: std.posix.fd_t) bool {
+        return self.queue.push(.{ .stream_fd = stream_fd });
+    }
+
+    fn workerFn(self: *ConnectionPool) void {
+        while (self.running.load(.acquire)) {
+            const item = self.queue.pop(&self.running) orelse continue;
+            self.handleConnection(item.stream_fd);
+        }
+    }
+
+    fn handleConnection(self: *ConnectionPool, fd: std.posix.fd_t) void {
+        defer std.posix.close(fd);
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        var requests_on_connection: u32 = 0;
+
+        while (true) {
+            _ = arena.reset(.retain_capacity);
+            const req_allocator = arena.allocator();
+            const keep_alive = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator) catch break;
+            requests_on_connection += 1;
+
+            if (!keep_alive) break;
+            if (self.server.config.keep_alive_max_requests > 0 and
+                requests_on_connection >= self.server.config.keep_alive_max_requests) break;
+        }
+    }
+
+    fn handleSingleRequestSync(self: *ConnectionPool, fd: std.posix.fd_t, request_num: u32, req_allocator: std.mem.Allocator) !bool {
+        _ = request_num;
+
+        // Read request
+        var buf: [8192]u8 = undefined;
+        const n = std.posix.read(fd, &buf) catch |err| {
+            if (err == error.WouldBlock or err == error.ConnectionResetByPeer) return false;
+            return err;
+        };
+        if (n == 0) return false;
+
+        // Simple HTTP parsing
+        const request_data = buf[0..n];
+        var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return false;
+        defer request.deinit(req_allocator);
+
+        // Check keep-alive
+        const client_wants_keep_alive = blk: {
+            if (findHeaderValue(request.headers.items, "connection")) |conn| {
+                break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
+            }
+            break :blk true;
+        };
+        const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
+
+        // Handle static files
+        if (self.server.config.static_dir) |static_dir| {
+            if (std.mem.startsWith(u8, request.url, "/static/")) {
+                self.serveStaticFileSync(fd, static_dir, request.url[7..], keep_alive) catch {};
+                return keep_alive;
+            }
+        }
+
+        // Invoke handler
+        if (self.server.pool) |*pool| {
+            var handle = pool.executeHandlerBorrowed(HttpRequest{
+                .url = request.url,
+                .method = request.method,
+                .headers = request.headers,
+                .body = request.body,
+            }) catch |err| {
+                const status: u16 = if (err == error.PoolExhausted) 503 else 500;
+                const message = if (err == error.PoolExhausted)
+                    "Service Unavailable"
+                else
+                    "Internal Server Error";
+                self.sendErrorSync(fd, status, message) catch {};
+                return false;
+            };
+            defer handle.deinit();
+
+            // Send response
+            self.sendResponseSync(fd, &handle.response, keep_alive) catch return false;
+        }
+
+        return keep_alive;
+    }
+
+    fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
+        _ = self;
+        var header_buf: [4096]u8 = undefined;
+        var pos: usize = 0;
+
+        // Write status line
+        const status_line = std.fmt.bufPrint(header_buf[pos..], "HTTP/1.1 {d} {s}\r\n", .{ response.status, getStatusText(response.status) }) catch return error.BufferOverflow;
+        pos += status_line.len;
+
+        // Write headers
+        for (response.headers.items) |h| {
+            const header_line = std.fmt.bufPrint(header_buf[pos..], "{s}: {s}\r\n", .{ h.key, h.value }) catch return error.BufferOverflow;
+            pos += header_line.len;
+        }
+
+        // Content-Length and Connection
+        const content_len = std.fmt.bufPrint(header_buf[pos..], "Content-Length: {d}\r\n", .{response.body.len}) catch return error.BufferOverflow;
+        pos += content_len.len;
+
+        const conn_header = if (keep_alive) "Connection: keep-alive\r\n" else "Connection: close\r\n";
+        if (pos + conn_header.len + 2 > header_buf.len) return error.BufferOverflow;
+        @memcpy(header_buf[pos..][0..conn_header.len], conn_header);
+        pos += conn_header.len;
+
+        // End of headers
+        @memcpy(header_buf[pos..][0..2], "\r\n");
+        pos += 2;
+
+        // Send headers
+        _ = std.c.write(fd, &header_buf, pos);
+
+        // Send body
+        if (response.body.len > 0) {
+            _ = std.c.write(fd, response.body.ptr, response.body.len);
+        }
+    }
+
+    fn sendErrorSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8) !void {
+        _ = self;
+        var buf: [512]u8 = undefined;
+        const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, getStatusText(status), message.len, message }) catch return;
+        _ = std.c.write(fd, response.ptr, response.len);
+    }
+
+    fn serveStaticFileSync(self: *ConnectionPool, fd: std.posix.fd_t, static_dir: []const u8, path: []const u8, keep_alive: bool) !void {
+        _ = self;
+        _ = static_dir;
+        _ = path;
+        _ = keep_alive;
+        // Simplified - just send 404 for now
+        var buf: [256]u8 = undefined;
+        const response = std.fmt.bufPrint(&buf, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found", .{}) catch return;
+        _ = std.c.write(fd, response.ptr, response.len);
+    }
+};
 
 // ============================================================================
 // Network Error Classification
@@ -177,6 +469,7 @@ pub const Server = struct {
     static_cache: StaticFileCache,
     running: bool,
     request_count: std.atomic.Value(u64),
+    conn_pool: ?*ConnectionPool,
 
     const Self = @This();
     const ConnectionEvent = enum { done, timeout };
@@ -192,7 +485,7 @@ pub const Server = struct {
         const handler_code, const handler_filename = switch (cfg.handler) {
             .inline_code => |code| .{ code, "<inline>" },
             .file_path => |path| blk: {
-                const source = try std.fs.cwd().readFileAlloc(path, allocator, Io.Limit.limited(10 * 1024 * 1024));
+                const source = try readFilePosix(allocator, path, 10 * 1024 * 1024);
                 // JSX transformation is now handled by the parser via filename detection
                 break :blk .{ source, path };
             },
@@ -214,10 +507,14 @@ pub const Server = struct {
             ),
             .running = false,
             .request_count = std.atomic.Value(u64).init(0),
+            .conn_pool = null,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        // Stop connection pool first (if using thread pool mode)
+        if (self.conn_pool) |cp| cp.deinit();
+
         if (self.pool) |*p| p.deinit();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -254,6 +551,13 @@ pub const Server = struct {
             .reuse_address = true,
         });
 
+        // Initialize connection thread pool on macOS (where we use threaded I/O)
+        if (!useEventedBackend()) {
+            const worker_count = std.Thread.getCpuCount() catch 4;
+            self.conn_pool = try ConnectionPool.init(self.allocator, self, worker_count);
+            std.log.info("   Connection pool: {d} workers", .{worker_count});
+        }
+
         self.running = true;
 
         std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
@@ -277,7 +581,18 @@ pub const Server = struct {
                 return err;
             };
 
-            group.async(io, handleConnectionTask, .{ self, stream, io });
+            // On macOS: use connection pool to avoid per-connection thread spawn
+            if (self.conn_pool) |cp| {
+                // Submit to thread pool - extract raw fd from stream
+                const fd = stream.socket.handle;
+                if (!cp.submit(fd)) {
+                    // Queue full - close connection
+                    std.posix.close(fd);
+                }
+            } else {
+                // Evented path: use async I/O group
+                group.async(io, handleConnectionTask, .{ self, stream, io });
+            }
         }
     }
 
@@ -582,6 +897,86 @@ pub const Server = struct {
         };
     }
 
+    /// Parse HTTP request from a pre-read buffer (synchronous path for thread pool).
+    fn parseRequestFromBuffer(self: *Self, allocator: std.mem.Allocator, data: []const u8) !ParsedRequest {
+        var headers = std.ArrayListUnmanaged(HttpHeader){};
+        errdefer headers.deinit(allocator);
+        try headers.ensureTotalCapacity(allocator, self.config.max_headers);
+
+        // Batch string storage
+        const storage_size: usize = 8192;
+        const string_storage = try allocator.alloc(u8, storage_size);
+        errdefer allocator.free(string_storage);
+        var storage_offset: usize = 0;
+
+        const copyToStorage = struct {
+            fn copy(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
+                if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
+                const dest = storage[offset.*..][0..src.len];
+                @memcpy(dest, src);
+                offset.* += src.len;
+                return dest;
+            }
+        }.copy;
+
+        // Find end of headers
+        const header_end = findHeaderEnd(data) orelse std.mem.indexOf(u8, data, "\r\n\r\n") orelse return error.InvalidRequest;
+        const header_section = data[0..header_end];
+        const body_start = header_end + 4;
+
+        // Parse request line
+        var lines = std.mem.splitSequence(u8, header_section, "\r\n");
+        const request_line = lines.next() orelse return error.InvalidRequest;
+        var parts = std.mem.splitScalar(u8, request_line, ' ');
+
+        const method_slice = parts.next() orelse return error.InvalidRequest;
+        const method = try copyToStorage(string_storage, &storage_offset, method_slice);
+
+        const url_slice = parts.next() orelse return error.InvalidRequest;
+        const url = try copyToStorage(string_storage, &storage_offset, url_slice);
+
+        // Parse headers
+        var content_length: ?usize = null;
+        var header_count: usize = 0;
+        while (lines.next()) |line| {
+            if (line.len == 0) break;
+            if (header_count >= self.config.max_headers) return error.TooManyHeaders;
+
+            var header_parts = std.mem.splitSequence(u8, line, ": ");
+            const key = header_parts.next() orelse continue;
+            const value = header_parts.rest();
+
+            var key_lower_buf: [256]u8 = undefined;
+            if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
+            const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
+            const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
+            const value_dup = try copyToStorage(string_storage, &storage_offset, value);
+            try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
+
+            if (content_length == null and std.mem.eql(u8, key_lower, "content-length")) {
+                content_length = std.fmt.parseInt(usize, value, 10) catch 0;
+            }
+            header_count += 1;
+        }
+
+        // Extract body if present
+        var body: ?[]u8 = null;
+        if (content_length) |len| {
+            if (len > 0 and len <= self.config.max_body_size and body_start + len <= data.len) {
+                body = try allocator.alloc(u8, len);
+                @memcpy(body.?, data[body_start..][0..len]);
+            }
+        }
+
+        return ParsedRequest{
+            .method = method,
+            .url = url,
+            .headers = headers,
+            .body = body,
+            .string_storage = string_storage,
+        };
+    }
+
     fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse, keep_alive: bool) !void {
         _ = self;
         var out_buf: [4096]u8 = undefined;
@@ -698,21 +1093,21 @@ pub const Server = struct {
             return;
         }
 
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [Dir.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ static_dir, path }) catch {
             return error.PathTooLong;
         };
 
-        const file = std.fs.cwd().openFile(full_path, .{}) catch {
+        const file = Dir.openFile(Dir.cwd(), io, full_path, .{}) catch {
             var out_buf: [256]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
             try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found");
             try writer.interface.flush();
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
-        const stat = try file.stat();
+        const stat = try file.stat(io);
         const content_type = getContentType(path);
         const connection = if (keep_alive) "keep-alive" else "close";
         const size = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
@@ -1126,7 +1521,7 @@ fn defaultPoolSize() usize {
 fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
     const Backend = @TypeOf(io.*);
     if (Backend == Io.Threaded) {
-        io.* = Io.Threaded.init(allocator);
+        io.* = Io.Threaded.init(allocator, .{ .environ = .empty });
         return;
     }
     if (@hasDecl(Backend, "InitOptions")) {
@@ -1137,6 +1532,8 @@ fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
 }
 
 fn useEventedBackend() bool {
+    // macOS kqueue has stdlib bugs in Zig 0.16.0 nightly - use threaded backend
+    // TODO: Re-enable evented backend when Zig stdlib kqueue is fixed
     return switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .visionos => false,
         else => true,

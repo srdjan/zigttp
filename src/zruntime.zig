@@ -795,46 +795,48 @@ pub const Runtime = struct {
 // ============================================================================
 
 fn consoleLog(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const stdout = std.fs.File.stdout();
     for (args, 0..) |arg, i| {
-        if (i > 0) stdout.writeAll(" ") catch {};
-        printValue(arg, stdout) catch {};
+        if (i > 0) writeToFd(std.c.STDOUT_FILENO, " ");
+        printValue(arg, std.c.STDOUT_FILENO);
     }
-    stdout.writeAll("\n") catch {};
+    writeToFd(std.c.STDOUT_FILENO, "\n");
     return zq.JSValue.undefined_val;
 }
 
 fn consoleError(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll("\x1b[31m[ERROR]\x1b[0m ") catch {};
+    writeToFd(std.c.STDERR_FILENO, "\x1b[31m[ERROR]\x1b[0m ");
     for (args, 0..) |arg, i| {
-        if (i > 0) stderr.writeAll(" ") catch {};
-        printValue(arg, stderr) catch {};
+        if (i > 0) writeToFd(std.c.STDERR_FILENO, " ");
+        printValue(arg, std.c.STDERR_FILENO);
     }
-    stderr.writeAll("\n") catch {};
+    writeToFd(std.c.STDERR_FILENO, "\n");
     return zq.JSValue.undefined_val;
 }
 
-fn printValue(val: zq.JSValue, file: std.fs.File) !void {
+fn writeToFd(fd: std.c.fd_t, data: []const u8) void {
+    _ = std.c.write(fd, data.ptr, data.len);
+}
+
+fn printValue(val: zq.JSValue, fd: std.c.fd_t) void {
     if (val.isUndefined()) {
-        try file.writeAll("undefined");
+        writeToFd(fd, "undefined");
     } else if (val.isNull()) {
-        try file.writeAll("null");
+        writeToFd(fd, "null");
     } else if (val.isTrue()) {
-        try file.writeAll("true");
+        writeToFd(fd, "true");
     } else if (val.isFalse()) {
-        try file.writeAll("false");
+        writeToFd(fd, "false");
     } else if (val.isInt()) {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return;
-        try file.writeAll(s);
+        writeToFd(fd, s);
     } else if (val.isString()) {
         const str = val.toPtr(zq.JSString);
-        try file.writeAll(str.data());
+        writeToFd(fd, str.data());
     } else if (val.isObject()) {
-        try file.writeAll("[Object]");
+        writeToFd(fd, "[Object]");
     } else {
-        try file.writeAll("[unknown]");
+        writeToFd(fd, "[unknown]");
     }
 }
 
@@ -1120,7 +1122,11 @@ pub const HandlerPool = struct {
                     break :blk @as(u64, @truncate(combined % (jitter_range * 2)));
                 } else 0;
                 const sleep_ns = backoff_ns -| jitter_range + jitter;
-                std.posix.nanosleep(0, sleep_ns);
+                const ts = std.c.timespec{
+                    .sec = @intCast(sleep_ns / std.time.ns_per_s),
+                    .nsec = @intCast(sleep_ns % std.time.ns_per_s),
+                };
+                _ = std.c.nanosleep(&ts, null);
                 backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
                 continue;
             } else {
@@ -1336,7 +1342,7 @@ test "HandlerPool concurrent stress" {
     const allocator = std.heap.c_allocator;
 
     // Allow disabling JIT for this test via env var during debugging.
-    if (std.posix.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
+    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
         zq.interpreter.disableJitForTests();
     }
 
@@ -1676,7 +1682,7 @@ test "HandlerPool high contention stress" {
     const allocator = std.heap.c_allocator;
 
     // Allow disabling JIT for this test via env var during debugging.
-    if (std.posix.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
+    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
         zq.interpreter.disableJitForTests();
     }
 

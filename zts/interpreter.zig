@@ -47,7 +47,8 @@ var jit_threshold_cache: ?u32 = null;
 /// Get current JIT policy (cached, reads ZTS_JIT_POLICY env on first call)
 pub fn getJitPolicy() JitPolicy {
     if (jit_policy_cache) |cached| return cached;
-    if (std.posix.getenv("ZTS_JIT_POLICY")) |policy_str| {
+    if (std.c.getenv("ZTS_JIT_POLICY")) |policy_ptr| {
+        const policy_str = std.mem.sliceTo(policy_ptr, 0);
         const policy = std.meta.stringToEnum(JitPolicy, policy_str) orelse .lazy;
         jit_policy_cache = policy;
         return policy;
@@ -59,7 +60,8 @@ pub fn getJitPolicy() JitPolicy {
 /// Get current JIT threshold (cached, reads ZTS_JIT_THRESHOLD env on first call)
 pub fn getJitThreshold() u32 {
     if (jit_threshold_cache) |cached| return cached;
-    if (std.posix.getenv("ZTS_JIT_THRESHOLD")) |threshold_str| {
+    if (std.c.getenv("ZTS_JIT_THRESHOLD")) |threshold_ptr| {
+        const threshold_str = std.mem.sliceTo(threshold_ptr, 0);
         const threshold = std.fmt.parseInt(u32, threshold_str, 10) catch bytecode.JIT_THRESHOLD;
         jit_threshold_cache = threshold;
         return threshold;
@@ -98,14 +100,14 @@ fn jitDisabled() bool {
     if (getJitPolicy() == .disabled) return true;
     // Then check legacy env var
     if (jit_disabled_cache) |cached| return cached;
-    const disabled = std.posix.getenv("ZTS_DISABLE_JIT") != null;
+    const disabled = std.c.getenv("ZTS_DISABLE_JIT") != null;
     jit_disabled_cache = disabled;
     return disabled;
 }
 
 fn callTraceEnabled() bool {
     if (call_trace_cache) |cached| return cached;
-    const enabled = std.posix.getenv("ZTS_TRACE_CALLS") != null;
+    const enabled = std.c.getenv("ZTS_TRACE_CALLS") != null;
     call_trace_cache = enabled;
     return enabled;
 }
@@ -113,8 +115,9 @@ fn callTraceEnabled() bool {
 fn callTraceLimit() usize {
     if (call_trace_limit_cached) return call_trace_limit_cache;
     const default_limit: usize = 200;
-    if (std.posix.getenv("ZTS_TRACE_CALLS_LIMIT")) |raw| {
-        const parsed = std.fmt.parseUnsigned(usize, raw[0..raw.len], 10) catch default_limit;
+    if (std.c.getenv("ZTS_TRACE_CALLS_LIMIT")) |raw_ptr| {
+        const raw = std.mem.sliceTo(raw_ptr, 0);
+        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch default_limit;
         call_trace_limit_cache = if (parsed == 0) default_limit else parsed;
     } else {
         call_trace_limit_cache = default_limit;
@@ -125,8 +128,9 @@ fn callTraceLimit() usize {
 
 fn callGuardDepth() usize {
     if (call_guard_cached) return call_guard_cache;
-    if (std.posix.getenv("ZTS_CALL_GUARD")) |raw| {
-        const parsed = std.fmt.parseUnsigned(usize, raw[0..raw.len], 10) catch 0;
+    if (std.c.getenv("ZTS_CALL_GUARD")) |raw_ptr| {
+        const raw = std.mem.sliceTo(raw_ptr, 0);
+        const parsed = std.fmt.parseUnsigned(usize, raw, 10) catch 0;
         call_guard_cache = parsed;
     } else {
         call_guard_cache = 0;
@@ -183,7 +187,7 @@ fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
     const cur = self.current_func orelse return;
     const code = cur.code;
     if (code.len == 0) return;
-    const full = std.posix.getenv("ZTS_TRACE_BC_FULL") != null;
+    const full = std.c.getenv("ZTS_TRACE_BC_FULL") != null;
     const window: usize = 12;
     const start = if (full) 0 else if (center_off > window) center_off - window else 0;
     const end = if (full) code.len else @min(code.len, center_off + window);

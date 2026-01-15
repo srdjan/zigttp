@@ -597,7 +597,7 @@ pub const Parser = struct {
             return error.TooManyLocals;
         };
 
-        if (std.posix.getenv("ZTS_TRACE_FUN_DECL") != null) {
+        if (std.c.getenv("ZTS_TRACE_FUN_DECL") != null) {
             const scope = self.scopes.getCurrentScope();
             std.debug.print(
                 "[fun_decl] name={s} scope={} kind={s}\n",

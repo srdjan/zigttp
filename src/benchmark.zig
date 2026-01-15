@@ -37,20 +37,28 @@ const usage =
     "Usage: zigttp-bench [--json] [--quiet] [--no-compare] [--script <path>] [--bench]\n" ++
     "                   [--bench-fn <name>] [--iterations <n>] [--warmup <n>] [--warmup-iters <n>]\n";
 
+fn writeStdout(data: []const u8) void {
+    _ = std.c.write(std.c.STDOUT_FILENO, data.ptr, data.len);
+}
+
 fn parseU32(arg: []const u8, flag: []const u8) u32 {
     return std.fmt.parseInt(u32, arg, 10) catch {
-        _ = std.fs.File.stdout().writeAll("Invalid value for ") catch {};
-        _ = std.fs.File.stdout().writeAll(flag) catch {};
-        _ = std.fs.File.stdout().writeAll("\n") catch {};
-        _ = std.fs.File.stdout().writeAll(usage) catch {};
+        writeStdout("Invalid value for ");
+        writeStdout(flag);
+        writeStdout("\n");
+        writeStdout(usage);
         std.process.exit(1);
     };
 }
 
+// Global to store args from main
+var g_args: std.process.Args = undefined;
+
 fn parseOptions() Options {
     var options = Options{};
-    var args = std.process.args();
-    _ = args.next();
+    var args = std.process.Args.Iterator.init(g_args);
+    defer args.deinit();
+    _ = args.skip();
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
@@ -61,10 +69,8 @@ fn parseOptions() Options {
             options.compare = false;
         } else if (std.mem.eql(u8, arg, "--script")) {
             const path = args.next() orelse {
-                _ = std.fs.File.stdout().writeAll(
-                    "Missing value for --script\n",
-                ) catch {};
-                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                writeStdout("Missing value for --script\n");
+                writeStdout(usage);
                 std.process.exit(1);
             };
             options.script_path = path;
@@ -72,34 +78,34 @@ fn parseOptions() Options {
             options.bench = true;
         } else if (std.mem.eql(u8, arg, "--bench-fn")) {
             const name = args.next() orelse {
-                _ = std.fs.File.stdout().writeAll("Missing value for --bench-fn\n") catch {};
-                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                writeStdout("Missing value for --bench-fn\n");
+                writeStdout(usage);
                 std.process.exit(1);
             };
             options.bench_fn = name;
         } else if (std.mem.eql(u8, arg, "--iterations")) {
             const value = args.next() orelse {
-                _ = std.fs.File.stdout().writeAll("Missing value for --iterations\n") catch {};
-                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                writeStdout("Missing value for --iterations\n");
+                writeStdout(usage);
                 std.process.exit(1);
             };
             options.bench_iterations = parseU32(value, "--iterations");
         } else if (std.mem.eql(u8, arg, "--warmup")) {
             const value = args.next() orelse {
-                _ = std.fs.File.stdout().writeAll("Missing value for --warmup\n") catch {};
-                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                writeStdout("Missing value for --warmup\n");
+                writeStdout(usage);
                 std.process.exit(1);
             };
             options.warmup_rounds = parseU32(value, "--warmup");
         } else if (std.mem.eql(u8, arg, "--warmup-iters")) {
             const value = args.next() orelse {
-                _ = std.fs.File.stdout().writeAll("Missing value for --warmup-iters\n") catch {};
-                _ = std.fs.File.stdout().writeAll(usage) catch {};
+                writeStdout("Missing value for --warmup-iters\n");
+                writeStdout(usage);
                 std.process.exit(1);
             };
             options.warmup_iterations = parseU32(value, "--warmup-iters");
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            _ = std.fs.File.stdout().writeAll(usage) catch {};
+            writeStdout(usage);
             std.process.exit(0);
         }
     }
@@ -108,8 +114,34 @@ fn parseOptions() Options {
 }
 
 fn println(msg: []const u8) void {
-    std.fs.File.stdout().writeAll(msg) catch {};
-    std.fs.File.stdout().writeAll("\n") catch {};
+    writeStdout(msg);
+    writeStdout("\n");
+}
+
+/// Read file using POSIX syscalls (before Io is initialized)
+fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.posix.close(fd);
+
+    const stat = try std.posix.fstat(fd);
+    const file_size: usize = @intCast(@max(0, stat.size));
+
+    if (file_size > max_size) return error.FileTooBig;
+
+    const buffer = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(buffer);
+
+    var total_read: usize = 0;
+    while (total_read < file_size) {
+        const bytes_read = try std.posix.read(fd, buffer[total_read..]);
+        if (bytes_read == 0) break;
+        total_read += bytes_read;
+    }
+
+    return buffer[0..total_read];
 }
 
 fn printFmt(comptime fmt: []const u8, args: anytype) void {
@@ -363,7 +395,8 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
     },
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
+    g_args = init.args;
     const options = parseOptions();
     // Use c_allocator (libc malloc/free) for benchmarks
     // - Proper memory freeing (unlike page_allocator)
@@ -380,7 +413,7 @@ pub fn main() !void {
     };
 
     if (options.script_path) |script_path| {
-        const code = std.fs.cwd().readFileAlloc(script_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+        const code = readFilePosix(allocator, script_path, 10 * 1024 * 1024) catch |err| {
             std.log.err("Failed to read script {s}: {}", .{ script_path, err });
             return;
         };
@@ -496,26 +529,25 @@ pub fn main() !void {
     }
 
     if (options.json) {
-        var stdout = std.fs.File.stdout();
-        try stdout.writeAll("{\n  \"benchmarks\": [\n");
+        writeStdout("{\n  \"benchmarks\": [\n");
         for (results, 0..) |result, i| {
             var line_buf: [512]u8 = undefined;
-            const line = try std.fmt.bufPrint(
+            const line = std.fmt.bufPrint(
                 &line_buf,
                 "    {{\"name\":\"{s}\",\"iterations\":{},\"time_ms\":{d:.3},\"ops_per_sec\":{}}}",
                 .{ result.name, result.iterations, result.time_ms, result.ops_per_sec },
-            );
-            try stdout.writeAll(line);
+            ) catch continue;
+            writeStdout(line);
             if (i + 1 < results.len) {
-                try stdout.writeAll(",\n");
+                writeStdout(",\n");
             } else {
-                try stdout.writeAll("\n");
+                writeStdout("\n");
             }
         }
         const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
         var tail_buf: [128]u8 = undefined;
-        const tail = try std.fmt.bufPrint(&tail_buf, "  ],\n  \"total_ms\":{d:.3}\n}}\n", .{total_ms});
-        try stdout.writeAll(tail);
+        const tail = std.fmt.bufPrint(&tail_buf, "  ],\n  \"total_ms\":{d:.3}\n}}\n", .{total_ms}) catch return;
+        writeStdout(tail);
         return;
     }
 

@@ -33,12 +33,12 @@ const ServerConfig = @import("server.zig").ServerConfig;
 const HandlerSource = @import("server.zig").HandlerSource;
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init.Minimal) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const config = parseArgs() catch |err| {
+    const config = parseArgs(init.args) catch |err| {
         if (err == error.HelpRequested) {
             return;
         }
@@ -58,14 +58,13 @@ pub fn main() !void {
     };
 }
 
-fn parseArgs() !ServerConfig {
-
+fn parseArgs(args_vector: std.process.Args) !ServerConfig {
     var config = ServerConfig{
         .handler = .{ .inline_code = "" },
         .runtime_config = .{},
     };
 
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
+    var args = std.process.Args.Iterator.init(args_vector);
     defer args.deinit();
 
     // Skip program name
@@ -200,7 +199,8 @@ fn printHelp() void {
         \\
     ;
 
-    std.fs.File.stdout().writeAll(help) catch {};
+    // Write to stdout using C write
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
 // ============================================================================
