@@ -365,12 +365,13 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
 
 pub fn main() !void {
     const options = parseOptions();
-    // Use page_allocator for benchmarks - no leak tracking overhead
-    // Benchmark memory is freed when process exits
-    const allocator = std.heap.page_allocator;
+    // Use c_allocator (libc malloc/free) for benchmarks
+    // - Proper memory freeing (unlike page_allocator)
+    // - No tracking overhead (unlike GPA which is 20x slower)
+    const allocator = std.heap.c_allocator;
 
     const config = RuntimeConfig{
-        .memory_limit = 8 * 1024 * 1024, // 8MB for benchmarks
+        .memory_limit = 64 * 1024 * 1024, // 64MB for benchmarks
         .enable_jsx = false,
         .enable_fetch = false,
         .enable_fs = false,

@@ -188,7 +188,7 @@ function handler(request) {
     console.log(request.method); // "GET", "POST", etc.
 
     // Path
-    console.log(request.path); // "/api/users"
+    console.log(request.url); // "/api/users"
 
     // Headers
     console.log(request.headers["Content-Type"]); // "application/json"
@@ -316,7 +316,7 @@ Common status codes:
 
 ```javascript
 function handler(request) {
-    let path = request.path;
+    let path = request.url;
     let method = request.method;
 
     // Exact match
@@ -340,7 +340,7 @@ function handler(request) {
 
 ```javascript
 function handler(request) {
-    let path = request.path;
+    let path = request.url;
     let method = request.method;
 
     if (path === "/api/users") {
@@ -373,7 +373,7 @@ function createUser(request) {
 
 ```javascript
 function handler(request) {
-    let path = request.path;
+    let path = request.url;
 
     // Match /api/users/:id
     if (path.indexOf("/api/users/") === 0) {
@@ -404,7 +404,7 @@ function getComments(postId) {
 
 ```javascript
 function handler(request) {
-    let path = request.path;
+    let path = request.url;
 
     // All /api/* routes
     if (path.indexOf("/api/") === 0) {
@@ -421,7 +421,7 @@ function handler(request) {
 }
 
 function handleApi(request) {
-    let subpath = request.path.substring(4); // Remove '/api'
+    let subpath = request.url.substring(4); // Remove '/api'
     return Response.json({ api: true, subpath: subpath });
 }
 
@@ -463,7 +463,7 @@ function createRouter() {
                 let route = routes[i];
                 if (
                     route.method === request.method &&
-                    route.path === request.path
+                    route.path === request.url
                 ) {
                     return route.handler(request);
                 }
@@ -593,7 +593,7 @@ function validateJson(body, requiredFields) {
 }
 
 function handler(request) {
-    if (request.path === "/api/users" && request.method === "POST") {
+    if (request.url === "/api/users" && request.method === "POST") {
         let result = validateJson(request.body, ["name", "email"]);
 
         if (!result.valid) {
@@ -632,7 +632,7 @@ function handler(request) {
 }
 
 function processRequest(request) {
-    if (request.path === "/api/risky") {
+    if (request.url === "/api/risky") {
         // This might throw
         let data = JSON.parse(request.body);
         return Response.json(data);
@@ -687,10 +687,10 @@ zts implements ES5 with some ES6+ extensions. Here's what's available:
 ### Supported Features
 
 ```javascript
-// letiables
+// Variables
 let x = 1; // ✓ let keyword
-let y = 2; // ✗ NOT supported
-const z = 3; // ✗ NOT supported
+const y = 2; // ✓ const keyword
+var z = 3; // ✓ var keyword (function scoped)
 
 // Functions
 function foo() {} // ✓ Function declarations
@@ -792,7 +792,7 @@ function handler(request: Request): Response {
         { id: 2, name: "Bob", email: "bob@example.com" },
     ];
 
-    if (request.path === "/api/users") {
+    if (request.url === "/api/users") {
         return Response.json(users);
     }
 
@@ -829,7 +829,7 @@ function handler(request: Request): Response {
     const page = (
         <Layout title="My App">
             <h1>Welcome</h1>
-            <p>Path: {request.path}</p>
+            <p>Path: {request.url}</p>
         </Layout>
     );
     return Response.html(renderToString(page));
@@ -1009,7 +1009,7 @@ let users = [
 let nextId = 3;
 
 function handler(request) {
-    let path = request.path;
+    let path = request.url;
     let method = request.method;
 
     // GET /api/users - List all users
@@ -1094,7 +1094,7 @@ function findUserIndex(id) {
 
 ```javascript
 function handler(request) {
-    let path = request.path;
+    let path = request.url;
 
     if (path === "/") {
         return Response.html(renderHomePage());
@@ -1227,14 +1227,14 @@ let requestCount = 0;
 function handler(request) {
     requestCount++;
 
-    if (request.path === "/health") {
+    if (request.url === "/health") {
         return Response.json({
             status: "healthy",
             timestamp: Date.now(),
         });
     }
 
-    if (request.path === "/metrics") {
+    if (request.url === "/metrics") {
         let uptime = Date.now() - startTime;
         return Response.json({
             uptime_ms: uptime,
@@ -1244,7 +1244,7 @@ function handler(request) {
         });
     }
 
-    if (request.path === "/ready") {
+    if (request.url === "/ready") {
         // Readiness check - could include dependency checks
         return Response.json({ ready: true });
     }
@@ -1459,7 +1459,7 @@ function handler(request) {
 // Use console.log for debugging
 function handler(request) {
     console.log("Method:", request.method);
-    console.log("Path:", request.path);
+    console.log("Path:", request.url);
     console.log("Headers:", JSON.stringify(request.headers));
     console.log("Body:", request.body);
 
@@ -1489,7 +1489,7 @@ If you see out-of-memory errors:
 ├─────────────────────────────────────────────────────────────────┤
 │ REQUEST OBJECT                                                  │
 │   request.method   → "GET", "POST", "PUT", "DELETE"            │
-│   request.path     → "/api/users"                              │
+│   request.url     → "/api/users"                              │
 │   request.headers  → { "Content-Type": "..." }                 │
 │   request.body     → "..." or null                             │
 ├─────────────────────────────────────────────────────────────────┤
@@ -1502,7 +1502,7 @@ If you see out-of-memory errors:
 │ COMMON PATTERNS                                                 │
 │   let data = JSON.parse(request.body);                         │
 │   return Response.json({ error: "msg" }, { status: 400 });     │
-│   if (request.path.indexOf('/api/') === 0) { ... }             │
+│   if (request.url.indexOf('/api/') === 0) { ... }             │
 ├─────────────────────────────────────────────────────────────────┤
 │ REMEMBER                                                        │
 │   • Use 'let' not 'let/const'                                  │

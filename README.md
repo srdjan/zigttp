@@ -89,6 +89,9 @@ Response.text(text, init?)
 
 // HTML response
 Response.html(html, init?)
+
+// Redirect response (default status: 302)
+Response.redirect(url, status?)
 ```
 
 ### Example Handler

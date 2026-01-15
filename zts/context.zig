@@ -101,16 +101,16 @@ pub const Context = struct {
         const call_stack = try allocator.alloc(CallFrame, config.call_stack_size);
         errdefer allocator.free(call_stack);
 
-        // Create root hidden class for all objects
-        const root_class = try object.HiddenClass.init(allocator);
-        errdefer root_class.deinit(allocator);
-
-        // Create index-based hidden class pool (Phase 1 migration)
+        // Create index-based hidden class pool
         const hidden_class_pool = try object.HiddenClassPool.init(allocator);
         errdefer hidden_class_pool.deinit();
 
-        // Create global object
-        const global_obj = try object.JSObject.create(allocator, root_class, null);
+        // Create root hidden class for all objects (legacy - to be removed)
+        const root_class = try object.HiddenClass.init(allocator);
+        errdefer root_class.deinit(allocator);
+
+        // Create global object using pool-based class
+        const global_obj = try object.JSObject.create(allocator, hidden_class_pool.getEmptyClass(), null);
         errdefer global_obj.destroy(allocator);
 
         ctx.* = .{
@@ -194,22 +194,20 @@ pub const Context = struct {
 
     /// Create a JS object, using arena when hybrid mode is enabled
     pub fn createObject(self: *Context, prototype: ?*object.JSObject) !*object.JSObject {
-        const root_class = self.root_class orelse return error.NoRootClass;
         if (self.hybrid) |h| {
-            return object.JSObject.createWithArena(h.arena, root_class, prototype) orelse
+            return object.JSObject.createWithArena(h.arena, self.root_class_idx, prototype) orelse
                 return error.OutOfMemory;
         }
-        return try object.JSObject.create(self.allocator, root_class, prototype);
+        return try object.JSObject.create(self.allocator, self.root_class_idx, prototype);
     }
 
     /// Create a JS array, using arena when hybrid mode is enabled
     pub fn createArray(self: *Context) !*object.JSObject {
-        const root_class = self.root_class orelse return error.NoRootClass;
         if (self.hybrid) |h| {
-            return object.JSObject.createArrayWithArena(h.arena, root_class) orelse
+            return object.JSObject.createArrayWithArena(h.arena, self.root_class_idx) orelse
                 return error.OutOfMemory;
         }
-        return try object.JSObject.createArray(self.allocator, root_class);
+        return try object.JSObject.createArray(self.allocator, self.root_class_idx);
     }
 
     /// Create a JS string pointer, using arena when hybrid mode is enabled
@@ -257,7 +255,8 @@ pub const Context = struct {
             self.throwException(value.JSValue.exception_val);
             return error.ArenaObjectEscape;
         }
-        obj.setProperty(self.allocator, name, val) catch |err| {
+        const pool = self.hidden_class_pool orelse return error.NoHiddenClassPool;
+        obj.setProperty(self.allocator, pool, name, val) catch |err| {
             self.throwException(value.JSValue.exception_val);
             return err;
         };
@@ -278,25 +277,27 @@ pub const Context = struct {
 
     pub fn deinit(self: *Context) void {
         // Destroy prototypes with destroyBuiltin to clean up their method properties
-        if (self.array_prototype) |proto| proto.destroyBuiltin(self.allocator);
-        if (self.string_prototype) |proto| proto.destroyBuiltin(self.allocator);
-        if (self.object_prototype) |proto| proto.destroyBuiltin(self.allocator);
-        if (self.function_prototype) |proto| proto.destroyBuiltin(self.allocator);
-        if (self.generator_prototype) |proto| proto.destroyBuiltin(self.allocator);
-        if (self.result_prototype) |proto| proto.destroyBuiltin(self.allocator);
+        if (self.hidden_class_pool) |pool| {
+            if (self.array_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
+            if (self.string_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
+            if (self.object_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
+            if (self.function_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
+            if (self.generator_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
+            if (self.result_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
 
-        // Destroy registered builtin objects (Math, JSON, console, etc.)
-        // Each builtin is destroyed with destroyBuiltin which also cleans up its function properties
-        for (self.builtin_objects.items) |obj| {
-            obj.destroyBuiltin(self.allocator);
+            // Destroy registered builtin objects (Math, JSON, console, etc.)
+            // Each builtin is destroyed with destroyBuiltin which also cleans up its function properties
+            for (self.builtin_objects.items) |obj| {
+                obj.destroyBuiltin(self.allocator, pool);
+            }
+
+            // Destroy global object with destroyBuiltin to clean up function properties
+            // (parseFloat, parseInt, isNaN, isFinite, range, etc.)
+            if (self.global_obj) |g| g.destroyBuiltin(self.allocator, pool);
         }
         self.builtin_objects.deinit(self.allocator);
-
-        // Destroy global object with destroyBuiltin to clean up function properties
-        // (parseFloat, parseInt, isNaN, isFinite, range, etc.)
-        if (self.global_obj) |g| g.destroyBuiltin(self.allocator);
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
-        if (self.hidden_class_pool) |pool| pool.deinit();
+        if (self.hidden_class_pool) |p| p.deinit();
 
         // Clean up JIT code allocator
         if (self.code_allocator) |ca| {
@@ -331,10 +332,11 @@ pub const Context = struct {
 
     /// JIT helper: get property by atom index
     pub fn jitGetField(self: *Context, obj_val: value.JSValue, atom_idx: u16) callconv(.c) value.JSValue {
+        const pool = self.hidden_class_pool orelse return value.JSValue.undefined_val;
         const atom: object.Atom = @enumFromInt(atom_idx);
         if (obj_val.isObject()) {
             const obj = object.JSObject.fromValue(obj_val);
-            return obj.getProperty(atom) orelse value.JSValue.undefined_val;
+            return obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
         }
         if (obj_val.isString()) {
             if (atom == .length) {
@@ -342,7 +344,7 @@ pub const Context = struct {
                 return value.JSValue.fromInt(@intCast(str.len));
             }
             if (self.string_prototype) |proto| {
-                return proto.getProperty(atom) orelse value.JSValue.undefined_val;
+                return proto.getProperty(pool, atom) orelse value.JSValue.undefined_val;
             }
         }
         return value.JSValue.undefined_val;
@@ -370,11 +372,10 @@ pub const Context = struct {
 
     /// JIT helper: create a new array with length
     pub fn jitNewArray(self: *Context, length: u16) callconv(.c) value.JSValue {
-        const root_class = self.root_class orelse return self.jitThrow();
         const obj = if (self.hybrid) |h|
-            object.JSObject.createArrayWithArena(h.arena, root_class) orelse return self.jitThrow()
+            object.JSObject.createArrayWithArena(h.arena, self.root_class_idx) orelse return self.jitThrow()
         else
-            object.JSObject.createArray(self.allocator, root_class) catch return self.jitThrow();
+            object.JSObject.createArray(self.allocator, self.root_class_idx) catch return self.jitThrow();
         obj.prototype = self.array_prototype;
         obj.setArrayLength(@intCast(length));
         return obj.toValue();
@@ -393,6 +394,7 @@ pub const Context = struct {
 
     /// JIT helper: get element by index
     pub fn jitGetElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue) callconv(.c) value.JSValue {
+        const pool = self.hidden_class_pool orelse return value.JSValue.undefined_val;
         if (obj_val.isObject() and index_val.isInt()) {
             const obj = object.JSObject.fromValue(obj_val);
             const idx = index_val.getInt();
@@ -416,7 +418,7 @@ pub const Context = struct {
                     var idx_buf: [32]u8 = undefined;
                     const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return value.JSValue.undefined_val;
                     const atom = self.atoms.intern(idx_slice) catch return value.JSValue.undefined_val;
-                    return obj.getProperty(atom) orelse value.JSValue.undefined_val;
+                    return obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
                 }
             }
         }
@@ -832,8 +834,9 @@ pub const Context = struct {
 
     /// Get global property by atom
     pub fn getGlobal(self: *Context, atom: object.Atom) ?value.JSValue {
+        const pool = self.hidden_class_pool orelse return null;
         if (self.global_obj) |g| {
-            return g.getProperty(atom);
+            return g.getProperty(pool, atom);
         }
         return null;
     }
@@ -852,8 +855,8 @@ pub const Context = struct {
 
     /// Register a native function on the global object
     pub fn registerGlobalFunction(self: *Context, name: object.Atom, func: object.NativeFn, arg_count: u8) !void {
-        const root_class = self.root_class orelse return error.NoRootClass;
-        const func_obj = try object.JSObject.createNativeFunction(self.allocator, root_class, func, name, arg_count);
+        const pool = self.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const func_obj = try object.JSObject.createNativeFunction(self.allocator, pool, self.root_class_idx, func, name, arg_count);
         try self.setGlobal(name, func_obj.toValue());
     }
 

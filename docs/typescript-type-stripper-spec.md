@@ -2,7 +2,7 @@
 
 This document defines a lightweight **TypeScript/TSX type‑stripper** for zts/zigttp. The goal is to erase a useful, meaningful subset of TypeScript syntax **without** adding a full TS compiler, while preserving line/column positions for error reporting.
 
-Status: **spec only** (no implementation yet).
+Status: **Implemented** (see `zts/stripper.zig`).
 
 ---
 

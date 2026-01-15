@@ -191,8 +191,9 @@ pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
+        const pool = ctx.hidden_class_pool orelse return createResponseFromString(ctx, json_js, status, "application/json");
         const status_atom = ctx.atoms.intern("status") catch return createResponseFromString(ctx, json_js, status, "application/json");
-        if (init.getProperty(status_atom)) |s| {
+        if (init.getProperty(pool, status_atom)) |s| {
             if (s.isInt()) status = @intCast(s.getInt());
         }
     }
@@ -212,8 +213,9 @@ pub fn responseText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
+        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, text, status, "text/plain; charset=utf-8");
         const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, text, status, "text/plain; charset=utf-8");
-        if (init.getProperty(status_atom)) |s| {
+        if (init.getProperty(pool, status_atom)) |s| {
             if (s.isInt()) status = @intCast(s.getInt());
         }
     }
@@ -233,8 +235,9 @@ pub fn responseHtml(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
+        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, html, status, "text/html; charset=utf-8");
         const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, html, status, "text/html; charset=utf-8");
-        if (init.getProperty(status_atom)) |s| {
+        if (init.getProperty(pool, status_atom)) |s| {
             if (s.isInt()) status = @intCast(s.getInt());
         }
     }
@@ -293,20 +296,21 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
     // Get init options from second argument
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
+        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, body, status, content_type);
 
         // Get status
         const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, body, status, content_type);
-        if (init.getProperty(status_atom)) |s| {
+        if (init.getProperty(pool, status_atom)) |s| {
             if (s.isInt()) status = @intCast(s.getInt());
         }
 
         // Get headers for content-type
         const headers_atom = ctx.atoms.intern("headers") catch return createResponse(ctx, body, status, content_type);
-        if (init.getProperty(headers_atom)) |hdr| {
+        if (init.getProperty(pool, headers_atom)) |hdr| {
             if (hdr.isObject()) {
                 const headers_obj = object.JSObject.fromValue(hdr);
                 const ct_atom = ctx.atoms.intern("Content-Type") catch return createResponse(ctx, body, status, content_type);
-                if (headers_obj.getProperty(ct_atom)) |ct| {
+                if (headers_obj.getProperty(pool, ct_atom)) |ct| {
                     if (ct.isString()) {
                         content_type = try getStringArg(ct);
                     }
@@ -445,16 +449,18 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             return;
         }
 
+        const pool = ctx.hidden_class_pool orelse return;
+
         // Check for tag property (vnode)
-        const tag_val = obj.getProperty(.tag) orelse return;
+        const tag_val = obj.getProperty(pool, .tag) orelse return;
 
         // Handle function components (tag is a callable function)
         if (tag_val.isCallable()) {
             const call_fn = call_function_callback orelse return;
 
             // Get props (or create empty object if not present but children exist)
-            var props_val = obj.getProperty(.props) orelse value.JSValue.null_val;
-            const children_val = obj.getProperty(.children);
+            var props_val = obj.getProperty(pool, .props) orelse value.JSValue.null_val;
+            const children_val = obj.getProperty(pool, .children);
 
             // Add children to props if present
             if (children_val) |cv| {
@@ -487,7 +493,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
         if (tag_val.isString()) {
             const tag_str = tag_val.toPtr(string.JSString);
             if (std.mem.eql(u8, tag_str.data(), FRAGMENT_MARKER)) {
-                if (obj.getProperty(.children)) |children| {
+                if (obj.getProperty(pool, .children)) |children| {
                     try renderChildren(ctx, children, writer);
                 }
                 return;
@@ -498,7 +504,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             try writer.writeAll(tag_str.data());
 
             // Render attributes from props
-            if (obj.getProperty(.props)) |props_val| {
+            if (obj.getProperty(pool, .props)) |props_val| {
                 if (props_val.isObject()) {
                     try renderAttributes(ctx, props_val, writer);
                 }
@@ -514,7 +520,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             try writer.writeByte('>');
 
             // Render children - use raw output for style/script elements
-            if (obj.getProperty(.children)) |children| {
+            if (obj.getProperty(pool, .children)) |children| {
                 if (isRawTextElement(tag_data)) {
                     try renderRawChildren(children, writer);
                 } else {
@@ -573,20 +579,34 @@ fn renderAttributes(ctx: *context.Context, props: value.JSValue, writer: anytype
 
     const props_obj = object.JSObject.fromValue(props);
 
-    // Iterate through properties (simplified - uses hidden class properties)
-    for (props_obj.hidden_class.properties) |prop| {
+    // Get pool for property iteration
+    const pool = ctx.hidden_class_pool orelse return;
+    const class_idx = props_obj.hidden_class_idx;
+    if (class_idx.isNone()) return;
+
+    const idx = class_idx.toInt();
+    if (idx >= pool.count) return;
+
+    const prop_count = pool.property_counts.items[idx];
+    if (prop_count == 0) return;
+
+    const start = pool.properties_starts.items[idx];
+    const names = pool.property_names.items[start..][0..prop_count];
+    const offsets = pool.property_offsets.items[start..][0..prop_count];
+
+    for (names, offsets) |prop_name, prop_offset| {
         // Skip reserved slots (used by native functions)
-        const atom_int = @intFromEnum(prop.name);
+        const atom_int = @intFromEnum(prop_name);
         if (atom_int >= 0xFFFE) continue;
 
         // Get the property name string
-        const name = ctx.atoms.getName(prop.name) orelse continue;
+        const name = ctx.atoms.getName(prop_name) orelse continue;
 
         // Skip internal properties (children) and event handlers (onClick, etc)
         if (std.mem.eql(u8, name, "children")) continue;
         if (name.len >= 2 and name[0] == 'o' and name[1] == 'n') continue;
 
-        const val = props_obj.getSlot(prop.offset);
+        const val = props_obj.getSlot(prop_offset);
         if (val.isNull() or val.isUndefined()) continue;
         if (val.isFalse()) continue;
 
@@ -700,7 +720,8 @@ fn estimateJsonSize(val: value.JSValue) usize {
         if (obj.class_id == .array) {
             return 32 + obj.getArrayLength() * 16;
         }
-        return 32 + obj.hidden_class.property_count * 24;
+        // Conservative estimate for objects (property count not directly accessible)
+        return 256;
     }
     if (val.isString()) {
         const str = val.toPtr(string.JSString);
@@ -819,20 +840,39 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
         } else {
             try writer.writeByte('{');
             var first = true;
-            for (obj.hidden_class.properties) |prop| {
-                const v = obj.getSlot(prop.offset);
-                if (v.isUndefined()) continue;
 
-                // Get property name from atom table (handles both predefined and dynamic atoms)
-                const name = ctx.atoms.getName(prop.name) orelse continue;
+            // Get properties from the pool using SoA layout
+            const pool = ctx.hidden_class_pool orelse {
+                try writer.writeByte('}');
+                return;
+            };
+            const class_idx = obj.hidden_class_idx;
+            if (!class_idx.isNone()) {
+                const idx = class_idx.toInt();
+                if (idx < pool.count) {
+                    const prop_count = pool.property_counts.items[idx];
+                    if (prop_count > 0) {
+                        const start = pool.properties_starts.items[idx];
+                        const names = pool.property_names.items[start..][0..prop_count];
+                        const offsets = pool.property_offsets.items[start..][0..prop_count];
 
-                if (!first) try writer.writeByte(',');
-                first = false;
+                        for (names, offsets) |prop_name, prop_offset| {
+                            const v = obj.getSlot(prop_offset);
+                            if (v.isUndefined()) continue;
 
-                try writer.writeByte('"');
-                try writer.writeAll(name);
-                try writer.writeAll("\":");
-                try writeJson(ctx, v, writer);
+                            // Get property name from atom table
+                            const name = ctx.atoms.getName(prop_name) orelse continue;
+
+                            if (!first) try writer.writeByte(',');
+                            first = false;
+
+                            try writer.writeByte('"');
+                            try writer.writeAll(name);
+                            try writer.writeAll("\":");
+                            try writeJson(ctx, v, writer);
+                        }
+                    }
+                }
             }
             try writer.writeByte('}');
         }
@@ -862,7 +902,8 @@ test "createResponse" {
 
     const resp_obj = object.JSObject.fromValue(resp);
     const status_atom = try ctx.atoms.intern("status");
-    const status = resp_obj.getProperty(status_atom);
+    const pool = ctx.hidden_class_pool.?;
+    const status = resp_obj.getProperty(pool, status_atom);
     try std.testing.expect(status != null);
     try std.testing.expectEqual(@as(i32, 200), status.?.getInt());
 }
@@ -929,10 +970,8 @@ test "renderToString with attributes and nested elements" {
     var ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const root_class = ctx.root_class orelse return error.NoRootClass;
-
     // props = { href: "/api/health" }
-    const props = try object.JSObject.create(allocator, root_class, null);
+    const props = try object.JSObject.create(allocator, ctx.root_class_idx, null);
     const href_atom = try ctx.atoms.intern("href");
     const href_str = try string.createString(allocator, "/api/health");
     try ctx.setPropertyChecked(props, href_atom, value.JSValue.fromPtr(href_str));

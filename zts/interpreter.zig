@@ -132,9 +132,9 @@ fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
 }
 
 /// Single entry in a polymorphic inline cache
-/// Stores hidden class and slot offset for one observed shape
+/// Stores hidden class index and slot offset for one observed shape
 const PICEntry = struct {
-    hidden_class: *object.HiddenClass,
+    hidden_class_idx: object.HiddenClassIndex,
     slot_offset: u16,
 };
 
@@ -156,24 +156,24 @@ pub const PolymorphicInlineCache = struct {
     megamorphic: bool = false,
 
     /// Lookup hidden class in cache, return slot offset if found
-    pub inline fn lookup(self: *const PolymorphicInlineCache, hidden_class: *object.HiddenClass) ?u16 {
+    pub inline fn lookup(self: *const PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex) ?u16 {
         // Linear search through valid entries
         for (self.entries[0..self.count]) |entry| {
-            if (entry.hidden_class == hidden_class) {
+            if (entry.hidden_class_idx == hidden_class_idx) {
                 return entry.slot_offset;
             }
         }
         return null;
     }
 
-    /// Update cache with new (hidden_class, slot_offset) pair
+    /// Update cache with new (hidden_class_idx, slot_offset) pair
     /// Returns true if entry was added, false if megamorphic
-    pub inline fn update(self: *PolymorphicInlineCache, hidden_class: *object.HiddenClass, slot_offset: u16) bool {
+    pub inline fn update(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, slot_offset: u16) bool {
         if (self.megamorphic) return false;
 
         // Check if already cached (update existing entry)
         for (self.entries[0..self.count]) |*entry| {
-            if (entry.hidden_class == hidden_class) {
+            if (entry.hidden_class_idx == hidden_class_idx) {
                 entry.slot_offset = slot_offset;
                 return true;
             }
@@ -182,7 +182,7 @@ pub const PolymorphicInlineCache = struct {
         // Add new entry if space available
         if (self.count < PIC_ENTRIES) {
             self.entries[self.count] = .{
-                .hidden_class = hidden_class,
+                .hidden_class_idx = hidden_class_idx,
                 .slot_offset = slot_offset,
             };
             self.count += 1;
@@ -577,6 +577,7 @@ pub const Interpreter = struct {
         NoTransition,
         NoRootClass,
         ArenaObjectEscape, // Arena object stored into persistent object
+        NoHiddenClassPool,
     };
 
     /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
@@ -674,7 +675,11 @@ pub const Interpreter = struct {
                             continue :dispatch;
                         } else {
                             // Fallback to property lookup
-                            if (obj.getProperty(.length)) |len| {
+                            const pool = self.ctx.hidden_class_pool orelse {
+                                self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                                continue :dispatch;
+                            };
+                            if (obj.getProperty(pool, .length)) |len| {
                                 self.ctx.stack[sp - 1] = len;
                             } else {
                                 self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
@@ -1109,7 +1114,11 @@ pub const Interpreter = struct {
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
-                        if (obj.getProperty(atom)) |prop_val| {
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                            continue :dispatch;
+                        };
+                        if (obj.getProperty(pool, atom)) |prop_val| {
                             try self.ctx.push(prop_val);
                         } else {
                             try self.ctx.push(value.JSValue.undefined_val);
@@ -1121,7 +1130,11 @@ pub const Interpreter = struct {
                             try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
                         } else if (self.ctx.string_prototype) |proto| {
                             // Look up method on String.prototype
-                            if (proto.getProperty(atom)) |prop_val| {
+                            const pool = self.ctx.hidden_class_pool orelse {
+                                try self.ctx.push(value.JSValue.undefined_val);
+                                continue :dispatch;
+                            };
+                            if (proto.getProperty(pool, atom)) |prop_val| {
                                 try self.ctx.push(prop_val);
                             } else {
                                 try self.ctx.push(value.JSValue.undefined_val);
@@ -1179,7 +1192,7 @@ pub const Interpreter = struct {
                         const pic = &self.pic_cache[cache_idx];
 
                         // PIC lookup: check all cached entries
-                        if (pic.lookup(obj.hidden_class)) |slot_offset| {
+                        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
                             self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
                             try self.ctx.push(obj.getSlot(slot_offset));
                             continue :dispatch;
@@ -1187,10 +1200,14 @@ pub const Interpreter = struct {
 
                         // Cache miss: full lookup and update PIC
                         self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
-                        if (obj.hidden_class.findProperty(atom)) |slot| {
-                            _ = pic.update(obj.hidden_class, slot.offset);
-                            try self.ctx.push(obj.getSlot(slot.offset));
-                        } else if (obj.getProperty(atom)) |prop_val| {
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                            continue :dispatch;
+                        };
+                        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
+                            _ = pic.update(obj.hidden_class_idx, slot_offset);
+                            try self.ctx.push(obj.getSlot(slot_offset));
+                        } else if (obj.getProperty(pool, atom)) |prop_val| {
                             // Property found in prototype chain (don't cache)
                             try self.ctx.push(prop_val);
                         } else {
@@ -1202,7 +1219,11 @@ pub const Interpreter = struct {
                             const str = obj_val.toPtr(string.JSString);
                             try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
                         } else if (self.ctx.string_prototype) |proto| {
-                            if (proto.getProperty(atom)) |prop_val| {
+                            const pool = self.ctx.hidden_class_pool orelse {
+                                try self.ctx.push(value.JSValue.undefined_val);
+                                continue :dispatch;
+                            };
+                            if (proto.getProperty(pool, atom)) |prop_val| {
                                 try self.ctx.push(prop_val);
                             } else {
                                 try self.ctx.push(value.JSValue.undefined_val);
@@ -1231,7 +1252,7 @@ pub const Interpreter = struct {
                         }
 
                         // PIC lookup: check all cached entries
-                        if (pic.lookup(obj.hidden_class)) |slot_offset| {
+                        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
                             self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
                             obj.setSlot(slot_offset, val);
                             continue :dispatch;
@@ -1239,10 +1260,15 @@ pub const Interpreter = struct {
 
                         // Cache miss: check if property exists
                         self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
-                        if (obj.hidden_class.findProperty(atom)) |slot| {
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            // No pool, use full setProperty path
+                            try self.ctx.setPropertyChecked(obj, atom, val);
+                            continue :dispatch;
+                        };
+                        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
                             // Property exists, update PIC and set value
-                            _ = pic.update(obj.hidden_class, slot.offset);
-                            obj.setSlot(slot.offset, val);
+                            _ = pic.update(obj.hidden_class_idx, slot_offset);
+                            obj.setSlot(slot_offset, val);
                         } else {
                             // Property doesn't exist, use full setProperty (may transition)
                             // Don't cache transitions as hidden class will change
@@ -1297,7 +1323,12 @@ pub const Interpreter = struct {
                                     self.ctx.sp = sp - 1;
                                     continue :dispatch;
                                 };
-                                self.ctx.stack[sp - 2] = obj.getProperty(atom) orelse value.JSValue.undefined_val;
+                                const pool = self.ctx.hidden_class_pool orelse {
+                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                                    self.ctx.sp = sp - 1;
+                                    continue :dispatch;
+                                };
+                                self.ctx.stack[sp - 2] = obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
                                 self.ctx.sp = sp - 1;
                                 continue :dispatch;
                             }
@@ -1363,10 +1394,10 @@ pub const Interpreter = struct {
                     if (!bc_val.isPtr()) return error.TypeError;
                     const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
                     // Create function object
-                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const root_class_idx = self.ctx.root_class_idx;
                     const func_obj = try object.JSObject.createBytecodeFunction(
                         self.ctx.allocator,
-                        root_class,
+                        root_class_idx,
                         bc_ptr,
                         @enumFromInt(bc_ptr.name_atom),
                     );
@@ -1381,10 +1412,10 @@ pub const Interpreter = struct {
                     if (!bc_val.isPtr()) return error.TypeError;
                     const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
                     // Create async function object (marked as async via slot 3)
-                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const root_class_idx = self.ctx.root_class_idx;
                     const func_obj = try object.JSObject.createBytecodeFunction(
                         self.ctx.allocator,
-                        root_class,
+                        root_class_idx,
                         bc_ptr,
                         @enumFromInt(bc_ptr.name_atom),
                     );
@@ -1477,9 +1508,13 @@ pub const Interpreter = struct {
                         const target = object.JSObject.fromValue(target_val);
                         const source = object.JSObject.fromValue(source_val);
                         var idx: usize = @intCast(idx_val.getInt());
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(idx_val);
+                            continue :dispatch;
+                        };
 
                         // Get source array length
-                        if (source.getProperty(.length)) |len_val| {
+                        if (source.getProperty(pool, .length)) |len_val| {
                             if (len_val.isInt()) {
                                 const src_len: usize = @intCast(len_val.getInt());
                                 // Copy each element from source to target
@@ -1536,9 +1571,13 @@ pub const Interpreter = struct {
 
                     const ctor_obj = object.JSObject.fromValue(ctor);
                     const target_obj = object.JSObject.fromValue(obj);
+                    const pool = self.ctx.hidden_class_pool orelse {
+                        try self.ctx.push(value.JSValue.false_val);
+                        continue :dispatch;
+                    };
 
                     // Get Constructor.prototype
-                    if (ctor_obj.getProperty(.prototype)) |proto_val| {
+                    if (ctor_obj.getProperty(pool, .prototype)) |proto_val| {
                         if (proto_val.isObject()) {
                             const proto = object.JSObject.fromValue(proto_val);
                             // Walk the prototype chain of obj
@@ -1629,7 +1668,12 @@ pub const Interpreter = struct {
                     const obj = self.ctx.pop();
                     if (obj.isObject()) {
                         const js_obj = object.JSObject.fromValue(obj);
-                        if (js_obj.getProperty(atom)) |method| {
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                            try self.doCall(argc, true);
+                            continue :dispatch;
+                        };
+                        if (js_obj.getProperty(pool, atom)) |method| {
                             // Push method on stack (obj is still there)
                             try self.ctx.push(method);
                             // Call as method (will use obj as 'this')
@@ -2078,10 +2122,10 @@ pub const Interpreter = struct {
                     }
 
                     // Create closure object
-                    const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                    const root_class_idx = self.ctx.root_class_idx;
                     const closure_obj = try object.JSObject.createClosure(
                         self.ctx.allocator,
-                        root_class,
+                        root_class_idx,
                         bc_ptr,
                         @enumFromInt(bc_ptr.name_atom),
                         upvalues,
@@ -2310,25 +2354,25 @@ pub const Interpreter = struct {
     }
 
     fn createObject(self: *Interpreter) !*object.JSObject {
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        const root_class_idx = self.ctx.root_class_idx;
         // Use arena for ephemeral object allocation if hybrid mode enabled
         if (self.ctx.hybrid) |h| {
-            return object.JSObject.createWithArena(h.arena, root_class, null) orelse
+            return object.JSObject.createWithArena(h.arena, root_class_idx, null) orelse
                 return error.OutOfMemory;
         }
-        return try object.JSObject.create(self.ctx.allocator, root_class, null);
+        return try object.JSObject.create(self.ctx.allocator, root_class_idx, null);
     }
 
     fn createArray(self: *Interpreter) !*object.JSObject {
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        const root_class_idx = self.ctx.root_class_idx;
         // Use arena for ephemeral array allocation if hybrid mode enabled
         if (self.ctx.hybrid) |h| {
-            const obj = object.JSObject.createArrayWithArena(h.arena, root_class) orelse
+            const obj = object.JSObject.createArrayWithArena(h.arena, root_class_idx) orelse
                 return error.OutOfMemory;
             obj.prototype = self.ctx.array_prototype;
             return obj;
         }
-        const obj = try object.JSObject.createArray(self.ctx.allocator, root_class);
+        const obj = try object.JSObject.createArray(self.ctx.allocator, root_class_idx);
         obj.prototype = self.ctx.array_prototype;
         return obj;
     }
@@ -2464,18 +2508,18 @@ pub const Interpreter = struct {
             // Check if this is a generator function (using cached flag)
             if (func_obj.flags.is_generator) {
                 // Create a generator object instead of executing
-                const root_class = self.ctx.root_class orelse return error.NoRootClass;
+                const root_class_idx = self.ctx.root_class_idx;
                 const gen_obj = if (self.ctx.hybrid) |h|
                     (object.JSObject.createGeneratorWithArena(
                         h.arena,
-                        root_class,
+                        root_class_idx,
                         func_bc,
                         self.ctx.generator_prototype,
                     ) orelse return error.OutOfMemory)
                 else
                     (object.JSObject.createGenerator(
                         self.ctx.allocator,
-                        root_class,
+                        root_class_idx,
                         func_bc,
                         self.ctx.generator_prototype,
                     ) catch return error.OutOfMemory);
@@ -2501,11 +2545,8 @@ pub const Interpreter = struct {
                 const result = try self.callBytecodeFunction(func_val, func_bc, this_val, args[0..argc]);
 
                 // Create a resolved Promise-like object {then: fn, value: result}
-                const promise_obj = self.ctx.createObject(null) catch |err| {
-                    return switch (err) {
-                        error.NoRootClass => error.NoRootClass,
-                        else => error.OutOfMemory,
-                    };
+                const promise_obj = self.ctx.createObject(null) catch {
+                    return error.OutOfMemory;
                 };
 
                 // Store the resolved value
@@ -3593,9 +3634,7 @@ test "Interpreter native function with arguments" {
 }
 
 test "Interpreter bytecode function call" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = std.testing.allocator;
     const gc_mod = @import("gc.zig");
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
@@ -3606,35 +3645,39 @@ test "Interpreter bytecode function call" {
 
     // Create a simple function: function add(a, b) { return a + b; }
     // Bytecode: get_loc_0, get_loc_1, add, ret
-    const inner_code = [_]u8{
-        @intFromEnum(bytecode.Opcode.get_loc_0), // a
-        @intFromEnum(bytecode.Opcode.get_loc_1), // b
-        @intFromEnum(bytecode.Opcode.add),
-        @intFromEnum(bytecode.Opcode.ret),
-    };
+    // Must heap-allocate since destroyFull will free bc.code
+    const inner_code = try allocator.alloc(u8, 4);
+    inner_code[0] = @intFromEnum(bytecode.Opcode.get_loc_0); // a
+    inner_code[1] = @intFromEnum(bytecode.Opcode.get_loc_1); // b
+    inner_code[2] = @intFromEnum(bytecode.Opcode.add);
+    inner_code[3] = @intFromEnum(bytecode.Opcode.ret);
 
-    const inner_func = bytecode.FunctionBytecode{
+    // Must heap-allocate the FunctionBytecode since createBytecodeFunction stores a pointer
+    const inner_func = try allocator.create(bytecode.FunctionBytecode);
+    inner_func.* = .{
         .header = .{},
         .name_atom = 0,
         .arg_count = 2,
         .local_count = 2, // a, b
         .stack_size = 16,
         .flags = .{},
-        .code = &inner_code,
+        .code = inner_code,
         .constants = &.{},
         .source_map = null,
     };
 
     // Create function object
-    const root_class = ctx.root_class.?;
-    const func_obj = try object.JSObject.createBytecodeFunction(allocator, root_class, &inner_func, .length);
+    const root_class_idx = ctx.root_class_idx;
+    const func_obj = try object.JSObject.createBytecodeFunction(allocator, root_class_idx, inner_func, .length);
 
     // Register as global "add" (Atom.abs = 95)
+    // The function will be cleaned up by ctx.deinit() -> destroyBuiltin -> destroyFull
     try ctx.setGlobal(.abs, func_obj.toValue());
 
     var interp = Interpreter.init(ctx);
 
     // Test: get_global(abs), push 7, push 8, call(2), ret
+    // This code is stack-allocated but only used for interp.run, not stored
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.get_global),
         95,
@@ -4613,85 +4656,60 @@ test "PolymorphicInlineCache unit tests" {
     // Test PIC lookup and update
     var pic = PolymorphicInlineCache{};
 
-    // Create fake hidden classes (just need distinct pointers)
-    var class1 = object.HiddenClass{
-        .properties = &.{},
-        .transitions = undefined,
-        .prototype = null,
-        .property_count = 1,
-    };
-    var class2 = object.HiddenClass{
-        .properties = &.{},
-        .transitions = undefined,
-        .prototype = null,
-        .property_count = 2,
-    };
-    var class3 = object.HiddenClass{
-        .properties = &.{},
-        .transitions = undefined,
-        .prototype = null,
-        .property_count = 3,
-    };
-    var class4 = object.HiddenClass{
-        .properties = &.{},
-        .transitions = undefined,
-        .prototype = null,
-        .property_count = 4,
-    };
-    var class5 = object.HiddenClass{
-        .properties = &.{},
-        .transitions = undefined,
-        .prototype = null,
-        .property_count = 5,
-    };
+    // Create distinct hidden class indices
+    const class1: object.HiddenClassIndex = @enumFromInt(1);
+    const class2: object.HiddenClassIndex = @enumFromInt(2);
+    const class3: object.HiddenClassIndex = @enumFromInt(3);
+    const class4: object.HiddenClassIndex = @enumFromInt(4);
+    const class5: object.HiddenClassIndex = @enumFromInt(5);
 
     // Initially empty
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
     try std.testing.expectEqual(@as(u8, 0), pic.count);
     try std.testing.expect(!pic.megamorphic);
 
     // Add first entry
-    try std.testing.expect(pic.update(&class1, 10));
+    try std.testing.expect(pic.update(class1, 10));
     try std.testing.expectEqual(@as(u8, 1), pic.count);
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
 
     // Add second entry
-    try std.testing.expect(pic.update(&class2, 20));
+    try std.testing.expect(pic.update(class2, 20));
     try std.testing.expectEqual(@as(u8, 2), pic.count);
-    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(&class2));
+    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2));
 
     // First entry still works
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
 
     // Add third and fourth entries
-    try std.testing.expect(pic.update(&class3, 30));
-    try std.testing.expect(pic.update(&class4, 40));
+    try std.testing.expect(pic.update(class3, 30));
+    try std.testing.expect(pic.update(class4, 40));
     try std.testing.expectEqual(@as(u8, 4), pic.count);
     try std.testing.expect(!pic.megamorphic);
 
     // All four entries work
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
-    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(&class2));
-    try std.testing.expectEqual(@as(?u16, 30), pic.lookup(&class3));
-    try std.testing.expectEqual(@as(?u16, 40), pic.lookup(&class4));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
+    try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2));
+    try std.testing.expectEqual(@as(?u16, 30), pic.lookup(class3));
+    try std.testing.expectEqual(@as(?u16, 40), pic.lookup(class4));
 
     // Fifth entry triggers megamorphic
-    try std.testing.expect(!pic.update(&class5, 50));
+    try std.testing.expect(!pic.update(class5, 50));
     try std.testing.expect(pic.megamorphic);
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(&class5));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class5));
 
     // Existing entries still work (megamorphic doesn't clear cache)
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
 
     // Update existing entry in megamorphic state - no change
-    try std.testing.expect(!pic.update(&class1, 100));
-    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(&class1)); // unchanged
+    try std.testing.expect(!pic.update(class1, 100));
+    try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1)); // unchanged
 
     // Reset test
     pic.reset();
     try std.testing.expectEqual(@as(u8, 0), pic.count);
     try std.testing.expect(!pic.megamorphic);
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(&class1));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
 }
 
 test "End-to-end: polymorphic property access" {

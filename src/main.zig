@@ -22,11 +22,10 @@
 //!   }
 //!
 //! Available APIs:
-//!   - fetch(url, options) → Promise<Response>
-//!   - Deno.readTextFile(path) → Promise<string>
-//!   - Deno.writeTextFile(path, content) → Promise<void>
 //!   - console.log/error/warn/info/debug
-//!   - setTimeout, clearTimeout
+//!   - Response.json/text/html/redirect helpers
+//!   - Math, String, Array, Object builtins
+//!   - JSON.parse/stringify
 
 const std = @import("std");
 const Server = @import("server.zig").Server;
@@ -39,7 +38,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const config = parseArgs(allocator) catch |err| {
+    const config = parseArgs() catch |err| {
         if (err == error.HelpRequested) {
             return;
         }
@@ -59,8 +58,7 @@ pub fn main() !void {
     };
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !ServerConfig {
-    _ = allocator;
+fn parseArgs() !ServerConfig {
 
     var config = ServerConfig{
         .handler = .{ .inline_code = "" },

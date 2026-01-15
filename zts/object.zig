@@ -847,11 +847,20 @@ pub const HiddenClassPool = struct {
         const new_idx = try self.allocClass(new_prop_count, prototype);
 
         // Copy old properties to new location (SoA format)
+        // IMPORTANT: Ensure capacity BEFORE copying to avoid aliasing bug where
+        // appendSlice would reallocate while reading from the same array
         if (old_prop_count > 0) {
             const old_start = self.properties_starts.items[from];
-            try self.property_names.appendSlice(self.allocator, self.property_names.items[old_start..][0..old_prop_count]);
-            try self.property_offsets.appendSlice(self.allocator, self.property_offsets.items[old_start..][0..old_prop_count]);
-            try self.property_flags.appendSlice(self.allocator, self.property_flags.items[old_start..][0..old_prop_count]);
+
+            // Ensure capacity for old properties + 1 new property
+            try self.property_names.ensureUnusedCapacity(self.allocator, new_prop_count);
+            try self.property_offsets.ensureUnusedCapacity(self.allocator, new_prop_count);
+            try self.property_flags.ensureUnusedCapacity(self.allocator, new_prop_count);
+
+            // Now safe to copy - no reallocation will occur
+            self.property_names.appendSliceAssumeCapacity(self.property_names.items[old_start..][0..old_prop_count]);
+            self.property_offsets.appendSliceAssumeCapacity(self.property_offsets.items[old_start..][0..old_prop_count]);
+            self.property_flags.appendSliceAssumeCapacity(self.property_flags.items[old_start..][0..old_prop_count]);
         }
 
         // Add new property using SoA arrays
@@ -904,6 +913,46 @@ pub const HiddenClassPool = struct {
 
         const start = self.properties_starts.items[i];
         return self.property_names.items[start..][0..prop_count];
+    }
+
+    /// Get or create a hidden class for functions with 2 reserved slots
+    /// This prevents property additions from overwriting internal function data
+    /// stored in inline_slots[0] and inline_slots[1]
+    pub fn getOrCreateFunctionClass(self: *HiddenClassPool, from_idx: HiddenClassIndex) !HiddenClassIndex {
+        const from = from_idx.toInt();
+
+        // Use special atoms for function class transition
+        const reserved0: Atom = @enumFromInt(0xFFFE);
+        const reserved1: Atom = @enumFromInt(0xFFFF);
+
+        // Check for existing transition
+        const trans = self.transitions.items;
+        var i: usize = 0;
+        while (i + TRANSITION_ENTRY_SIZE <= trans.len) : (i += TRANSITION_ENTRY_SIZE) {
+            if (trans[i] == from and trans[i + 1] == @intFromEnum(reserved0)) {
+                return HiddenClassIndex.fromInt(trans[i + 2]);
+            }
+        }
+
+        // Create function class with 2 reserved slots
+        const prototype = self.getPrototype(from_idx);
+        const new_idx = try self.allocClass(2, prototype);
+
+        // Add reserved property slots (using SoA arrays)
+        try self.property_names.append(self.allocator, reserved0);
+        try self.property_offsets.append(self.allocator, 0);
+        try self.property_flags.append(self.allocator, .{});
+
+        try self.property_names.append(self.allocator, reserved1);
+        try self.property_offsets.append(self.allocator, 1);
+        try self.property_flags.append(self.allocator, .{});
+
+        // Record transition
+        try self.transitions.append(self.allocator, from);
+        try self.transitions.append(self.allocator, @intFromEnum(reserved0));
+        try self.transitions.append(self.allocator, new_idx.toInt());
+
+        return new_idx;
     }
 };
 
@@ -1090,7 +1139,8 @@ pub const ClassId = enum(u8) {
 /// Uses extern struct for predictable C-compatible memory layout
 pub const JSObject = extern struct {
     header: heap.MemBlockHeader,
-    hidden_class: *HiddenClass,
+    hidden_class_idx: HiddenClassIndex,
+    _padding: u32 = 0, // Alignment padding (was pointer, now u32 index)
     prototype: ?*JSObject,
     class_id: ClassId,
     flags: ObjectFlags,
@@ -1150,11 +1200,11 @@ pub const JSObject = extern struct {
     };
 
     /// Create a new object
-    pub fn create(allocator: std.mem.Allocator, class: *HiddenClass, prototype: ?*JSObject) !*JSObject {
+    pub fn create(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, prototype: ?*JSObject) !*JSObject {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = prototype,
             .class_id = .object,
             .flags = .{},
@@ -1167,11 +1217,11 @@ pub const JSObject = extern struct {
     }
 
     /// Create a new object using arena allocation (ephemeral, dies at request end)
-    pub fn createWithArena(arena: *arena_mod.Arena, class: *HiddenClass, prototype: ?*JSObject) ?*JSObject {
+    pub fn createWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, prototype: ?*JSObject) ?*JSObject {
         const obj = arena.create(JSObject) orelse return null;
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = prototype,
             .class_id = .object,
             .flags = .{ .is_arena = true },
@@ -1184,11 +1234,11 @@ pub const JSObject = extern struct {
     }
 
     /// Create an array object using arena allocation
-    pub fn createArrayWithArena(arena: *arena_mod.Arena, class: *HiddenClass) ?*JSObject {
+    pub fn createArrayWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex) ?*JSObject {
         const obj = arena.create(JSObject) orelse return null;
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = null,
             .class_id = .array,
             .flags = .{ .is_exotic = true, .has_small_array = true, .is_arena = true },
@@ -1249,12 +1299,11 @@ pub const JSObject = extern struct {
 
     /// Destroy a builtin object and all its function properties
     /// Used for cleaning up Math, JSON, Object, etc. during Context.deinit
-    pub fn destroyBuiltin(self: *JSObject, allocator: std.mem.Allocator) void {
-        // Get properties from hidden class
-        const props = self.hidden_class.properties;
-        for (props) |slot| {
-            // Get property value using slot offset
-            const slot_idx = slot.offset;
+    pub fn destroyBuiltin(self: *JSObject, allocator: std.mem.Allocator, pool: *const HiddenClassPool) void {
+        // Iterate through all property slots
+        const prop_count = pool.getPropertyCount(self.hidden_class_idx);
+        var slot_idx: u16 = 0;
+        while (slot_idx < prop_count) : (slot_idx += 1) {
             const val = if (slot_idx < INLINE_SLOT_COUNT)
                 self.inline_slots[slot_idx]
             else if (self.overflow_slots) |slots|
@@ -1267,7 +1316,7 @@ pub const JSObject = extern struct {
             if (val.isObject()) {
                 const obj = val.toPtr(JSObject);
                 if (obj.class_id == .function) {
-                    obj.destroyBuiltin(allocator);
+                    obj.destroyBuiltin(allocator, pool);
                 }
             } else if (val.isString()) {
                 // Free string values (e.g., Fragment constant)
@@ -1280,7 +1329,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a native function object
-    pub fn createNativeFunction(allocator: std.mem.Allocator, class: *HiddenClass, func: NativeFn, name: Atom, arg_count: u8) !*JSObject {
+    pub fn createNativeFunction(allocator: std.mem.Allocator, pool: *HiddenClassPool, class_idx: HiddenClassIndex, func: NativeFn, name: Atom, arg_count: u8) !*JSObject {
         // Allocate native function data
         const data = try allocator.create(NativeFunctionData);
         errdefer allocator.destroy(data);
@@ -1292,13 +1341,13 @@ pub const JSObject = extern struct {
 
         // Create a hidden class that reserves slots 0-1 for internal function data
         // This prevents setProperty from overwriting the native function data
-        const func_class = try class.getOrCreateFunctionClass(allocator);
+        const func_class_idx = try pool.getOrCreateFunctionClass(class_idx);
 
         // Create function object
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = func_class,
+            .hidden_class_idx = func_class_idx,
             .prototype = null,
             .class_id = .function,
             .flags = .{ .is_callable = true },
@@ -1324,7 +1373,7 @@ pub const JSObject = extern struct {
 
     /// Create a JS bytecode function object
     /// Copies is_generator and is_async flags from bytecode for efficient call-time checks
-    pub fn createBytecodeFunction(allocator: std.mem.Allocator, class: *HiddenClass, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, name: Atom) !*JSObject {
+    pub fn createBytecodeFunction(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, name: Atom) !*JSObject {
         // Allocate bytecode function data
         const data = try allocator.create(BytecodeFunctionData);
         errdefer allocator.destroy(data);
@@ -1337,7 +1386,7 @@ pub const JSObject = extern struct {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = null,
             .class_id = .function,
             .flags = .{
@@ -1380,7 +1429,7 @@ pub const JSObject = extern struct {
     /// Copies is_generator and is_async flags from bytecode for efficient call-time checks
     pub fn createClosure(
         allocator: std.mem.Allocator,
-        class: *HiddenClass,
+        class_idx: HiddenClassIndex,
         bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode,
         name: Atom,
         upvalues: []*Upvalue,
@@ -1398,7 +1447,7 @@ pub const JSObject = extern struct {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = null,
             .class_id = .function,
             .flags = .{
@@ -1429,7 +1478,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a generator object from bytecode function
-    pub fn createGenerator(allocator: std.mem.Allocator, class: *HiddenClass, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) !*JSObject {
+    pub fn createGenerator(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) !*JSObject {
         // Allocate generator data
         const data = try allocator.create(GeneratorData);
         errdefer allocator.destroy(data);
@@ -1456,7 +1505,7 @@ pub const JSObject = extern struct {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = prototype,
             .class_id = .generator,
             .flags = .{},
@@ -1471,7 +1520,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a generator object using arena allocation (ephemeral)
-    pub fn createGeneratorWithArena(arena: *arena_mod.Arena, class: *HiddenClass, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) ?*JSObject {
+    pub fn createGeneratorWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) ?*JSObject {
         const data = arena.create(GeneratorData) orelse return null;
         const locals = arena.allocSlice(value.JSValue, bytecode_ptr.local_count) orelse return null;
         @memset(locals, value.JSValue.undefined_val);
@@ -1490,7 +1539,7 @@ pub const JSObject = extern struct {
         const obj = arena.create(JSObject) orelse return null;
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = prototype,
             .class_id = .generator,
             .flags = .{ .is_arena = true },
@@ -1542,7 +1591,7 @@ pub const JSObject = extern struct {
     }
 
     /// Get property by name (with prototype chain lookup)
-    pub fn getProperty(self: *const JSObject, name: Atom) ?value.JSValue {
+    pub fn getProperty(self: *const JSObject, pool: *const HiddenClassPool, name: Atom) ?value.JSValue {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
@@ -1551,15 +1600,15 @@ pub const JSObject = extern struct {
             return value.JSValue.fromInt(@intCast(self.getRangeLength()));
         }
         // Check own properties first
-        if (self.hidden_class.findProperty(name)) |slot| {
-            return self.getSlot(slot.offset);
+        if (pool.findProperty(self.hidden_class_idx, name)) |offset| {
+            return self.getSlot(offset);
         }
 
         // Walk prototype chain
         var proto = self.prototype;
         while (proto) |p| {
-            if (p.hidden_class.findProperty(name)) |slot| {
-                return p.getSlot(slot.offset);
+            if (pool.findProperty(p.hidden_class_idx, name)) |offset| {
+                return p.getSlot(offset);
             }
             proto = p.prototype;
         }
@@ -1568,7 +1617,7 @@ pub const JSObject = extern struct {
     }
 
     /// Get own property (no prototype lookup)
-    pub fn getOwnProperty(self: *const JSObject, name: Atom) ?value.JSValue {
+    pub fn getOwnProperty(self: *const JSObject, pool: *const HiddenClassPool, name: Atom) ?value.JSValue {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
@@ -1576,15 +1625,15 @@ pub const JSObject = extern struct {
         if (self.class_id == .range_iterator and name == .length) {
             return value.JSValue.fromInt(@intCast(self.getRangeLength()));
         }
-        if (self.hidden_class.findProperty(name)) |slot| {
-            return self.getSlot(slot.offset);
+        if (pool.findProperty(self.hidden_class_idx, name)) |offset| {
+            return self.getSlot(offset);
         }
         return null;
     }
 
     /// Set property (with hidden class transition)
     /// Returns error.ArenaObjectEscape if storing arena object into persistent object
-    pub fn setProperty(self: *JSObject, allocator: std.mem.Allocator, name: Atom, val: value.JSValue) !void {
+    pub fn setProperty(self: *JSObject, allocator: std.mem.Allocator, pool: *HiddenClassPool, name: Atom, val: value.JSValue) !void {
         if (self.class_id == .array and name == .length) {
             if (val.isInt()) {
                 const len = val.getInt();
@@ -1599,8 +1648,8 @@ pub const JSObject = extern struct {
         // which respects the enforce_arena_escape flag
 
         // Check if property exists
-        if (self.hidden_class.findProperty(name)) |slot| {
-            self.setSlot(slot.offset, val);
+        if (pool.findProperty(self.hidden_class_idx, name)) |offset| {
+            self.setSlot(offset, val);
             return;
         }
 
@@ -1610,15 +1659,15 @@ pub const JSObject = extern struct {
         }
 
         // Transition to new hidden class
-        const new_class = try self.hidden_class.addProperty(allocator, name);
-        const new_slot = new_class.property_count - 1;
+        const new_class_idx = try pool.addProperty(self.hidden_class_idx, name);
+        const new_slot = pool.getPropertyCount(new_class_idx) - 1;
 
         // Ensure we have space
         if (new_slot >= INLINE_SLOT_COUNT) {
             try self.ensureOverflowCapacity(allocator, new_slot - INLINE_SLOT_COUNT + 1);
         }
 
-        self.hidden_class = new_class;
+        self.hidden_class_idx = new_class_idx;
         self.setSlot(new_slot, val);
     }
 
@@ -1655,23 +1704,24 @@ pub const JSObject = extern struct {
     }
 
     /// Check if object has own property
-    pub fn hasOwnProperty(self: *const JSObject, name: Atom) bool {
-        return self.hidden_class.findProperty(name) != null;
+    pub fn hasOwnProperty(self: *const JSObject, pool: *const HiddenClassPool, name: Atom) bool {
+        return pool.findProperty(self.hidden_class_idx, name) != null;
     }
 
     /// Check if property exists (including prototype chain)
-    pub fn hasProperty(self: *const JSObject, name: Atom) bool {
-        return self.getProperty(name) != null;
+    pub fn hasProperty(self: *const JSObject, pool: *const HiddenClassPool, name: Atom) bool {
+        return self.getProperty(pool, name) != null;
     }
 
     /// Delete property
-    pub fn deleteProperty(self: *JSObject, name: Atom) bool {
+    pub fn deleteProperty(self: *JSObject, pool: *const HiddenClassPool, name: Atom) bool {
         if (self.class_id == .array and name == .length) return false;
-        if (self.hidden_class.findProperty(name)) |slot| {
-            if (!slot.flags.configurable) return false;
+        if (pool.findProperty(self.hidden_class_idx, name)) |offset| {
+            const flags = pool.getPropertyFlags(self.hidden_class_idx, name) orelse return true;
+            if (!flags.configurable) return false;
             // Note: In a full implementation, we'd transition to a new hidden class
             // For now, just set to undefined
-            self.setSlot(slot.offset, value.JSValue.undefined_val);
+            self.setSlot(offset, value.JSValue.undefined_val);
             return true;
         }
         return true; // Deleting non-existent property succeeds
@@ -1688,13 +1738,15 @@ pub const JSObject = extern struct {
     }
 
     /// Get all own enumerable property names
-    pub fn getOwnEnumerableKeys(self: *const JSObject, allocator: std.mem.Allocator) ![]Atom {
+    pub fn getOwnEnumerableKeys(self: *const JSObject, allocator: std.mem.Allocator, pool: *const HiddenClassPool) ![]Atom {
         var keys = std.ArrayList(Atom).empty;
         errdefer keys.deinit(allocator);
 
-        for (self.hidden_class.properties) |prop| {
-            if (prop.flags.enumerable) {
-                try keys.append(allocator, prop.name);
+        const prop_names = pool.propertyNames(self.hidden_class_idx);
+        for (prop_names) |name| {
+            const flags = pool.getPropertyFlags(self.hidden_class_idx, name) orelse continue;
+            if (flags.enumerable) {
+                try keys.append(allocator, name);
             }
         }
 
@@ -1716,11 +1768,11 @@ pub const JSObject = extern struct {
     // ========================================================================
 
     /// Create an array object
-    pub fn createArray(allocator: std.mem.Allocator, class: *HiddenClass) !*JSObject {
+    pub fn createArray(allocator: std.mem.Allocator, class_idx: HiddenClassIndex) !*JSObject {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = null,
             .class_id = .array,
             .flags = .{ .is_exotic = true, .has_small_array = true },
@@ -1736,7 +1788,7 @@ pub const JSObject = extern struct {
 
     /// Create a lazy range iterator object
     /// Unlike createArray, this doesn't pre-allocate elements - values are computed on access
-    pub fn createRangeIterator(allocator: std.mem.Allocator, class: *HiddenClass, start: i32, end: i32, step: i32) !*JSObject {
+    pub fn createRangeIterator(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, start: i32, end: i32, step: i32) !*JSObject {
         // Compute length once at creation (avoid division in hot loop)
         const length: u32 = blk: {
             if (step == 0) break :blk 0;
@@ -1752,7 +1804,7 @@ pub const JSObject = extern struct {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = null,
             .class_id = .range_iterator,
             .flags = .{ .is_exotic = true },
@@ -1770,7 +1822,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a lazy range iterator object using arena allocation (ephemeral)
-    pub fn createRangeIteratorWithArena(arena: *arena_mod.Arena, class: *HiddenClass, start: i32, end: i32, step: i32) ?*JSObject {
+    pub fn createRangeIteratorWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, start: i32, end: i32, step: i32) ?*JSObject {
         const length: u32 = blk: {
             if (step == 0) break :blk 0;
             if (step > 0) {
@@ -1785,7 +1837,7 @@ pub const JSObject = extern struct {
         const obj = arena.create(JSObject) orelse return null;
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class = class,
+            .hidden_class_idx = class_idx,
             .prototype = null,
             .class_id = .range_iterator,
             .flags = .{ .is_exotic = true, .is_arena = true },
@@ -1917,39 +1969,48 @@ pub const JSObject = extern struct {
 
     pub const PropertyIterator = struct {
         obj: *const JSObject,
-        index: usize,
+        pool: *const HiddenClassPool,
+        index: u16,
+        prop_count: u16,
 
         pub fn next(self: *PropertyIterator) ?PropertyEntry {
-            const props = self.obj.hidden_class.properties;
-            if (self.index >= props.len) return null;
+            if (self.index >= self.prop_count) return null;
 
-            const slot = props[self.index];
-            const val = self.obj.getSlot(slot.offset);
+            const prop_names = self.pool.propertyNames(self.obj.hidden_class_idx);
+            if (self.index >= prop_names.len) return null;
+
+            const name = prop_names[self.index];
+            const val = self.obj.getSlot(self.index);
             self.index += 1;
 
             return .{
-                .atom = slot.name,
+                .atom = name,
                 .value = val,
             };
         }
     };
 
     /// Get property iterator
-    pub fn propertyIterator(self: *const JSObject) PropertyIterator {
-        return .{ .obj = self, .index = 0 };
+    pub fn propertyIterator(self: *const JSObject, pool: *const HiddenClassPool) PropertyIterator {
+        return .{
+            .obj = self,
+            .pool = pool,
+            .index = 0,
+            .prop_count = pool.getPropertyCount(self.hidden_class_idx),
+        };
     }
 };
 
 /// Inline cache for property access
 pub const InlineCache = struct {
-    cached_class: ?*HiddenClass = null,
+    cached_class_idx: HiddenClassIndex = .none,
     cached_slot: u16 = 0,
     hit_count: u32 = 0,
     miss_count: u32 = 0,
 
     /// Try fast property lookup via cached shape
     pub fn get(self: *InlineCache, obj: *JSObject) ?value.JSValue {
-        if (obj.hidden_class == self.cached_class) {
+        if (obj.hidden_class_idx == self.cached_class_idx and !self.cached_class_idx.isNone()) {
             self.hit_count += 1;
             return obj.getPropertyFast(self.cached_slot);
         }
@@ -1958,8 +2019,8 @@ pub const InlineCache = struct {
     }
 
     /// Update cache after miss
-    pub fn update(self: *InlineCache, class: *HiddenClass, slot: u16) void {
-        self.cached_class = class;
+    pub fn update(self: *InlineCache, class_idx: HiddenClassIndex, slot: u16) void {
+        self.cached_class_idx = class_idx;
         self.cached_slot = slot;
     }
 
@@ -2040,22 +2101,20 @@ test "InlineCache hit tracking" {
 test "JSObject creation and property access" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
     // Initially no properties
-    try std.testing.expect(obj.getOwnProperty(.length) == null);
+    try std.testing.expect(obj.getOwnProperty(pool, .length) == null);
 
     // Set property
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(42));
-    defer allocator.free(obj.hidden_class.properties);
-    defer obj.hidden_class.deinit(allocator);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(42));
 
     // Get property
-    const val = obj.getOwnProperty(.length);
+    const val = obj.getOwnProperty(pool, .length);
     try std.testing.expect(val != null);
     try std.testing.expectEqual(@as(i32, 42), val.?.getInt());
 }
@@ -2063,60 +2122,53 @@ test "JSObject creation and property access" {
 test "JSObject prototype chain lookup" {
     const allocator = std.testing.allocator;
 
-    // Create prototype
-    var proto_class = try HiddenClass.init(allocator);
-    defer proto_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var proto = try JSObject.create(allocator, proto_class, null);
+    // Create prototype
+    var proto = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer proto.destroy(allocator);
 
-    try proto.setProperty(allocator, .toString, value.JSValue.fromInt(1));
-    defer allocator.free(proto.hidden_class.properties);
-    defer proto.hidden_class.deinit(allocator);
+    try proto.setProperty(allocator, pool, .toString, value.JSValue.fromInt(1));
 
     // Create child object with prototype
-    var child_class = try HiddenClass.init(allocator);
-    defer child_class.deinit(allocator);
-
-    var child = try JSObject.create(allocator, child_class, proto);
+    var child = try JSObject.create(allocator, pool.getEmptyClass(), proto);
     defer child.destroy(allocator);
 
     // Child can access prototype property
-    const val = child.getProperty(.toString);
+    const val = child.getProperty(pool, .toString);
     try std.testing.expect(val != null);
     try std.testing.expectEqual(@as(i32, 1), val.?.getInt());
 
     // But not as own property
-    try std.testing.expect(child.getOwnProperty(.toString) == null);
+    try std.testing.expect(child.getOwnProperty(pool, .toString) == null);
 }
 
 test "JSObject hasProperty" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
-    try std.testing.expect(!obj.hasOwnProperty(.length));
-    try std.testing.expect(!obj.hasProperty(.length));
+    try std.testing.expect(!obj.hasOwnProperty(pool, .length));
+    try std.testing.expect(!obj.hasProperty(pool, .length));
 
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(5));
-    defer allocator.free(obj.hidden_class.properties);
-    defer obj.hidden_class.deinit(allocator);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(5));
 
-    try std.testing.expect(obj.hasOwnProperty(.length));
-    try std.testing.expect(obj.hasProperty(.length));
+    try std.testing.expect(obj.hasOwnProperty(pool, .length));
+    try std.testing.expect(obj.hasProperty(pool, .length));
 }
 
 test "JSObject extensibility" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
     try std.testing.expect(obj.isExtensible());
@@ -2125,17 +2177,17 @@ test "JSObject extensibility" {
     try std.testing.expect(!obj.isExtensible());
 
     // Can't add new properties
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
-    try std.testing.expect(obj.getOwnProperty(.length) == null);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
+    try std.testing.expect(obj.getOwnProperty(pool, .length) == null);
 }
 
 test "JSObject to/from value" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
     const js_val = obj.toValue();
@@ -2148,15 +2200,13 @@ test "JSObject to/from value" {
 test "InlineCache with object" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(100));
-    defer allocator.free(obj.hidden_class.properties);
-    defer obj.hidden_class.deinit(allocator);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(100));
 
     var ic = InlineCache{};
 
@@ -2166,8 +2216,8 @@ test "InlineCache with object" {
     try std.testing.expectEqual(@as(u32, 1), ic.miss_count);
 
     // Update cache
-    if (obj.hidden_class.findProperty(.length)) |slot| {
-        ic.update(obj.hidden_class, slot.offset);
+    if (pool.findProperty(obj.hidden_class_idx, .length)) |slot| {
+        ic.update(obj.hidden_class_idx, slot);
     }
 
     // Second access - cache hit
@@ -2210,54 +2260,50 @@ test "Upvalue operations" {
 test "JSObject deleteProperty" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
-    defer allocator.free(obj.hidden_class.properties);
-    defer obj.hidden_class.deinit(allocator);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
 
     // Property exists
-    try std.testing.expect(obj.hasOwnProperty(.length));
+    try std.testing.expect(obj.hasOwnProperty(pool, .length));
 
     // Delete property - returns true
-    const deleted = obj.deleteProperty(.length);
+    const deleted = obj.deleteProperty(pool, .length);
     try std.testing.expect(deleted);
 
     // Deleting non-existent property also returns true (JS spec behavior)
-    const deleted_again = obj.deleteProperty(.prototype);
+    const deleted_again = obj.deleteProperty(pool, .prototype);
     try std.testing.expect(deleted_again);
 }
 
 test "JSObject hasOwnProperty" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
     // Initially no property
-    try std.testing.expect(!obj.hasOwnProperty(.length));
+    try std.testing.expect(!obj.hasOwnProperty(pool, .length));
 
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(5));
-    defer allocator.free(obj.hidden_class.properties);
-    defer obj.hidden_class.deinit(allocator);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(5));
 
-    try std.testing.expect(obj.hasOwnProperty(.length));
+    try std.testing.expect(obj.hasOwnProperty(pool, .length));
 }
 
 test "JSObject array operations" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var arr = try JSObject.createArray(allocator, root_class);
+    var arr = try JSObject.createArray(allocator, pool.getEmptyClass());
     defer arr.destroy(allocator);
 
     // Check it's an array
@@ -2274,10 +2320,10 @@ test "JSObject array operations" {
 test "JSObject getIndex and setIndex" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var arr = try JSObject.createArray(allocator, root_class);
+    var arr = try JSObject.createArray(allocator, pool.getEmptyClass());
     defer arr.destroy(allocator);
 
     // Initially no element at index 0
@@ -2293,10 +2339,10 @@ test "JSObject getIndex and setIndex" {
 test "JSObject arrayPush" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var arr = try JSObject.createArray(allocator, root_class);
+    var arr = try JSObject.createArray(allocator, pool.getEmptyClass());
     defer arr.destroy(allocator);
 
     try std.testing.expectEqual(@as(u32, 0), arr.getArrayLength());
@@ -2313,17 +2359,15 @@ test "JSObject arrayPush" {
 test "JSObject getOwnEnumerableKeys" {
     const allocator = std.testing.allocator;
 
-    var root_class = try HiddenClass.init(allocator);
-    defer root_class.deinit(allocator);
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, root_class, null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
     defer obj.destroy(allocator);
 
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
-    defer allocator.free(obj.hidden_class.properties);
-    defer obj.hidden_class.deinit(allocator);
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
 
-    const keys = try obj.getOwnEnumerableKeys(allocator);
+    const keys = try obj.getOwnEnumerableKeys(allocator, pool);
     defer allocator.free(keys);
 
     try std.testing.expectEqual(@as(usize, 1), keys.len);
@@ -2348,14 +2392,14 @@ test "PropertyIterator" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const root_class = try HiddenClass.init(allocator);
+    var pool = try HiddenClassPool.init(allocator);
 
-    const obj = try JSObject.create(allocator, root_class, null);
+    const obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
 
-    try obj.setProperty(allocator, .length, value.JSValue.fromInt(10));
-    try obj.setProperty(allocator, .prototype, value.JSValue.fromInt(20));
+    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
+    try obj.setProperty(allocator, pool, .prototype, value.JSValue.fromInt(20));
 
-    var iter = obj.propertyIterator();
+    var iter = obj.propertyIterator(pool);
     var count: usize = 0;
     while (iter.next()) |_| {
         count += 1;
@@ -2472,4 +2516,32 @@ test "HiddenClassPool propertyNames SoA access" {
     const flags = pool.getPropertyFlags(class3, .name);
     try std.testing.expect(flags != null);
     try std.testing.expect(flags.?.enumerable == true); // default is true
+}
+
+test "JSObject setProperty/getProperty with pool" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    const empty = pool.getEmptyClass();
+
+    // Create object with empty class
+    const obj = try JSObject.create(allocator, empty, null);
+    defer obj.destroy(allocator);
+
+    // Verify empty class
+    try std.testing.expectEqual(HiddenClassIndex.empty, obj.hidden_class_idx);
+
+    // Set property
+    try obj.setProperty(allocator, pool, .console, value.JSValue.fromInt(42));
+
+    // Verify class transitioned
+    try std.testing.expect(obj.hidden_class_idx != HiddenClassIndex.empty);
+    try std.testing.expectEqual(@as(u16, 1), pool.getPropertyCount(obj.hidden_class_idx));
+
+    // Get property
+    const val = obj.getProperty(pool, .console);
+    try std.testing.expect(val != null);
+    try std.testing.expectEqual(@as(i32, 42), val.?.getInt());
 }

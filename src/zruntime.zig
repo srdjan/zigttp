@@ -20,34 +20,38 @@ pub const RuntimeConfig = struct {
     /// Memory limit per context in bytes (0 = no limit)
     memory_limit: usize = 0,
 
-    /// Enable all Deno-compatible APIs
+    // NOTE: The following fields are placeholders for future features.
+    // They are defined for API stability but not yet wired into the runtime.
+    // Setting them has no effect on runtime behavior.
+
+    /// Enable all Deno-compatible APIs (NOT YET IMPLEMENTED)
     enable_deno_apis: bool = true,
 
-    /// Enable fetch() API
+    /// Enable fetch() API (NOT YET IMPLEMENTED)
     enable_fetch: bool = true,
 
-    /// Enable file system APIs
+    /// Enable file system APIs (NOT YET IMPLEMENTED)
     enable_fs: bool = true,
 
-    /// Enable timers (setTimeout, setInterval)
+    /// Enable timers (setTimeout, setInterval) (NOT YET IMPLEMENTED)
     enable_timers: bool = true,
 
-    /// Enable network socket APIs
+    /// Enable network socket APIs (NOT YET IMPLEMENTED)
     enable_net: bool = false,
 
-    /// Sandbox mode: restrict file system to specific paths
+    /// Sandbox mode: restrict file system to specific paths (NOT YET IMPLEMENTED)
     sandbox_paths: ?[]const []const u8 = null,
 
-    /// Max execution time per request in milliseconds (0 = no limit)
+    /// Max execution time per request in milliseconds (NOT YET IMPLEMENTED)
     max_execution_time_ms: u32 = 30_000,
 
-    /// Enable JSX runtime (h, renderToString, Fragment)
+    /// Enable JSX runtime (h, renderToString, Fragment) - JSX IS enabled by file extension
     enable_jsx: bool = true,
 
-    /// Clear user-defined globals between requests (builtins always preserved)
+    /// Clear user-defined globals between requests (NOT YET IMPLEMENTED)
     reset_user_globals: bool = false,
 
-    // Internal zts settings
+    // Internal zts settings (these ARE wired and functional)
     /// GC nursery size
     nursery_size: usize = 64 * 1024,
 
@@ -132,60 +136,31 @@ pub const HttpResponse = struct {
         self.body_owner = null;
     }
 
-    pub fn putHeader(self: *HttpResponse, key: []const u8, value: []const u8) !void {
-        const key_dup = try self.allocator.dupe(u8, key);
-        errdefer self.allocator.free(key_dup);
-        const value_dup = try self.allocator.dupe(u8, value);
-        errdefer self.allocator.free(value_dup);
-        for (self.headers.items) |*header| {
-            if (ascii.eqlIgnoreCase(header.key, key)) {
-                if (header.key_owned) {
-                    self.allocator.free(header.key);
-                }
-                if (header.value_owned) {
-                    self.allocator.free(header.value);
-                }
-                header.* = .{
-                    .key = key_dup,
-                    .value = value_dup,
-                    .key_owned = true,
-                    .value_owned = true,
-                };
-                return;
-            }
-        }
-        try self.headers.append(self.allocator, .{
-            .key = key_dup,
-            .value = value_dup,
-            .key_owned = true,
-            .value_owned = true,
-        });
+    /// Add or update a header, duplicating key/value strings (caller does not retain ownership)
+    pub fn putHeader(self: *HttpResponse, key: []const u8, val: []const u8) !void {
+        try self.putHeaderInternal(key, val, true);
     }
 
-    pub fn putHeaderBorrowed(self: *HttpResponse, key: []const u8, value: []const u8) !void {
+    /// Add or update a header without duplicating strings (caller retains ownership)
+    pub fn putHeaderBorrowed(self: *HttpResponse, key: []const u8, val: []const u8) !void {
+        try self.putHeaderInternal(key, val, false);
+    }
+
+    fn putHeaderInternal(self: *HttpResponse, key: []const u8, val: []const u8, owned: bool) !void {
+        const final_key = if (owned) try self.allocator.dupe(u8, key) else key;
+        errdefer if (owned) self.allocator.free(final_key);
+        const final_val = if (owned) try self.allocator.dupe(u8, val) else val;
+        errdefer if (owned) self.allocator.free(final_val);
+
         for (self.headers.items) |*header| {
             if (ascii.eqlIgnoreCase(header.key, key)) {
-                if (header.key_owned) {
-                    self.allocator.free(header.key);
-                }
-                if (header.value_owned) {
-                    self.allocator.free(header.value);
-                }
-                header.* = .{
-                    .key = key,
-                    .value = value,
-                    .key_owned = false,
-                    .value_owned = false,
-                };
+                if (header.key_owned) self.allocator.free(header.key);
+                if (header.value_owned) self.allocator.free(header.value);
+                header.* = .{ .key = final_key, .value = final_val, .key_owned = owned, .value_owned = owned };
                 return;
             }
         }
-        try self.headers.append(self.allocator, .{
-            .key = key,
-            .value = value,
-            .key_owned = false,
-            .value_owned = false,
-        });
+        try self.headers.append(self.allocator, .{ .key = final_key, .value = final_val, .key_owned = owned, .value_owned = owned });
     }
 
     fn setBodyOwned(self: *HttpResponse, bytes: []const u8) void {
@@ -365,32 +340,35 @@ pub const Runtime = struct {
     }
 
     fn installConsole(self: *Self) !void {
-        const root_class = self.ctx.root_class orelse return error.NoRootClass;
+        const root_class_idx = self.ctx.root_class_idx;
+        const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         // Create console object
-        const console_obj = try zq.JSObject.create(self.allocator, root_class, null);
+        const console_obj = try zq.JSObject.create(self.allocator, root_class_idx, null);
 
         // Add console.log
         const log_atom: zq.Atom = .log;
         const log_func = try zq.JSObject.createNativeFunction(
             self.allocator,
-            root_class,
+            pool,
+            root_class_idx,
             consoleLog,
             log_atom,
             0,
         );
-        try console_obj.setProperty(self.allocator, log_atom, log_func.toValue());
+        try console_obj.setProperty(self.allocator, pool, log_atom, log_func.toValue());
 
         // Add console.error
         const error_atom = try self.ctx.atoms.intern("error");
         const error_func = try zq.JSObject.createNativeFunction(
             self.allocator,
-            root_class,
+            pool,
+            root_class_idx,
             consoleError,
             error_atom,
             0,
         );
-        try console_obj.setProperty(self.allocator, error_atom, error_func.toValue());
+        try console_obj.setProperty(self.allocator, pool, error_atom, error_func.toValue());
 
         // Track for cleanup in Context.deinit
         try self.ctx.builtin_objects.append(self.allocator, console_obj);
@@ -684,16 +662,17 @@ pub const Runtime = struct {
         }
 
         const result_obj = result.toPtr(zq.JSObject);
+        const pool = self.ctx.hidden_class_pool orelse return response;
 
         // Extract status using predefined atom
-        if (result_obj.getOwnProperty(zq.Atom.status)) |status_val| {
+        if (result_obj.getOwnProperty(pool, zq.Atom.status)) |status_val| {
             if (status_val.isInt()) {
                 response.status = @intCast(status_val.getInt());
             }
         }
 
         // Extract body using predefined atom
-        if (result_obj.getOwnProperty(zq.Atom.body)) |body_val| {
+        if (result_obj.getOwnProperty(pool, zq.Atom.body)) |body_val| {
             if (body_val.isString()) {
                 const str = body_val.toPtr(zq.JSString);
                 if (borrow_body) {
@@ -706,14 +685,14 @@ pub const Runtime = struct {
         }
 
         // Extract headers
-        if (result_obj.getOwnProperty(zq.Atom.headers)) |headers_val| {
+        if (result_obj.getOwnProperty(pool, zq.Atom.headers)) |headers_val| {
             if (headers_val.isObject()) {
                 const headers_obj = headers_val.toPtr(zq.JSObject);
-                const keys = try headers_obj.getOwnEnumerableKeys(self.allocator);
+                const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
                 defer self.allocator.free(keys);
                 for (keys) |key_atom| {
                     const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
-                    const header_val = headers_obj.getOwnProperty(key_atom) orelse continue;
+                    const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
                     if (header_val.isString()) {
                         const str = header_val.toPtr(zq.JSString);
                         if (borrow_body) {
@@ -1216,7 +1195,8 @@ test "string prototype methods are callable" {
     defer rt.deinit();
 
     const proto = rt.ctx.string_prototype orelse return error.NoRootClass;
-    const split_val = proto.getProperty(zq.Atom.split) orelse return error.NoHandler;
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoRootClass;
+    const split_val = proto.getProperty(pool, zq.Atom.split) orelse return error.NoHandler;
     try std.testing.expect(split_val.isCallable());
 
     try rt.loadHandler("function handler(req){ return Response.text(typeof ''.split); }", "<test>");
