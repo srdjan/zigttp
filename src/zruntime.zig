@@ -748,6 +748,40 @@ pub const Runtime = struct {
         // is achieved through the handler pool (each request gets a pooled runtime)
         // and stack/exception clearing above.
     }
+
+    // === GC Tuning Hooks ===
+
+    /// Hint GC about expected request allocation size
+    /// Call at request start for large request bodies
+    pub fn hintRequestSize(self: *Self, body_len: usize) void {
+        self.gc_state.hintRequestSize(body_len);
+        self.last_request_body_len = body_len;
+    }
+
+    /// Reset GC hints after request completes
+    pub fn resetRequestHint(self: *Self) void {
+        self.gc_state.resetRequestHint();
+    }
+
+    /// Force minor GC if nursery exceeds watermark
+    pub fn collectIfAbove(self: *Self, watermark: usize) void {
+        self.gc_state.collectIfAbove(watermark);
+    }
+
+    /// Get current nursery usage (bytes)
+    pub fn getNurseryUsage(self: *const Self) usize {
+        return self.gc_state.getNurseryUsage();
+    }
+
+    /// Set major GC threshold
+    pub fn setMajorGCThreshold(self: *Self, threshold: usize) void {
+        self.gc_state.setMajorGCThreshold(threshold);
+    }
+
+    /// Get GC statistics
+    pub fn getGCStats(self: *const Self) zq.GC.GCStats {
+        return self.gc_state.getStats();
+    }
 };
 
 // ============================================================================

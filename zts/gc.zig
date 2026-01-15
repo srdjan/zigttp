@@ -1013,6 +1013,53 @@ pub const GC = struct {
         };
     }
 
+    // === GC Tuning Hooks for FaaS workloads ===
+
+    /// Get current nursery usage (bytes)
+    pub fn getNurseryUsage(self: *const GC) usize {
+        return self.nursery.used();
+    }
+
+    /// Set threshold for automatic major GC triggering
+    pub fn setMajorGCThreshold(self: *GC, threshold: usize) void {
+        self.major_gc_threshold = threshold;
+    }
+
+    /// Get current major GC threshold
+    pub fn getMajorGCThreshold(self: *const GC) usize {
+        return self.major_gc_threshold;
+    }
+
+    /// Hint GC about expected request allocation size
+    /// Adjusts thresholds to trigger earlier collection for large requests
+    /// Call at request start, pair with resetRequestHint() at end
+    pub fn hintRequestSize(self: *GC, body_len: usize) void {
+        // For large request bodies, lower major GC threshold to collect earlier
+        // This prevents memory pressure from large JSON parsing, etc.
+        if (body_len > self.nursery.size / 2) {
+            // Large request: trigger major GC at half normal threshold
+            self.major_gc_threshold = @max(1000, self.major_gc_threshold / 2);
+        } else if (body_len > self.nursery.size / 4) {
+            // Medium request: trigger at 75% normal threshold
+            self.major_gc_threshold = @max(1000, self.major_gc_threshold * 3 / 4);
+        }
+        // Small requests: keep default threshold
+    }
+
+    /// Reset GC hints after request completes
+    /// Restores default thresholds
+    pub fn resetRequestHint(self: *GC) void {
+        self.major_gc_threshold = 10000; // Default value
+    }
+
+    /// Force a minor GC if nursery usage exceeds watermark
+    /// Useful for bounded per-request memory control
+    pub fn collectIfAbove(self: *GC, watermark: usize) void {
+        if (self.nursery.used() > watermark) {
+            self.minorGC();
+        }
+    }
+
     pub const GCStats = struct {
         minor_gc_count: u64,
         major_gc_count: u64,

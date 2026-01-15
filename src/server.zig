@@ -650,13 +650,11 @@ pub const Server = struct {
     /// Generate ETag from file modification time and size
     fn computeETag(mtime: Io.Timestamp, size: u64) [16]u8 {
         var result: [16]u8 = undefined;
-        // Simple hash: combine mtime seconds/nanos and size
-        const sec_bytes = std.mem.asBytes(&mtime.tv_sec);
-        const nsec_bytes = std.mem.asBytes(&mtime.tv_nsec);
+        // Simple hash: combine mtime nanoseconds and size
+        const ns_bytes = std.mem.asBytes(&mtime.nanoseconds);
         const size_bytes = std.mem.asBytes(&size);
-        // XOR-fold into 16 bytes: [0..4] sec, [4..8] nsec, [8..16] size
-        for (result[0..4], sec_bytes[0..4]) |*r, m| r.* = m;
-        for (result[4..8], nsec_bytes[0..4]) |*r, m| r.* = m;
+        // XOR-fold into 16 bytes: [0..8] from ns, [8..16] from size
+        for (result[0..8], ns_bytes[0..8]) |*r, m| r.* = m;
         for (result[8..16], size_bytes[0..8]) |*r, s| r.* = s;
         return result;
     }
@@ -694,7 +692,12 @@ pub const Server = struct {
         const etag_bytes = computeETag(stat.mtime, stat.size);
         var etag_str: [34]u8 = undefined; // "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" (32 hex chars + quotes)
         etag_str[0] = '"';
-        _ = std.fmt.bufPrint(etag_str[1..33], "{s}", .{std.fmt.fmtSliceHexLower(&etag_bytes)}) catch unreachable;
+        // Format as lowercase hex
+        const hex_chars = "0123456789abcdef";
+        for (etag_bytes, 0..) |byte, i| {
+            etag_str[1 + i * 2] = hex_chars[byte >> 4];
+            etag_str[1 + i * 2 + 1] = hex_chars[byte & 0x0f];
+        }
         etag_str[33] = '"';
         const etag = etag_str[0..34];
 

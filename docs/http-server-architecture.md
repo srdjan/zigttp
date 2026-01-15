@@ -267,8 +267,41 @@ const Shard = struct {
 - Borrowed response bodies eliminate copies but require strict send-before-reset discipline.
 - Evented IO yields best tail latency but needs careful backpressure and buffer sizing.
 
+## Implementation Status
+
+The following optimizations from this plan have been implemented:
+
+### Completed
+
+1. **Bytecode Cache Wiring** - `HandlerPool.loadHandlerCached()` now checks bytecode cache first, deserializes with atom remapping on hit, and caches parsed bytecode on miss. Thread-safe with mutex protection.
+
+2. **HTTP Parser Optimizations**:
+   - Comptime lowercase table (`LowerTable`) for O(1) per-byte header normalization
+   - SIMD header terminator scan utility (`findHeaderEnd`) using `@Vector(16, u8)`
+   - Ring buffer integration deferred pending benchmark results
+
+3. **JIT Policy Controls** - `JitPolicy` enum (disabled/lazy/eager) with configurable threshold:
+   - Environment variables: `ZTS_JIT_POLICY`, `ZTS_JIT_THRESHOLD`
+   - Exposed in `RuntimeConfig` for per-pool configuration
+   - Default: lazy mode with threshold=100
+
+4. **Static File ETag/304** - `serveStaticFile()` now:
+   - Computes ETag from mtime nanoseconds and file size
+   - Checks `If-None-Match` header and returns 304 Not Modified
+   - Adds `ETag` header to all 200 responses
+
+5. **GC Tuning Hooks** - New APIs in `zts/gc.zig` and `src/zruntime.zig`:
+   - `hintRequestSize(body_len)` - adjusts major GC threshold for large requests
+   - `resetRequestHint()` - restores default thresholds
+   - `collectIfAbove(watermark)` - conditional minor GC
+   - `getNurseryUsage()`, `setMajorGCThreshold()`, `getGCStats()`
+
+### Deferred
+
+- **Pool Sharding** - Per-core runtime pools require significant refactor; current lock-free pool with adaptive backoff performs well under moderate concurrency
+
 ## Next Steps
 
-- Decide on parser scope (incremental vs full rewrite).
-- Pick core-sharding strategy (per-thread vs explicit CPU affinity).
-- Prioritize bytecode cache atom serialization (biggest cold-start win).
+- Benchmark current optimizations under load
+- Measure cold start improvement from bytecode cache
+- Consider pool sharding if contention becomes measurable bottleneck
