@@ -89,14 +89,14 @@ Run:
 ### JSON API
 
 ```bash
-./zig-out/bin/zigttp-server -e "function handler(req) { return Response.json({message: 'Hello', path: req.path}) }"
+./zig-out/bin/zigttp-server -e "function handler(req) { return Response.json({message: 'Hello', url: req.url}) }"
 ```
 
 Test:
 
 ```bash
 curl http://localhost:8080/api/test
-# Output: {"message":"Hello","path":"/api/test"}
+# Output: {"message":"Hello","url":"/api/test"}
 ```
 
 ---

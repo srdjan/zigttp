@@ -436,8 +436,9 @@ as an external baseline). See `benchmarks/*.json` for raw results.
 
 Run benchmarks with: `./zig-out/bin/zigttp-bench`
 
-Note: Optional instrumentation (perf), parallel compiler, and JIT modules exist
-in `zts/` but are not enabled by default.
+Note: JIT compilation is enabled by default for hot functions (after
+`JIT_THRESHOLD` executions). Optional instrumentation (perf.zig) and parallel
+compiler (compiler.zig) modules exist in `zts/` but are not exported.
 
 ### FaaS Optimizations
 
