@@ -4,6 +4,7 @@
 //! Designed for FaaS with per-request isolation and fast cold starts.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ascii = std.ascii;
 
 // Import zts module
@@ -925,11 +926,25 @@ pub const HandlerPool = struct {
         defer {
             self.releaseForRequest(base_rt);
         }
-
-        const rt = try self.ensureRuntime(base_rt);
         var exec_timer = std.time.Timer.start() catch null;
         defer if (exec_timer) |*t| self.recordExec(t.read());
-        return rt.executeHandlerWithId(request, request_id);
+
+        var attempt: u8 = 0;
+        var last_err: ?anyerror = null;
+        while (attempt < 2) : (attempt += 1) {
+            const rt = try self.ensureRuntime(base_rt);
+            const result = rt.executeHandlerWithId(request, request_id) catch |err| {
+                if (isHandlerInvalid(err)) {
+                    std.log.warn("Handler invalid, rebuilding runtime (err={})", .{err});
+                    self.invalidateRuntime(base_rt);
+                    last_err = err;
+                    continue;
+                }
+                return err;
+            };
+            return result;
+        }
+        return last_err orelse error.HandlerNotCallable;
     }
 
     /// Execute handler and return a response handle that borrows JS strings.
@@ -938,17 +953,30 @@ pub const HandlerPool = struct {
         const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
         const base_rt = try self.acquireForRequest();
         errdefer self.releaseForRequest(base_rt);
-
-        const rt = try self.ensureRuntime(base_rt);
         var exec_timer = std.time.Timer.start() catch null;
         defer if (exec_timer) |*t| self.recordExec(t.read());
-        const response = try rt.executeHandlerBorrowedWithId(request, request_id);
-        return .{
-            .response = response,
-            .runtime = rt,
-            .base_rt = base_rt,
-            .pool = self,
-        };
+
+        var attempt: u8 = 0;
+        var last_err: ?anyerror = null;
+        while (attempt < 2) : (attempt += 1) {
+            const rt = try self.ensureRuntime(base_rt);
+            const response = rt.executeHandlerBorrowedWithId(request, request_id) catch |err| {
+                if (isHandlerInvalid(err)) {
+                    std.log.warn("Handler invalid, rebuilding runtime (err={})", .{err});
+                    self.invalidateRuntime(base_rt);
+                    last_err = err;
+                    continue;
+                }
+                return err;
+            };
+            return .{
+                .response = response,
+                .runtime = rt,
+                .base_rt = base_rt,
+                .pool = self,
+            };
+        }
+        return last_err orelse error.HandlerNotCallable;
     }
 
     pub fn getInUse(self: *const Self) usize {
@@ -964,14 +992,58 @@ pub const HandlerPool = struct {
         };
     }
 
+    /// Context for parallel prewarm workers
+    const PrewarmCtx = struct {
+        pool: *HandlerPool,
+        success: std.atomic.Value(bool),
+    };
+
     fn prewarm(self: *Self) !void {
         const prewarm_count = @min(@as(usize, 4), self.max_size);
-        for (0..prewarm_count) |_| {
-            const base_rt = try self.pool.acquire();
-            errdefer self.pool.release(base_rt);
-            _ = try self.ensureRuntime(base_rt);
-            self.pool.release(base_rt);
+
+        // Single runtime or test mode - sequential prewarm
+        // (test allocators aren't thread-safe)
+        if (prewarm_count <= 1 or builtin.is_test) {
+            for (0..prewarm_count) |_| {
+                const base_rt = try self.pool.acquire();
+                errdefer self.pool.release(base_rt);
+                _ = try self.ensureRuntime(base_rt);
+                self.pool.release(base_rt);
+            }
+            return;
         }
+
+        // Parallel prewarm for multiple runtimes (production only)
+        var contexts: [4]PrewarmCtx = undefined;
+        var threads: [4]?std.Thread = [_]?std.Thread{null} ** 4;
+
+        // Spawn workers
+        for (0..prewarm_count) |i| {
+            contexts[i] = .{
+                .pool = self,
+                .success = std.atomic.Value(bool).init(false),
+            };
+            threads[i] = std.Thread.spawn(.{}, prewarmWorker, .{&contexts[i]}) catch null;
+        }
+
+        // Join all workers
+        var success_count: usize = 0;
+        for (0..prewarm_count) |i| {
+            if (threads[i]) |t| {
+                t.join();
+                if (contexts[i].success.load(.acquire)) success_count += 1;
+            }
+        }
+
+        // Require at least one successful prewarm
+        if (success_count == 0) return error.PrewarmFailed;
+    }
+
+    fn prewarmWorker(ctx: *PrewarmCtx) void {
+        const base_rt = ctx.pool.pool.acquire() catch return;
+        defer ctx.pool.pool.release(base_rt);
+        _ = ctx.pool.ensureRuntime(base_rt) catch return;
+        ctx.success.store(true, .release);
     }
 
     fn acquireForRequest(self: *Self) !*zq.LockFreePool.Runtime {
@@ -1040,12 +1112,13 @@ pub const HandlerPool = struct {
                 }
 
                 // Phase 2: Sleep with jitter to prevent thundering herd
-                // Jitter: randomize within +/- 25% of backoff
+                // Use thread-unique seed: stack address differs per thread
                 const jitter_range = backoff_ns / 4;
-                const jitter = if (jitter_range > 0)
-                    @as(u64, @truncate(@as(u128, retry_count * 7919) % (jitter_range * 2)))
-                else
-                    0;
+                const jitter = if (jitter_range > 0) blk: {
+                    const thread_seed = @intFromPtr(&retry_count);
+                    const combined = @as(u128, retry_count) * 7919 + @as(u128, thread_seed);
+                    break :blk @as(u64, @truncate(combined % (jitter_range * 2)));
+                } else 0;
                 const sleep_ns = backoff_ns -| jitter_range + jitter;
                 std.posix.nanosleep(0, sleep_ns);
                 backoff_ns = @min(backoff_ns * 2, max_backoff_ns);
@@ -1100,6 +1173,16 @@ pub const HandlerPool = struct {
     fn recordExec(self: *Self, ns: u64) void {
         _ = self.total_exec_ns.fetchAdd(ns, .acq_rel);
         updateMax(&self.max_exec_ns, ns);
+    }
+
+    fn isHandlerInvalid(err: anyerror) bool {
+        return err == error.HandlerNotCallable or err == error.NoHandler or err == error.NotCallable;
+    }
+
+    fn invalidateRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) void {
+        if (base_rt.user_data != null) {
+            runtimeUserDeinit(base_rt, self.allocator);
+        }
     }
 
     fn updateMax(target: *std.atomic.Value(u64), value: u64) void {

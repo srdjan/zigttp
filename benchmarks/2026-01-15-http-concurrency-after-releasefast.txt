@@ -1,0 +1,100 @@
+date: 2026-01-15
+server: http://127.0.0.1:3001
+optimize: ReleaseFast
+
+== hey -z 30s -c 1 ==
+
+Summary:
+  Total:	30.0002 secs
+  Slowest:	0.1298 secs
+  Fastest:	0.0000 secs
+  Average:	0.0000 secs
+  Requests/sec:	27063.4368
+  
+  Total data:	1623816 bytes
+  Size/request:	2 bytes
+
+Response time histogram:
+  0.000 [1]	|
+  0.013 [811905]	|■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  0.026 [0]	|
+  0.039 [0]	|
+  0.052 [0]	|
+  0.065 [0]	|
+  0.078 [0]	|
+  0.091 [0]	|
+  0.104 [0]	|
+  0.117 [0]	|
+  0.130 [2]	|
+
+
+Latency distribution:
+  10% in 0.0000 secs
+  25% in 0.0000 secs
+  50% in 0.0000 secs
+  75% in 0.0000 secs
+  90% in 0.0000 secs
+  95% in 0.0000 secs
+  99% in 0.0001 secs
+
+Details (average, fastest, slowest):
+  DNS+dialup:	0.0000 secs, 0.0000 secs, 0.1298 secs
+  DNS-lookup:	0.0000 secs, 0.0000 secs, 0.0000 secs
+  req write:	0.0000 secs, 0.0000 secs, 0.0006 secs
+  resp wait:	0.0000 secs, 0.0000 secs, 0.0086 secs
+  resp read:	0.0000 secs, 0.0000 secs, 0.1212 secs
+
+Status code distribution:
+  [200]	811908 responses
+
+
+
+
+== hey -z 30s -c 10 ==
+
+Summary:
+  Total:	40.0505 secs
+  Slowest:	10.0175 secs
+  Fastest:	0.0000 secs
+  Average:	0.0161 secs
+  Requests/sec:	63.3451
+  
+  Total data:	5042 bytes
+  Size/request:	2 bytes
+
+Response time histogram:
+  0.000 [1]	|
+  1.002 [2516]	|■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+  2.004 [0]	|
+  3.005 [0]	|
+  4.007 [0]	|
+  5.009 [0]	|
+  6.011 [0]	|
+  7.012 [0]	|
+  8.014 [0]	|
+  9.016 [0]	|
+  10.018 [4]	|
+
+
+Latency distribution:
+  10% in 0.0000 secs
+  25% in 0.0001 secs
+  50% in 0.0001 secs
+  75% in 0.0001 secs
+  90% in 0.0002 secs
+  95% in 0.0002 secs
+  99% in 0.0012 secs
+
+Details (average, fastest, slowest):
+  DNS+dialup:	0.0000 secs, 0.0000 secs, 10.0175 secs
+  DNS-lookup:	0.0000 secs, 0.0000 secs, 0.0000 secs
+  req write:	0.0000 secs, 0.0000 secs, 0.0001 secs
+  resp wait:	0.0160 secs, 0.0000 secs, 10.0167 secs
+  resp read:	0.0000 secs, 0.0000 secs, 0.0000 secs
+
+Status code distribution:
+  [200]	2521 responses
+
+Error distribution:
+  [16]	Get "http://127.0.0.1:3001/": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+

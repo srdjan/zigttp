@@ -117,8 +117,8 @@ pub const ServerConfig = struct {
     /// JS runtime configuration
     runtime_config: RuntimeConfig = .{},
 
-    /// Number of runtime instances in pool
-    pool_size: usize = 8,
+    /// Number of runtime instances in pool (0 = auto)
+    pool_size: usize = 0,
 
     /// Log requests to stdout
     log_requests: bool = true,
@@ -183,8 +183,13 @@ pub const Server = struct {
     const IoBackend = if (useEventedBackend()) Io.Evented else Io.Threaded;
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
+        var cfg = config;
+        if (cfg.pool_size == 0) {
+            cfg.pool_size = defaultPoolSize();
+        }
+
         // Load handler code
-        const handler_code, const handler_filename = switch (config.handler) {
+        const handler_code, const handler_filename = switch (cfg.handler) {
             .inline_code => |code| .{ code, "<inline>" },
             .file_path => |path| blk: {
                 const source = try std.fs.cwd().readFileAlloc(path, allocator, Io.Limit.limited(10 * 1024 * 1024));
@@ -194,7 +199,7 @@ pub const Server = struct {
         };
 
         return Self{
-            .config = config,
+            .config = cfg,
             .allocator = allocator,
             .io_backend = undefined,
             .evented_ready = false,
@@ -204,8 +209,8 @@ pub const Server = struct {
             .handler_filename = handler_filename,
             .static_cache = StaticFileCache.init(
                 allocator,
-                config.static_cache_max_bytes,
-                config.static_cache_max_file_size,
+                cfg.static_cache_max_bytes,
+                cfg.static_cache_max_file_size,
             ),
             .running = false,
             .request_count = std.atomic.Value(u64).init(0),
@@ -1106,6 +1111,16 @@ fn getContentType(path: []const u8) []const u8 {
     if (std.mem.eql(u8, ext, ".xml")) return "application/xml";
     if (std.mem.eql(u8, ext, ".pdf")) return "application/pdf";
     return "application/octet-stream";
+}
+
+fn defaultPoolSize() usize {
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const min_pool: usize = 8;
+    const max_pool: usize = 64;
+    const base = cpu_count * 2;
+    if (base < min_pool) return min_pool;
+    if (base > max_pool) return max_pool;
+    return base;
 }
 
 fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {

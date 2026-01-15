@@ -28,6 +28,8 @@ pub const LockFreePool = struct {
     size: std.atomic.Value(usize),
     /// Hint for next likely-free slot (reduces linear scanning)
     free_hint: std.atomic.Value(usize),
+    /// O(1) count of available (idle) runtimes in pool slots
+    available_count: std.atomic.Value(usize),
     config: PoolConfig,
     allocator: std.mem.Allocator,
 
@@ -194,6 +196,7 @@ pub const LockFreePool = struct {
             .slots = slots,
             .size = std.atomic.Value(usize).init(0),
             .free_hint = std.atomic.Value(usize).init(0),
+            .available_count = std.atomic.Value(usize).init(0),
             .config = config,
             .allocator = allocator,
         };
@@ -243,6 +246,8 @@ pub const LockFreePool = struct {
         if (current) |runtime| {
             if (slot.cmpxchgWeak(current, null, .release, .monotonic) == null) {
                 runtime.in_use = true;
+                // Decrement available count - runtime taken from pool
+                _ = self.available_count.fetchSub(1, .release);
                 return runtime;
             }
         }
@@ -263,6 +268,8 @@ pub const LockFreePool = struct {
             if (self.slots[idx].cmpxchgWeak(null, runtime, .release, .monotonic) == null) {
                 // Update hint to point to this slot (next acquire will find it)
                 self.free_hint.store(idx, .monotonic);
+                // Increment available count - runtime returned to pool
+                _ = self.available_count.fetchAdd(1, .release);
                 return; // Successfully pooled
             }
         }
@@ -277,15 +284,9 @@ pub const LockFreePool = struct {
         return self.size.load(.monotonic);
     }
 
-    /// Get number of available (idle) runtimes
+    /// Get number of available (idle) runtimes - O(1) via atomic counter
     pub fn getAvailable(self: *LockFreePool) usize {
-        var count: usize = 0;
-        for (self.slots) |*slot| {
-            if (slot.load(.acquire) != null) {
-                count += 1;
-            }
-        }
-        return count;
+        return self.available_count.load(.acquire);
     }
 };
 
@@ -323,9 +324,6 @@ pub fn acquireWithCache(pool: *LockFreePool) !*LockFreePool.Runtime {
 /// to prevent thread-local caches from starving other threads.
 pub fn releaseWithCache(pool: *LockFreePool, runtime: *LockFreePool.Runtime) void {
     if (thread_local_runtime == runtime) {
-        runtime.reset();
-        runtime.in_use = false;
-
         // Check pool pressure: release to pool when running low on available slots.
         // This prevents starvation when many threads hold cached runtimes.
         const available = pool.getAvailable();
@@ -336,6 +334,8 @@ pub fn releaseWithCache(pool: *LockFreePool, runtime: *LockFreePool.Runtime) voi
             pool.release(runtime);
             return;
         }
+        runtime.reset();
+        runtime.in_use = false;
         // Keep in thread-local cache - pool has adequate capacity
         return;
     }
