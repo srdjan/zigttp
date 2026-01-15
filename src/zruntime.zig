@@ -65,6 +65,15 @@ pub const RuntimeConfig = struct {
     /// Enforce arena escape checking (default: true for HTTP handlers)
     /// Set to false for scripts/benchmarks where arena lifetime matches script lifetime
     enforce_arena_escape: bool = true,
+
+    /// JIT compilation policy (default: lazy)
+    /// - .disabled: Never JIT compile (fastest cold start, pure interpreter)
+    /// - .lazy: JIT after threshold (default 100 calls, balanced)
+    /// - .eager: Lower threshold (25 calls, faster warmup)
+    jit_policy: ?zq.interpreter.JitPolicy = null,
+
+    /// Override JIT compilation threshold (null = use policy default)
+    jit_threshold: ?u32 = null,
 };
 
 // ============================================================================
@@ -268,6 +277,14 @@ pub const Runtime = struct {
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
+
+        // Apply JIT policy from config (only first runtime sets global policy)
+        if (config.jit_policy) |policy| {
+            zq.interpreter.setJitPolicy(policy);
+        }
+        if (config.jit_threshold) |threshold| {
+            zq.interpreter.setJitThreshold(threshold);
+        }
 
         // Install built-in bindings
         try self.installBindings();
@@ -803,6 +820,7 @@ pub const HandlerPool = struct {
     exhausted_count: std.atomic.Value(u64),
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
+    cache_mutex: std.Thread.Mutex,
 
     const Self = @This();
 
@@ -849,6 +867,7 @@ pub const HandlerPool = struct {
             .exhausted_count = std.atomic.Value(u64).init(0),
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
+            .cache_mutex = .{},
         };
 
         try self.prewarm();
@@ -1056,10 +1075,30 @@ pub const HandlerPool = struct {
     }
 
     fn loadHandlerCached(self: *Self, rt: *Runtime) !void {
-        // For now, always parse. The cache stores serialized bytecode but
-        // we need to parse to populate atoms in each runtime's atom table.
-        // TODO: Implement full atom serialization for true cache hit path.
-        try rt.loadHandler(self.handler_code, self.handler_filename);
+        const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
+
+        self.cache_mutex.lock();
+        const cached = self.cache.getRaw(key);
+        self.cache_mutex.unlock();
+
+        if (cached) |cached_data| {
+            // Cache HIT: deserialize with atom remapping
+            try rt.loadFromCachedBytecode(cached_data);
+            return;
+        }
+
+        // Cache MISS: parse and compile
+        var buffer: [65536]u8 = undefined;
+        const serialized = try rt.loadCodeWithCaching(self.handler_code, self.handler_filename, &buffer);
+
+        // Store in cache for future hits
+        if (serialized) |data| {
+            self.cache_mutex.lock();
+            defer self.cache_mutex.unlock();
+            if (!self.cache.contains(key)) {
+                self.cache.putRaw(key, data) catch {};
+            }
+        }
     }
 
     fn runtimeUserDeinit(base_rt: *zq.LockFreePool.Runtime, allocator: std.mem.Allocator) void {
@@ -1111,6 +1150,34 @@ test "HandlerPool basic operations" {
     defer response.deinit();
 
     try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HandlerPool bytecode cache" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const handler_code = "function handler(req) { return Response.text('cached'); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 4, 0);
+    defer {
+        zq.pool.releaseThreadLocal(&pool.pool);
+        pool.deinit();
+    }
+
+    // First request triggers cache population during prewarm
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try pool.executeHandler(request);
+    defer response.deinit();
+    try std.testing.expectEqualStrings("cached", response.body);
+
+    // Cache should have entries (hits from prewarm, misses from first parse)
+    try std.testing.expect(pool.cache.hits + pool.cache.misses >= 1);
 }
 
 test "HandlerPool concurrent stress" {

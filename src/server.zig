@@ -18,6 +18,58 @@ const HttpResponse = zruntime.HttpResponse;
 const HttpHeader = zruntime.HttpHeader;
 
 // ============================================================================
+// Fast Header Normalization
+// ============================================================================
+
+/// Comptime lookup table for O(1) ASCII lowercase conversion.
+/// Eliminates branch-per-character overhead in header normalization.
+const LowerTable = blk: {
+    var t: [256]u8 = undefined;
+    for (&t, 0..) |*b, i| {
+        b.* = if (i >= 'A' and i <= 'Z') @intCast(i + 32) else @intCast(i);
+    }
+    break :blk t;
+};
+
+/// Fast lowercase string conversion using comptime lookup table.
+/// Returns slice into dest buffer.
+fn lowerStringFast(dest: []u8, src: []const u8) []u8 {
+    const len = @min(dest.len, src.len);
+    for (dest[0..len], src[0..len]) |*d, s| {
+        d.* = LowerTable[s];
+    }
+    return dest[0..len];
+}
+
+/// SIMD-accelerated search for HTTP header terminator (\r\n\r\n).
+/// Returns offset to start of terminator, or null if not found.
+/// Uses 16-byte vector operations when buffer is large enough.
+fn findHeaderEnd(buf: []const u8) ?usize {
+    const Vec = @Vector(16, u8);
+    const cr: Vec = @splat('\r');
+    const lf: Vec = @splat('\n');
+    var i: usize = 0;
+
+    // SIMD path: scan 16 bytes at a time
+    while (i + 16 <= buf.len) : (i += 16) {
+        const chunk: Vec = @as(*const [16]u8, @ptrCast(buf.ptr + i)).*;
+        // Quick check: any CR or LF in this chunk?
+        if (@reduce(.Or, chunk == cr) or @reduce(.Or, chunk == lf)) {
+            // Found potential match - do precise search
+            if (std.mem.indexOf(u8, buf[i..], "\r\n\r\n")) |offset| {
+                return i + offset;
+            }
+        }
+    }
+
+    // Scalar tail: search remaining bytes
+    if (std.mem.indexOf(u8, buf[i..], "\r\n\r\n")) |offset| {
+        return i + offset;
+    }
+    return null;
+}
+
+// ============================================================================
 // Server Configuration
 // ============================================================================
 
@@ -329,7 +381,7 @@ pub const Server = struct {
         // Handle static files if configured
         if (self.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.url, "/static/")) {
-                try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive);
+                try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive, request.headers.items);
                 return keep_alive;
             }
         }
@@ -468,10 +520,10 @@ pub const Server = struct {
             const key = header_parts.next() orelse continue;
             const value = header_parts.rest();
 
-            // Normalize key to lowercase, then copy to batch storage
+            // Normalize key to lowercase using comptime lookup table
             var key_lower_buf: [256]u8 = undefined;
             if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
-            const key_lower = std.ascii.lowerString(key_lower_buf[0..key.len], key);
+            const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
             const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
             const value_dup = try copyToStorage(string_storage, &storage_offset, value);
             try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
@@ -595,7 +647,21 @@ pub const Server = struct {
         try writer.interface.flush();
     }
 
-    fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8, keep_alive: bool) !void {
+    /// Generate ETag from file modification time and size
+    fn computeETag(mtime: Io.Timestamp, size: u64) [16]u8 {
+        var result: [16]u8 = undefined;
+        // Simple hash: combine mtime seconds/nanos and size
+        const sec_bytes = std.mem.asBytes(&mtime.tv_sec);
+        const nsec_bytes = std.mem.asBytes(&mtime.tv_nsec);
+        const size_bytes = std.mem.asBytes(&size);
+        // XOR-fold into 16 bytes: [0..4] sec, [4..8] nsec, [8..16] size
+        for (result[0..4], sec_bytes[0..4]) |*r, m| r.* = m;
+        for (result[4..8], nsec_bytes[0..4]) |*r, m| r.* = m;
+        for (result[8..16], size_bytes[0..8]) |*r, s| r.* = s;
+        return result;
+    }
+
+    fn serveStaticFile(self: *Self, stream: *net.Stream, io: Io, static_dir: []const u8, path: []const u8, keep_alive: bool, headers: []const HttpHeader) !void {
         // Security: comprehensive path validation
         if (!isPathSafe(path)) {
             var out_buf: [256]u8 = undefined;
@@ -624,14 +690,36 @@ pub const Server = struct {
         const connection = if (keep_alive) "keep-alive" else "close";
         const size = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
 
+        // Compute ETag from mtime and size
+        const etag_bytes = computeETag(stat.mtime, stat.size);
+        var etag_str: [34]u8 = undefined; // "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" (32 hex chars + quotes)
+        etag_str[0] = '"';
+        _ = std.fmt.bufPrint(etag_str[1..33], "{s}", .{std.fmt.fmtSliceHexLower(&etag_bytes)}) catch unreachable;
+        etag_str[33] = '"';
+        const etag = etag_str[0..34];
+
+        // Check If-None-Match header for conditional request
+        if (findHeaderValue(headers, "if-none-match")) |client_etag| {
+            if (std.mem.eql(u8, client_etag, etag)) {
+                // 304 Not Modified - client has current version
+                var out_buf: [256]u8 = undefined;
+                var writer = stream.writer(io, &out_buf);
+                const out = &writer.interface;
+                try out.print("HTTP/1.1 304 Not Modified\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{ etag, connection });
+                try writer.interface.flush();
+                return;
+            }
+        }
+
         // Serve from cache if available
         if (self.static_cache.get(full_path, size, stat.mtime)) |entry| {
             var out_buf: [4096]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
             const out = &writer.interface;
-            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
+            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{
                 entry.data.len,
                 entry.content_type,
+                etag,
                 connection,
             });
             if (entry.data.len > 0) {
@@ -659,9 +747,10 @@ pub const Server = struct {
             var out_buf: [4096]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
             const out = &writer.interface;
-            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
+            try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{
                 size,
                 content_type,
+                etag,
                 connection,
             });
             if (size > 0) {
@@ -674,9 +763,10 @@ pub const Server = struct {
         var out_buf: [4096]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
-        try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nConnection: {s}\r\n\r\n", .{
+        try out.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nContent-Type: {s}\r\nETag: {s}\r\nConnection: {s}\r\n\r\n", .{
             size,
             content_type,
+            etag,
             connection,
         });
 

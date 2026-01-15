@@ -112,11 +112,17 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
         return;
     }
 
-    if (val.isFunction()) {
-        const func = val.toPtr(bytecode.FunctionBytecode);
-        try writer.writeByte(@intFromEnum(ConstantTag.nested_function));
-        try serializeFunctionBytecode(func, writer, allocator);
-        return;
+    // Check for FunctionBytecode by magic number (val.isFunction() doesn't work
+    // for parser-created FunctionBytecode because it uses BytecodeHeader, not MemBlockHeader)
+    if (val.isPtr()) {
+        const ptr = val.toPtr(u32);
+        if (ptr.* == bytecode.MAGIC) {
+            // This is a FunctionBytecode - magic matches
+            const func = val.toPtr(bytecode.FunctionBytecode);
+            try writer.writeByte(@intFromEnum(ConstantTag.nested_function));
+            try serializeFunctionBytecode(func, writer, allocator);
+            return;
+        }
     }
 
     // Unknown pointer type - serialize as undefined

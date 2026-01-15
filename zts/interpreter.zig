@@ -24,13 +24,79 @@ var call_guard_cache: usize = 0;
 var call_guard_cached = false;
 var call_trace_count: usize = 0;
 
+// ============================================================================
+// JIT Policy Configuration
+// ============================================================================
+
+/// JIT compilation policy for FaaS-aware optimization.
+pub const JitPolicy = enum {
+    /// Never JIT compile - pure interpreter mode (fastest cold start)
+    disabled,
+    /// Default: JIT after threshold (balanced)
+    lazy,
+    /// Lower threshold for faster warmup (more aggressive)
+    eager,
+};
+
+/// Current JIT policy (defaults to lazy, overridable via env or API)
+var jit_policy_cache: ?JitPolicy = null;
+
+/// Current JIT threshold (defaults to bytecode.JIT_THRESHOLD, overridable via env or API)
+var jit_threshold_cache: ?u32 = null;
+
+/// Get current JIT policy (cached, reads ZTS_JIT_POLICY env on first call)
+pub fn getJitPolicy() JitPolicy {
+    if (jit_policy_cache) |cached| return cached;
+    if (std.posix.getenv("ZTS_JIT_POLICY")) |policy_str| {
+        const policy = std.meta.stringToEnum(JitPolicy, policy_str) orelse .lazy;
+        jit_policy_cache = policy;
+        return policy;
+    }
+    jit_policy_cache = .lazy;
+    return .lazy;
+}
+
+/// Get current JIT threshold (cached, reads ZTS_JIT_THRESHOLD env on first call)
+pub fn getJitThreshold() u32 {
+    if (jit_threshold_cache) |cached| return cached;
+    if (std.posix.getenv("ZTS_JIT_THRESHOLD")) |threshold_str| {
+        const threshold = std.fmt.parseInt(u32, threshold_str, 10) catch bytecode.JIT_THRESHOLD;
+        jit_threshold_cache = threshold;
+        return threshold;
+    }
+    // Eager policy uses lower threshold
+    const policy = getJitPolicy();
+    const threshold = switch (policy) {
+        .disabled => std.math.maxInt(u32), // Never reached
+        .lazy => bytecode.JIT_THRESHOLD,
+        .eager => bytecode.JIT_THRESHOLD / 4, // 25 calls instead of 100
+    };
+    jit_threshold_cache = threshold;
+    return threshold;
+}
+
+/// Set JIT policy programmatically (overrides env var)
+pub fn setJitPolicy(policy: JitPolicy) void {
+    jit_policy_cache = policy;
+    jit_threshold_cache = null; // Reset threshold to recalculate based on policy
+}
+
+/// Set JIT threshold programmatically (overrides env var and policy default)
+pub fn setJitThreshold(threshold: u32) void {
+    jit_threshold_cache = threshold;
+}
+
 /// Force-disable JIT in the current process (used by tests that exercise
 /// multithreaded runtime behavior without JIT stability guarantees yet).
 pub fn disableJitForTests() void {
     jit_disabled_cache = true;
+    jit_policy_cache = .disabled;
 }
 
 fn jitDisabled() bool {
+    // Check policy first
+    if (getJitPolicy() == .disabled) return true;
+    // Then check legacy env var
     if (jit_disabled_cache) |cached| return cached;
     const disabled = std.posix.getenv("ZTS_DISABLE_JIT") != null;
     jit_disabled_cache = disabled;
@@ -274,7 +340,7 @@ pub const Interpreter = struct {
         // Use non-atomic increment for single-threaded interpreter
         func.execution_count +%= 1;
         if (jitDisabled()) return false;
-        if (func.execution_count == bytecode.JIT_THRESHOLD and func.tier == .interpreted) {
+        if (func.execution_count == getJitThreshold() and func.tier == .interpreted) {
             func.tier = .baseline_candidate;
             return true;
         }
