@@ -987,11 +987,23 @@ pub const HandlerPool = struct {
 
         while (true) {
             if (self.max_size != 0) {
-                // Use acq_rel ordering - counter is used for limit enforcement
-                const prev = self.in_use.fetchAdd(1, .acq_rel);
-                if (prev < self.max_size) break;
-                _ = self.in_use.fetchSub(1, .acq_rel);
+                // Use CAS loop to atomically check-and-increment only if under limit.
+                // This prevents the race where multiple threads temporarily exceed max_size.
+                var current = self.in_use.load(.acquire);
+                var acquired = false;
+                while (current < self.max_size) {
+                    if (self.in_use.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |actual| {
+                        // CAS failed - another thread modified in_use, retry with actual value
+                        current = actual;
+                        continue;
+                    }
+                    // CAS succeeded - we atomically incremented and are under limit
+                    acquired = true;
+                    break;
+                }
+                if (acquired) break;
 
+                // At capacity - proceed to retry/backoff logic
                 retry_count += 1;
 
                 // Check timeout first
@@ -1110,6 +1122,19 @@ pub const HandlerPool = struct {
 
     fn loadHandlerCached(self: *Self, rt: *Runtime) !void {
         const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
+
+        // Temporarily disable hybrid mode during handler loading.
+        // Handler function objects must use persistent allocation so they survive
+        // arena resets between requests. Without this, closures or function objects
+        // could reference arena-allocated memory that gets invalidated.
+        const saved_hybrid = rt.ctx.hybrid;
+        const saved_hybrid_mode = rt.gc_state.hybrid_mode;
+        rt.ctx.hybrid = null;
+        rt.gc_state.hybrid_mode = false;
+        defer {
+            rt.ctx.hybrid = saved_hybrid;
+            rt.gc_state.hybrid_mode = saved_hybrid_mode;
+        }
 
         self.cache_mutex.lock();
         const cached = self.cache.getRaw(key);

@@ -70,6 +70,26 @@ fn findHeaderEnd(buf: []const u8) ?usize {
 }
 
 // ============================================================================
+// Network Error Classification
+// ============================================================================
+
+/// Returns true for network errors that are expected during normal operation.
+/// These include client disconnects, timeouts, and connection resets which
+/// occur naturally under load and should not be logged at error level.
+fn isExpectedNetworkError(err: anyerror) bool {
+    return switch (err) {
+        error.Canceled,
+        error.RequestTimedOut,
+        error.EndOfStream,
+        error.ConnectionResetByPeer,
+        error.BrokenPipe,
+        error.ConnectionRefused,
+        => true,
+        else => false,
+    };
+}
+
+// ============================================================================
 // Server Configuration
 // ============================================================================
 
@@ -258,7 +278,8 @@ pub const Server = struct {
         var stream_mut = stream;
         if (self.config.timeout_ms == 0) {
             self.handleConnection(&stream_mut, io) catch |err| {
-                if (err != error.Canceled) {
+                // Only log unexpected errors, not normal disconnects
+                if (!isExpectedNetworkError(err)) {
                     std.log.err("Connection error: {}", .{err});
                 }
             };
@@ -296,7 +317,8 @@ pub const Server = struct {
                 self.sendErrorResponse(&stream_mut, io, 408, "Request Timeout") catch {};
                 return;
             }
-            if (err != error.Canceled and err != error.RequestTimedOut) {
+            // Only log unexpected errors, not normal disconnects
+            if (!isExpectedNetworkError(err)) {
                 std.log.err("Connection error: {}", .{err});
             }
         };

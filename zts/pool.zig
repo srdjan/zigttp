@@ -318,12 +318,25 @@ pub fn acquireWithCache(pool: *LockFreePool) !*LockFreePool.Runtime {
     return rt;
 }
 
-/// Release runtime with thread-local caching
+/// Release runtime with thread-local caching.
+/// Under pool pressure (< 25% slots free), releases to pool instead of caching
+/// to prevent thread-local caches from starving other threads.
 pub fn releaseWithCache(pool: *LockFreePool, runtime: *LockFreePool.Runtime) void {
     if (thread_local_runtime == runtime) {
         runtime.reset();
         runtime.in_use = false;
-        // Keep in thread-local cache
+
+        // Check pool pressure: release to pool when running low on available slots.
+        // This prevents starvation when many threads hold cached runtimes.
+        const available = pool.getAvailable();
+        const threshold = @max(1, pool.slots.len / 4);
+        if (available < threshold) {
+            // Pool is under pressure - release to pool instead of keeping cached
+            thread_local_runtime = null;
+            pool.release(runtime);
+            return;
+        }
+        // Keep in thread-local cache - pool has adequate capacity
         return;
     }
     pool.release(runtime);
