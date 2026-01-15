@@ -227,6 +227,11 @@ pub const Runtime = struct {
         });
         errdefer gc_state.deinit();
 
+        // Increase major GC threshold for FaaS workloads.
+        // Default 10,000 triggers too frequently during request handling.
+        // Higher threshold reduces GC pause frequency at cost of memory.
+        gc_state.setMajorGCThreshold(50_000);
+
         // Initialize heap for size-class allocation and wire up to GC
         const heap_state = try allocator.create(zq.heap.Heap);
         errdefer allocator.destroy(heap_state);
@@ -1136,24 +1141,29 @@ pub const HandlerPool = struct {
             rt.gc_state.hybrid_mode = saved_hybrid_mode;
         }
 
-        self.cache_mutex.lock();
-        const cached = self.cache.getRaw(key);
-        self.cache_mutex.unlock();
-
-        if (cached) |cached_data| {
-            // Cache HIT: deserialize with atom remapping
+        // Fast path: check cache without lock (read-only, safe for concurrent access)
+        if (self.cache.getRaw(key)) |cached_data| {
             try rt.loadFromCachedBytecode(cached_data);
             return;
         }
 
-        // Cache MISS: parse and compile
+        // Slow path: acquire lock for parsing (double-checked locking pattern)
+        // This prevents "thundering herd" where multiple threads all parse on cold start
+        self.cache_mutex.lock();
+        defer self.cache_mutex.unlock();
+
+        // Double-check: another thread may have populated cache while we waited
+        if (self.cache.getRaw(key)) |cached_data| {
+            try rt.loadFromCachedBytecode(cached_data);
+            return;
+        }
+
+        // Cache MISS confirmed: parse and compile (only one thread does this)
         var buffer: [65536]u8 = undefined;
         const serialized = try rt.loadCodeWithCaching(self.handler_code, self.handler_filename, &buffer);
 
         // Store in cache for future hits
         if (serialized) |data| {
-            self.cache_mutex.lock();
-            defer self.cache_mutex.unlock();
             if (!self.cache.contains(key)) {
                 self.cache.putRaw(key, data) catch {};
             }
