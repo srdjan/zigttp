@@ -1349,6 +1349,35 @@ test "HandlerPool bytecode cache" {
     try std.testing.expect(hits + misses >= 1);
 }
 
+test "HandlerPool handler remains callable across resets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
+    defer pool.deinit();
+
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    const iterations: usize = 200;
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        var response = try pool.executeHandler(request);
+        defer response.deinit();
+        try std.testing.expectEqualStrings("ok", response.body);
+    }
+
+    // Flush main thread cache (if any).
+    zq.pool.releaseThreadLocal(&pool.pool);
+}
+
 test "HandlerPool concurrent stress" {
     const allocator = std.heap.c_allocator;
 

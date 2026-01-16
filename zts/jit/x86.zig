@@ -224,6 +224,94 @@ pub const X86Emitter = struct {
         }
     }
 
+    /// MOV r32, [base + offset] (32-bit load, zero-extends to 64-bit)
+    /// No REX.W prefix = 32-bit operand size
+    pub fn movRegMem32(self: *X86Emitter, dst: Register, base: Register, disp: i32) !void {
+        // No REX.W for 32-bit, but need REX for extended registers
+        if (dst.isExtended() or base.isExtended()) {
+            const rex: u8 = 0x40 | (if (dst.isExtended()) @as(u8, 4) else 0) | (if (base.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x8B); // MOV r32, r/m32
+
+        // ModRM/SIB/disp encoding same as movRegMem
+        if (base == .rsp or base == .r12) {
+            if (disp == 0 and base != .rbp and base != .r13) {
+                try self.emitModRM(0b00, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+            } else if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        } else if (base == .rbp or base == .r13) {
+            if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        } else {
+            if (disp == 0) {
+                try self.emitModRM(0b00, dst.low3(), base.low3());
+            } else if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        }
+    }
+
+    /// MOVZX r64, word [base + offset] (zero-extend 16-bit load to 64-bit)
+    /// Used for loading slot_offset from PIC entries
+    pub fn movzxRegMem16(self: *X86Emitter, dst: Register, base: Register, disp: i32) !void {
+        // REX.W for 64-bit destination, plus R/B for extended registers
+        try self.emitRex(true, dst.isExtended(), false, base.isExtended());
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0xB7); // MOVZX r64, r/m16
+
+        // ModRM/SIB/disp encoding same pattern as movRegMem
+        if (base == .rsp or base == .r12) {
+            if (disp == 0 and base != .rbp and base != .r13) {
+                try self.emitModRM(0b00, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+            } else if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        } else if (base == .rbp or base == .r13) {
+            if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        } else {
+            if (disp == 0) {
+                try self.emitModRM(0b00, dst.low3(), base.low3());
+            } else if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        }
+    }
+
     /// MOV [base + offset], r64
     pub fn movMemReg(self: *X86Emitter, base: Register, disp: i32, src: Register) !void {
         try self.emitRexW(src, base);
@@ -360,6 +448,17 @@ pub const X86Emitter = struct {
         try self.emitModRM(0b11, b.low3(), a.low3());
     }
 
+    /// CMP r32, r32 (32-bit compare, useful for hidden class index comparison)
+    pub fn cmpRegReg32(self: *X86Emitter, a: Register, b: Register) !void {
+        // No REX.W for 32-bit, but need REX for extended registers
+        if (a.isExtended() or b.isExtended()) {
+            const rex: u8 = 0x40 | (if (b.isExtended()) @as(u8, 4) else 0) | (if (a.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x39); // CMP r/m32, r32
+        try self.emitModRM(0b11, b.low3(), a.low3());
+    }
+
     /// CMP r64, imm32
     pub fn cmpRegImm32(self: *X86Emitter, reg: Register, imm: i32) !void {
         try self.emitRex(true, false, false, reg.isExtended());
@@ -429,6 +528,22 @@ pub const X86Emitter = struct {
     /// SHR r64, imm8 (logical shift right)
     pub fn shrRegImm(self: *X86Emitter, reg: Register, imm: u8) !void {
         try self.emitRex(true, false, false, reg.isExtended());
+        if (imm == 1) {
+            try self.buffer.append(self.allocator, 0xD1);
+            try self.emitModRM(0b11, 5, reg.low3());
+        } else {
+            try self.buffer.append(self.allocator, 0xC1);
+            try self.emitModRM(0b11, 5, reg.low3());
+            try self.buffer.append(self.allocator, imm);
+        }
+    }
+
+    /// SHR r32, imm8 (32-bit logical shift right, zero-extends to 64-bit)
+    pub fn shrRegImm32(self: *X86Emitter, reg: Register, imm: u8) !void {
+        // No REX.W for 32-bit, but need REX.B for extended registers
+        if (reg.isExtended()) {
+            try self.buffer.append(self.allocator, 0x41); // REX.B
+        }
         if (imm == 1) {
             try self.buffer.append(self.allocator, 0xD1);
             try self.emitModRM(0b11, 5, reg.low3());

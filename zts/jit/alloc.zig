@@ -86,11 +86,15 @@ pub const CodeAllocator = struct {
     pages: std.ArrayListUnmanaged(CodePage),
     /// Backing allocator for the page list
     allocator: std.mem.Allocator,
+    /// Hint for next likely-available page (O(1) fast path)
+    /// Follows pattern from zts/pool.zig for efficient slot finding
+    free_hint: usize,
 
     pub fn init(allocator: std.mem.Allocator) CodeAllocator {
         return .{
             .pages = .{},
             .allocator = allocator,
+            .free_hint = 0,
         };
     }
 
@@ -109,12 +113,30 @@ pub const CodeAllocator = struct {
     }
 
     /// Allocate space and return slice + page index
+    /// Uses free_hint for O(1) allocation in the common case
     pub fn allocWithPage(self: *CodeAllocator, size: usize) AllocError!CodeAllocation {
-        // Try to allocate from existing pages
-        for (self.pages.items, 0..) |*page, idx| {
+        const len = self.pages.items.len;
+
+        // Fast path: try hint position first (O(1) in common case)
+        if (len > 0 and self.free_hint < len) {
+            const page = &self.pages.items[self.free_hint];
             if (page.writable) {
                 if (page.alloc(size)) |slice| {
-                    return .{ .slice = slice, .page_index = idx };
+                    return .{ .slice = slice, .page_index = self.free_hint };
+                }
+            }
+        }
+
+        // Scan from hint with wrap-around
+        if (len > 0) {
+            for (1..len) |offset| {
+                const idx = (self.free_hint + offset) % len;
+                const page = &self.pages.items[idx];
+                if (page.writable) {
+                    if (page.alloc(size)) |slice| {
+                        self.free_hint = idx;
+                        return .{ .slice = slice, .page_index = idx };
+                    }
                 }
             }
         }
@@ -126,6 +148,8 @@ pub const CodeAllocator = struct {
         const slice = page.alloc(size) orelse return AllocError.OutOfMemory;
         const page_index = self.pages.items.len;
         self.pages.append(self.allocator, page) catch return AllocError.OutOfMemory;
+        // Update hint to the new page for next allocation
+        self.free_hint = page_index;
         return .{ .slice = slice, .page_index = page_index };
     }
 

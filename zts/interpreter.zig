@@ -383,6 +383,7 @@ pub const Interpreter = struct {
                 jit.CompileError.UnsupportedOpcode => {
                     // Function uses opcodes we can't compile yet - stay interpreted
                     func.tier = .interpreted;
+                    self.ctx.recordJitFailure();
                     return;
                 },
                 else => return err,
@@ -390,7 +391,7 @@ pub const Interpreter = struct {
         };
 
         if (timer) |*t| {
-            self.ctx.recordJitCompile(t.read(), compiled.code.len);
+            self.ctx.recordJitCompile(t.read(), compiled.code.len, func.code.len);
         }
 
         // Allocate CompiledCode struct on heap and store it
@@ -433,6 +434,9 @@ pub const Interpreter = struct {
                 const prev_interp = current_interpreter;
                 current_interpreter = self;
                 defer current_interpreter = prev_interp;
+                // Set interpreter pointer in context for IC fast path
+                self.ctx.jit_interpreter = @ptrCast(self);
+                defer self.ctx.jit_interpreter = null;
                 const result_raw = cc.execute(self.ctx);
                 return value.JSValue{ .raw = result_raw };
             }
@@ -615,6 +619,9 @@ pub const Interpreter = struct {
                 const prev_interp = current_interpreter;
                 current_interpreter = self;
                 defer current_interpreter = prev_interp;
+                // Set interpreter pointer in context for IC fast path
+                self.ctx.jit_interpreter = @ptrCast(self);
+                defer self.ctx.jit_interpreter = null;
                 const result_raw = cc.execute(self.ctx);
                 const result = value.JSValue{ .raw = result_raw };
 

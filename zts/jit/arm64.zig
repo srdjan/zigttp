@@ -243,6 +243,54 @@ pub const Arm64Emitter = struct {
         }
     }
 
+    /// LDR Wt, [Xn, #imm] (32-bit load, zero-extends to 64-bit, scaled by 4)
+    /// Used for loading hidden_class_idx and other u32 values
+    pub fn ldrImmW(self: *Arm64Emitter, dst: Register, base: Register, offset_bytes: i32) !void {
+        if (offset_bytes >= 0 and offset_bytes <= 16380 and @mod(offset_bytes, 4) == 0) {
+            // Unsigned offset form: LDR Wt, [Xn, #pimm]
+            const pimm: u12 = @intCast(@divExact(offset_bytes, 4));
+            const inst: u32 = 0xB9400000 | // size=10, opc=01 for 32-bit load
+                (@as(u32, pimm) << 10) |
+                (@as(u32, base.encode()) << 5) |
+                @as(u32, dst.encode());
+            try self.emit32(inst);
+        } else if (offset_bytes >= -256 and offset_bytes <= 255) {
+            // Unscaled immediate: LDUR Wt, [Xn, #simm9]
+            const simm9: u9 = @bitCast(@as(i9, @intCast(offset_bytes)));
+            const inst: u32 = 0xB8400000 |
+                (@as(u32, simm9) << 12) |
+                (@as(u32, base.encode()) << 5) |
+                @as(u32, dst.encode());
+            try self.emit32(inst);
+        } else {
+            return error.OffsetTooLarge;
+        }
+    }
+
+    /// LDRH Xt, [Xn, #imm] (16-bit load, zero-extends to 64-bit, scaled by 2)
+    /// Used for loading slot_offset from PIC entries
+    pub fn ldrhImm(self: *Arm64Emitter, dst: Register, base: Register, offset_bytes: i32) !void {
+        if (offset_bytes >= 0 and offset_bytes <= 8190 and @mod(offset_bytes, 2) == 0) {
+            // Unsigned offset form: LDRH Wt, [Xn, #pimm]
+            const pimm: u12 = @intCast(@divExact(offset_bytes, 2));
+            const inst: u32 = 0x79400000 | // size=01, opc=01 for 16-bit load
+                (@as(u32, pimm) << 10) |
+                (@as(u32, base.encode()) << 5) |
+                @as(u32, dst.encode());
+            try self.emit32(inst);
+        } else if (offset_bytes >= -256 and offset_bytes <= 255) {
+            // Unscaled immediate: LDURH Wt, [Xn, #simm9]
+            const simm9: u9 = @bitCast(@as(i9, @intCast(offset_bytes)));
+            const inst: u32 = 0x78400000 |
+                (@as(u32, simm9) << 12) |
+                (@as(u32, base.encode()) << 5) |
+                @as(u32, dst.encode());
+            try self.emit32(inst);
+        } else {
+            return error.OffsetTooLarge;
+        }
+    }
+
     /// STR Xt, [Xn, #imm] (unsigned offset, scaled by 8)
     pub fn strImm(self: *Arm64Emitter, src: Register, base: Register, offset_bytes: i32) !void {
         if (offset_bytes >= 0 and offset_bytes <= 32760 and @mod(offset_bytes, 8) == 0) {

@@ -203,6 +203,8 @@ pub const LockFreePool = struct {
     }
 
     pub fn deinit(self: *LockFreePool) void {
+        // Ensure the current thread doesn't keep a cached runtime when tearing down the pool.
+        releaseThreadLocal(self);
         // Destroy all pooled runtimes
         for (self.slots) |*slot| {
             if (slot.load(.acquire)) |runtime| {

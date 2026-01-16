@@ -14,10 +14,34 @@ const jit = @import("jit/root.zig");
 
 pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
 
+/// Enhanced JIT metrics for monitoring and tuning compilation behavior
 pub const JitMetrics = struct {
+    /// Number of functions successfully compiled
     compile_count: u32 = 0,
+    /// Total compilation time in nanoseconds
     compile_time_ns: u64 = 0,
+    /// Total native code bytes generated
     code_bytes: u64 = 0,
+    /// Total bytecode bytes compiled (for expansion ratio calculation)
+    bytecode_bytes: u64 = 0,
+    /// Number of compilation failures (UnsupportedOpcode, etc.)
+    compilation_failures: u32 = 0,
+    /// Compilation time histogram: [0-10us, 10-100us, 100us-1ms, >1ms]
+    compile_time_histogram: [4]u32 = .{ 0, 0, 0, 0 },
+
+    /// Calculate average compilation time in microseconds
+    pub fn averageCompileTimeUs(self: *const JitMetrics) f64 {
+        if (self.compile_count == 0) return 0;
+        return @as(f64, @floatFromInt(self.compile_time_ns)) /
+            @as(f64, @floatFromInt(self.compile_count)) / 1000.0;
+    }
+
+    /// Calculate code expansion ratio (native bytes / bytecode bytes)
+    pub fn codeExpansionRatio(self: *const JitMetrics) f64 {
+        if (self.bytecode_bytes == 0) return 0;
+        return @as(f64, @floatFromInt(self.code_bytes)) /
+            @as(f64, @floatFromInt(self.bytecode_bytes));
+    }
 };
 
 const JitMetricsState = if (enable_jit_metrics) JitMetrics else struct {};
@@ -100,6 +124,10 @@ pub const Context = struct {
     code_allocator: ?*jit.CodeAllocator,
     /// JIT compilation metrics (compiled out in ReleaseFast)
     jit_metrics: JitMetricsState,
+    /// Interpreter pointer for JIT IC fast path access
+    /// Set before JIT code execution, null otherwise
+    /// Allows JIT-compiled code to access the interpreter's PIC cache directly
+    jit_interpreter: ?*anyopaque = null,
     /// Builtin objects registered during initialization (Math, JSON, etc.)
     /// Tracked for proper cleanup in deinit
     builtin_objects: std.ArrayList(*object.JSObject),
@@ -169,11 +197,22 @@ pub const Context = struct {
         self.gc_state.hybrid_mode = true;
     }
 
-    pub fn recordJitCompile(self: *Context, time_ns: u64, code_size: usize) void {
+    pub fn recordJitCompile(self: *Context, time_ns: u64, code_size: usize, bytecode_size: usize) void {
         if (!enable_jit_metrics) return;
         self.jit_metrics.compile_count +%= 1;
         self.jit_metrics.compile_time_ns +%= time_ns;
         self.jit_metrics.code_bytes +%= @intCast(code_size);
+        self.jit_metrics.bytecode_bytes +%= @intCast(bytecode_size);
+
+        // Update histogram: [0-10us, 10-100us, 100us-1ms, >1ms]
+        const time_us = time_ns / 1000;
+        const bucket: usize = if (time_us < 10) 0 else if (time_us < 100) 1 else if (time_us < 1000) 2 else 3;
+        self.jit_metrics.compile_time_histogram[bucket] +%= 1;
+    }
+
+    pub fn recordJitFailure(self: *Context) void {
+        if (!enable_jit_metrics) return;
+        self.jit_metrics.compilation_failures +%= 1;
     }
 
     pub fn getJitMetrics(self: *const Context) ?JitMetrics {
@@ -183,9 +222,21 @@ pub const Context = struct {
 
     pub fn writeJitMetrics(self: *const Context, writer: anytype) !void {
         if (!enable_jit_metrics) return;
+        const m = &self.jit_metrics;
         try writer.print(
-            "jit: compiled={d} code_bytes={d} time_ns={d}\n",
-            .{ self.jit_metrics.compile_count, self.jit_metrics.code_bytes, self.jit_metrics.compile_time_ns },
+            "jit: compiled={d} failures={d} code_bytes={d} bytecode_bytes={d} time_ns={d}\n",
+            .{ m.compile_count, m.compilation_failures, m.code_bytes, m.bytecode_bytes, m.compile_time_ns },
+        );
+        try writer.print(
+            "jit: avg_compile_us={d:.2} expansion_ratio={d:.2}x histogram=[<10us:{d}, <100us:{d}, <1ms:{d}, >1ms:{d}]\n",
+            .{
+                m.averageCompileTimeUs(),
+                m.codeExpansionRatio(),
+                m.compile_time_histogram[0],
+                m.compile_time_histogram[1],
+                m.compile_time_histogram[2],
+                m.compile_time_histogram[3],
+            },
         );
     }
 
