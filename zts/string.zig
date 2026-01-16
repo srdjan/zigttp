@@ -19,7 +19,8 @@ pub const JSString = extern struct {
         is_unique: bool = false, // Interned string
         is_ascii: bool = false, // All bytes < 128
         is_numeric: bool = false, // Valid array index
-        _reserved: u5 = 0,
+        hash_computed: bool = false,
+        _reserved: u4 = 0,
     };
 
     /// Get string data (const version)
@@ -39,6 +40,19 @@ pub const JSString = extern struct {
         return self.len;
     }
 
+    /// Get cached hash (compute on first use)
+    pub fn getHash(self: *JSString) u64 {
+        if (!self.flags.hash_computed) {
+            self.hash = hashString(self.data());
+            self.flags.hash_computed = true;
+        }
+        return self.hash;
+    }
+
+    pub fn getHashConst(self: *const JSString) u64 {
+        return @constCast(self).getHash();
+    }
+
     /// Get string length in UTF-8 codepoints
     pub fn codepointLength(self: *const JSString) u32 {
         if (self.flags.is_ascii) {
@@ -55,7 +69,9 @@ pub const JSString = extern struct {
     /// Compare with another string
     pub fn compare(self: *const JSString, other: *const JSString) std.math.Order {
         // Fast path: same hash means likely equal
-        if (self.hash == other.hash and self.len == other.len) {
+        const self_hash = self.getHashConst();
+        const other_hash = other.getHashConst();
+        if (self_hash == other_hash and self.len == other.len) {
             if (self == other) return .eq; // Same pointer
             if (eqlStrings(self.data(), other.data())) return .eq;
         }
@@ -65,7 +81,9 @@ pub const JSString = extern struct {
     /// Check equality with another string
     pub fn eql(self: *const JSString, other: *const JSString) bool {
         if (self == other) return true; // Same pointer (interned)
-        if (self.hash != other.hash) return false;
+        const self_hash = self.getHashConst();
+        const other_hash = other.getHashConst();
+        if (self_hash != other_hash) return false;
         if (self.len != other.len) return false;
         return eqlStrings(self.data(), other.data());
     }
@@ -467,6 +485,7 @@ pub const StringTable = struct {
                 .is_unique = true,
                 .is_ascii = isAscii(s),
                 .is_numeric = isArrayIndex(s) != null,
+                .hash_computed = true,
             },
             .len = @intCast(s.len),
             .hash = hash,
@@ -498,9 +517,10 @@ pub fn createString(allocator: std.mem.Allocator, s: []const u8) !*JSString {
             .is_unique = false,
             .is_ascii = isAscii(s),
             .is_numeric = isArrayIndex(s) != null,
+            .hash_computed = false,
         },
         .len = @intCast(s.len),
-        .hash = hashString(s),
+        .hash = 0,
     };
 
     @memcpy(str.dataMut(), s);
@@ -526,9 +546,10 @@ pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString 
             .is_unique = false,
             .is_ascii = isAscii(s),
             .is_numeric = isArrayIndex(s) != null,
+            .hash_computed = false,
         },
         .len = @intCast(s.len),
-        .hash = hashString(s),
+        .hash = 0,
     };
 
     @memcpy(str.dataMut(), s);
@@ -551,6 +572,7 @@ pub fn concatStringsWithArena(arena: *arena_mod.Arena, a: *const JSString, b: *c
             .is_unique = false,
             .is_ascii = a.flags.is_ascii and b.flags.is_ascii,
             .is_numeric = false,
+            .hash_computed = false,
         },
         .len = total_len,
         .hash = 0,
@@ -559,8 +581,6 @@ pub fn concatStringsWithArena(arena: *arena_mod.Arena, a: *const JSString, b: *c
     const data_mut = str.dataMut();
     @memcpy(data_mut[0..a.len], data_a);
     @memcpy(data_mut[a.len..], data_b);
-    str.hash = hashString(str.data());
-
     return str;
 }
 
@@ -580,17 +600,15 @@ pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const
             .is_unique = false,
             .is_ascii = a.flags.is_ascii and b.flags.is_ascii,
             .is_numeric = false, // Concatenation rarely produces valid index
+            .hash_computed = false,
         },
         .len = total_len,
-        .hash = 0, // Will be computed lazily
+        .hash = 0,
     };
 
     const data_mut = str.dataMut();
     @memcpy(data_mut[0..a.len], data_a);
     @memcpy(data_mut[a.len..], data_b);
-
-    // Compute hash
-    str.hash = hashString(str.data());
 
     return str;
 }
@@ -628,6 +646,7 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
             .is_unique = false,
             .is_ascii = all_ascii,
             .is_numeric = false,
+            .hash_computed = false,
         },
         .len = total_len,
         .hash = 0,
@@ -640,9 +659,6 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
         @memcpy(data_mut[offset .. offset + s.len], s.data());
         offset += s.len;
     }
-
-    // Compute hash
-    str.hash = hashString(str.data());
 
     return str;
 }

@@ -211,7 +211,7 @@ const PICEntry = struct {
 /// Number of entries in a polymorphic inline cache
 /// 4 entries provides good coverage for common polymorphic patterns
 /// while keeping memory overhead reasonable (40 bytes per IC site)
-pub const PIC_ENTRIES = 4;
+pub const PIC_ENTRIES = 8;
 
 /// Polymorphic Inline Cache for property access optimization
 /// Caches up to 4 (hidden_class, slot_offset) pairs per access site
@@ -219,17 +219,27 @@ pub const PIC_ENTRIES = 4;
 pub const PolymorphicInlineCache = struct {
     /// Cached entries (only first `count` are valid)
     entries: [PIC_ENTRIES]PICEntry = undefined,
-    /// Number of valid entries (0-4)
+    /// Number of valid entries (0-8)
     count: u8 = 0,
+    /// Index of most recently hit entry
+    last_hit: u8 = 0,
     /// Megamorphic flag: true when > PIC_ENTRIES shapes observed
     /// When megamorphic, skip caching entirely (too polymorphic to benefit)
     megamorphic: bool = false,
 
     /// Lookup hidden class in cache, return slot offset if found
-    pub inline fn lookup(self: *const PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex) ?u16 {
+    pub inline fn lookup(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex) ?u16 {
         // Linear search through valid entries
-        for (self.entries[0..self.count]) |entry| {
+        if (self.count == 0) return null;
+        if (self.last_hit < self.count) {
+            const entry = self.entries[self.last_hit];
             if (entry.hidden_class_idx == hidden_class_idx) {
+                return entry.slot_offset;
+            }
+        }
+        for (self.entries[0..self.count], 0..) |entry, idx| {
+            if (entry.hidden_class_idx == hidden_class_idx) {
+                self.last_hit = @intCast(idx);
                 return entry.slot_offset;
             }
         }
@@ -242,9 +252,10 @@ pub const PolymorphicInlineCache = struct {
         if (self.megamorphic) return false;
 
         // Check if already cached (update existing entry)
-        for (self.entries[0..self.count]) |*entry| {
+        for (self.entries[0..self.count], 0..) |*entry, idx| {
             if (entry.hidden_class_idx == hidden_class_idx) {
                 entry.slot_offset = slot_offset;
+                self.last_hit = @intCast(idx);
                 return true;
             }
         }
@@ -255,6 +266,7 @@ pub const PolymorphicInlineCache = struct {
                 .hidden_class_idx = hidden_class_idx,
                 .slot_offset = slot_offset,
             };
+            self.last_hit = self.count;
             self.count += 1;
             return true;
         }
@@ -267,6 +279,7 @@ pub const PolymorphicInlineCache = struct {
     /// Reset cache to initial state (for debugging/testing)
     pub fn reset(self: *PolymorphicInlineCache) void {
         self.count = 0;
+        self.last_hit = 0;
         self.megamorphic = false;
     }
 };
@@ -4837,6 +4850,10 @@ test "PolymorphicInlineCache unit tests" {
     const class3: object.HiddenClassIndex = @enumFromInt(3);
     const class4: object.HiddenClassIndex = @enumFromInt(4);
     const class5: object.HiddenClassIndex = @enumFromInt(5);
+    const class6: object.HiddenClassIndex = @enumFromInt(6);
+    const class7: object.HiddenClassIndex = @enumFromInt(7);
+    const class8: object.HiddenClassIndex = @enumFromInt(8);
+    const class9: object.HiddenClassIndex = @enumFromInt(9);
 
     // Initially empty
     try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
@@ -4862,16 +4879,24 @@ test "PolymorphicInlineCache unit tests" {
     try std.testing.expectEqual(@as(u8, 4), pic.count);
     try std.testing.expect(!pic.megamorphic);
 
-    // All four entries work
+    // Add fifth through eighth entries
+    try std.testing.expect(pic.update(class5, 50));
+    try std.testing.expect(pic.update(class6, 60));
+    try std.testing.expect(pic.update(class7, 70));
+    try std.testing.expect(pic.update(class8, 80));
+    try std.testing.expectEqual(@as(u8, PIC_ENTRIES), pic.count);
+    try std.testing.expect(!pic.megamorphic);
+
+    // All entries work
     try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
     try std.testing.expectEqual(@as(?u16, 20), pic.lookup(class2));
     try std.testing.expectEqual(@as(?u16, 30), pic.lookup(class3));
     try std.testing.expectEqual(@as(?u16, 40), pic.lookup(class4));
 
-    // Fifth entry triggers megamorphic
-    try std.testing.expect(!pic.update(class5, 50));
+    // Ninth entry triggers megamorphic
+    try std.testing.expect(!pic.update(class9, 90));
     try std.testing.expect(pic.megamorphic);
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class5));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class9));
 
     // Existing entries still work (megamorphic doesn't clear cache)
     try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));

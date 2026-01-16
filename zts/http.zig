@@ -43,6 +43,32 @@ pub fn createRequest(
     headers: []const [2][]const u8,
     body: ?[]const u8,
 ) !value.JSValue {
+    if (ctx.http_shapes) |shapes| {
+        const req_obj = try ctx.createObjectWithClass(shapes.request.class_idx, null);
+
+        const method_str = try ctx.createString(method);
+        req_obj.setSlot(shapes.request.method_slot, method_str);
+
+        const url_str = try ctx.createString(url);
+        req_obj.setSlot(shapes.request.url_slot, url_str);
+
+        if (body) |b| {
+            const body_str = try ctx.createString(b);
+            req_obj.setSlot(shapes.request.body_slot, body_str);
+        } else {
+            req_obj.setSlot(shapes.request.body_slot, value.JSValue.null_val);
+        }
+
+        const headers_obj = try ctx.createObject(null);
+        for (headers) |header| {
+            const name_atom = try ctx.atoms.intern(header[0]);
+            const value_str = try ctx.createString(header[1]);
+            try ctx.setPropertyChecked(headers_obj, name_atom, value_str);
+        }
+        req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
+        return req_obj.toValue();
+    }
+
     const req_obj = try ctx.createObject(null);
 
     // Set method
@@ -88,6 +114,42 @@ pub fn createResponse(
     status: u16,
     content_type: []const u8,
 ) !value.JSValue {
+    if (ctx.http_shapes) |shapes| {
+        const resp_obj = try ctx.createObjectWithClass(shapes.response.class_idx, null);
+
+        const body_str = try ctx.createString(body);
+        resp_obj.setSlot(shapes.response.body_slot, body_str);
+
+        resp_obj.setSlot(shapes.response.status_slot, value.JSValue.fromInt(@intCast(status)));
+
+        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else blk: {
+            const status_text = switch (status) {
+                200 => "OK",
+                201 => "Created",
+                204 => "No Content",
+                301 => "Moved Permanently",
+                302 => "Found",
+                400 => "Bad Request",
+                401 => "Unauthorized",
+                403 => "Forbidden",
+                404 => "Not Found",
+                500 => "Internal Server Error",
+                else => "Unknown",
+            };
+            break :blk try ctx.createString(status_text);
+        };
+        resp_obj.setSlot(shapes.response.status_text_slot, status_text_val);
+
+        resp_obj.setSlot(shapes.response.ok_slot, value.JSValue.fromBool(status >= 200 and status < 300));
+
+        const headers_obj = try ctx.createObjectWithClass(shapes.response_headers.class_idx, null);
+        const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
+        headers_obj.setSlot(shapes.response_headers.content_type_slot, ct_val);
+        resp_obj.setSlot(shapes.response.headers_slot, headers_obj.toValue());
+
+        return resp_obj.toValue();
+    }
+
     const resp_obj = try ctx.createObject(null);
 
     // Set body (using predefined atom for efficiency)
@@ -98,7 +160,7 @@ pub fn createResponse(
     try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
 
     // Set statusText
-    const status_text_atom = try ctx.atoms.intern("statusText");
+    const status_text_atom = if (ctx.http_strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
     const status_text = switch (status) {
         200 => "OK",
         201 => "Created",
@@ -112,18 +174,18 @@ pub fn createResponse(
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    const status_text_str = try ctx.createString(status_text);
-    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_str);
+    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(status_text);
+    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_val);
 
     // Set ok (status 200-299)
-    const ok_atom = try ctx.atoms.intern("ok");
+    const ok_atom = object.Atom.ok;
     try ctx.setPropertyChecked(resp_obj, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
 
     // Set headers (using predefined atom)
     const headers_obj = try ctx.createObject(null);
-    const ct_atom = try ctx.atoms.intern("Content-Type");
-    const ct_str = try ctx.createString(content_type);
-    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_str);
+    const ct_atom = if (ctx.http_strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
+    const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
+    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_val);
     try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
 
     return resp_obj.toValue();
@@ -136,6 +198,40 @@ pub fn createResponseFromString(
     status: u16,
     content_type: []const u8,
 ) !value.JSValue {
+    if (ctx.http_shapes) |shapes| {
+        const resp_obj = try ctx.createObjectWithClass(shapes.response.class_idx, null);
+
+        resp_obj.setSlot(shapes.response.body_slot, value.JSValue.fromPtr(body_str));
+        resp_obj.setSlot(shapes.response.status_slot, value.JSValue.fromInt(@intCast(status)));
+
+        const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else blk: {
+            const status_text = switch (status) {
+                200 => "OK",
+                201 => "Created",
+                204 => "No Content",
+                301 => "Moved Permanently",
+                302 => "Found",
+                400 => "Bad Request",
+                401 => "Unauthorized",
+                403 => "Forbidden",
+                404 => "Not Found",
+                500 => "Internal Server Error",
+                else => "Unknown",
+            };
+            break :blk try ctx.createString(status_text);
+        };
+        resp_obj.setSlot(shapes.response.status_text_slot, status_text_val);
+
+        resp_obj.setSlot(shapes.response.ok_slot, value.JSValue.fromBool(status >= 200 and status < 300));
+
+        const headers_obj = try ctx.createObjectWithClass(shapes.response_headers.class_idx, null);
+        const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
+        headers_obj.setSlot(shapes.response_headers.content_type_slot, ct_val);
+        resp_obj.setSlot(shapes.response.headers_slot, headers_obj.toValue());
+
+        return resp_obj.toValue();
+    }
+
     const resp_obj = try ctx.createObject(null);
 
     // Set body using existing JSString
@@ -145,7 +241,7 @@ pub fn createResponseFromString(
     try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
 
     // Set statusText
-    const status_text_atom = try ctx.atoms.intern("statusText");
+    const status_text_atom = if (ctx.http_strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
     const status_text = switch (status) {
         200 => "OK",
         201 => "Created",
@@ -159,18 +255,18 @@ pub fn createResponseFromString(
         500 => "Internal Server Error",
         else => "Unknown",
     };
-    const status_text_str = try ctx.createString(status_text);
-    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_str);
+    const status_text_val: value.JSValue = if (ctx.getCachedStatusText(status)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(status_text);
+    try ctx.setPropertyChecked(resp_obj, status_text_atom, status_text_val);
 
     // Set ok (status 200-299)
-    const ok_atom = try ctx.atoms.intern("ok");
+    const ok_atom = object.Atom.ok;
     try ctx.setPropertyChecked(resp_obj, ok_atom, value.JSValue.fromBool(status >= 200 and status < 300));
 
     // Set headers (using predefined atom)
     const headers_obj = try ctx.createObject(null);
-    const ct_atom = try ctx.atoms.intern("Content-Type");
-    const ct_str = try ctx.createString(content_type);
-    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_str);
+    const ct_atom = if (ctx.http_strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
+    const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
+    try ctx.setPropertyChecked(headers_obj, ct_atom, ct_val);
     try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
 
     return resp_obj.toValue();
@@ -901,6 +997,9 @@ test "createResponse" {
     try std.testing.expect(resp.isObject());
 
     const resp_obj = object.JSObject.fromValue(resp);
+    if (ctx.http_shapes) |shapes| {
+        try std.testing.expectEqual(shapes.response.class_idx, resp_obj.hidden_class_idx);
+    }
     const status_atom = try ctx.atoms.intern("status");
     const pool = ctx.hidden_class_pool.?;
     const status = resp_obj.getProperty(pool, status_atom);

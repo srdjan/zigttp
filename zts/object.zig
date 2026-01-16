@@ -734,6 +734,11 @@ pub const HiddenClassPool = struct {
     property_offsets: std.ArrayListUnmanaged(u16),
     property_flags: std.ArrayListUnmanaged(PropertyFlags),
 
+    /// Optional sorted property names for binary search on large classes
+    sorted_property_names: std.ArrayListUnmanaged(Atom),
+    sorted_property_offsets: std.ArrayListUnmanaged(u16),
+    sorted_starts: std.ArrayListUnmanaged(u32),
+
     /// Transition table: flat array with entries [from_class: u32, atom: u32, to_class: u32]
     /// Looked up via linear scan (small number of transitions per class)
     transitions: std.ArrayListUnmanaged(u32),
@@ -742,6 +747,8 @@ pub const HiddenClassPool = struct {
     count: u32,
 
     const TRANSITION_ENTRY_SIZE = 3; // from, atom, to
+    const SORTED_START_INVALID: u32 = std.math.maxInt(u32);
+    const BINARY_SEARCH_THRESHOLD: u16 = 8;
 
     pub fn init(allocator: std.mem.Allocator) !*HiddenClassPool {
         const pool = try allocator.create(HiddenClassPool);
@@ -755,6 +762,9 @@ pub const HiddenClassPool = struct {
             .property_names = .empty,
             .property_offsets = .empty,
             .property_flags = .empty,
+            .sorted_property_names = .empty,
+            .sorted_property_offsets = .empty,
+            .sorted_starts = .empty,
             .transitions = .empty,
             .count = 0,
         };
@@ -772,6 +782,9 @@ pub const HiddenClassPool = struct {
         self.property_names.deinit(self.allocator);
         self.property_offsets.deinit(self.allocator);
         self.property_flags.deinit(self.allocator);
+        self.sorted_property_names.deinit(self.allocator);
+        self.sorted_property_offsets.deinit(self.allocator);
+        self.sorted_starts.deinit(self.allocator);
         self.transitions.deinit(self.allocator);
         self.allocator.destroy(self);
     }
@@ -784,6 +797,7 @@ pub const HiddenClassPool = struct {
         try self.property_counts.append(self.allocator, prop_count);
         try self.properties_starts.append(self.allocator, @intCast(self.property_names.items.len));
         try self.prototype_indices.append(self.allocator, prototype);
+        try self.sorted_starts.append(self.allocator, SORTED_START_INVALID);
 
         return HiddenClassIndex.fromInt(idx);
     }
@@ -813,6 +827,28 @@ pub const HiddenClassPool = struct {
 
         const prop_count = self.property_counts.items[i];
         if (prop_count == 0) return null;
+
+        if (prop_count >= BINARY_SEARCH_THRESHOLD) {
+            const sorted_start = self.sorted_starts.items[i];
+            if (sorted_start != SORTED_START_INVALID) {
+                const names = self.sorted_property_names.items[sorted_start..][0..prop_count];
+                const offsets = self.sorted_property_offsets.items[sorted_start..][0..prop_count];
+                var lo: usize = 0;
+                var hi: usize = names.len;
+                const target = @intFromEnum(name);
+                while (lo < hi) {
+                    const mid = (lo + hi) / 2;
+                    const mid_val = @intFromEnum(names[mid]);
+                    if (mid_val == target) return offsets[mid];
+                    if (mid_val < target) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                return null;
+            }
+        }
 
         const start = self.properties_starts.items[i];
         const names = self.property_names.items[start..][0..prop_count];
@@ -873,7 +909,48 @@ pub const HiddenClassPool = struct {
         try self.transitions.append(self.allocator, @intFromEnum(name));
         try self.transitions.append(self.allocator, new_idx.toInt());
 
+        if (new_prop_count >= BINARY_SEARCH_THRESHOLD) {
+            try self.buildSortedProperties(new_idx, new_prop_count);
+        }
+
         return new_idx;
+    }
+
+    fn buildSortedProperties(self: *HiddenClassPool, idx: HiddenClassIndex, prop_count: u16) !void {
+        const i = idx.toInt();
+        if (i >= self.count) return;
+        const start = self.properties_starts.items[i];
+        const names = self.property_names.items[start..][0..prop_count];
+        const offsets = self.property_offsets.items[start..][0..prop_count];
+
+        const Entry = struct {
+            name: Atom,
+            offset: u16,
+        };
+
+        var entries = try self.allocator.alloc(Entry, prop_count);
+        defer self.allocator.free(entries);
+
+        for (names, 0..) |n, idx_entry| {
+            entries[idx_entry] = .{ .name = n, .offset = offsets[idx_entry] };
+        }
+
+        std.mem.sort(Entry, entries, {}, struct {
+            fn lessThan(_: void, a: Entry, b: Entry) bool {
+                return @intFromEnum(a.name) < @intFromEnum(b.name);
+            }
+        }.lessThan);
+
+        const sorted_start: u32 = @intCast(self.sorted_property_names.items.len);
+        try self.sorted_property_names.ensureUnusedCapacity(self.allocator, prop_count);
+        try self.sorted_property_offsets.ensureUnusedCapacity(self.allocator, prop_count);
+
+        for (entries) |entry| {
+            self.sorted_property_names.appendAssumeCapacity(entry.name);
+            self.sorted_property_offsets.appendAssumeCapacity(entry.offset);
+        }
+
+        self.sorted_starts.items[i] = sorted_start;
     }
 
     /// Get empty root class index

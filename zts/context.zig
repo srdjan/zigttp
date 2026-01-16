@@ -51,6 +51,54 @@ pub const ContextConfig = struct {
     stack_size: usize = 1024 * 1024, // 1MB value stack
     call_stack_size: usize = 1024, // Max call depth
     init_globals: bool = true, // Initialize global object
+    use_http_shape_cache: bool = true, // Prebuild HTTP Request/Response shapes
+    use_http_string_cache: bool = true, // Cache common HTTP strings
+};
+
+pub const HttpRequestShape = struct {
+    class_idx: object.HiddenClassIndex,
+    method_slot: u16,
+    url_slot: u16,
+    body_slot: u16,
+    headers_slot: u16,
+};
+
+pub const HttpResponseShape = struct {
+    class_idx: object.HiddenClassIndex,
+    body_slot: u16,
+    status_slot: u16,
+    status_text_slot: u16,
+    ok_slot: u16,
+    headers_slot: u16,
+};
+
+pub const HttpHeadersShape = struct {
+    class_idx: object.HiddenClassIndex,
+    content_type_slot: u16,
+};
+
+pub const HttpShapeCache = struct {
+    request: HttpRequestShape,
+    response: HttpResponseShape,
+    response_headers: HttpHeadersShape,
+};
+
+pub const HttpStringCache = struct {
+    status_ok: *string.JSString,
+    status_created: *string.JSString,
+    status_no_content: *string.JSString,
+    status_moved_permanently: *string.JSString,
+    status_found: *string.JSString,
+    status_bad_request: *string.JSString,
+    status_unauthorized: *string.JSString,
+    status_forbidden: *string.JSString,
+    status_not_found: *string.JSString,
+    status_internal_error: *string.JSString,
+    content_type_json: *string.JSString,
+    content_type_text: *string.JSString,
+    content_type_html: *string.JSString,
+    status_text_atom: object.Atom,
+    content_type_atom: object.Atom,
 };
 
 /// Call frame on the call stack
@@ -131,6 +179,10 @@ pub const Context = struct {
     /// Builtin objects registered during initialization (Math, JSON, etc.)
     /// Tracked for proper cleanup in deinit
     builtin_objects: std.ArrayList(*object.JSObject),
+    /// Cached HTTP shapes for fast Request/Response creation
+    http_shapes: ?HttpShapeCache,
+    /// Cached HTTP strings and atoms for common values
+    http_strings: ?HttpStringCache,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -184,7 +236,16 @@ pub const Context = struct {
             .code_allocator = null,
             .jit_metrics = .{},
             .builtin_objects = .{},
+            .http_shapes = null,
+            .http_strings = null,
         };
+
+        if (config.use_http_shape_cache) {
+            try ctx.initHttpShapes();
+        }
+        if (config.use_http_string_cache) {
+            try ctx.initHttpStrings();
+        }
 
         return ctx;
     }
@@ -197,6 +258,147 @@ pub const Context = struct {
         self.gc_state.hybrid_mode = true;
     }
 
+    pub fn createObjectWithClass(self: *Context, class_idx: object.HiddenClassIndex, prototype: ?*object.JSObject) !*object.JSObject {
+        if (self.hybrid) |h| {
+            return object.JSObject.createWithArena(h.arena, class_idx, prototype) orelse return error.OutOfMemory;
+        }
+        return try object.JSObject.create(self.allocator, class_idx, prototype);
+    }
+
+    fn initHttpShapes(self: *Context) !void {
+        if (self.http_shapes != null) return;
+        const pool = self.hidden_class_pool orelse return;
+
+        const status_text_atom = try self.atoms.intern("statusText");
+        const content_type_atom = try self.atoms.intern("Content-Type");
+
+        const addProp = struct {
+            fn add(hc_pool: *object.HiddenClassPool, class_idx: *object.HiddenClassIndex, name: object.Atom) !u16 {
+                const next = try hc_pool.addProperty(class_idx.*, name);
+                const slot = hc_pool.getPropertyCount(next) - 1;
+                class_idx.* = next;
+                return slot;
+            }
+        }.add;
+
+        var req_class = pool.getEmptyClass();
+        const method_slot = try addProp(pool, &req_class, .method);
+        const url_slot = try addProp(pool, &req_class, .url);
+        const body_slot = try addProp(pool, &req_class, .body);
+        const headers_slot = try addProp(pool, &req_class, .headers);
+
+        var resp_class = pool.getEmptyClass();
+        const resp_body_slot = try addProp(pool, &resp_class, .body);
+        const resp_status_slot = try addProp(pool, &resp_class, .status);
+        const resp_status_text_slot = try addProp(pool, &resp_class, status_text_atom);
+        const resp_ok_slot = try addProp(pool, &resp_class, .ok);
+        const resp_headers_slot = try addProp(pool, &resp_class, .headers);
+
+        var resp_headers_class = pool.getEmptyClass();
+        const content_type_slot = try addProp(pool, &resp_headers_class, content_type_atom);
+
+        self.http_shapes = .{
+            .request = .{
+                .class_idx = req_class,
+                .method_slot = method_slot,
+                .url_slot = url_slot,
+                .body_slot = body_slot,
+                .headers_slot = headers_slot,
+            },
+            .response = .{
+                .class_idx = resp_class,
+                .body_slot = resp_body_slot,
+                .status_slot = resp_status_slot,
+                .status_text_slot = resp_status_text_slot,
+                .ok_slot = resp_ok_slot,
+                .headers_slot = resp_headers_slot,
+            },
+            .response_headers = .{
+                .class_idx = resp_headers_class,
+                .content_type_slot = content_type_slot,
+            },
+        };
+    }
+
+    fn initHttpStrings(self: *Context) !void {
+        if (self.http_strings != null) return;
+
+        const status_text_atom = try self.atoms.intern("statusText");
+        const content_type_atom = try self.atoms.intern("Content-Type");
+
+        const status_ok = try string.createString(self.allocator, "OK");
+        errdefer string.freeString(self.allocator, status_ok);
+        const status_created = try string.createString(self.allocator, "Created");
+        errdefer string.freeString(self.allocator, status_created);
+        const status_no_content = try string.createString(self.allocator, "No Content");
+        errdefer string.freeString(self.allocator, status_no_content);
+        const status_moved_permanently = try string.createString(self.allocator, "Moved Permanently");
+        errdefer string.freeString(self.allocator, status_moved_permanently);
+        const status_found = try string.createString(self.allocator, "Found");
+        errdefer string.freeString(self.allocator, status_found);
+        const status_bad_request = try string.createString(self.allocator, "Bad Request");
+        errdefer string.freeString(self.allocator, status_bad_request);
+        const status_unauthorized = try string.createString(self.allocator, "Unauthorized");
+        errdefer string.freeString(self.allocator, status_unauthorized);
+        const status_forbidden = try string.createString(self.allocator, "Forbidden");
+        errdefer string.freeString(self.allocator, status_forbidden);
+        const status_not_found = try string.createString(self.allocator, "Not Found");
+        errdefer string.freeString(self.allocator, status_not_found);
+        const status_internal_error = try string.createString(self.allocator, "Internal Server Error");
+        errdefer string.freeString(self.allocator, status_internal_error);
+        const content_type_json = try string.createString(self.allocator, "application/json");
+        errdefer string.freeString(self.allocator, content_type_json);
+        const content_type_text = try string.createString(self.allocator, "text/plain; charset=utf-8");
+        errdefer string.freeString(self.allocator, content_type_text);
+        const content_type_html = try string.createString(self.allocator, "text/html; charset=utf-8");
+        errdefer string.freeString(self.allocator, content_type_html);
+
+        self.http_strings = .{
+            .status_ok = status_ok,
+            .status_created = status_created,
+            .status_no_content = status_no_content,
+            .status_moved_permanently = status_moved_permanently,
+            .status_found = status_found,
+            .status_bad_request = status_bad_request,
+            .status_unauthorized = status_unauthorized,
+            .status_forbidden = status_forbidden,
+            .status_not_found = status_not_found,
+            .status_internal_error = status_internal_error,
+            .content_type_json = content_type_json,
+            .content_type_text = content_type_text,
+            .content_type_html = content_type_html,
+            .status_text_atom = status_text_atom,
+            .content_type_atom = content_type_atom,
+        };
+    }
+
+    pub fn getCachedStatusText(self: *const Context, status: u16) ?*string.JSString {
+        if (self.http_strings) |cache| {
+            return switch (status) {
+                200 => cache.status_ok,
+                201 => cache.status_created,
+                204 => cache.status_no_content,
+                301 => cache.status_moved_permanently,
+                302 => cache.status_found,
+                400 => cache.status_bad_request,
+                401 => cache.status_unauthorized,
+                403 => cache.status_forbidden,
+                404 => cache.status_not_found,
+                500 => cache.status_internal_error,
+                else => null,
+            };
+        }
+        return null;
+    }
+
+    pub fn getCachedContentType(self: *const Context, content_type: []const u8) ?*string.JSString {
+        if (self.http_strings) |cache| {
+            if (std.mem.eql(u8, content_type, "application/json")) return cache.content_type_json;
+            if (std.mem.eql(u8, content_type, "text/plain; charset=utf-8")) return cache.content_type_text;
+            if (std.mem.eql(u8, content_type, "text/html; charset=utf-8")) return cache.content_type_html;
+        }
+        return null;
+    }
     pub fn recordJitCompile(self: *Context, time_ns: u64, code_size: usize, bytecode_size: usize) void {
         if (!enable_jit_metrics) return;
         self.jit_metrics.compile_count +%= 1;
@@ -381,6 +583,21 @@ pub const Context = struct {
             if (self.global_obj) |g| g.destroyBuiltin(self.allocator, pool);
         }
         self.builtin_objects.deinit(self.allocator);
+        if (self.http_strings) |cache| {
+            string.freeString(self.allocator, cache.status_ok);
+            string.freeString(self.allocator, cache.status_created);
+            string.freeString(self.allocator, cache.status_no_content);
+            string.freeString(self.allocator, cache.status_moved_permanently);
+            string.freeString(self.allocator, cache.status_found);
+            string.freeString(self.allocator, cache.status_bad_request);
+            string.freeString(self.allocator, cache.status_unauthorized);
+            string.freeString(self.allocator, cache.status_forbidden);
+            string.freeString(self.allocator, cache.status_not_found);
+            string.freeString(self.allocator, cache.status_internal_error);
+            string.freeString(self.allocator, cache.content_type_json);
+            string.freeString(self.allocator, cache.content_type_text);
+            string.freeString(self.allocator, cache.content_type_html);
+        }
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
         if (self.hidden_class_pool) |p| p.deinit();
 
