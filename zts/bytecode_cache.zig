@@ -317,21 +317,26 @@ pub const BytecodeCache = struct {
     /// In-memory cache: source hash -> serialized bytecode
     cache: std.AutoHashMapUnmanaged(CacheKey, []const u8),
 
+    /// Synchronizes cache access across threads
+    lock: std.Thread.RwLock = .{},
+
     /// Cache statistics
-    hits: u64,
-    misses: u64,
+    hits: std.atomic.Value(u64),
+    misses: std.atomic.Value(u64),
 
     pub fn init(allocator: std.mem.Allocator) BytecodeCache {
         return .{
             .allocator = allocator,
             .cache = .{},
-            .hits = 0,
-            .misses = 0,
+            .hits = std.atomic.Value(u64).init(0),
+            .misses = std.atomic.Value(u64).init(0),
         };
     }
 
     pub fn deinit(self: *BytecodeCache) void {
         // Free all cached bytecode
+        self.lock.lock();
+        defer self.lock.unlock();
         var it = self.cache.valueIterator();
         while (it.next()) |bytes| {
             self.allocator.free(bytes.*);
@@ -354,6 +359,9 @@ pub const BytecodeCache = struct {
         const owned = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(owned);
 
+        self.lock.lock();
+        defer self.lock.unlock();
+
         // Remove old entry if exists
         if (self.cache.fetchRemove(key)) |old| {
             self.allocator.free(old.value);
@@ -364,11 +372,13 @@ pub const BytecodeCache = struct {
 
     /// Retrieve bytecode from cache
     pub fn get(self: *BytecodeCache, key: CacheKey) ?*const bytecode.FunctionBytecodeCompact {
+        self.lock.lockShared();
+        defer self.lock.unlockShared();
         if (self.cache.get(key)) |bytes| {
-            self.hits += 1;
+            _ = self.hits.fetchAdd(1, .monotonic);
             return @ptrCast(@alignCast(bytes.ptr));
         }
-        self.misses += 1;
+        _ = self.misses.fetchAdd(1, .monotonic);
         return null;
     }
 
@@ -377,6 +387,9 @@ pub const BytecodeCache = struct {
         // Copy bytes to owned memory
         const owned = try self.allocator.dupe(u8, data);
         errdefer self.allocator.free(owned);
+
+        self.lock.lock();
+        defer self.lock.unlock();
 
         // Remove old entry if exists
         if (self.cache.fetchRemove(key)) |old| {
@@ -388,39 +401,51 @@ pub const BytecodeCache = struct {
 
     /// Get raw serialized bytes from cache (Phase 1b: for JSValue constant deserialization)
     pub fn getRaw(self: *BytecodeCache, key: CacheKey) ?[]const u8 {
+        self.lock.lockShared();
+        defer self.lock.unlockShared();
         if (self.cache.get(key)) |bytes| {
-            self.hits += 1;
+            _ = self.hits.fetchAdd(1, .monotonic);
             return bytes;
         }
-        self.misses += 1;
+        _ = self.misses.fetchAdd(1, .monotonic);
         return null;
     }
 
     /// Check if key exists in cache
     pub fn contains(self: *const BytecodeCache, key: CacheKey) bool {
+        const lock = @constCast(&self.lock);
+        lock.lockShared();
+        defer lock.unlockShared();
         return self.cache.contains(key);
     }
 
     /// Get cache hit rate
     pub fn hitRate(self: *const BytecodeCache) f64 {
-        const total = self.hits + self.misses;
+        const hits = self.hits.load(.monotonic);
+        const misses = self.misses.load(.monotonic);
+        const total = hits + misses;
         if (total == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.hits)) / @as(f64, @floatFromInt(total));
+        return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
     }
 
     /// Clear all cached entries
     pub fn clear(self: *BytecodeCache) void {
+        self.lock.lock();
+        defer self.lock.unlock();
         var it = self.cache.valueIterator();
         while (it.next()) |bytes| {
             self.allocator.free(bytes.*);
         }
         self.cache.clearRetainingCapacity();
-        self.hits = 0;
-        self.misses = 0;
+        self.hits.store(0, .monotonic);
+        self.misses.store(0, .monotonic);
     }
 
     /// Number of cached entries
     pub fn count(self: *const BytecodeCache) usize {
+        const lock = @constCast(&self.lock);
+        lock.lockShared();
+        defer lock.unlockShared();
         return self.cache.count();
     }
 };
@@ -535,8 +560,8 @@ test "BytecodeCache basic operations" {
     try std.testing.expect(miss == null);
 
     // Check stats
-    try std.testing.expectEqual(@as(u64, 1), cache.hits);
-    try std.testing.expectEqual(@as(u64, 1), cache.misses);
+    try std.testing.expectEqual(@as(u64, 1), cache.hits.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), cache.misses.load(.monotonic));
 }
 
 /// Simple slice writer for serialization

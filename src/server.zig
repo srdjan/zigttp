@@ -334,11 +334,11 @@ const ConnectionPool = struct {
         pos += 2;
 
         // Send headers
-        _ = std.c.write(fd, &header_buf, pos);
+        try writeAllFd(fd, header_buf[0..pos]);
 
         // Send body
         if (response.body.len > 0) {
-            _ = std.c.write(fd, response.body.ptr, response.body.len);
+            try writeAllFd(fd, response.body);
         }
     }
 
@@ -346,7 +346,7 @@ const ConnectionPool = struct {
         _ = self;
         var buf: [512]u8 = undefined;
         const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, getStatusText(status), message.len, message }) catch return;
-        _ = std.c.write(fd, response.ptr, response.len);
+        try writeAllFd(fd, response);
     }
 
     fn serveStaticFileSync(self: *ConnectionPool, fd: std.posix.fd_t, static_dir: []const u8, path: []const u8, keep_alive: bool) !void {
@@ -357,9 +357,18 @@ const ConnectionPool = struct {
         // Simplified - just send 404 for now
         var buf: [256]u8 = undefined;
         const response = std.fmt.bufPrint(&buf, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found", .{}) catch return;
-        _ = std.c.write(fd, response.ptr, response.len);
+        try writeAllFd(fd, response);
     }
 };
+
+fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const n = try std.posix.write(fd, remaining);
+        if (n == 0) return error.WriteFailed;
+        remaining = remaining[n..];
+    }
+}
 
 // ============================================================================
 // Network Error Classification
@@ -860,9 +869,9 @@ pub const Server = struct {
             const line = try reader.readLine();
             if (line.len == 0) break;
 
-            var header_parts = std.mem.splitSequence(u8, line, ": ");
-            const key = header_parts.next() orelse continue;
-            const value = header_parts.rest();
+            const header = splitHeaderLine(line) orelse continue;
+            const key = header.key;
+            const value = header.value;
 
             // Normalize key to lowercase using comptime lookup table
             var key_lower_buf: [256]u8 = undefined;
@@ -942,9 +951,9 @@ pub const Server = struct {
             if (line.len == 0) break;
             if (header_count >= self.config.max_headers) return error.TooManyHeaders;
 
-            var header_parts = std.mem.splitSequence(u8, line, ": ");
-            const key = header_parts.next() orelse continue;
-            const value = header_parts.rest();
+            const header = splitHeaderLine(line) orelse continue;
+            const key = header.key;
+            const value = header.value;
 
             var key_lower_buf: [256]u8 = undefined;
             if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
@@ -1442,6 +1451,16 @@ fn findHeaderValue(headers: []const HttpHeader, name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u8 } {
+    const idx = std.mem.indexOfScalar(u8, line, ':') orelse return null;
+    const key = line[0..idx];
+    var value = line[idx + 1 ..];
+    if (value.len > 0 and value[0] == ' ') {
+        value = value[1..];
+    }
+    return .{ .key = key, .value = value };
+}
+
 fn getStatusText(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
@@ -1582,6 +1601,20 @@ test "path safety validation" {
 
     // Unsafe: empty path
     try std.testing.expect(!isPathSafe(""));
+}
+
+test "splitHeaderLine accepts no-space colon" {
+    const h1_opt = splitHeaderLine("X-Test:123");
+    try std.testing.expect(h1_opt != null);
+    const h1 = h1_opt.?;
+    try std.testing.expectEqualStrings("X-Test", h1.key);
+    try std.testing.expectEqualStrings("123", h1.value);
+
+    const h2_opt = splitHeaderLine("X-Test: 123");
+    try std.testing.expect(h2_opt != null);
+    const h2 = h2_opt.?;
+    try std.testing.expectEqualStrings("X-Test", h2.key);
+    try std.testing.expectEqualStrings("123", h2.value);
 }
 
 test "static file cache hit and invalidation" {

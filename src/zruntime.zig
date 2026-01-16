@@ -283,6 +283,7 @@ pub const Runtime = struct {
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
+        errdefer self.strings.deinit();
 
         // Apply JIT policy from config (only first runtime sets global policy)
         if (config.jit_policy) |policy| {
@@ -321,6 +322,7 @@ pub const Runtime = struct {
             .arena_state = null,
             .hybrid_state = null,
         };
+        errdefer self.strings.deinit();
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(pool_rt.ctx);
@@ -738,13 +740,18 @@ pub const Runtime = struct {
         self.ctx.call_depth = 0;
         self.ctx.clearException();
 
-        // Trigger minor GC if nursery is half full
-        const used = self.gc_state.nursery.used();
-        const base_threshold = self.gc_state.config.nursery_size / 2;
-        const body_threshold = self.gc_state.config.nursery_size / 4;
-        const threshold = if (self.last_request_body_len >= base_threshold) body_threshold else base_threshold;
-        if (used > threshold) {
-            self.gc_state.minorGC();
+        // Reset ephemeral allocations when hybrid allocation is enabled
+        if (self.hybrid_state) |h| {
+            h.resetEphemeral();
+        } else {
+            // Trigger minor GC if nursery is half full
+            const used = self.gc_state.nursery.used();
+            const base_threshold = self.gc_state.config.nursery_size / 2;
+            const body_threshold = self.gc_state.config.nursery_size / 4;
+            const threshold = if (self.last_request_body_len >= base_threshold) body_threshold else base_threshold;
+            if (used > threshold) {
+                self.gc_state.minorGC();
+            }
         }
         self.last_request_body_len = 0;
 
@@ -890,7 +897,8 @@ pub const HandlerPool = struct {
         const pool = try zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
             .gc_config = .{ .nursery_size = config.nursery_size },
-            .use_hybrid_allocation = true,
+            .arena_config = .{ .size = config.arena_size },
+            .use_hybrid_allocation = config.use_hybrid_allocation,
         });
 
         var self = Self{
@@ -912,6 +920,7 @@ pub const HandlerPool = struct {
             .cache_mutex = .{},
         };
 
+        errdefer self.deinit();
         try self.prewarm();
         return self;
     }
@@ -988,8 +997,8 @@ pub const HandlerPool = struct {
     /// Get cache statistics
     pub fn getCacheStats(self: *const Self) struct { hits: u64, misses: u64, hit_rate: f64 } {
         return .{
-            .hits = self.cache.hits,
-            .misses = self.cache.misses,
+            .hits = self.cache.hits.load(.monotonic),
+            .misses = self.cache.misses.load(.monotonic),
             .hit_rate = self.cache.hitRate(),
         };
     }
@@ -1335,7 +1344,9 @@ test "HandlerPool bytecode cache" {
     try std.testing.expectEqualStrings("cached", response.body);
 
     // Cache should have entries (hits from prewarm, misses from first parse)
-    try std.testing.expect(pool.cache.hits + pool.cache.misses >= 1);
+    const hits = pool.cache.hits.load(.monotonic);
+    const misses = pool.cache.misses.load(.monotonic);
+    try std.testing.expect(hits + misses >= 1);
 }
 
 test "HandlerPool concurrent stress" {
