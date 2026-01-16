@@ -22,6 +22,8 @@ const Opcode = bytecode.Opcode;
 const Context = context_mod.Context;
 
 extern fn jitCall(ctx: *Context, argc: u8, is_method: u8) value_mod.JSValue;
+extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
+extern fn jitPutFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, val: value_mod.JSValue, cache_idx: u16) value_mod.JSValue;
 
 // Context field offsets for JIT code generation
 // These are computed at compile time using @offsetOf
@@ -115,13 +117,13 @@ pub const BaselineCompiler = struct {
         try self.patchJumps();
 
         // Allocate executable memory and copy code
-        const native_code = self.code_alloc.alloc(self.emitter.buffer.items.len) catch return CompileError.AllocationFailed;
-        @memcpy(native_code, self.emitter.buffer.items);
+        const alloc_info = self.code_alloc.allocWithPage(self.emitter.buffer.items.len) catch return CompileError.AllocationFailed;
+        @memcpy(alloc_info.slice, self.emitter.buffer.items);
 
-        // Make executable
-        self.code_alloc.makeAllExecutable() catch return CompileError.AllocationFailed;
+        // Make only the used page executable
+        self.code_alloc.makeExecutable(alloc_info.page_index) catch return CompileError.AllocationFailed;
 
-        return CompiledCode.fromSlice(native_code);
+        return CompiledCode.fromSlice(alloc_info.slice);
     }
 
     fn emitPrologue(self: *BaselineCompiler) CompileError!void {
@@ -130,8 +132,11 @@ pub const BaselineCompiler = struct {
             self.emitter.pushReg(.rbp) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rbp, .rsp) catch return CompileError.OutOfMemory;
             self.emitter.pushReg(.rbx) catch return CompileError.OutOfMemory;
+            self.emitter.pushReg(.r12) catch return CompileError.OutOfMemory;
+            self.emitter.pushReg(.r13) catch return CompileError.OutOfMemory;
             // Save context pointer (rdi) to rbx for later use
             self.emitter.movRegReg(.rbx, .rdi) catch return CompileError.OutOfMemory;
+            try self.emitInitStackCache();
         } else if (is_aarch64) {
             // ARM64 prologue: save frame pointer and link register
             self.emitter.stpPreIndex(.x29, .x30, .sp, -16) catch return CompileError.OutOfMemory;
@@ -139,19 +144,26 @@ pub const BaselineCompiler = struct {
             self.emitter.addRegImm12(.x29, .sp, 0) catch return CompileError.OutOfMemory;
             // Save callee-saved registers we use
             self.emitter.stpPreIndex(.x19, .x20, .sp, -16) catch return CompileError.OutOfMemory;
+            self.emitter.stpPreIndex(.x21, .x22, .sp, -16) catch return CompileError.OutOfMemory;
             // Save context pointer (x0) to x19 for later use
             self.emitter.movRegReg(.x19, .x0) catch return CompileError.OutOfMemory;
+            try self.emitInitStackCache();
         }
     }
 
     fn emitEpilogue(self: *BaselineCompiler) CompileError!void {
         if (is_x86_64) {
             // x86-64 epilogue: restore callee-saved registers
+            try self.emitFlushStackCache();
+            self.emitter.popReg(.r13) catch return CompileError.OutOfMemory;
+            self.emitter.popReg(.r12) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.rbx) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.rbp) catch return CompileError.OutOfMemory;
             self.emitter.ret() catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
             // ARM64 epilogue: restore registers and return
+            try self.emitFlushStackCache();
+            self.emitter.ldpPostIndex(.x21, .x22, .sp, 16) catch return CompileError.OutOfMemory;
             self.emitter.ldpPostIndex(.x19, .x20, .sp, 16) catch return CompileError.OutOfMemory;
             self.emitter.ldpPostIndex(.x29, .x30, .sp, 16) catch return CompileError.OutOfMemory;
             self.emitter.ret() catch return CompileError.OutOfMemory;
@@ -458,9 +470,9 @@ pub const BaselineCompiler = struct {
 
             .get_field_ic => {
                 const atom_idx = readU16(code, new_pc);
-                // Skip cache_idx (u16)
+                const cache_idx = readU16(code, new_pc + 2);
                 new_pc += 4;
-                try self.emitGetField(atom_idx);
+                try self.emitGetFieldIC(atom_idx, cache_idx);
             },
 
             .put_field => {
@@ -477,9 +489,9 @@ pub const BaselineCompiler = struct {
 
             .put_field_ic => {
                 const atom_idx = readU16(code, new_pc);
-                // Skip cache_idx (u16)
+                const cache_idx = readU16(code, new_pc + 2);
                 new_pc += 4;
-                try self.emitPutField(atom_idx, false);
+                try self.emitPutFieldIC(atom_idx, cache_idx);
             },
 
             .get_elem => {
@@ -625,31 +637,96 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    fn emitLoadSp(self: *BaselineCompiler, dst: Register) CompileError!void {
-        const ctx = getCtxReg();
+    fn getSpCacheReg() Register {
         if (is_x86_64) {
-            self.emitter.movRegMem(dst, ctx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
+            return .r12;
         } else if (is_aarch64) {
-            self.emitter.ldrImm(dst, ctx, @intCast(@as(u32, @bitCast(CTX_SP_OFF)))) catch return CompileError.OutOfMemory;
+            return .x20;
+        }
+    }
+
+    fn getStackPtrCacheReg() Register {
+        if (is_x86_64) {
+            return .r13;
+        } else if (is_aarch64) {
+            return .x21;
+        }
+    }
+
+    fn emitInitStackCache(self: *BaselineCompiler) CompileError!void {
+        const ctx = getCtxReg();
+        const sp = getSpCacheReg();
+        const stack_ptr = getStackPtrCacheReg();
+        if (is_x86_64) {
+            self.emitter.movRegMem(sp, ctx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(stack_ptr, ctx, CTX_STACK_PTR_OFF) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            self.emitter.ldrImm(sp, ctx, @intCast(@as(u32, @bitCast(CTX_SP_OFF)))) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(stack_ptr, ctx, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitFlushStackCache(self: *BaselineCompiler) CompileError!void {
+        const ctx = getCtxReg();
+        const sp = getSpCacheReg();
+        if (is_x86_64) {
+            self.emitter.movMemReg(ctx, CTX_SP_OFF, sp) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            self.emitter.strImm(sp, ctx, @intCast(@as(u32, @bitCast(CTX_SP_OFF)))) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitReloadStackCache(self: *BaselineCompiler) CompileError!void {
+        try self.emitInitStackCache();
+    }
+
+    fn emitLoadSp(self: *BaselineCompiler, dst: Register) CompileError!void {
+        const sp = getSpCacheReg();
+        if (is_x86_64) {
+            if (dst != sp) {
+                self.emitter.movRegReg(dst, sp) catch return CompileError.OutOfMemory;
+            }
+        } else if (is_aarch64) {
+            if (dst != sp) {
+                self.emitter.movRegReg(dst, sp) catch return CompileError.OutOfMemory;
+            }
         }
     }
 
     fn emitStoreSp(self: *BaselineCompiler, src: Register) CompileError!void {
-        const ctx = getCtxReg();
+        const sp = getSpCacheReg();
         if (is_x86_64) {
-            self.emitter.movMemReg(ctx, CTX_SP_OFF, src) catch return CompileError.OutOfMemory;
+            if (src != sp) {
+                self.emitter.movRegReg(sp, src) catch return CompileError.OutOfMemory;
+            }
         } else if (is_aarch64) {
-            self.emitter.strImm(src, ctx, @intCast(@as(u32, @bitCast(CTX_SP_OFF)))) catch return CompileError.OutOfMemory;
+            if (src != sp) {
+                self.emitter.movRegReg(sp, src) catch return CompileError.OutOfMemory;
+            }
         }
     }
 
     fn emitLoadStackPtr(self: *BaselineCompiler, dst: Register) CompileError!void {
-        const ctx = getCtxReg();
+        const stack_ptr = getStackPtrCacheReg();
         if (is_x86_64) {
-            self.emitter.movRegMem(dst, ctx, CTX_STACK_PTR_OFF) catch return CompileError.OutOfMemory;
+            if (dst != stack_ptr) {
+                self.emitter.movRegReg(dst, stack_ptr) catch return CompileError.OutOfMemory;
+            }
         } else if (is_aarch64) {
-            self.emitter.ldrImm(dst, ctx, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+            if (dst != stack_ptr) {
+                self.emitter.movRegReg(dst, stack_ptr) catch return CompileError.OutOfMemory;
+            }
         }
+    }
+
+    fn emitCallHelperReg(self: *BaselineCompiler, reg: Register) CompileError!void {
+        try self.emitFlushStackCache();
+        if (is_x86_64) {
+            self.emitter.callReg(reg) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            self.emitter.blr(reg) catch return CompileError.OutOfMemory;
+        }
+        try self.emitReloadStackCache();
     }
 
     fn newLocalLabel(self: *BaselineCompiler) u32 {
@@ -728,46 +805,36 @@ pub const BaselineCompiler = struct {
 
     fn emitPushReg(self: *BaselineCompiler, val_reg: Register) CompileError!void {
         if (is_x86_64) {
-            // r8 = sp, r9 = stack_ptr, r10 = addr
-            try self.emitLoadSp(.r8);
-            try self.emitLoadStackPtr(.r9);
-            self.emitter.movRegReg(.r10, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.shlRegImm(.r10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.addRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            // r12 = cached sp, r13 = cached stack_ptr, r10 = addr
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+            self.emitter.leaRegMem(.r10, stack_ptr, sp, 3, 0) catch return CompileError.OutOfMemory;
             self.emitter.movMemReg(.r10, 0, val_reg) catch return CompileError.OutOfMemory;
-            self.emitter.addRegImm32(.r8, 1) catch return CompileError.OutOfMemory;
-            try self.emitStoreSp(.r8);
+            self.emitter.addRegImm32(sp, 1) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            // x12 = sp, x13 = stack_ptr, x14 = addr
-            try self.emitLoadSp(.x12);
-            try self.emitLoadStackPtr(.x13);
-            self.emitter.lslRegImm(.x14, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.addRegReg(.x14, .x13, .x14) catch return CompileError.OutOfMemory;
+            // x20 = cached sp, x21 = cached stack_ptr, x14 = addr
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+            self.emitter.addRegRegShift(.x14, stack_ptr, sp, 3) catch return CompileError.OutOfMemory;
             self.emitter.strImm(val_reg, .x14, 0) catch return CompileError.OutOfMemory;
-            self.emitter.addRegImm12(.x12, .x12, 1) catch return CompileError.OutOfMemory;
-            try self.emitStoreSp(.x12);
+            self.emitter.addRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
         }
     }
 
     fn emitPopReg(self: *BaselineCompiler, dst: Register) CompileError!void {
         if (is_x86_64) {
-            // r8 = sp, r9 = stack_ptr, r10 = addr
-            try self.emitLoadSp(.r8);
-            self.emitter.subRegImm32(.r8, 1) catch return CompileError.OutOfMemory;
-            try self.emitStoreSp(.r8);
-            try self.emitLoadStackPtr(.r9);
-            self.emitter.movRegReg(.r10, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.shlRegImm(.r10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.addRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            // r12 = cached sp, r13 = cached stack_ptr, r10 = addr
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+            self.emitter.subRegImm32(sp, 1) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r10, stack_ptr, sp, 3, 0) catch return CompileError.OutOfMemory;
             self.emitter.movRegMem(dst, .r10, 0) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            // x12 = sp, x13 = stack_ptr, x14 = addr
-            try self.emitLoadSp(.x12);
-            self.emitter.subRegImm12(.x12, .x12, 1) catch return CompileError.OutOfMemory;
-            try self.emitStoreSp(.x12);
-            try self.emitLoadStackPtr(.x13);
-            self.emitter.lslRegImm(.x14, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.addRegReg(.x14, .x13, .x14) catch return CompileError.OutOfMemory;
+            // x20 = cached sp, x21 = cached stack_ptr, x14 = addr
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+            self.emitter.subRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x14, stack_ptr, sp, 3) catch return CompileError.OutOfMemory;
             self.emitter.ldrImm(dst, .x14, 0) catch return CompileError.OutOfMemory;
         }
     }
@@ -826,13 +893,11 @@ pub const BaselineCompiler = struct {
 
     fn emitDrop(self: *BaselineCompiler) CompileError!void {
         if (is_x86_64) {
-            try self.emitLoadSp(.r8);
-            self.emitter.subRegImm32(.r8, 1) catch return CompileError.OutOfMemory;
-            try self.emitStoreSp(.r8);
+            const sp = getSpCacheReg();
+            self.emitter.subRegImm32(sp, 1) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            try self.emitLoadSp(.x9);
-            self.emitter.subRegImm12(.x9, .x9, 1) catch return CompileError.OutOfMemory;
-            try self.emitStoreSp(.x9);
+            const sp = getSpCacheReg();
+            self.emitter.subRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
         }
     }
 
@@ -1067,7 +1132,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rdx, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
@@ -1081,10 +1146,6 @@ pub const BaselineCompiler = struct {
             // Preserve boxed values for slow path
             self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x13, .x10) catch return CompileError.OutOfMemory;
-
-            if (op == .mul) {
-                try self.emitJmpToLabel(slow);
-            }
 
             // Tag guard: both ints
             self.emitter.orrRegReg(.x11, .x9, .x10) catch return CompileError.OutOfMemory;
@@ -1107,7 +1168,11 @@ pub const BaselineCompiler = struct {
                 },
                 .mul => {
                     self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.vs, slow);
+                    // Check i31 range: (x9 << 33) >> 33 == x9
+                    self.emitter.lslRegImm(.x11, .x9, 33) catch return CompileError.OutOfMemory;
+                    self.emitter.asrRegImm(.x11, .x11, 33) catch return CompileError.OutOfMemory;
+                    self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
+                    try self.emitBcondToLabel(.ne, slow);
                 },
             }
 
@@ -1127,7 +1192,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x2, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x12, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x12) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x12);
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
@@ -1159,7 +1224,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
@@ -1185,7 +1250,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x12, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x12) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x12);
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
@@ -1199,14 +1264,14 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm32(.rsi, @intCast(argc)) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rdx, if (is_method) 1 else 0) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, argc) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, if (is_method) 1 else 0) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1218,14 +1283,14 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rsi); // a
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x2); // b
             try self.emitPopReg(.x1); // a
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1237,14 +1302,14 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rsi); // a
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x2); // b
             try self.emitPopReg(.x1); // a
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1256,14 +1321,14 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rsi); // a
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x2); // b
             try self.emitPopReg(.x1); // a
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1298,7 +1363,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
@@ -1331,7 +1396,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x14, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x14) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x14);
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
@@ -1445,14 +1510,36 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x1); // obj
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitPushReg(.x0);
+        }
+    }
+
+    /// Emit code to get an object property via PIC helper (get_field_ic)
+    fn emitGetFieldIC(self: *BaselineCompiler, atom_idx: u16, cache_idx: u16) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitGetFieldIC);
+        if (is_x86_64) {
+            try self.emitPopReg(.rsi); // obj
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rcx, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitPushReg(.rax);
+        } else if (is_aarch64) {
+            try self.emitPopReg(.x1); // obj
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x3, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1467,7 +1554,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             if (keep) {
                 try self.emitPushReg(.rax);
             }
@@ -1477,10 +1564,32 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             if (keep) {
                 try self.emitPushReg(.x0);
             }
+        }
+    }
+
+    /// Emit code to set an object property via PIC helper (put_field_ic)
+    fn emitPutFieldIC(self: *BaselineCompiler, atom_idx: u16, cache_idx: u16) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitPutFieldIC);
+        if (is_x86_64) {
+            try self.emitPopReg(.rcx); // val
+            try self.emitPopReg(.rsi); // obj
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.r8, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+        } else if (is_aarch64) {
+            try self.emitPopReg(.x3); // val
+            try self.emitPopReg(.x1); // obj
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x4, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
         }
     }
 
@@ -1492,14 +1601,14 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rsi); // obj
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x2); // idx
             try self.emitPopReg(.x1); // obj
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1511,13 +1620,13 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1530,13 +1639,13 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x2); // val
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
         }
     }
 
@@ -1546,12 +1655,12 @@ pub const BaselineCompiler = struct {
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1563,13 +1672,13 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, length) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, length) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
     }
@@ -1583,14 +1692,14 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rsi); // obj
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
         } else if (is_aarch64) {
             try self.emitPopReg(.x3); // val
             try self.emitPopReg(.x2); // idx
             try self.emitPopReg(.x1); // obj
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
         }
     }
 
@@ -1599,13 +1708,13 @@ pub const BaselineCompiler = struct {
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
         }
@@ -1617,14 +1726,14 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
         }
@@ -1702,7 +1811,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rdx, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             if (op == .neq) {
                 // Invert boolean result: (true -> false, false -> true)
                 self.emitter.movRegReg(.rdx, .rax) catch return CompileError.OutOfMemory;
@@ -1780,7 +1889,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x2, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x14, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x14) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x14);
             if (op == .neq) {
                 // Invert boolean result: (true -> false, false -> true)
                 self.emitter.movRegImm64(.x11, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
@@ -1827,7 +1936,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rdx, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             if (negate) {
                 self.emitter.movRegReg(.rdx, .rax) catch return CompileError.OutOfMemory;
                 self.emitter.movRegImm64(.rcx, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
@@ -1867,7 +1976,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x2, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x14, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x14) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x14);
             if (negate) {
                 self.emitter.movRegImm64(.x11, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
                 self.emitter.movRegImm64(.x12, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
@@ -1933,7 +2042,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rdx, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
@@ -1985,7 +2094,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x2, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x14, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x14) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x14);
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
@@ -2027,7 +2136,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
@@ -2064,7 +2173,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x14, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x14) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x14);
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
@@ -2131,7 +2240,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rdx, .r9) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
@@ -2193,7 +2302,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x2, .x13) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x14, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x14) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x14);
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
@@ -2213,7 +2322,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             // Load function address into rax and call it
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             // Push result (rax contains JSValue)
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
@@ -2223,7 +2332,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             // Load function address and call it
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             // Push result (x0 contains JSValue)
             try self.emitPushReg(.x0);
         }
@@ -2242,7 +2351,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             // Call helper -> bool in rax
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
 
             // Convert bool to JSValue (!bool)
             self.emitter.movRegReg(.rcx, .rax) catch return CompileError.OutOfMemory; // rcx = bool
@@ -2258,7 +2367,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             // Call helper -> bool in x0
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
 
             // Convert bool to JSValue (!bool)
             self.emitter.movRegReg(.x9, .x0) catch return CompileError.OutOfMemory; // x9 = bool
@@ -2309,7 +2418,7 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rsi);
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
 
             const cond: x86.X86Emitter.Condition = if (jump_if_true) .ne else .e;
@@ -2331,7 +2440,7 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.x1);
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
 
             const cond: arm64.Condition = if (jump_if_true) .ne else .eq;
@@ -2552,21 +2661,35 @@ test "baseline: compile property access opcodes" {
 
     const code = [_]u8{
         @intFromEnum(Opcode.push_null),
-        @intFromEnum(Opcode.get_field), 0x01, 0x00,
+        @intFromEnum(Opcode.get_field),
+        0x01,
+        0x00,
         @intFromEnum(Opcode.drop),
         @intFromEnum(Opcode.push_null),
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.put_field), 0x02, 0x00,
+        @intFromEnum(Opcode.put_field),
+        0x02,
+        0x00,
         @intFromEnum(Opcode.push_null),
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.put_field_keep), 0x03, 0x00,
+        @intFromEnum(Opcode.put_field_keep),
+        0x03,
+        0x00,
         @intFromEnum(Opcode.drop),
         @intFromEnum(Opcode.push_null),
-        @intFromEnum(Opcode.get_field_ic), 0x04, 0x00, 0x00, 0x00,
+        @intFromEnum(Opcode.get_field_ic),
+        0x04,
+        0x00,
+        0x00,
+        0x00,
         @intFromEnum(Opcode.drop),
         @intFromEnum(Opcode.push_null),
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.put_field_ic), 0x05, 0x00, 0x00, 0x00,
+        @intFromEnum(Opcode.put_field_ic),
+        0x05,
+        0x00,
+        0x00,
+        0x00,
         @intFromEnum(Opcode.push_null),
         @intFromEnum(Opcode.push_0),
         @intFromEnum(Opcode.get_elem),
@@ -2603,7 +2726,10 @@ test "baseline: compile get_field_call opcode" {
     const code = [_]u8{
         @intFromEnum(Opcode.push_null),
         @intFromEnum(Opcode.dup),
-        @intFromEnum(Opcode.get_field_call), 0x01, 0x00, 0x00,
+        @intFromEnum(Opcode.get_field_call),
+        0x01,
+        0x00,
+        0x00,
         @intFromEnum(Opcode.ret),
     };
 
@@ -2632,12 +2758,18 @@ test "baseline: compile globals and object creation" {
     const code = [_]u8{
         @intFromEnum(Opcode.new_object),
         @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.new_array), 0x02, 0x00,
+        @intFromEnum(Opcode.new_array),
+        0x02,
+        0x00,
         @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.get_global), 0x01, 0x00,
+        @intFromEnum(Opcode.get_global),
+        0x01,
+        0x00,
         @intFromEnum(Opcode.drop),
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.put_global), 0x02, 0x00,
+        @intFromEnum(Opcode.put_global),
+        0x02,
+        0x00,
         @intFromEnum(Opcode.ret_undefined),
     };
 
@@ -2670,47 +2802,69 @@ test "baseline: compile superinstructions and const ops" {
         @intFromEnum(Opcode.put_loc_1),
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.get_loc_add), 0x00,
+        @intFromEnum(Opcode.get_loc_add),
+        0x00,
 
-        @intFromEnum(Opcode.get_loc_get_loc_add), 0x00, 0x01,
+        @intFromEnum(Opcode.get_loc_get_loc_add),
+        0x00,
+        0x01,
 
         @intFromEnum(Opcode.push_false),
-        @intFromEnum(Opcode.if_false_goto), 0x00, 0x00,
+        @intFromEnum(Opcode.if_false_goto),
+        0x00,
+        0x00,
 
-        @intFromEnum(Opcode.push_const_call), 0x00, 0x00, 0x00,
-
-        @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.push_2),
-        @intFromEnum(Opcode.add_mod), 0x01, 0x00,
-
-        @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.push_2),
-        @intFromEnum(Opcode.sub_mod), 0x01, 0x00,
+        @intFromEnum(Opcode.push_const_call),
+        0x00,
+        0x00,
+        0x00,
 
         @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.push_2),
-        @intFromEnum(Opcode.mul_mod), 0x01, 0x00,
+        @intFromEnum(Opcode.add_mod),
+        0x01,
+        0x00,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.mod_const), 0x01, 0x00,
+        @intFromEnum(Opcode.push_2),
+        @intFromEnum(Opcode.sub_mod),
+        0x01,
+        0x00,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.mod_const_i8), 0x03,
+        @intFromEnum(Opcode.push_2),
+        @intFromEnum(Opcode.mul_mod),
+        0x01,
+        0x00,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.add_const_i8), 0x02,
+        @intFromEnum(Opcode.mod_const),
+        0x01,
+        0x00,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.sub_const_i8), 0x02,
+        @intFromEnum(Opcode.mod_const_i8),
+        0x03,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.mul_const_i8), 0x02,
+        @intFromEnum(Opcode.add_const_i8),
+        0x02,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.lt_const_i8), 0x02,
+        @intFromEnum(Opcode.sub_const_i8),
+        0x02,
 
         @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.le_const_i8), 0x02,
+        @intFromEnum(Opcode.mul_const_i8),
+        0x02,
+
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.lt_const_i8),
+        0x02,
+
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.le_const_i8),
+        0x02,
 
         @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.shr_1),
@@ -2718,8 +2872,13 @@ test "baseline: compile superinstructions and const ops" {
         @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.mul_2),
 
-        @intFromEnum(Opcode.for_of_next), 0x00, 0x00,
-        @intFromEnum(Opcode.for_of_next_put_loc), 0x00, 0x00, 0x00,
+        @intFromEnum(Opcode.for_of_next),
+        0x00,
+        0x00,
+        @intFromEnum(Opcode.for_of_next_put_loc),
+        0x00,
+        0x00,
+        0x00,
 
         @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.push_2),

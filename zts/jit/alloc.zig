@@ -74,6 +74,12 @@ pub const CodePage = struct {
     }
 };
 
+/// Allocation result with page index for executable toggling
+pub const CodeAllocation = struct {
+    slice: []u8,
+    page_index: usize,
+};
+
 /// Manages multiple pages of executable memory
 pub const CodeAllocator = struct {
     /// List of allocated pages
@@ -96,13 +102,19 @@ pub const CodeAllocator = struct {
     }
 
     /// Allocate space for code, returns writable slice
-    /// After writing, call makeExecutable() on the returned slice's page
+    /// Use allocWithPage() if you need to toggle the page executable.
     pub fn alloc(self: *CodeAllocator, size: usize) AllocError![]u8 {
+        const allocation = try self.allocWithPage(size);
+        return allocation.slice;
+    }
+
+    /// Allocate space and return slice + page index
+    pub fn allocWithPage(self: *CodeAllocator, size: usize) AllocError!CodeAllocation {
         // Try to allocate from existing pages
-        for (self.pages.items) |*page| {
+        for (self.pages.items, 0..) |*page, idx| {
             if (page.writable) {
                 if (page.alloc(size)) |slice| {
-                    return slice;
+                    return .{ .slice = slice, .page_index = idx };
                 }
             }
         }
@@ -112,8 +124,15 @@ pub const CodeAllocator = struct {
         errdefer page.deinit();
 
         const slice = page.alloc(size) orelse return AllocError.OutOfMemory;
+        const page_index = self.pages.items.len;
         self.pages.append(self.allocator, page) catch return AllocError.OutOfMemory;
-        return slice;
+        return .{ .slice = slice, .page_index = page_index };
+    }
+
+    /// Make a single page executable
+    pub fn makeExecutable(self: *CodeAllocator, page_index: usize) AllocError!void {
+        std.debug.assert(page_index < self.pages.items.len);
+        try self.pages.items[page_index].makeExecutable();
     }
 
     /// Make all pages executable

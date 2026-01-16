@@ -3,6 +3,7 @@
 //! Thread-local context with stack, atoms, and global state.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("value.zig");
 const gc = @import("gc.zig");
 const heap = @import("heap.zig");
@@ -10,6 +11,16 @@ const object = @import("object.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
+
+pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
+
+pub const JitMetrics = struct {
+    compile_count: u32 = 0,
+    compile_time_ns: u64 = 0,
+    code_bytes: u64 = 0,
+};
+
+const JitMetricsState = if (enable_jit_metrics) JitMetrics else struct {};
 
 /// Context configuration
 pub const ContextConfig = struct {
@@ -87,6 +98,8 @@ pub const Context = struct {
     /// JIT code allocator for compiled functions (Phase 11)
     /// Lazily initialized when first JIT compilation is requested
     code_allocator: ?*jit.CodeAllocator,
+    /// JIT compilation metrics (compiled out in ReleaseFast)
+    jit_metrics: JitMetricsState,
     /// Builtin objects registered during initialization (Math, JSON, etc.)
     /// Tracked for proper cleanup in deinit
     builtin_objects: std.ArrayList(*object.JSObject),
@@ -141,6 +154,7 @@ pub const Context = struct {
             .enforce_arena_escape = true,
             .json_writer = std.Io.Writer.Allocating.init(allocator),
             .code_allocator = null,
+            .jit_metrics = .{},
             .builtin_objects = .{},
         };
 
@@ -153,6 +167,26 @@ pub const Context = struct {
         self.hybrid = hybrid;
         // Disable GC when hybrid allocator is active - arena handles ephemeral cleanup
         self.gc_state.hybrid_mode = true;
+    }
+
+    pub fn recordJitCompile(self: *Context, time_ns: u64, code_size: usize) void {
+        if (!enable_jit_metrics) return;
+        self.jit_metrics.compile_count +%= 1;
+        self.jit_metrics.compile_time_ns +%= time_ns;
+        self.jit_metrics.code_bytes +%= @intCast(code_size);
+    }
+
+    pub fn getJitMetrics(self: *const Context) ?JitMetrics {
+        if (!enable_jit_metrics) return null;
+        return self.jit_metrics;
+    }
+
+    pub fn writeJitMetrics(self: *const Context, writer: anytype) !void {
+        if (!enable_jit_metrics) return;
+        try writer.print(
+            "jit: compiled={d} code_bytes={d} time_ns={d}\n",
+            .{ self.jit_metrics.compile_count, self.jit_metrics.code_bytes, self.jit_metrics.compile_time_ns },
+        );
     }
 
     // ========================================================================

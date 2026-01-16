@@ -372,6 +372,11 @@ pub const Interpreter = struct {
         // Get or create the JIT code allocator
         const code_alloc = try self.ctx.getOrCreateCodeAllocator();
 
+        var timer: ?std.time.Timer = null;
+        if (context.enable_jit_metrics) {
+            timer = std.time.Timer.start() catch null;
+        }
+
         // Try to compile
         const compiled = jit.compileFunction(self.ctx.allocator, code_alloc, func) catch |err| {
             switch (err) {
@@ -383,6 +388,10 @@ pub const Interpreter = struct {
                 else => return err,
             }
         };
+
+        if (timer) |*t| {
+            self.ctx.recordJitCompile(t.read(), compiled.code.len);
+        }
 
         // Allocate CompiledCode struct on heap and store it
         const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
@@ -2869,6 +2878,95 @@ pub export fn jitCall(ctx: *context.Context, argc: u8, is_method: u8) value.JSVa
     };
 
     return ctx.pop();
+}
+
+/// JIT helper: get_field_ic using the interpreter's PIC cache.
+pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, cache_idx: u16) value.JSValue {
+    const interp = current_interpreter orelse {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    const atom: object.Atom = @enumFromInt(atom_idx);
+    if (obj_val.isObject()) {
+        const obj = object.JSObject.fromValue(obj_val);
+        const pic = &interp.pic_cache[cache_idx];
+
+        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
+            interp.pic_hits +%= 1;
+            return obj.getSlot(slot_offset);
+        }
+
+        interp.pic_misses +%= 1;
+        const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
+        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
+            _ = pic.update(obj.hidden_class_idx, slot_offset);
+            return obj.getSlot(slot_offset);
+        }
+        if (obj.getProperty(pool, atom)) |prop_val| {
+            return prop_val;
+        }
+        return value.JSValue.undefined_val;
+    } else if (obj_val.isString()) {
+        if (atom == .length) {
+            const str = obj_val.toPtr(string.JSString);
+            return value.JSValue.fromInt(@intCast(str.len));
+        }
+        if (ctx.string_prototype) |proto| {
+            const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
+            return proto.getProperty(pool, atom) orelse value.JSValue.undefined_val;
+        }
+        return value.JSValue.undefined_val;
+    }
+
+    return value.JSValue.undefined_val;
+}
+
+/// JIT helper: put_field_ic using the interpreter's PIC cache.
+pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue, cache_idx: u16) value.JSValue {
+    const interp = current_interpreter orelse {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    const atom: object.Atom = @enumFromInt(atom_idx);
+    if (obj_val.isObject()) {
+        const obj = object.JSObject.fromValue(obj_val);
+        const pic = &interp.pic_cache[cache_idx];
+
+        if (ctx.enforce_arena_escape and ctx.hybrid != null and !obj.flags.is_arena and ctx.isEphemeralValue(val)) {
+            ctx.throwException(value.JSValue.exception_val);
+            return value.JSValue.exception_val;
+        }
+
+        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
+            interp.pic_hits +%= 1;
+            obj.setSlot(slot_offset, val);
+            return val;
+        }
+
+        interp.pic_misses +%= 1;
+        const pool = ctx.hidden_class_pool orelse {
+            ctx.setPropertyChecked(obj, atom, val) catch {
+                ctx.throwException(value.JSValue.exception_val);
+                return value.JSValue.exception_val;
+            };
+            return val;
+        };
+
+        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
+            _ = pic.update(obj.hidden_class_idx, slot_offset);
+            obj.setSlot(slot_offset, val);
+            return val;
+        }
+
+        ctx.setPropertyChecked(obj, atom, val) catch {
+            ctx.throwException(value.JSValue.exception_val);
+            return value.JSValue.exception_val;
+        };
+    }
+
+    return val;
 }
 
 // ============================================================================

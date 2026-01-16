@@ -263,6 +263,31 @@ pub const X86Emitter = struct {
         }
     }
 
+    /// LEA r64, [base + index*scale + disp]
+    pub fn leaRegMem(self: *X86Emitter, dst: Register, base: Register, index: Register, scale: u2, disp: i32) !void {
+        // Use SIB addressing. Index cannot be RSP.
+        std.debug.assert(index != .rsp);
+
+        try self.emitRex(true, dst.isExtended(), index.isExtended(), base.isExtended());
+        try self.buffer.append(self.allocator, 0x8D); // LEA
+
+        const needs_disp = disp != 0 or base == .rbp or base == .r13;
+        const disp_fits_i8 = disp >= -128 and disp <= 127;
+        const mod: u2 = if (!needs_disp) 0b00 else if (disp_fits_i8) 0b01 else 0b10;
+
+        // ModRM: reg = dst, rm = SIB
+        try self.emitModRM(mod, dst.low3(), 0b100);
+        // SIB: scale, index, base
+        try self.emitSIB(scale, index.low3(), base.low3());
+
+        if (mod == 0b01) {
+            try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+        } else if (mod == 0b10 or (mod == 0b00 and needs_disp)) {
+            // For base=rbp/r13 with mod=00, force disp32=0
+            try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+        }
+    }
+
     // ========================================
     // Arithmetic instructions
     // ========================================

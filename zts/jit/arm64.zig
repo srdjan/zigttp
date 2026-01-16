@@ -325,6 +325,16 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// ADD Xd, Xn, Xm, LSL #shift
+    pub fn addRegRegShift(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register, shift: u6) !void {
+        const inst: u32 = 0x8B000000 |
+            (@as(u32, shift) << 10) |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     /// ADDS Xd, Xn, Xm (sets flags)
     pub fn addsRegReg(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
         const inst: u32 = 0xAB000000 |
