@@ -199,7 +199,7 @@ fn printHelp() void {
         \\
     ;
 
-    // Write to stdout using C write
+    // Write to stdout using C write (std.io not available in Zig 0.16)
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 

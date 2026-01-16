@@ -180,8 +180,11 @@ const ConnectionPool = struct {
         const self = try allocator.create(ConnectionPool);
         errdefer allocator.destroy(self);
 
+        const workers = try allocator.alloc(std.Thread, worker_count);
+        errdefer allocator.free(workers);
+
         self.* = .{
-            .workers = try allocator.alloc(std.Thread, worker_count),
+            .workers = workers,
             .queue = BoundedQueue.init(),
             .running = std.atomic.Value(bool).init(true),
             .server = server,
@@ -192,10 +195,9 @@ const ConnectionPool = struct {
         for (self.workers, 0..) |*worker, i| {
             worker.* = std.Thread.spawn(.{}, workerFn, .{self}) catch {
                 // If spawn fails, clean up already spawned workers
+                // errdefers will handle freeing workers array and destroying self
                 self.running.store(false, .release);
                 for (self.workers[0..i]) |w| w.join();
-                allocator.free(self.workers);
-                allocator.destroy(self);
                 return error.ThreadSpawnFailed;
             };
         }
@@ -364,7 +366,9 @@ const ConnectionPool = struct {
 fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     var remaining = data;
     while (remaining.len > 0) {
-        const n = try std.posix.write(fd, remaining);
+        const result = std.c.write(fd, remaining.ptr, remaining.len);
+        if (result < 0) return error.WriteFailed;
+        const n: usize = @intCast(result);
         if (n == 0) return error.WriteFailed;
         remaining = remaining[n..];
     }
