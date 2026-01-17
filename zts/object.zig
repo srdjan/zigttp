@@ -1325,7 +1325,8 @@ pub const JSObject = extern struct {
     };
 
     /// Create a new object
-    pub fn create(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, prototype: ?*JSObject) !*JSObject {
+    /// When pool is provided, pre-allocates overflow_slots if the hidden class has >8 properties.
+    pub fn create(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, prototype: ?*JSObject, pool: ?*const HiddenClassPool) !*JSObject {
         const obj = try allocator.create(JSObject);
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
@@ -1338,11 +1339,19 @@ pub const JSObject = extern struct {
             .overflow_capacity = 0,
             .arena_ptr = null,
         };
+        // Pre-allocate overflow slots if the hidden class has >8 properties
+        if (pool) |p| {
+            const prop_count = p.getPropertyCount(class_idx);
+            if (prop_count > INLINE_SLOT_COUNT) {
+                try obj.ensureOverflowCapacity(allocator, prop_count - INLINE_SLOT_COUNT);
+            }
+        }
         return obj;
     }
 
     /// Create a new object using arena allocation (ephemeral, dies at request end)
-    pub fn createWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, prototype: ?*JSObject) ?*JSObject {
+    /// When pool is provided, pre-allocates overflow_slots if the hidden class has >8 properties.
+    pub fn createWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, prototype: ?*JSObject, pool: ?*const HiddenClassPool) ?*JSObject {
         const obj = arena.create(JSObject) orelse return null;
         obj.* = .{
             .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
@@ -1355,6 +1364,20 @@ pub const JSObject = extern struct {
             .overflow_capacity = 0,
             .arena_ptr = arena,
         };
+        // Pre-allocate overflow slots if the hidden class has >8 properties
+        if (pool) |p| {
+            const prop_count = p.getPropertyCount(class_idx);
+            if (prop_count > INLINE_SLOT_COUNT) {
+                const overflow_needed: u16 = prop_count - INLINE_SLOT_COUNT;
+                const overflow_capacity = @max(overflow_needed, 4);
+                const slots = arena.allocSlice(value.JSValue, overflow_capacity) orelse return null;
+                for (0..overflow_capacity) |i| {
+                    slots[i] = value.JSValue.undefined_val;
+                }
+                obj.overflow_slots = slots.ptr;
+                obj.overflow_capacity = overflow_capacity;
+            }
+        }
         return obj;
     }
 
@@ -2229,7 +2252,7 @@ test "JSObject creation and property access" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     // Initially no properties
@@ -2251,13 +2274,13 @@ test "JSObject prototype chain lookup" {
     defer pool.deinit();
 
     // Create prototype
-    var proto = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var proto = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer proto.destroy(allocator);
 
     try proto.setProperty(allocator, pool, .toString, value.JSValue.fromInt(1));
 
     // Create child object with prototype
-    var child = try JSObject.create(allocator, pool.getEmptyClass(), proto);
+    var child = try JSObject.create(allocator, pool.getEmptyClass(), proto, pool);
     defer child.destroy(allocator);
 
     // Child can access prototype property
@@ -2275,7 +2298,7 @@ test "JSObject hasProperty" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     try std.testing.expect(!obj.hasOwnProperty(pool, .length));
@@ -2293,7 +2316,7 @@ test "JSObject extensibility" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     try std.testing.expect(obj.isExtensible());
@@ -2312,7 +2335,7 @@ test "JSObject to/from value" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     const js_val = obj.toValue();
@@ -2328,7 +2351,7 @@ test "InlineCache with object" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(100));
@@ -2388,7 +2411,7 @@ test "JSObject deleteProperty" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
@@ -2411,7 +2434,7 @@ test "JSObject hasOwnProperty" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     // Initially no property
@@ -2487,7 +2510,7 @@ test "JSObject getOwnEnumerableKeys" {
     var pool = try HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
@@ -2519,7 +2542,7 @@ test "PropertyIterator" {
 
     var pool = try HiddenClassPool.init(allocator);
 
-    const obj = try JSObject.create(allocator, pool.getEmptyClass(), null);
+    const obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
 
     try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(10));
     try obj.setProperty(allocator, pool, .prototype, value.JSValue.fromInt(20));
@@ -2652,7 +2675,7 @@ test "JSObject setProperty/getProperty with pool" {
     const empty = pool.getEmptyClass();
 
     // Create object with empty class
-    const obj = try JSObject.create(allocator, empty, null);
+    const obj = try JSObject.create(allocator, empty, null, pool);
     defer obj.destroy(allocator);
 
     // Verify empty class
@@ -2669,4 +2692,48 @@ test "JSObject setProperty/getProperty with pool" {
     const val = obj.getProperty(pool, .console);
     try std.testing.expect(val != null);
     try std.testing.expectEqual(@as(i32, 42), val.?.getInt());
+}
+
+test "JSObject overflow slots pre-allocation for >8 properties" {
+    const allocator = std.testing.allocator;
+
+    var pool = try HiddenClassPool.init(allocator);
+    defer pool.deinit();
+
+    // Build a hidden class with 10 properties (more than INLINE_SLOT_COUNT=8)
+    var class_idx = pool.getEmptyClass();
+    class_idx = try pool.addProperty(class_idx, .length);
+    class_idx = try pool.addProperty(class_idx, .prototype);
+    class_idx = try pool.addProperty(class_idx, .constructor);
+    class_idx = try pool.addProperty(class_idx, .name);
+    class_idx = try pool.addProperty(class_idx, .message);
+    class_idx = try pool.addProperty(class_idx, .valueOf);
+    class_idx = try pool.addProperty(class_idx, .toString);
+    class_idx = try pool.addProperty(class_idx, .toJSON);
+    class_idx = try pool.addProperty(class_idx, .caller); // slot 8 (first overflow)
+    class_idx = try pool.addProperty(class_idx, .arguments); // slot 9 (second overflow)
+
+    try std.testing.expectEqual(@as(u16, 10), pool.getPropertyCount(class_idx));
+
+    // Create object with this class - should pre-allocate overflow_slots
+    const obj = try JSObject.create(allocator, class_idx, null, pool);
+    defer obj.destroy(allocator);
+
+    // Verify overflow_slots was allocated
+    try std.testing.expect(obj.overflow_slots != null);
+    try std.testing.expect(obj.overflow_capacity >= 2);
+
+    // Set values to ALL slots including overflow
+    obj.setSlot(0, value.JSValue.fromInt(100)); // length
+    obj.setSlot(1, value.JSValue.fromInt(101)); // prototype
+    obj.setSlot(7, value.JSValue.fromInt(107)); // toJSON (last inline)
+    obj.setSlot(8, value.JSValue.fromInt(108)); // caller (first overflow)
+    obj.setSlot(9, value.JSValue.fromInt(109)); // arguments (second overflow)
+
+    // Verify all values were stored correctly
+    try std.testing.expectEqual(@as(i32, 100), obj.getSlot(0).getInt());
+    try std.testing.expectEqual(@as(i32, 101), obj.getSlot(1).getInt());
+    try std.testing.expectEqual(@as(i32, 107), obj.getSlot(7).getInt());
+    try std.testing.expectEqual(@as(i32, 108), obj.getSlot(8).getInt());
+    try std.testing.expectEqual(@as(i32, 109), obj.getSlot(9).getInt());
 }

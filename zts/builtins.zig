@@ -2862,7 +2862,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const root_class_idx = ctx.root_class_idx;
 
     // Create console object
-    const console_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const console_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethod(ctx, allocator, pool, console_obj, root_class_idx, .log, wrap(consoleLog), 0);
     // Note: .warn and .error atoms don't exist in predefined atoms, use .log for now
     // In full implementation would add dynamic atoms
@@ -2872,7 +2872,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.console, console_obj.toValue());
 
     // Create Math object
-    const math_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const math_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .abs, wrap(mathAbs), 1);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .floor, wrap(mathFloor), 1);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .ceil, wrap(mathCeil), 1);
@@ -2898,7 +2898,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.Math, math_obj.toValue());
 
     // Create JSON object
-    const json_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const json_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .parse, wrap(jsonParse), 1);
     try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .tryParse, wrap(jsonTryParse), 1);
     try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .stringify, wrap(jsonStringify), 1);
@@ -2908,7 +2908,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.JSON, json_obj.toValue());
 
     // Create Object constructor with static methods
-    const object_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const object_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, object_obj, "keys", wrap(objectKeys), 1);
     try addMethodDynamic(ctx, object_obj, "values", wrap(objectValues), 1);
     try addMethodDynamic(ctx, object_obj, "entries", wrap(objectEntries), 1);
@@ -2922,7 +2922,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.Object, object_obj.toValue());
 
     // Create Error prototype with toString method
-    const error_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const error_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, error_proto, "toString", wrap(errorToString), 0);
     try ctx.builtin_objects.append(allocator,error_proto);
 
@@ -2953,7 +2953,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
 
     // Create Promise prototype with then/catch methods
-    const promise_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const promise_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, promise_proto, "then", wrap(promiseThen), 2);
     try addMethodDynamic(ctx, promise_proto, "catch", wrap(promiseCatch), 1);
     try ctx.builtin_objects.append(allocator,promise_proto);
@@ -2970,7 +2970,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.Promise, promise_ctor.toValue());
 
     // Create Number object with static methods
-    const number_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const number_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, number_obj, "isInteger", wrap(numberIsInteger), 1);
     try addMethodDynamic(ctx, number_obj, "isNaN", wrap(numberIsNaN), 1);
     try addMethodDynamic(ctx, number_obj, "isFinite", wrap(numberIsFinite), 1);
@@ -3027,7 +3027,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(range_atom, range_func.toValue());
 
     // Create Map prototype with methods
-    const map_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const map_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, map_proto, "set", wrap(mapSet), 2);
     try addMethodDynamic(ctx, map_proto, "get", wrap(mapGet), 1);
     try addMethodDynamic(ctx, map_proto, "has", wrap(mapHas), 1);
@@ -3042,7 +3042,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.Map, map_ctor.toValue());
 
     // Create Set prototype with methods
-    const set_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const set_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, set_proto, "add", wrap(setAdd), 1);
     try addMethodDynamic(ctx, set_proto, "has", wrap(setHas), 1);
     try addMethodDynamic(ctx, set_proto, "delete", wrap(setDelete), 1);
@@ -3098,13 +3098,13 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(fragment_atom, value.JSValue.fromPtr(fragment_str));
 
     // Register Date object with Date.now()
-    const date_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const date_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, date_obj, "now", wrap(dateNow), 0);
     try ctx.builtin_objects.append(allocator,date_obj);
     try ctx.setGlobal(.Date, date_obj.toValue());
 
     // Register performance object with performance.now()
-    const performance_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const performance_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, performance_obj, "now", wrap(performanceNow), 0);
     try ctx.builtin_objects.append(allocator,performance_obj);
     const performance_atom = try ctx.atoms.intern("performance");
@@ -3113,7 +3113,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // ========================================================================
     // Array.prototype
     // ========================================================================
-    const array_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const array_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, array_proto, "push", wrap(arrayPush), 1);
     try addMethodDynamic(ctx, array_proto, "pop", wrap(arrayPop), 0);
     try addMethodDynamic(ctx, array_proto, "shift", wrap(arrayShift), 0);
@@ -3138,7 +3138,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     ctx.array_prototype = array_proto;
 
     // Create Array constructor function on global
-    const array_ctor = try object.JSObject.create(allocator, root_class_idx, null);
+    const array_ctor = try object.JSObject.create(allocator, root_class_idx, null, pool);
     // Array static methods
     try addMethodDynamic(ctx, array_ctor, "isArray", wrap(arrayIsArray), 1);
     try addMethodDynamic(ctx, array_ctor, "from", wrap(arrayFrom), 1);
@@ -3149,7 +3149,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // ========================================================================
     // String.prototype
     // ========================================================================
-    const string_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const string_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, string_proto, "charAt", wrap(stringCharAt), 1);
     try addMethodDynamic(ctx, string_proto, "charCodeAt", wrap(stringCharCodeAt), 1);
     try addMethodDynamic(ctx, string_proto, "indexOf", wrap(stringIndexOf), 1);
@@ -3174,14 +3174,14 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     ctx.string_prototype = string_proto;
 
     // Create String constructor function on global
-    const string_ctor = try object.JSObject.create(allocator, root_class_idx, null);
+    const string_ctor = try object.JSObject.create(allocator, root_class_idx, null, pool);
     // String.fromCharCode static method
     try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrap(stringFromCharCode), 1);
     try ctx.builtin_objects.append(allocator,string_ctor);
     try ctx.setGlobal(.String, string_ctor.toValue());
 
     // Create RegExp prototype with test/exec methods
-    const regexp_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const regexp_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, regexp_proto, "test", wrap(regExpTest), 1);
     try addMethodDynamic(ctx, regexp_proto, "exec", wrap(regExpExec), 1);
     try ctx.builtin_objects.append(allocator,regexp_proto);
@@ -3193,7 +3193,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
 
     // Create Result prototype with instance methods
-    const result_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const result_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .isOk, wrap(resultIsOk), 0);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .isErr, wrap(resultIsErr), 0);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .unwrap, wrap(resultUnwrap), 0);
@@ -3204,7 +3204,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, result_proto, "match", wrap(resultMatch), 1);
 
     // Create Result object with static methods ok/err
-    const result_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const result_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .ok, wrap(resultOk), 1);
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .err, wrap(resultErr), 1);
     try ctx.setPropertyChecked(result_obj, .prototype, result_proto.toValue());
@@ -3372,7 +3372,7 @@ pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []con
     const allocator = ctx.allocator;
     const root_class_idx = ctx.root_class_idx;
 
-    const regexp_obj = try object.JSObject.create(allocator, root_class_idx, null);
+    const regexp_obj = try object.JSObject.create(allocator, root_class_idx, null, ctx.hidden_class_pool);
 
     const source_atom = try ctx.atoms.intern("source");
     const flags_atom = try ctx.atoms.intern("flags");
@@ -3867,7 +3867,7 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
     const root_class_idx = ctx.root_class_idx;
 
     // Create WeakMap prototype
-    const weak_map_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const weak_map_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, weak_map_proto, "get", wrap(weakMapGet), 1);
     try addMethodDynamic(ctx, weak_map_proto, "set", wrap(weakMapSet), 2);
     try addMethodDynamic(ctx, weak_map_proto, "has", wrap(weakMapHas), 1);
@@ -3879,7 +3879,7 @@ pub fn initWeakCollections(ctx: *context.Context) !void {
     try ctx.setGlobal(.WeakMap, weak_map_ctor.toValue());
 
     // Create WeakSet prototype
-    const weak_set_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const weak_set_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, weak_set_proto, "add", wrap(weakSetAdd), 1);
     try addMethodDynamic(ctx, weak_set_proto, "has", wrap(weakSetHas), 1);
     try addMethodDynamic(ctx, weak_set_proto, "delete", wrap(weakSetDelete), 1);
@@ -3897,7 +3897,7 @@ pub fn initSymbol(ctx: *context.Context) !void {
     const root_class_idx = ctx.root_class_idx;
 
     // Create Symbol prototype
-    const symbol_proto = try object.JSObject.create(allocator, root_class_idx, null);
+    const symbol_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, symbol_proto, "toString", wrap(symbolToString), 0);
     try addMethodDynamic(ctx, symbol_proto, "valueOf", wrap(symbolDescription), 0);
 
@@ -4085,7 +4085,7 @@ test "Object.isFrozen" {
     var pool = try object.HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     // Object is extensible by default
@@ -4113,7 +4113,7 @@ test "Array.isArray" {
     var pool = try object.HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    var obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null);
+    var obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer obj.destroy(allocator);
 
     const not_array = arrayIsArray(ctx, value.JSValue.undefined_val, &[_]value.JSValue{obj.toValue()});
@@ -4141,7 +4141,7 @@ test "Array.slice" {
     // Use ctx's pool so arraySlice can find properties
     const pool = ctx.hidden_class_pool.?;
 
-    var arr = try object.JSObject.create(allocator, pool.getEmptyClass(), null);
+    var arr = try object.JSObject.create(allocator, pool.getEmptyClass(), null, pool);
     defer arr.destroy(allocator);
 
     // Set length = 10
@@ -5604,7 +5604,7 @@ test "JSON.stringify object" {
     var pool = try object.HiddenClassPool.init(allocator);
     defer pool.deinit();
 
-    const obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null);
+    const obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null, pool);
 
     const result = jsonStringify(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
         obj.toValue(),

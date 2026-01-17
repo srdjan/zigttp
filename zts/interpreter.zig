@@ -2785,10 +2785,10 @@ pub const Interpreter = struct {
         const root_class_idx = self.ctx.root_class_idx;
         // Use arena for ephemeral object allocation if hybrid mode enabled
         if (self.ctx.hybrid) |h| {
-            return object.JSObject.createWithArena(h.arena, root_class_idx, null) orelse
+            return object.JSObject.createWithArena(h.arena, root_class_idx, null, self.ctx.hidden_class_pool) orelse
                 return error.OutOfMemory;
         }
-        return try object.JSObject.create(self.ctx.allocator, root_class_idx, null);
+        return try object.JSObject.create(self.ctx.allocator, root_class_idx, null, self.ctx.hidden_class_pool);
     }
 
     fn createArray(self: *Interpreter) !*object.JSObject {

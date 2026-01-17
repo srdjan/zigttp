@@ -369,7 +369,7 @@ pub const Runtime = struct {
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         // Create console object
-        const console_obj = try zq.JSObject.create(self.allocator, root_class_idx, null);
+        const console_obj = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
 
         // Add console.log
         const log_atom: zq.Atom = .log;

@@ -1070,7 +1070,7 @@ test "renderToString with attributes and nested elements" {
     defer ctx.deinit();
 
     // props = { href: "/api/health" }
-    const props = try object.JSObject.create(allocator, ctx.root_class_idx, null);
+    const props = try object.JSObject.create(allocator, ctx.root_class_idx, null, ctx.hidden_class_pool);
     const href_atom = try ctx.atoms.intern("href");
     const href_str = try string.createString(allocator, "/api/health");
     try ctx.setPropertyChecked(props, href_atom, value.JSValue.fromPtr(href_str));

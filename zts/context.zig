@@ -216,7 +216,7 @@ pub const Context = struct {
         errdefer root_class.deinit(allocator);
 
         // Create global object using pool-based class
-        const global_obj = try object.JSObject.create(allocator, hidden_class_pool.getEmptyClass(), null);
+        const global_obj = try object.JSObject.create(allocator, hidden_class_pool.getEmptyClass(), null, hidden_class_pool);
         errdefer global_obj.destroy(allocator);
 
         ctx.* = .{
@@ -274,9 +274,9 @@ pub const Context = struct {
 
     pub fn createObjectWithClass(self: *Context, class_idx: object.HiddenClassIndex, prototype: ?*object.JSObject) !*object.JSObject {
         if (self.hybrid) |h| {
-            return object.JSObject.createWithArena(h.arena, class_idx, prototype) orelse return error.OutOfMemory;
+            return object.JSObject.createWithArena(h.arena, class_idx, prototype, self.hidden_class_pool) orelse return error.OutOfMemory;
         }
-        return try object.JSObject.create(self.allocator, class_idx, prototype);
+        return try object.JSObject.create(self.allocator, class_idx, prototype, self.hidden_class_pool);
     }
 
     fn initHttpShapes(self: *Context) !void {
@@ -539,10 +539,10 @@ pub const Context = struct {
     /// Create a JS object, using arena when hybrid mode is enabled
     pub fn createObject(self: *Context, prototype: ?*object.JSObject) !*object.JSObject {
         if (self.hybrid) |h| {
-            return object.JSObject.createWithArena(h.arena, self.root_class_idx, prototype) orelse
+            return object.JSObject.createWithArena(h.arena, self.root_class_idx, prototype, self.hidden_class_pool) orelse
                 return error.OutOfMemory;
         }
-        return try object.JSObject.create(self.allocator, self.root_class_idx, prototype);
+        return try object.JSObject.create(self.allocator, self.root_class_idx, prototype, self.hidden_class_pool);
     }
 
     /// Create a JS array, using arena when hybrid mode is enabled
