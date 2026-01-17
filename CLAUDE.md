@@ -76,9 +76,35 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 
 The request pipeline includes several optimizations for low-latency FaaS workloads:
 
-**Pool Slot Hint** (`zts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
+#### Property Access Optimizations
 
-**Pre-interned HTTP Atoms** (`zts/object.zig`): Common HTTP headers (content-type, content-length, accept, host, user-agent, authorization, cache-control, connection, accept-encoding, cookie, x-forwarded-for, x-request-id) are predefined atoms for O(1) lookup.
+**Shape Preallocation** (`zts/context.zig:284-346`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
+- Request shape: method, url, body, headers (4 props)
+- Response shape: body, status, statusText, ok, headers (5 props)
+- Response headers shape: content-type, content-length, cache-control (3 props)
+- Request headers shape: authorization, content-type, accept (3 props)
+
+**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:214-272`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
+
+**Binary Search for Large Objects** (`zts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
+
+**JIT Baseline IC Integration** (`zts/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
+
+#### String Optimizations
+
+**Lazy String Hashing** (`zts/string.zig:18-24, 44-54`): Hash computation deferred until actually needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access. Reduces overhead for strings never used as hash keys.
+
+**Pre-interned HTTP Atoms** (`zts/object.zig:237-264`): 27 common headers with O(1) lookup:
+- Basic: content-type, content-length, accept, host, user-agent, authorization
+- Caching: cache-control, if-modified-since, if-none-match, etag, last-modified, expires, pragma
+- CORS: origin, access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-allow-credentials, access-control-max-age
+- Other: connection, accept-encoding, cookie, x-forwarded-for, x-request-id, content-encoding, transfer-encoding, vary
+
+**HTTP String Cache** (`zts/context.zig:96-110, 349-400`): Pre-allocated status texts (OK, Created, Not Found, etc.) and content-type strings (application/json, text/plain, text/html).
+
+#### Pool and Request Optimizations
+
+**Pool Slot Hint** (`zts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
 
 **Relaxed Atomic Ordering** (`src/zruntime.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
 

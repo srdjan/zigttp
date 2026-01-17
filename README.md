@@ -1,20 +1,59 @@
-# zigttp - Serverless JavaScript Runtime and zts TypeScript compiler developed with Zig
+# zigttp - Serverless JavaScript Runtime
 
 > **Note**: This project is experimental and under active development.
 
-A serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases,
-powered by **zts** - a pure Zig JavaScript engine. Designed for AWS Lambda,
-Azure Functions, Cloudflare Workers, and edge computing deployments.
+A high-performance serverless JavaScript runtime for FaaS (Function-as-a-Service) use cases, powered by **zts** - a pure Zig JavaScript engine. Designed for AWS Lambda, Azure Functions, Cloudflare Workers, and edge computing deployments.
 
-## Features
+---
 
-- **Instant cold starts**: No JIT warm-up by default, predictable startup times
-- **Small deployment package**: Pure Zig, zero external dependencies
-- **Request isolation**: LockFreePool-backed handler pool with pre-warmed
-  contexts
-- **Functional API**: Response helpers similar to Deno/Fetch API
-- **Safe by default**: Strict mode JavaScript, sandboxed execution
-- **TypeScript/TSX**: Native type stripping with compile-time evaluation
+## Key Features
+
+### Runtime Performance
+
+- **Sub-millisecond cold starts** - No JIT warm-up overhead, predictable startup times
+- **Zero external dependencies** - Pure Zig implementation, single static binary
+- **Inline caching with hidden classes** - V8-style property access optimization
+- **Polymorphic inline cache (PIC)** - 8-entry cache with last-hit optimization for O(1) monomorphic lookups
+- **Lazy string hashing** - Hash computation deferred until needed, reducing allocation overhead
+- **Binary search for large objects** - O(log n) property lookup for objects with 8+ properties
+- **NaN-boxing** - 64-bit tagged values storing integers, floats, and pointers in a single word
+
+### HTTP/FaaS Optimizations
+
+- **Shape preallocation** - Zero hidden class transitions for Request/Response objects
+- **Pre-interned HTTP atoms** - 27 common headers (content-type, authorization, cache-control, CORS headers, etc.) with O(1) lookup
+- **HTTP string caching** - Pre-allocated status texts and content-type strings
+- **LockFreePool handler isolation** - Pre-warmed contexts with O(1) slot acquisition
+- **Adaptive backoff** - Three-phase contention handling (spin, sleep with jitter, circuit breaker)
+- **Zero-copy response** - Borrowed mode for body and headers avoids memcpy
+- **LRU static file cache** - Doubly-linked list eviction eliminates latency spikes
+
+### Memory Management
+
+- **Generational GC** - Nursery + tenured spaces with write barrier tracking
+- **Hybrid arena allocation** - Request-scoped memory with O(1) bulk reset
+- **Escape detection** - Write barriers prevent arena objects from leaking
+- **GC disabled in hybrid mode** - No collection pauses during request handling
+
+### Language Support
+
+- **ES5 + ES6 extensions** - Strict mode JavaScript with modern features
+- **Native TypeScript/TSX** - Type stripping at load time, no build step required
+- **Compile-time evaluation** - `comptime()` function for constant folding
+- **JSX/TSX support** - Direct parsing with server-side rendering
+
+### JIT Compilation
+
+- **Baseline JIT compiler** - x86-64 and ARM64 native code generation
+- **Inline cache integration** - JIT fast paths for property access
+- **Adaptive compilation** - Hot functions compiled after threshold executions
+
+### Developer Experience
+
+- **Fetch-like API** - Response.json(), Response.text(), Response.html()
+- **Static file serving** - Built-in with configurable cache
+- **CORS support** - Single flag to enable
+- **Pool metrics** - Real-time monitoring of handler pool utilization
 
 ## Use Cases
 
