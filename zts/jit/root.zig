@@ -13,6 +13,7 @@ pub const x86 = @import("x86.zig");
 pub const arm64 = @import("arm64.zig");
 pub const alloc = @import("alloc.zig");
 pub const baseline = @import("baseline.zig");
+pub const deopt = @import("deopt.zig");
 
 // Re-export common types (architecture-specific via baseline)
 pub const CodeAllocator = alloc.CodeAllocator;
@@ -34,4 +35,5 @@ test {
     _ = arm64;
     _ = alloc;
     _ = baseline;
+    _ = deopt;
 }

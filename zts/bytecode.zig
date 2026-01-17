@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const value = @import("value.zig");
+const type_feedback = @import("type_feedback.zig");
 
 /// Bytecode file magic number ("ZQJS")
 pub const MAGIC: u32 = 0x5A514A53;
@@ -412,9 +413,23 @@ pub const FunctionBytecode = struct {
     source_map: ?[]const u8,
 
     // JIT profiling fields (Phase 11)
-    execution_count: u32 = 0,           // Incremented on each call
+    execution_count: u32 = 0, // Incremented on each call
     tier: CompilationTier = .interpreted,
-    compiled_code: ?*anyopaque = null,  // Pointer to CompiledCode when JIT'd
+    compiled_code: ?*anyopaque = null, // Pointer to CompiledCode when JIT'd
+
+    // Type feedback for speculative optimization (Phase 12)
+    type_feedback_ptr: ?*type_feedback.TypeFeedback = null,
+    feedback_site_map: ?[]u16 = null, // bytecode_offset -> site_index
+
+    /// Get the type feedback vector if allocated
+    pub fn getTypeFeedback(self: *const FunctionBytecode) ?*type_feedback.TypeFeedback {
+        return self.type_feedback_ptr;
+    }
+
+    /// Set the type feedback vector
+    pub fn setTypeFeedback(self: *FunctionBytecode, tf: *type_feedback.TypeFeedback) void {
+        self.type_feedback_ptr = tf;
+    }
 };
 
 pub const FunctionFlags = packed struct {

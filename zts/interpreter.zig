@@ -11,6 +11,7 @@ const heap = @import("heap.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
+const type_feedback = @import("type_feedback.zig");
 
 const empty_code: [0]u8 = .{};
 
@@ -43,6 +44,8 @@ var jit_policy_cache: ?JitPolicy = null;
 
 /// Current JIT threshold (defaults to bytecode.JIT_THRESHOLD, overridable via env or API)
 var jit_threshold_cache: ?u32 = null;
+/// Warmup count for type feedback before JIT compilation
+var jit_feedback_warmup_cache: ?u32 = null;
 
 /// Get current JIT policy (cached, reads ZTS_JIT_POLICY env on first call)
 pub fn getJitPolicy() JitPolicy {
@@ -77,15 +80,41 @@ pub fn getJitThreshold() u32 {
     return threshold;
 }
 
+/// Get warmup calls for type feedback collection before JIT compilation.
+/// Can be overridden by ZTS_JIT_FEEDBACK_WARMUP.
+pub fn getJitFeedbackWarmup() u32 {
+    if (jit_feedback_warmup_cache) |cached| return cached;
+    if (std.c.getenv("ZTS_JIT_FEEDBACK_WARMUP")) |warmup_ptr| {
+        const warmup_str = std.mem.sliceTo(warmup_ptr, 0);
+        const warmup = std.fmt.parseInt(u32, warmup_str, 10) catch 50;
+        jit_feedback_warmup_cache = warmup;
+        return warmup;
+    }
+    const policy = getJitPolicy();
+    const warmup: u32 = switch (policy) {
+        .disabled => @intCast(std.math.maxInt(u32)),
+        .lazy => 50,
+        .eager => 10,
+    };
+    jit_feedback_warmup_cache = warmup;
+    return warmup;
+}
+
 /// Set JIT policy programmatically (overrides env var)
 pub fn setJitPolicy(policy: JitPolicy) void {
     jit_policy_cache = policy;
     jit_threshold_cache = null; // Reset threshold to recalculate based on policy
+    jit_feedback_warmup_cache = null; // Reset warmup to recalculate based on policy
 }
 
 /// Set JIT threshold programmatically (overrides env var and policy default)
 pub fn setJitThreshold(threshold: u32) void {
     jit_threshold_cache = threshold;
+}
+
+/// Set feedback warmup count programmatically (overrides env var and policy default).
+pub fn setJitFeedbackWarmup(warmup: u32) void {
+    jit_feedback_warmup_cache = warmup;
 }
 
 /// Force-disable JIT in the current process (used by tests that exercise
@@ -390,8 +419,8 @@ pub const Interpreter = struct {
             timer = std.time.Timer.start() catch null;
         }
 
-        // Try to compile
-        const compiled = jit.compileFunction(self.ctx.allocator, code_alloc, func) catch |err| {
+        // Try to compile (pass hidden_class_pool for monomorphic property optimization)
+        const compiled = jit.compileFunction(self.ctx.allocator, code_alloc, func, self.ctx.hidden_class_pool) catch |err| {
             switch (err) {
                 jit.CompileError.UnsupportedOpcode => {
                     // Function uses opcodes we can't compile yet - stay interpreted
@@ -414,6 +443,203 @@ pub const Interpreter = struct {
         func.tier = .baseline;
     }
 
+    /// Allocate type feedback vector for a function
+    /// Scans bytecode to count and map feedback sites
+    fn allocateTypeFeedback(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
+        if (func.type_feedback_ptr != null) return; // Already allocated
+
+        // Count feedback sites by scanning bytecode
+        var binary_op_count: u32 = 0;
+        var call_site_count: u32 = 0;
+        var pc: usize = 0;
+
+        while (pc < func.code.len) {
+            const op: bytecode.Opcode = @enumFromInt(func.code[pc]);
+            pc += 1;
+
+            switch (op) {
+                // Binary ops that benefit from type feedback
+                .add, .sub, .mul, .div, .mod => {
+                    binary_op_count += 2; // Two operands per binary op
+                },
+                // Property access with hidden class feedback
+                .get_field_ic, .put_field_ic => {
+                    binary_op_count += 1; // One object per access
+                    pc += 4; // Skip atom_idx (u16) and cache_idx (u16)
+                },
+                // Function calls
+                .call, .call_method => {
+                    call_site_count += 1;
+                    pc += 1; // Skip argc
+                },
+                // Skip other opcodes based on their encoding
+                else => {
+                    pc += getOpcodeSize(op);
+                },
+            }
+        }
+
+        // No feedback sites needed
+        if (binary_op_count == 0 and call_site_count == 0) return;
+
+        // Allocate the type feedback vector
+        const tf = try type_feedback.TypeFeedback.init(
+            self.ctx.allocator,
+            binary_op_count,
+            call_site_count,
+        );
+        errdefer tf.deinit();
+
+        // Create bytecode offset to site index mapping
+        const site_map = try self.ctx.allocator.alloc(u16, func.code.len);
+        errdefer self.ctx.allocator.free(site_map);
+        @memset(site_map, 0xFFFF); // Mark unmapped offsets
+
+        // Second pass: populate the mapping
+        var site_idx: u16 = 0;
+        var call_idx: u16 = 0;
+        pc = 0;
+
+        while (pc < func.code.len) {
+            const op: bytecode.Opcode = @enumFromInt(func.code[pc]);
+            const op_offset = pc;
+            pc += 1;
+
+            switch (op) {
+                .add, .sub, .mul, .div, .mod => {
+                    site_map[op_offset] = site_idx;
+                    site_idx += 2;
+                },
+                .get_field_ic, .put_field_ic => {
+                    site_map[op_offset] = site_idx;
+                    site_idx += 1;
+                    pc += 4;
+                },
+                .call, .call_method => {
+                    // Store call site index with high bit set to distinguish
+                    site_map[op_offset] = call_idx | 0x8000;
+                    call_idx += 1;
+                    pc += 1;
+                },
+                else => {
+                    pc += getOpcodeSize(op);
+                },
+            }
+        }
+
+        // Store in function
+        func.type_feedback_ptr = tf;
+        func.feedback_site_map = site_map;
+    }
+
+    /// Get the size of an opcode's operands (not including the opcode byte itself)
+    fn getOpcodeSize(op: bytecode.Opcode) usize {
+        return switch (op) {
+            // No operands (0 bytes)
+            .nop, .push_0, .push_1, .push_2, .push_3, .push_null, .push_undefined, .push_true, .push_false => 0,
+            .dup, .drop, .swap, .rot3, .halt, .get_length, .dup2 => 0,
+            .get_loc_0, .get_loc_1, .get_loc_2, .get_loc_3, .put_loc_0, .put_loc_1, .put_loc_2, .put_loc_3 => 0,
+            .add, .sub, .mul, .div, .mod, .pow, .neg, .inc, .dec => 0,
+            .bit_and, .bit_or, .bit_xor, .bit_not, .shl, .shr, .ushr => 0,
+            .lt, .lte, .gt, .gte, .eq, .neq, .strict_eq, .strict_neq, .not => 0,
+            .ret, .ret_undefined => 0,
+            .get_elem, .put_elem, .delete_elem => 0,
+            .new_object, .array_spread, .call_spread => 0,
+            .typeof, .instanceof => 0,
+            .shr_1, .mul_2, .await_val, .make_async, .import_default, .export_default => 0,
+
+            // 1-byte operand
+            .push_i8, .get_loc, .put_loc => 1,
+            .call, .call_method, .tail_call => 1,
+            .get_upvalue, .put_upvalue, .close_upvalue => 1,
+            .add_const_i8, .sub_const_i8, .mul_const_i8, .mod_const_i8, .lt_const_i8, .le_const_i8 => 1,
+
+            // 2-byte operand (u16 or i16)
+            .push_i16, .push_const, .loop => 2,
+            .goto, .if_true, .if_false => 2,
+            .get_field, .put_field, .delete_field, .put_field_keep => 2,
+            .new_array, .get_global, .put_global, .define_global, .make_function => 2,
+            .import_module, .import_name, .export_name => 2,
+            .for_of_next, .add_mod, .sub_mod, .mul_mod, .mod_const => 2,
+
+            // 3-byte operand
+            .get_loc_add, .get_loc_get_loc_add => 2,
+            .push_const_call, .make_closure, .call_ic => 3,
+
+            // 4-byte operands
+            .get_field_ic, .put_field_ic, .if_false_goto => 4,
+            .for_of_next_put_loc, .get_field_call => 4,
+
+            // Catch-all for any new/unknown opcodes
+            _ => 0,
+        };
+    }
+
+    /// Record type feedback for a binary operation
+    /// Called from dispatch loop when type_feedback is allocated
+    inline fn recordBinaryOpFeedback(self: *Interpreter, a: value.JSValue, b: value.JSValue) void {
+        const func = self.current_func orelse return;
+        const tf = func.type_feedback_ptr orelse return;
+        const site_map = func.feedback_site_map orelse return;
+
+        // Calculate bytecode offset (pc was already incremented past the opcode)
+        const bc_offset = @intFromPtr(self.pc) - @intFromPtr(func.code.ptr) - 1;
+        if (bc_offset >= site_map.len) return;
+
+        const site_idx = site_map[bc_offset];
+        if (site_idx == 0xFFFF) return; // Not a feedback site
+
+        // Record both operand types
+        if (site_idx + 1 < tf.sites.len) {
+            tf.sites[site_idx].record(a);
+            tf.sites[site_idx + 1].record(b);
+        }
+    }
+
+    /// Record type feedback for property access
+    inline fn recordPropertyFeedback(self: *Interpreter, obj: value.JSValue) void {
+        const func = self.current_func orelse return;
+        const tf = func.type_feedback_ptr orelse return;
+        const site_map = func.feedback_site_map orelse return;
+
+        // Calculate bytecode offset (pc was already incremented past opcode + operands)
+        // For get_field_ic: opcode (1) + atom_idx (2) + cache_idx (2) = 5 bytes total
+        const bc_offset = @intFromPtr(self.pc) - @intFromPtr(func.code.ptr) - 5;
+        if (bc_offset >= site_map.len) return;
+
+        const site_idx = site_map[bc_offset];
+        if (site_idx == 0xFFFF) return;
+
+        if (site_idx < tf.sites.len) {
+            tf.sites[site_idx].record(obj);
+        }
+    }
+
+    /// Record call site feedback for function inlining decisions
+    /// Records which function is being called at this call site
+    inline fn recordCallSiteFeedback(self: *Interpreter, callee_bc: ?*const bytecode.FunctionBytecode) void {
+        const func = self.current_func orelse return;
+        const tf = func.type_feedback_ptr orelse return;
+        const site_map = func.feedback_site_map orelse return;
+
+        // Calculate bytecode offset (pc was already incremented past opcode + argc)
+        // For call: opcode (1) + argc (1) = 2 bytes total
+        const func_code_start = @intFromPtr(func.code.ptr);
+        const pc_addr = @intFromPtr(self.pc);
+        if (pc_addr < func_code_start + 2) return;
+        const bc_offset = pc_addr - func_code_start - 2;
+        if (bc_offset >= site_map.len) return;
+
+        const site_idx = site_map[bc_offset];
+        // Call sites have high bit set (0x8000)
+        if ((site_idx & 0x8000) == 0) return;
+        const call_idx = site_idx & 0x7FFF;
+
+        if (call_idx < tf.call_sites.len) {
+            tf.call_sites[call_idx].recordCallee(callee_bc);
+        }
+    }
+
     /// Offset the program counter by a signed value
     /// Consolidates the verbose type-casting pattern used throughout dispatch
     inline fn offsetPc(self: *Interpreter, offset: i16) void {
@@ -428,9 +654,25 @@ pub const Interpreter = struct {
         // Profile function entry and potentially trigger JIT compilation
         const is_candidate = profileFunctionEntry(func_mut);
         if (is_candidate) {
-            self.tryCompileBaseline(func_mut) catch {
-                // Compilation failed - continue with interpreter
-            };
+            // Allocate type feedback for future optimization
+            self.allocateTypeFeedback(func_mut) catch {};
+
+            // If no feedback sites exist, compile immediately
+            if (func_mut.type_feedback_ptr == null and func_mut.feedback_site_map == null) {
+                self.tryCompileBaseline(func_mut) catch {
+                    // Compilation failed - continue with interpreter
+                };
+            }
+        }
+
+        // Compile after feedback warmup if eligible
+        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr != null) {
+            const warmup_target = getJitThreshold() + getJitFeedbackWarmup();
+            if (func_mut.execution_count >= warmup_target) {
+                self.tryCompileBaseline(func_mut) catch {
+                    // Compilation failed - continue with interpreter
+                };
+            }
         }
 
         // Allocate space for locals
@@ -444,6 +686,20 @@ pub const Interpreter = struct {
         if (!jitDisabled() and func.tier == .baseline) {
             if (func.compiled_code) |cc_opaque| {
                 const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
+                const prev_func = self.current_func;
+                const prev_constants = self.constants;
+                const prev_code_end = self.code_end;
+                const prev_pc = self.pc;
+                self.current_func = func;
+                self.constants = func.constants;
+                self.code_end = func.code.ptr + func.code.len;
+                self.pc = func.code.ptr;
+                defer {
+                    self.current_func = prev_func;
+                    self.constants = prev_constants;
+                    self.code_end = prev_code_end;
+                    self.pc = prev_pc;
+                }
                 const prev_interp = current_interpreter;
                 current_interpreter = self;
                 defer current_interpreter = prev_interp;
@@ -596,10 +852,25 @@ pub const Interpreter = struct {
         // Profile function entry and potentially trigger JIT compilation
         const is_candidate = profileFunctionEntry(func_bc_mut);
         if (is_candidate) {
-            // Function hit JIT threshold - try to compile
-            self.tryCompileBaseline(func_bc_mut) catch {
-                // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
-            };
+            // Allocate type feedback for future optimization
+            self.allocateTypeFeedback(func_bc_mut) catch {};
+
+            // If no feedback sites exist, compile immediately
+            if (func_bc_mut.type_feedback_ptr == null and func_bc_mut.feedback_site_map == null) {
+                self.tryCompileBaseline(func_bc_mut) catch {
+                    // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
+                };
+            }
+        }
+
+        // Compile after feedback warmup if eligible
+        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr != null) {
+            const warmup_target = getJitThreshold() + getJitFeedbackWarmup();
+            if (func_bc_mut.execution_count >= warmup_target) {
+                self.tryCompileBaseline(func_bc_mut) catch {
+                    // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
+                };
+            }
         }
 
         try self.pushState();
@@ -629,6 +900,20 @@ pub const Interpreter = struct {
         if (!jitDisabled() and func_bc.tier == .baseline) {
             if (func_bc.compiled_code) |cc_opaque| {
                 const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
+                const prev_func = self.current_func;
+                const prev_constants = self.constants;
+                const prev_code_end = self.code_end;
+                const prev_pc = self.pc;
+                self.current_func = func_bc;
+                self.constants = func_bc.constants;
+                self.code_end = func_bc.code.ptr + func_bc.code.len;
+                self.pc = func_bc.code.ptr;
+                defer {
+                    self.current_func = prev_func;
+                    self.constants = prev_constants;
+                    self.code_end = prev_code_end;
+                    self.pc = prev_pc;
+                }
                 const prev_interp = current_interpreter;
                 current_interpreter = self;
                 defer current_interpreter = prev_interp;
@@ -835,6 +1120,8 @@ pub const Interpreter = struct {
                     const sp = self.ctx.sp;
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
+                    // Record type feedback for JIT optimization
+                    self.recordBinaryOpFeedback(a, b);
                     // Inline integer fast path
                     if (a.isInt() and b.isInt()) {
                         @branchHint(.likely);
@@ -863,6 +1150,7 @@ pub const Interpreter = struct {
                     const sp = self.ctx.sp;
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
+                    self.recordBinaryOpFeedback(a, b);
                     if (a.isInt() and b.isInt()) {
                         @branchHint(.likely);
                         const ai = a.getInt();
@@ -889,6 +1177,7 @@ pub const Interpreter = struct {
                     const sp = self.ctx.sp;
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
+                    self.recordBinaryOpFeedback(a, b);
                     if (a.isInt() and b.isInt()) {
                         @branchHint(.likely);
                         const ai = a.getInt();
@@ -914,6 +1203,7 @@ pub const Interpreter = struct {
                 .div => {
                     const b = self.ctx.pop();
                     const a = self.ctx.pop();
+                    self.recordBinaryOpFeedback(a, b);
                     self.ctx.pushUnchecked(try self.divValues(a, b));
                 },
 
@@ -921,6 +1211,7 @@ pub const Interpreter = struct {
                     const sp = self.ctx.sp;
                     const b = self.ctx.stack[sp - 1];
                     const a = self.ctx.stack[sp - 2];
+                    self.recordBinaryOpFeedback(a, b);
                     if (a.isInt() and b.isInt()) {
                         @branchHint(.likely);
                         const bv = b.getInt();
@@ -1285,6 +1576,7 @@ pub const Interpreter = struct {
                     self.pc += 4;
                     const atom: object.Atom = @enumFromInt(atom_idx);
                     const obj_val = self.ctx.pop();
+                    self.recordPropertyFeedback(obj_val);
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
@@ -1342,6 +1634,7 @@ pub const Interpreter = struct {
                     const atom: object.Atom = @enumFromInt(atom_idx);
                     const val = self.ctx.pop();
                     const obj_val = self.ctx.pop();
+                    self.recordPropertyFeedback(obj_val);
 
                     if (obj_val.isObject()) {
                         const obj = object.JSObject.fromValue(obj_val);
@@ -2598,6 +2891,9 @@ pub const Interpreter = struct {
         else
             null;
 
+        // Record call site feedback for inlining decisions
+        self.recordCallSiteFeedback(func_bc_opt);
+
         if (func_bc_opt) |func_bc| {
             // Set current closure context for this call (null for non-closures)
             const prev_closure = self.current_closure;
@@ -2900,6 +3196,94 @@ pub export fn jitCall(ctx: *context.Context, argc: u8, is_method: u8) value.JSVa
     return ctx.pop();
 }
 
+/// JIT helper: perform a monomorphic bytecode call from compiled code.
+/// Verifies the callee matches the expected bytecode function and then
+/// dispatches directly to callBytecodeFunction. Falls back to doCall otherwise.
+pub export fn jitCallBytecode(
+    ctx: *context.Context,
+    expected_bc: *const bytecode.FunctionBytecode,
+    argc: u8,
+    is_method: u8,
+) value.JSValue {
+    const interp = current_interpreter orelse {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    const is_method_bool = is_method != 0;
+    const sp = ctx.sp;
+    const needed: usize = @as(usize, argc) + 1 + @as(usize, @intFromBool(is_method_bool));
+    if (sp < needed) {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    }
+
+    // Peek function value without modifying the stack.
+    const func_idx = sp - 1 - @as(usize, argc);
+    const func_val = ctx.stack[func_idx];
+
+    if (!func_val.isCallable()) {
+        interp.doCall(argc, is_method_bool) catch {
+            ctx.throwException(value.JSValue.exception_val);
+            return value.JSValue.exception_val;
+        };
+        return ctx.pop();
+    }
+
+    const func_obj = object.JSObject.fromValue(func_val);
+    if (func_obj.flags.is_generator or func_obj.flags.is_async) {
+        interp.doCall(argc, is_method_bool) catch {
+            ctx.throwException(value.JSValue.exception_val);
+            return value.JSValue.exception_val;
+        };
+        return ctx.pop();
+    }
+
+    const closure_data = func_obj.getClosureData();
+    const func_bc_opt = if (closure_data) |cd|
+        cd.bytecode
+    else if (func_obj.getBytecodeFunctionData()) |bc_data|
+        bc_data.bytecode
+    else
+        null;
+
+    if (func_bc_opt == null or func_bc_opt.? != expected_bc) {
+        interp.doCall(argc, is_method_bool) catch {
+            ctx.throwException(value.JSValue.exception_val);
+            return value.JSValue.exception_val;
+        };
+        return ctx.pop();
+    }
+
+    // Collect arguments (in reverse order from stack)
+    if (argc > Interpreter.MAX_STACK_ARGS) {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    }
+    var args: [Interpreter.MAX_STACK_ARGS]value.JSValue = undefined;
+    var i: usize = argc;
+    while (i > 0) {
+        i -= 1;
+        args[i] = ctx.pop();
+    }
+
+    // Pop function and optional this
+    _ = ctx.pop(); // func_val
+    const this_val = if (is_method_bool) ctx.pop() else value.JSValue.undefined_val;
+
+    // Set current closure context if needed
+    const prev_closure = interp.current_closure;
+    interp.current_closure = closure_data;
+    defer interp.current_closure = prev_closure;
+
+    const result = interp.callBytecodeFunction(func_val, expected_bc, this_val, args[0..argc]) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    return result;
+}
+
 /// JIT helper: get_field_ic using the interpreter's PIC cache.
 pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, cache_idx: u16) value.JSValue {
     const interp = current_interpreter orelse {
@@ -3061,6 +3445,25 @@ fn readI16(pc: [*]const u8) i16 {
 /// Read u16 from bytecode
 fn readU16(pc: [*]const u8) u16 {
     return @as(u16, pc[0]) | (@as(u16, pc[1]) << 8);
+}
+
+fn cleanupTypeFeedback(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
+    if (func.type_feedback_ptr) |tf| {
+        tf.deinit();
+        func.type_feedback_ptr = null;
+    }
+    if (func.feedback_site_map) |site_map| {
+        allocator.free(site_map);
+        func.feedback_site_map = null;
+    }
+}
+
+fn cleanupCompiledCode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
+    if (func.compiled_code) |cc| {
+        const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
+        allocator.destroy(compiled);
+        func.compiled_code = null;
+    }
 }
 
 test "Interpreter basic arithmetic" {
@@ -3894,6 +4297,226 @@ test "Interpreter bytecode function call" {
     const result = try interp.run(&func);
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 15), result.getInt()); // 7 + 8 = 15
+}
+
+test "JIT: inlined call deopts on callee change" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    const prev_policy = getJitPolicy();
+    const prev_threshold = getJitThreshold();
+    const prev_warmup = getJitFeedbackWarmup();
+    defer {
+        setJitPolicy(prev_policy);
+        setJitThreshold(prev_threshold);
+        setJitFeedbackWarmup(prev_warmup);
+    }
+
+    setJitPolicy(.eager);
+    setJitThreshold(1);
+    setJitFeedbackWarmup(type_feedback.InliningPolicy.MIN_CALL_COUNT);
+
+    if (jitDisabled()) return;
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Callee add(a, b) { return a + b; }
+    const add_code = try allocator.alloc(u8, 4);
+    add_code[0] = @intFromEnum(bytecode.Opcode.get_loc_0);
+    add_code[1] = @intFromEnum(bytecode.Opcode.get_loc_1);
+    add_code[2] = @intFromEnum(bytecode.Opcode.add);
+    add_code[3] = @intFromEnum(bytecode.Opcode.ret);
+
+    const add_func = try allocator.create(bytecode.FunctionBytecode);
+    add_func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2,
+        .stack_size = 16,
+        .flags = .{},
+        .code = add_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const add_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, add_func, .length);
+    defer add_obj_ptr.destroyFull(allocator);
+    defer cleanupTypeFeedback(allocator, add_func);
+
+    // Alternate callee sub(a, b) { return a - b; }
+    const sub_code = try allocator.alloc(u8, 4);
+    sub_code[0] = @intFromEnum(bytecode.Opcode.get_loc_0);
+    sub_code[1] = @intFromEnum(bytecode.Opcode.get_loc_1);
+    sub_code[2] = @intFromEnum(bytecode.Opcode.sub);
+    sub_code[3] = @intFromEnum(bytecode.Opcode.ret);
+
+    const sub_func = try allocator.create(bytecode.FunctionBytecode);
+    sub_func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2,
+        .stack_size = 16,
+        .flags = .{},
+        .code = sub_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, sub_func);
+
+    const sub_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, sub_func, .length);
+    defer sub_obj_ptr.destroyFull(allocator);
+
+    const holder = try ctx.createObject(null);
+    defer holder.destroy(allocator);
+    try ctx.setPropertyChecked(holder, .abs, add_obj_ptr.toValue());
+
+    const holder_const = [_]value.JSValue{holder.toValue()};
+
+    // Caller: return holder.abs(7, 8);
+    const caller_code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0, // constant 0
+        @intFromEnum(bytecode.Opcode.get_field),
+        95,
+        0, // Atom.abs
+        @intFromEnum(bytecode.Opcode.push_i8),
+        7,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        8,
+        @intFromEnum(bytecode.Opcode.call),
+        2,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    var caller_func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &caller_code,
+        .constants = &holder_const,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &caller_func);
+    defer cleanupCompiledCode(allocator, &caller_func);
+
+    const warmup_calls = type_feedback.InliningPolicy.MIN_CALL_COUNT + 1;
+    var i: u32 = 0;
+    while (i < warmup_calls) : (i += 1) {
+        const res = try interp.run(&caller_func);
+        if (i == 0) {
+            try std.testing.expectEqual(@as(i32, 15), res.getInt());
+        }
+    }
+
+    try std.testing.expect(caller_func.compiled_code != null);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline, caller_func.tier);
+
+    // Callee changed -> should trigger inline guard deopt.
+    jit.deopt.resetDeoptStats();
+    try ctx.setPropertyChecked(holder, .abs, sub_obj_ptr.toValue());
+    const result = try interp.run(&caller_func);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, -1), result.getInt());
+
+    const stats = jit.deopt.getDeoptStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.callee_changed_count);
+}
+
+test "JIT: deopt on type mismatch in specialized add" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    const prev_policy = getJitPolicy();
+    const prev_threshold = getJitThreshold();
+    const prev_warmup = getJitFeedbackWarmup();
+    defer {
+        setJitPolicy(prev_policy);
+        setJitThreshold(prev_threshold);
+        setJitFeedbackWarmup(prev_warmup);
+    }
+
+    setJitPolicy(.eager);
+    setJitThreshold(1);
+    setJitFeedbackWarmup(1);
+
+    if (jitDisabled()) return;
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Callee add(a, b) { return a + b; }
+    const add_code = try allocator.alloc(u8, 4);
+    add_code[0] = @intFromEnum(bytecode.Opcode.get_loc_0);
+    add_code[1] = @intFromEnum(bytecode.Opcode.get_loc_1);
+    add_code[2] = @intFromEnum(bytecode.Opcode.add);
+    add_code[3] = @intFromEnum(bytecode.Opcode.ret);
+
+    const add_func = try allocator.create(bytecode.FunctionBytecode);
+    add_func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 2,
+        .local_count = 2,
+        .stack_size = 16,
+        .flags = .{},
+        .code = add_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    const add_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, add_func, .length);
+    defer add_obj.destroyFull(allocator);
+    defer cleanupTypeFeedback(allocator, add_func);
+
+    const func_val = add_obj.toValue();
+    const this_val = value.JSValue.undefined_val;
+    const int_args = [_]value.JSValue{
+        value.JSValue.fromInt(40),
+        value.JSValue.fromInt(2),
+    };
+
+    _ = try interp.callBytecodeFunction(func_val, add_func, this_val, int_args[0..]);
+    _ = try interp.callBytecodeFunction(func_val, add_func, this_val, int_args[0..]);
+
+    try std.testing.expect(add_func.compiled_code != null);
+
+    const str1 = try string.createString(allocator, "a");
+    const str2 = try string.createString(allocator, "b");
+    defer {
+        string.freeString(allocator, str1);
+        string.freeString(allocator, str2);
+    }
+    const str_args = [_]value.JSValue{
+        value.JSValue.fromPtr(str1),
+        value.JSValue.fromPtr(str2),
+    };
+
+    jit.deopt.resetDeoptStats();
+    const result = try interp.callBytecodeFunction(func_val, add_func, this_val, str_args[0..]);
+    try std.testing.expect(result.isString());
+    const result_str = result.toPtr(string.JSString);
+    try std.testing.expectEqualStrings("ab", result_str.data());
+    string.freeString(allocator, result_str);
+
+    const stats = jit.deopt.getDeoptStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.type_mismatch_count);
 }
 
 test "End-to-end: function declaration" {

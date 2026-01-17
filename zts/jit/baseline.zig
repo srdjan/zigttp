@@ -17,6 +17,7 @@ const value_mod = @import("../value.zig");
 const context_mod = @import("../context.zig");
 const object = @import("../object.zig");
 const interpreter_mod = @import("../interpreter.zig");
+const type_feedback = @import("../type_feedback.zig");
 
 const CodeAllocator = alloc.CodeAllocator;
 const CompiledCode = alloc.CompiledCode;
@@ -27,8 +28,10 @@ const Interpreter = interpreter_mod.Interpreter;
 const PolymorphicInlineCache = interpreter_mod.PolymorphicInlineCache;
 
 extern fn jitCall(ctx: *Context, argc: u8, is_method: u8) value_mod.JSValue;
+extern fn jitCallBytecode(ctx: *Context, func_bc: *const bytecode.FunctionBytecode, argc: u8, is_method: u8) value_mod.JSValue;
 extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
 extern fn jitPutFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, val: value_mod.JSValue, cache_idx: u16) value_mod.JSValue;
+extern fn jitDeoptimize(ctx: *Context, bytecode_offset: u32, reason: u32) u64;
 
 // Context field offsets for JIT code generation
 // These are computed at compile time using @offsetOf
@@ -40,6 +43,8 @@ const CTX_JIT_INTERP_OFF: i32 = @intCast(@offsetOf(Context, "jit_interpreter"));
 // JSObject field offsets for inline cache fast path
 const OBJ_HIDDEN_CLASS_OFF: i32 = @intCast(@offsetOf(JSObject, "hidden_class_idx"));
 const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
+const OBJ_FUNC_DATA_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_DATA)) * 8;
+const OBJ_FUNC_IS_BYTECODE_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_IS_BYTECODE)) * 8;
 
 // Interpreter field offsets for inline cache fast path
 const INTERP_PIC_CACHE_OFF: i32 = @intCast(@offsetOf(Interpreter, "pic_cache"));
@@ -73,6 +78,21 @@ pub const CompileError = error{
 /// Takes context pointer, returns JS value (u64)
 pub const CompiledFn = *const fn (ctx: *anyopaque) callconv(.c) u64;
 
+/// Deoptimization reason for type guards
+pub const DeoptReason = enum(u8) {
+    type_mismatch,
+    hidden_class_mismatch,
+    overflow,
+    callee_changed,
+};
+
+/// Deoptimization point recorded during compilation
+pub const DeoptPoint = struct {
+    native_offset: u32, // Where to jump for deopt
+    bytecode_offset: u32, // Where to resume in interpreter
+    reason: DeoptReason,
+};
+
 /// Baseline compiler state
 pub const BaselineCompiler = struct {
     emitter: Emitter,
@@ -89,13 +109,31 @@ pub const BaselineCompiler = struct {
     allocator: std.mem.Allocator,
     next_local_label: u32,
 
+    /// Type feedback for speculative optimization
+    tf: ?*type_feedback.TypeFeedback,
+    feedback_site_map: ?[]u16,
+
+    /// Hidden class pool for monomorphic property access optimization
+    hidden_class_pool: ?*object.HiddenClassPool,
+
+    /// Deoptimization points for type guard failures
+    deopt_points: std.ArrayListUnmanaged(DeoptPoint),
+    /// Offset where deopt stubs begin in native code
+    deopt_stubs_offset: u32,
+
+    /// Inlining state
+    inline_depth: u32,
+    total_inlined_size: u32,
+    inline_exit_label: ?u32,
+    inline_is_method: bool,
+
     const PendingJump = struct {
         native_offset: u32, // Offset in emitted code where the rel32/imm is
         bytecode_target: u32, // Target bytecode offset
         is_conditional: bool, // For ARM64: conditional vs unconditional branch
     };
 
-    pub fn init(allocator: std.mem.Allocator, code_alloc: *CodeAllocator, func: *const bytecode.FunctionBytecode) BaselineCompiler {
+    pub fn init(allocator: std.mem.Allocator, code_alloc: *CodeAllocator, func: *const bytecode.FunctionBytecode, hidden_class_pool: ?*object.HiddenClassPool) BaselineCompiler {
         // Pre-allocate emitter buffer based on bytecode size heuristic
         // Native code is typically 4-8x bytecode size; use 6x as conservative estimate
         // This eliminates 3-5 reallocs during compilation for typical functions
@@ -113,6 +151,16 @@ pub const BaselineCompiler = struct {
             .jump_targets = .{},
             .allocator = allocator,
             .next_local_label = 0,
+            // Type feedback from interpreter (may be null)
+            .tf = func.type_feedback_ptr,
+            .feedback_site_map = func.feedback_site_map,
+            .hidden_class_pool = hidden_class_pool,
+            .deopt_points = .{},
+            .deopt_stubs_offset = 0,
+            .inline_depth = 0,
+            .total_inlined_size = 0,
+            .inline_exit_label = null,
+            .inline_is_method = false,
         };
     }
 
@@ -121,6 +169,523 @@ pub const BaselineCompiler = struct {
         self.labels.deinit(self.allocator);
         self.pending_jumps.deinit(self.allocator);
         self.jump_targets.deinit(self.allocator);
+        self.deopt_points.deinit(self.allocator);
+    }
+
+    // ========================================================================
+    // Type Feedback Queries
+    // ========================================================================
+
+    /// Get type feedback site for a binary operation at given bytecode offset
+    fn getBinaryOpFeedback(self: *BaselineCompiler, bytecode_offset: u32) ?struct { left: *type_feedback.TypeFeedbackSite, right: *type_feedback.TypeFeedbackSite } {
+        const tf = self.tf orelse return null;
+        const site_map = self.feedback_site_map orelse return null;
+
+        if (bytecode_offset >= site_map.len) return null;
+        const site_idx = site_map[bytecode_offset];
+        if (site_idx == 0xFFFF) return null;
+
+        if (site_idx + 1 >= tf.sites.len) return null;
+        return .{
+            .left = &tf.sites[site_idx],
+            .right = &tf.sites[site_idx + 1],
+        };
+    }
+
+    /// Check if a binary op should use specialized integer path
+    fn shouldSpecializeIntBinaryOp(self: *BaselineCompiler, bytecode_offset: u32) bool {
+        const fb = self.getBinaryOpFeedback(bytecode_offset) orelse return false;
+
+        // Both operands must be monomorphic SMI
+        return fb.left.isMonomorphic() and
+            fb.left.dominantType() == .smi and
+            fb.right.isMonomorphic() and
+            fb.right.dominantType() == .smi;
+    }
+
+    /// Get type feedback site for property access at given bytecode offset
+    fn getPropertyFeedback(self: *BaselineCompiler, bytecode_offset: u32) ?*type_feedback.TypeFeedbackSite {
+        const tf = self.tf orelse return null;
+        const site_map = self.feedback_site_map orelse return null;
+
+        if (bytecode_offset >= site_map.len) return null;
+        const site_idx = site_map[bytecode_offset];
+        if (site_idx == 0xFFFF) return null;
+
+        if (site_idx >= tf.sites.len) return null;
+        return &tf.sites[site_idx];
+    }
+
+    /// Check if property access should use monomorphic specialization
+    /// Returns the hidden class index if monomorphic with object type
+    fn getMonomorphicHiddenClass(self: *BaselineCompiler, bytecode_offset: u32) ?object.HiddenClassIndex {
+        const fb = self.getPropertyFeedback(bytecode_offset) orelse return null;
+
+        // Must be monomorphic with object or array type
+        if (!fb.isMonomorphic()) return null;
+        const dominant = fb.dominantType() orelse return null;
+        if (dominant != .object and dominant != .array) return null;
+
+        // Get the recorded hidden class
+        return fb.getMonomorphicHiddenClass();
+    }
+
+    /// Get monomorphic property access info at compile time
+    /// Returns (hidden_class_index, slot_offset) if monomorphic with known slot
+    fn getMonomorphicPropertyInfo(self: *BaselineCompiler, atom_idx: u16, bytecode_offset: u32) ?struct { hc_idx: object.HiddenClassIndex, slot: u16 } {
+        // Need both type feedback and hidden class pool
+        const hc_idx = self.getMonomorphicHiddenClass(bytecode_offset) orelse return null;
+        const pool = self.hidden_class_pool orelse return null;
+
+        // Look up slot offset for this property in the hidden class
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        const slot = pool.findProperty(hc_idx, atom) orelse return null;
+
+        // Only optimize inline slots (< 8) for simplicity
+        if (slot >= JSObject.INLINE_SLOT_COUNT) return null;
+
+        return .{ .hc_idx = hc_idx, .slot = slot };
+    }
+
+    /// Get call site feedback for a call instruction at given bytecode offset
+    fn getCallSiteFeedback(self: *BaselineCompiler, bytecode_offset: u32) ?*type_feedback.CallSiteFeedback {
+        const tf = self.tf orelse return null;
+        const site_map = self.feedback_site_map orelse return null;
+
+        if (bytecode_offset >= site_map.len) return null;
+        const site_idx = site_map[bytecode_offset];
+
+        // Call sites have high bit set (0x8000)
+        if ((site_idx & 0x8000) == 0) return null;
+        const call_idx = site_idx & 0x7FFF;
+
+        if (call_idx >= tf.call_sites.len) return null;
+        return &tf.call_sites[call_idx];
+    }
+
+    /// Get monomorphic call target for fast path, or null if not suitable
+    fn getMonomorphicCallTarget(self: *BaselineCompiler, bytecode_offset: u32) ?*const bytecode.FunctionBytecode {
+        const cs = self.getCallSiteFeedback(bytecode_offset) orelse return null;
+        if (!cs.isMonomorphic()) return null;
+        if (cs.total_calls < type_feedback.InliningPolicy.MIN_CALL_COUNT) return null;
+        const callee = cs.getMonomorphicCallee() orelse return null;
+        if (callee.flags.is_generator or callee.flags.is_async) return null;
+        return callee;
+    }
+
+    /// Check if a call site should be inlined and return the callee
+    fn getInlineCandidate(self: *BaselineCompiler, bytecode_offset: u32) ?*const bytecode.FunctionBytecode {
+        const cs = self.getCallSiteFeedback(bytecode_offset) orelse return null;
+
+        // Must be monomorphic
+        const callee = cs.getMonomorphicCallee() orelse return null;
+
+        // Check inlining policy
+        const decision = type_feedback.InliningPolicy.shouldInline(
+            self.func,
+            callee,
+            cs,
+            self.inline_depth,
+            self.total_inlined_size,
+        );
+
+        if (decision != .yes) return null;
+        return callee;
+    }
+
+    /// Record a deoptimization point and return its index
+    fn recordDeoptPoint(self: *BaselineCompiler, bytecode_offset: u32, reason: DeoptReason) !u32 {
+        const idx: u32 = @intCast(self.deopt_points.items.len);
+        try self.deopt_points.append(self.allocator, .{
+            .native_offset = 0, // Will be patched later
+            .bytecode_offset = bytecode_offset,
+            .reason = reason,
+        });
+        return idx;
+    }
+
+    /// Emit specialized integer binary operation when type feedback shows both operands are SMI.
+    /// Guards SMI tags and deoptimizes on mismatch. On overflow, falls back to slow path helper.
+    fn emitSpecializedIntBinaryOp(self: *BaselineCompiler, op: BinaryOp, bytecode_offset: u32) CompileError!void {
+        if (is_x86_64) {
+            const overflow_slow = self.newLocalLabel();
+            const deopt = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+
+            // Load operands from stack without modifying sp
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.rcx, .r11, 0) catch return CompileError.OutOfMemory; // b
+            self.emitter.subRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.rax, .r11, 0) catch return CompileError.OutOfMemory; // a
+
+            // Save boxed values for overflow slow path
+            self.emitter.movRegReg(.r8, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.r9, .rcx) catch return CompileError.OutOfMemory;
+
+            // Guard SMI tags (LSB == 0)
+            self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt);
+            self.emitter.movRegReg(.r10, .rcx) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt);
+
+            // Unbox: shift right arithmetic by 1
+            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            self.emitter.sarRegImm(.rcx, 1) catch return CompileError.OutOfMemory;
+
+            // Perform operation with overflow check
+            switch (op) {
+                .add => {
+                    self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+                    try self.emitJccToLabel(.o, overflow_slow);
+                },
+                .sub => {
+                    self.emitter.subRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+                    try self.emitJccToLabel(.o, overflow_slow);
+                },
+                .mul => {
+                    self.emitter.imulRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+                    try self.emitJccToLabel(.o, overflow_slow);
+                },
+            }
+
+            // Rebox: shift left by 1
+            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+
+            // Store result to stack[sp-2] and decrement sp
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, 2) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movMemReg(.r11, 0, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(sp, 1) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(done);
+
+            // Overflow slow path: call helper
+            try self.markLabel(overflow_slow);
+            const fn_ptr: u64 = switch (op) {
+                .add => @intFromPtr(&Context.jitAdd),
+                .sub => @intFromPtr(&Context.jitSub),
+                .mul => @intFromPtr(&Context.jitMul),
+            };
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.rdx, .r9) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+
+            // Store helper result to stack[sp-2] and decrement sp
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, 2) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movMemReg(.r11, 0, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(sp, 1) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(done);
+
+            // Deopt path on type mismatch
+            try self.markLabel(deopt);
+            try self.emitDeoptExit(bytecode_offset, .type_mismatch);
+
+            try self.markLabel(done);
+        } else if (is_aarch64) {
+            const overflow_slow = self.newLocalLabel();
+            const deopt = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+
+            // Load operands from stack without modifying sp
+            self.emitter.movRegReg(.x11, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x11, .x11, 1) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x12, stack_ptr, .x11, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x10, .x12, 0) catch return CompileError.OutOfMemory; // b
+            self.emitter.subRegImm12(.x11, .x11, 1) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x12, stack_ptr, .x11, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x9, .x12, 0) catch return CompileError.OutOfMemory; // a
+
+            // Save boxed values for overflow slow path
+            self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x13, .x10) catch return CompileError.OutOfMemory;
+
+            // Guard SMI tags (LSB == 0)
+            self.emitter.andRegImm(.x14, .x9, 0) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x14, 0) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt);
+            self.emitter.andRegImm(.x14, .x10, 0) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x14, 0) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt);
+
+            // Unbox: arithmetic shift right by 1
+            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            self.emitter.asrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+
+            // Perform operation with overflow check
+            switch (op) {
+                .add => {
+                    self.emitter.addsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
+                    try self.emitBcondToLabel(.vs, overflow_slow);
+                },
+                .sub => {
+                    self.emitter.subsRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
+                    try self.emitBcondToLabel(.vs, overflow_slow);
+                },
+                .mul => {
+                    self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
+                    // Check i31 range: (x9 << 33) >> 33 == x9
+                    self.emitter.lslRegImm(.x11, .x9, 33) catch return CompileError.OutOfMemory;
+                    self.emitter.asrRegImm(.x11, .x11, 33) catch return CompileError.OutOfMemory;
+                    self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
+                    try self.emitBcondToLabel(.ne, overflow_slow);
+                },
+            }
+
+            // Rebox: shift left by 1
+            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+
+            // Store result to stack[sp-2] and decrement sp
+            self.emitter.movRegReg(.x14, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x14, .x14, 2) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x15, stack_ptr, .x14, 3) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x9, .x15, 0) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(done);
+
+            // Overflow slow path: call helper
+            try self.markLabel(overflow_slow);
+            const fn_ptr: u64 = switch (op) {
+                .add => @intFromPtr(&Context.jitAdd),
+                .sub => @intFromPtr(&Context.jitSub),
+                .mul => @intFromPtr(&Context.jitMul),
+            };
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x2, .x13) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x12);
+
+            // Store helper result to stack[sp-2] and decrement sp
+            self.emitter.movRegReg(.x14, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x14, .x14, 2) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x15, stack_ptr, .x14, 3) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x0, .x15, 0) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(done);
+
+            // Deopt path on type mismatch
+            try self.markLabel(deopt);
+            try self.emitDeoptExit(bytecode_offset, .type_mismatch);
+
+            try self.markLabel(done);
+        }
+    }
+
+    /// Emit monomorphic get field when type feedback shows consistent hidden class.
+    /// Hardcodes the hidden class check and slot offset, skipping PIC lookup entirely.
+    fn emitMonomorphicGetField(self: *BaselineCompiler, hc_idx: object.HiddenClassIndex, slot: u16, atom_idx: u16, cache_idx: u16) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitGetFieldIC);
+
+        if (is_x86_64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Pop object value into r8
+            try self.emitPopReg(.r8);
+
+            // Quick pointer check: (raw & 0x7) == 1
+            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r9, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Extract object pointer (clear low 3 bits)
+            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+
+            // Check MemTag.object in header
+            self.emitter.movRegMem32(.r10, .r9, 0) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, 0xF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Check hidden class matches expected (hardcoded from type feedback)
+            self.emitter.movRegMem32(.r10, .r9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Fast path: load directly from inline slot (hardcoded offset)
+            const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
+            self.emitter.movRegMem(.rax, .r9, slot_offset) catch return CompileError.OutOfMemory;
+            try self.emitPushReg(.rax);
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper
+            try self.markLabel(slow);
+            self.emitter.movRegReg(.rsi, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rcx, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitPushReg(.rax);
+
+            try self.markLabel(done);
+        } else if (is_aarch64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Pop object value into x12
+            try self.emitPopReg(.x12);
+
+            // Quick pointer check: (raw & 0x7) == 1
+            self.emitter.andRegImm(.x9, .x12, 2) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer (clear low 3 bits)
+            self.emitter.lsrRegImm(.x9, .x12, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
+
+            // Check MemTag.object in header
+            self.emitter.ldrImmW(.x10, .x9, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check hidden class matches expected (hardcoded from type feedback)
+            self.emitter.ldrImmW(.x10, .x9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Fast path: load directly from inline slot (hardcoded offset)
+            const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
+            self.emitter.ldrImm(.x0, .x9, slot_offset) catch return CompileError.OutOfMemory;
+            try self.emitPushReg(.x0);
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper
+            try self.markLabel(slow);
+            self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x3, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitPushReg(.x0);
+
+            try self.markLabel(done);
+        }
+    }
+
+    /// Emit monomorphic put field when type feedback shows consistent hidden class.
+    /// Hardcodes the hidden class check and slot offset, skipping PIC lookup entirely.
+    fn emitMonomorphicPutField(self: *BaselineCompiler, hc_idx: object.HiddenClassIndex, slot: u16, atom_idx: u16, cache_idx: u16) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitPutFieldIC);
+
+        if (is_x86_64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Pop value into r8, object into r9
+            try self.emitPopReg(.r8);
+            try self.emitPopReg(.r9);
+
+            // Quick pointer check: (raw & 0x7) == 1
+            self.emitter.movRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Extract object pointer (clear low 3 bits)
+            self.emitter.movRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+
+            // Check MemTag.object in header
+            self.emitter.movRegMem32(.r11, .r10, 0) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r11, 0xF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Check hidden class matches expected
+            self.emitter.movRegMem32(.r11, .r10, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Fast path: store directly to inline slot
+            const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
+            self.emitter.movMemReg(.r10, slot_offset, .r8) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper
+            try self.markLabel(slow);
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.rsi, .r9) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.rcx, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.r8, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+
+            try self.markLabel(done);
+        } else if (is_aarch64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Pop value into x12, object into x13
+            try self.emitPopReg(.x12);
+            try self.emitPopReg(.x13);
+
+            // Quick pointer check: (raw & 0x7) == 1
+            self.emitter.andRegImm(.x9, .x13, 2) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer (clear low 3 bits)
+            self.emitter.lsrRegImm(.x9, .x13, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
+
+            // Check MemTag.object in header
+            self.emitter.ldrImmW(.x10, .x9, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check hidden class matches expected
+            self.emitter.ldrImmW(.x10, .x9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Fast path: store directly to inline slot
+            const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
+            self.emitter.strImm(.x12, .x9, slot_offset) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper
+            try self.markLabel(slow);
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x1, .x13) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x3, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x4, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+
+            try self.markLabel(done);
+        }
     }
 
     /// Pre-scan bytecode to find all jump targets
@@ -229,6 +794,7 @@ pub const BaselineCompiler = struct {
             self.emitter.pushReg(.rbx) catch return CompileError.OutOfMemory;
             self.emitter.pushReg(.r12) catch return CompileError.OutOfMemory;
             self.emitter.pushReg(.r13) catch return CompileError.OutOfMemory;
+            self.emitter.pushReg(.r14) catch return CompileError.OutOfMemory;
             // Save context pointer (rdi) to rbx for later use
             self.emitter.movRegReg(.rbx, .rdi) catch return CompileError.OutOfMemory;
             try self.emitInitStackCache();
@@ -250,6 +816,7 @@ pub const BaselineCompiler = struct {
         if (is_x86_64) {
             // x86-64 epilogue: restore callee-saved registers
             try self.emitFlushStackCache();
+            self.emitter.popReg(.r14) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.r13) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.r12) catch return CompileError.OutOfMemory;
             self.emitter.popReg(.rbx) catch return CompileError.OutOfMemory;
@@ -367,15 +934,33 @@ pub const BaselineCompiler = struct {
             .put_loc_3 => try self.emitPutLocal(3),
 
             .add => {
-                try self.emitBinaryOp(.add);
+                // Type-specialized path when both operands are known SMI
+                const opcode_offset = pc - 1;
+                if (self.shouldSpecializeIntBinaryOp(opcode_offset)) {
+                    try self.emitSpecializedIntBinaryOp(.add, opcode_offset);
+                } else {
+                    try self.emitBinaryOp(.add);
+                }
             },
 
             .sub => {
-                try self.emitBinaryOp(.sub);
+                // Type-specialized path when both operands are known SMI
+                const opcode_offset = pc - 1;
+                if (self.shouldSpecializeIntBinaryOp(opcode_offset)) {
+                    try self.emitSpecializedIntBinaryOp(.sub, opcode_offset);
+                } else {
+                    try self.emitBinaryOp(.sub);
+                }
             },
 
             .mul => {
-                try self.emitBinaryOp(.mul);
+                // Type-specialized path when both operands are known SMI
+                const opcode_offset = pc - 1;
+                if (self.shouldSpecializeIntBinaryOp(opcode_offset)) {
+                    try self.emitSpecializedIntBinaryOp(.mul, opcode_offset);
+                } else {
+                    try self.emitBinaryOp(.mul);
+                }
             },
 
             .div => {
@@ -403,13 +988,22 @@ pub const BaselineCompiler = struct {
             },
 
             .ret => {
-                try self.emitPop(.ret);
-                try self.emitEpilogue();
+                if (self.inline_exit_label) |label| {
+                    try self.emitJmpToLabel(label);
+                } else {
+                    try self.emitPop(.ret);
+                    try self.emitEpilogue();
+                }
             },
 
             .ret_undefined => {
-                try self.emitMovImm64(.ret, @bitCast(value_mod.JSValue.undefined_val));
-                try self.emitEpilogue();
+                if (self.inline_exit_label) |label| {
+                    try self.emitPushImm64(@bitCast(value_mod.JSValue.undefined_val));
+                    try self.emitJmpToLabel(label);
+                } else {
+                    try self.emitMovImm64(.ret, @bitCast(value_mod.JSValue.undefined_val));
+                    try self.emitEpilogue();
+                }
             },
 
             .get_loc_add => {
@@ -567,7 +1161,12 @@ pub const BaselineCompiler = struct {
                 const atom_idx = readU16(code, new_pc);
                 const cache_idx = readU16(code, new_pc + 2);
                 new_pc += 4;
-                try self.emitGetFieldIC(atom_idx, cache_idx);
+                const opcode_offset = pc - 1;
+                if (self.getMonomorphicPropertyInfo(atom_idx, opcode_offset)) |info| {
+                    try self.emitMonomorphicGetField(info.hc_idx, info.slot, atom_idx, cache_idx);
+                } else {
+                    try self.emitGetFieldIC(atom_idx, cache_idx);
+                }
             },
 
             .put_field => {
@@ -586,7 +1185,12 @@ pub const BaselineCompiler = struct {
                 const atom_idx = readU16(code, new_pc);
                 const cache_idx = readU16(code, new_pc + 2);
                 new_pc += 4;
-                try self.emitPutFieldIC(atom_idx, cache_idx);
+                const opcode_offset = pc - 1;
+                if (self.getMonomorphicPropertyInfo(atom_idx, opcode_offset)) |info| {
+                    try self.emitMonomorphicPutField(info.hc_idx, info.slot, atom_idx, cache_idx);
+                } else {
+                    try self.emitPutFieldIC(atom_idx, cache_idx);
+                }
             },
 
             .get_elem => {
@@ -621,13 +1225,28 @@ pub const BaselineCompiler = struct {
             .call => {
                 const argc = code[new_pc];
                 new_pc += 1;
-                try self.emitCall(argc, false);
+                const opcode_offset = pc - 1;
+
+                if (self.getInlineCandidate(opcode_offset)) |callee| {
+                    try self.emitInlinedCall(callee, argc, false, opcode_offset);
+                } else if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
+                    try self.emitMonomorphicCall(callee, argc, false);
+                } else {
+                    try self.emitCall(argc, false);
+                }
             },
 
             .call_method => {
                 const argc = code[new_pc];
                 new_pc += 1;
-                try self.emitCall(argc, true);
+                const opcode_offset = pc - 1;
+                if (self.getInlineCandidate(opcode_offset)) |callee| {
+                    try self.emitInlinedCall(callee, argc, true, opcode_offset);
+                } else if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
+                    try self.emitMonomorphicCall(callee, argc, true);
+                } else {
+                    try self.emitCall(argc, true);
+                }
             },
 
             .tail_call => {
@@ -748,6 +1367,14 @@ pub const BaselineCompiler = struct {
         }
     }
 
+    fn getInlineFpSaveReg() Register {
+        if (is_x86_64) {
+            return .r14;
+        } else if (is_aarch64) {
+            return .x22;
+        }
+    }
+
     fn emitInitStackCache(self: *BaselineCompiler) CompileError!void {
         const ctx = getCtxReg();
         const sp = getSpCacheReg();
@@ -822,6 +1449,26 @@ pub const BaselineCompiler = struct {
             self.emitter.blr(reg) catch return CompileError.OutOfMemory;
         }
         try self.emitReloadStackCache();
+    }
+
+    /// Emit a deoptimization exit that resumes in the interpreter and returns.
+    fn emitDeoptExit(self: *BaselineCompiler, bytecode_offset: u32, reason: DeoptReason) CompileError!void {
+        const fn_ptr: u64 = @intFromPtr(&jitDeoptimize);
+        if (is_x86_64) {
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rsi, @intCast(bytecode_offset)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, @intFromEnum(reason)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitEpilogue();
+        } else if (is_aarch64) {
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x1, bytecode_offset) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, @intFromEnum(reason)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitEpilogue();
+        }
     }
 
     fn newLocalLabel(self: *BaselineCompiler) u32 {
@@ -1369,6 +2016,420 @@ pub const BaselineCompiler = struct {
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
+    }
+
+    /// Emit monomorphic call fast path with callee guard.
+    /// Falls back to generic call helper on mismatch.
+    fn emitMonomorphicCall(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8, is_method: bool) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitCallBytecode);
+        const expected_ptr: u64 = @intFromPtr(callee);
+        const true_raw: u12 = @intCast(value_mod.JSValue.true_val.raw);
+        const slow = self.newLocalLabel();
+        const done = self.newLocalLabel();
+
+        if (is_x86_64) {
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+
+            // Load function value from stack without modifying sp
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, @intCast(@as(i32, argc) + 1)) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.r8, .r11, 0) catch return CompileError.OutOfMemory;
+
+            // Pointer tag check: (raw & 0x7) == 1
+            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r9, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Extract object pointer (clear low 3 bits)
+            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+
+            // Check MemTag.object in header
+            self.emitter.movRegMem32(.r11, .r9, 0) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r11, 0xF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Ensure FUNC_IS_BYTECODE is true
+            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, @intCast(true_raw)) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Load function data pointer and verify it's a pointer
+            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Extract pointer and load bytecode pointer (first field)
+            self.emitter.andRegImm32(.r11, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.r10, .r11, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r9, expected_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+
+            // Fast path: call jitCallBytecode
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rsi, expected_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, @intCast(argc)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rcx, if (is_method) 1 else 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitPushReg(.rax);
+            try self.emitJmpToLabel(done);
+
+            // Slow path: generic call
+            try self.markLabel(slow);
+            try self.emitCall(argc, is_method);
+            try self.markLabel(done);
+        } else if (is_aarch64) {
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+
+            // Load function value from stack without modifying sp
+            self.emitter.movRegReg(.x9, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x9, .x9, @intCast(@as(u32, argc) + 1)) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x10, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x12, .x10, 0) catch return CompileError.OutOfMemory;
+
+            // Pointer tag check: (raw & 0x7) == 1
+            self.emitter.andRegImm(.x11, .x12, 2) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer (clear low 3 bits)
+            self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
+
+            // Check MemTag.object in header
+            self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Ensure FUNC_IS_BYTECODE is true
+            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, true_raw) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Load function data pointer and verify it's a pointer
+            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x9, .x10, 2) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract pointer and load bytecode pointer (first field)
+            self.emitter.lsrRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x9, .x10, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, expected_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Fast path: call jitCallBytecode
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x1, expected_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, argc) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x3, if (is_method) 1 else 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitPushReg(.x0);
+            try self.emitJmpToLabel(done);
+
+            // Slow path
+            try self.markLabel(slow);
+            try self.emitCall(argc, is_method);
+            try self.markLabel(done);
+        }
+    }
+
+    fn canInlineOpcode(op: Opcode) bool {
+        return switch (op) {
+            // Exclude complex/unsupported operations from inlining
+            .call_spread,
+            .array_spread,
+            .await_val,
+            .make_async,
+            .import_module,
+            .import_name,
+            .export_name,
+            .import_default,
+            .export_default,
+            .get_upvalue,
+            .put_upvalue,
+            .close_upvalue,
+            .make_closure,
+            .call_ic,
+            => false,
+            else => true,
+        };
+    }
+
+    fn canInlineFunction(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode) bool {
+        _ = self;
+        // Reject closures/generators/async
+        if (callee.upvalue_count > 0) return false;
+        if (callee.flags.is_generator or callee.flags.is_async) return false;
+
+        var pc: usize = 0;
+        while (pc < callee.code.len) {
+            const op: Opcode = @enumFromInt(callee.code[pc]);
+            if (!canInlineOpcode(op)) return false;
+            pc += 1 + @as(usize, @intCast(bytecode.getOpcodeInfo(op).size - 1));
+        }
+        return true;
+    }
+
+    fn emitInlinePrologue(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8) CompileError!void {
+        const ctx = getCtxReg();
+        const sp = getSpCacheReg();
+        const saved_fp = getInlineFpSaveReg();
+
+        if (is_x86_64) {
+            // Save caller fp into r14
+            self.emitter.movRegMem(saved_fp, ctx, CTX_FP_OFF) catch return CompileError.OutOfMemory;
+            // new fp = sp - argc
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            if (argc > 0) {
+                self.emitter.subRegImm32(.r10, argc) catch return CompileError.OutOfMemory;
+            }
+            self.emitter.movMemReg(ctx, CTX_FP_OFF, .r10) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            self.emitter.ldrImm(saved_fp, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x9, sp) catch return CompileError.OutOfMemory;
+            if (argc > 0) {
+                self.emitter.subRegImm12(.x9, .x9, argc) catch return CompileError.OutOfMemory;
+            }
+            self.emitter.strImm(.x9, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+        }
+
+        // Initialize missing locals with undefined (args already on stack)
+        var idx: u16 = argc;
+        while (idx < callee.local_count) : (idx += 1) {
+            try self.emitPushImm64(@bitCast(value_mod.JSValue.undefined_val));
+        }
+    }
+
+    fn emitInlineCleanup(self: *BaselineCompiler) CompileError!void {
+        const ctx = getCtxReg();
+        const sp = getSpCacheReg();
+        const stack_ptr = getStackPtrCacheReg();
+        const saved_fp = getInlineFpSaveReg();
+        const result_offset: i32 = if (self.inline_is_method) 2 else 1;
+
+        if (is_x86_64) {
+            // Load result from top of stack into rax
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.rax, .r11, 0) catch return CompileError.OutOfMemory;
+
+            // Load callee fp
+            self.emitter.movRegMem(.r10, ctx, CTX_FP_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, result_offset) catch return CompileError.OutOfMemory;
+
+            // Store result into slot (func or obj)
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movMemReg(.r11, 0, .rax) catch return CompileError.OutOfMemory;
+
+            // sp = result_index + 1
+            self.emitter.addRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(sp, .r10) catch return CompileError.OutOfMemory;
+
+            // Restore caller fp
+            self.emitter.movMemReg(ctx, CTX_FP_OFF, saved_fp) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Load result from top of stack into x9
+            self.emitter.movRegReg(.x10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x11, stack_ptr, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x9, .x11, 0) catch return CompileError.OutOfMemory;
+
+            // Load callee fp
+            self.emitter.ldrImm(.x10, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x10, .x10, @intCast(result_offset)) catch return CompileError.OutOfMemory;
+
+            // Store result into slot (func or obj)
+            self.emitter.addRegRegShift(.x11, stack_ptr, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x9, .x11, 0) catch return CompileError.OutOfMemory;
+
+            // sp = result_index + 1
+            self.emitter.addRegImm12(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(sp, .x10) catch return CompileError.OutOfMemory;
+
+            // Restore caller fp
+            self.emitter.strImm(saved_fp, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitInlinedCall(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8, is_method: bool, bytecode_offset: u32) CompileError!void {
+        if (argc > callee.local_count) {
+            try self.emitMonomorphicCall(callee, argc, is_method);
+            return;
+        }
+        if (!self.canInlineFunction(callee)) {
+            try self.emitMonomorphicCall(callee, argc, is_method);
+            return;
+        }
+
+        const deopt_label = self.newLocalLabel();
+        const done_label = self.newLocalLabel();
+
+        // Guard: verify callee still matches expected
+        const expected_ptr: u64 = @intFromPtr(callee);
+        const true_raw: u12 = @intCast(value_mod.JSValue.true_val.raw);
+
+        if (is_x86_64) {
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+
+            self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm32(.r10, @intCast(@as(i32, argc) + 1)) catch return CompileError.OutOfMemory;
+            self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.r8, .r11, 0) catch return CompileError.OutOfMemory;
+
+            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r9, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt_label);
+
+            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+
+            self.emitter.movRegMem32(.r11, .r9, 0) catch return CompileError.OutOfMemory;
+            self.emitter.shrRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r11, 0xF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt_label);
+
+            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, @intCast(true_raw)) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt_label);
+
+            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt_label);
+
+            self.emitter.andRegImm32(.r11, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.r10, .r11, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r9, expected_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, deopt_label);
+        } else if (is_aarch64) {
+            const sp = getSpCacheReg();
+            const stack_ptr = getStackPtrCacheReg();
+
+            self.emitter.movRegReg(.x9, sp) catch return CompileError.OutOfMemory;
+            self.emitter.subRegImm12(.x9, .x9, @intCast(@as(u32, argc) + 1)) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x10, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x12, .x10, 0) catch return CompileError.OutOfMemory;
+
+            self.emitter.andRegImm(.x11, .x12, 2) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt_label);
+
+            self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
+
+            self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt_label);
+
+            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, true_raw) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt_label);
+
+            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x9, .x10, 2) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt_label);
+
+            self.emitter.lsrRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x9, .x10, 0) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, expected_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, deopt_label);
+        }
+
+        // Inline prologue (sets ctx->fp, initializes locals)
+        try self.emitInlinePrologue(callee, argc);
+
+        // Save caller compiler state and switch to callee
+        const saved_func = self.func;
+        const saved_tf = self.tf;
+        const saved_feedback = self.feedback_site_map;
+        const saved_labels = self.labels;
+        const saved_pending = self.pending_jumps;
+        const saved_jump_targets = self.jump_targets;
+        const saved_inline_exit = self.inline_exit_label;
+        const saved_inline_is_method = self.inline_is_method;
+        const saved_inline_depth = self.inline_depth;
+        const saved_total_inlined = self.total_inlined_size;
+
+        self.func = callee;
+        self.tf = callee.type_feedback_ptr;
+        self.feedback_site_map = callee.feedback_site_map;
+        self.labels = .{};
+        self.pending_jumps = .{};
+        self.jump_targets = .{};
+        self.inline_exit_label = self.newLocalLabel();
+        self.inline_is_method = is_method;
+        self.inline_depth = saved_inline_depth + 1;
+        self.total_inlined_size = saved_total_inlined + @as(u32, @intCast(callee.code.len));
+
+        // Compile callee bytecode inline (no prologue/epilogue)
+        try self.findJumpTargets();
+        var pc: u32 = 0;
+        const code = callee.code;
+        while (pc < code.len) {
+            if (self.jump_targets.contains(pc)) {
+                self.labels.put(self.allocator, pc, @intCast(self.emitter.buffer.items.len)) catch return CompileError.OutOfMemory;
+            }
+            const op: Opcode = @enumFromInt(code[pc]);
+            pc += 1;
+            pc = try self.compileOpcode(op, pc, code);
+        }
+
+        // Inline exit: cleanup and return to caller
+        try self.markLabel(self.inline_exit_label.?);
+        try self.emitInlineCleanup();
+
+        // Patch inline jumps and restore compiler state
+        try self.patchJumps();
+        self.labels.deinit(self.allocator);
+        self.pending_jumps.deinit(self.allocator);
+        self.jump_targets.deinit(self.allocator);
+
+        self.func = saved_func;
+        self.tf = saved_tf;
+        self.feedback_site_map = saved_feedback;
+        self.labels = saved_labels;
+        self.pending_jumps = saved_pending;
+        self.jump_targets = saved_jump_targets;
+        self.inline_exit_label = saved_inline_exit;
+        self.inline_is_method = saved_inline_is_method;
+        self.inline_depth = saved_inline_depth;
+        self.total_inlined_size = saved_total_inlined;
+
+        // Skip deopt path on success
+        try self.emitJmpToLabel(done_label);
+
+        // Deopt on callee mismatch
+        try self.markLabel(deopt_label);
+        try self.emitDeoptExit(bytecode_offset, .callee_changed);
+
+        try self.markLabel(done_label);
     }
 
     fn emitDiv(self: *BaselineCompiler) CompileError!void {
@@ -2863,8 +3924,8 @@ fn readU16(code: []const u8, offset: u32) u16 {
 }
 
 /// Compile a function to native code
-pub fn compileFunction(allocator: std.mem.Allocator, code_alloc: *CodeAllocator, func: *const bytecode.FunctionBytecode) CompileError!CompiledCode {
-    var compiler = BaselineCompiler.init(allocator, code_alloc, func);
+pub fn compileFunction(allocator: std.mem.Allocator, code_alloc: *CodeAllocator, func: *const bytecode.FunctionBytecode, hidden_class_pool: ?*object.HiddenClassPool) CompileError!CompiledCode {
+    var compiler = BaselineCompiler.init(allocator, code_alloc, func, hidden_class_pool);
     defer compiler.deinit();
     return compiler.compile();
 }
@@ -2896,7 +3957,7 @@ test "baseline: compile simple return" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -2925,7 +3986,7 @@ test "baseline: compile arithmetic" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -2956,7 +4017,7 @@ test "baseline: compile div/mod/pow/inc/dec" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 
@@ -2983,7 +4044,7 @@ test "baseline: compile div/mod/pow/inc/dec" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
@@ -3015,7 +4076,7 @@ test "baseline: compile call opcodes" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
@@ -3080,7 +4141,7 @@ test "baseline: compile property access opcodes" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3112,7 +4173,7 @@ test "baseline: compile get_field_call opcode" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3152,7 +4213,7 @@ test "baseline: compile globals and object creation" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3276,7 +4337,7 @@ test "baseline: compile superinstructions and const ops" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3302,7 +4363,7 @@ test "baseline: unsupported opcode returns error" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const result = compileFunction(testing.allocator, &code_alloc, &func);
+    const result = compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expectError(CompileError.UnsupportedOpcode, result);
 }
 
@@ -3328,7 +4389,7 @@ test "baseline: verify generated code size" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
 
     // Should have prologue + body + epilogue
     try testing.expect(compiled.code.len > 10);
@@ -3370,7 +4431,7 @@ test "baseline: compile local variable access" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3402,7 +4463,7 @@ test "baseline: compile get_loc with index" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3435,7 +4496,7 @@ test "baseline: compile comparison opcodes" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
@@ -3467,7 +4528,7 @@ test "baseline: compile loop opcode" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3503,7 +4564,7 @@ test "baseline: compile comparison with conditional jump" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3536,7 +4597,7 @@ test "baseline: compile bitwise operations" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
@@ -3565,7 +4626,7 @@ test "baseline: compile bitwise NOT" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3599,7 +4660,7 @@ test "baseline: compile shift operations" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
@@ -3629,7 +4690,7 @@ test "baseline: compile typeof operation" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3667,7 +4728,7 @@ test "baseline: compile typeof with different values" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
@@ -3697,7 +4758,7 @@ test "baseline: compile logical NOT operation" {
     var code_alloc = CodeAllocator.init(testing.allocator);
     defer code_alloc.deinit();
 
-    const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+    const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
     try testing.expect(compiled.code.len > 0);
 }
 
@@ -3734,7 +4795,7 @@ test "baseline: compile logical NOT with falsy values" {
         var code_alloc = CodeAllocator.init(testing.allocator);
         defer code_alloc.deinit();
 
-        const compiled = try compileFunction(testing.allocator, &code_alloc, &func);
+        const compiled = try compileFunction(testing.allocator, &code_alloc, &func, null);
         try testing.expect(compiled.code.len > 0);
     }
 }
