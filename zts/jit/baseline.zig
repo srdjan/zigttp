@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const x86 = @import("x86.zig");
 const arm64 = @import("arm64.zig");
 const alloc = @import("alloc.zig");
+const deopt = @import("deopt.zig");
 const bytecode = @import("../bytecode.zig");
 const value_mod = @import("../value.zig");
 const context_mod = @import("../context.zig");
@@ -31,7 +32,7 @@ extern fn jitCall(ctx: *Context, argc: u8, is_method: u8) value_mod.JSValue;
 extern fn jitCallBytecode(ctx: *Context, func_bc: *const bytecode.FunctionBytecode, argc: u8, is_method: u8) value_mod.JSValue;
 extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
 extern fn jitPutFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, val: value_mod.JSValue, cache_idx: u16) value_mod.JSValue;
-extern fn jitDeoptimize(ctx: *Context, bytecode_offset: u32, reason: u32) u64;
+const jitDeoptimize = deopt.jitDeoptimize;
 
 // Context field offsets for JIT code generation
 // These are computed at compile time using @offsetOf
@@ -309,7 +310,7 @@ pub const BaselineCompiler = struct {
     fn emitSpecializedIntBinaryOp(self: *BaselineCompiler, op: BinaryOp, bytecode_offset: u32) CompileError!void {
         if (is_x86_64) {
             const overflow_slow = self.newLocalLabel();
-            const deopt = self.newLocalLabel();
+            const type_guard_fail = self.newLocalLabel();
             const done = self.newLocalLabel();
 
             const sp = getSpCacheReg();
@@ -332,11 +333,11 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, deopt);
+            try self.emitJccToLabel(.ne, type_guard_fail);
             self.emitter.movRegReg(.r10, .rcx) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, deopt);
+            try self.emitJccToLabel(.ne, type_guard_fail);
 
             // Unbox: shift right arithmetic by 1
             self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
@@ -391,13 +392,13 @@ pub const BaselineCompiler = struct {
             try self.emitJmpToLabel(done);
 
             // Deopt path on type mismatch
-            try self.markLabel(deopt);
+            try self.markLabel(type_guard_fail);
             try self.emitDeoptExit(bytecode_offset, .type_mismatch);
 
             try self.markLabel(done);
         } else if (is_aarch64) {
             const overflow_slow = self.newLocalLabel();
-            const deopt = self.newLocalLabel();
+            const type_guard_fail = self.newLocalLabel();
             const done = self.newLocalLabel();
 
             const sp = getSpCacheReg();
@@ -419,10 +420,10 @@ pub const BaselineCompiler = struct {
             // Guard SMI tags (LSB == 0)
             self.emitter.andRegImm(.x14, .x9, 0) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x14, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, deopt);
+            try self.emitBcondToLabel(.ne, type_guard_fail);
             self.emitter.andRegImm(.x14, .x10, 0) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x14, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, deopt);
+            try self.emitBcondToLabel(.ne, type_guard_fail);
 
             // Unbox: arithmetic shift right by 1
             self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
@@ -481,7 +482,7 @@ pub const BaselineCompiler = struct {
             try self.emitJmpToLabel(done);
 
             // Deopt path on type mismatch
-            try self.markLabel(deopt);
+            try self.markLabel(type_guard_fail);
             try self.emitDeoptExit(bytecode_offset, .type_mismatch);
 
             try self.markLabel(done);
