@@ -246,13 +246,29 @@ pub const Atom = enum(u32) {
     cookie = 216,
     @"x-forwarded-for" = 217,
     @"x-request-id" = 218,
+    // Additional CORS and caching headers
+    @"content-encoding" = 219,
+    @"transfer-encoding" = 220,
+    @"if-modified-since" = 221,
+    @"if-none-match" = 222,
+    etag = 223,
+    @"last-modified" = 224,
+    vary = 225,
+    origin = 226,
+    @"access-control-allow-origin" = 227,
+    @"access-control-allow-methods" = 228,
+    @"access-control-allow-headers" = 229,
+    @"access-control-allow-credentials" = 230,
+    @"access-control-max-age" = 231,
+    expires = 232,
+    pragma = 233,
     // Reserved for more builtins
-    __count__ = 220,
+    __count__ = 235,
 
-    // Dynamic atoms start at 221
+    // Dynamic atoms start at 236
     _,
 
-    pub const FIRST_DYNAMIC: u32 = 221;
+    pub const FIRST_DYNAMIC: u32 = 236;
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
@@ -347,6 +363,22 @@ pub const Atom = enum(u32) {
             .cookie => "cookie",
             .@"x-forwarded-for" => "x-forwarded-for",
             .@"x-request-id" => "x-request-id",
+            // Additional CORS and caching headers
+            .@"content-encoding" => "content-encoding",
+            .@"transfer-encoding" => "transfer-encoding",
+            .@"if-modified-since" => "if-modified-since",
+            .@"if-none-match" => "if-none-match",
+            .etag => "etag",
+            .@"last-modified" => "last-modified",
+            .vary => "vary",
+            .origin => "origin",
+            .@"access-control-allow-origin" => "access-control-allow-origin",
+            .@"access-control-allow-methods" => "access-control-allow-methods",
+            .@"access-control-allow-headers" => "access-control-allow-headers",
+            .@"access-control-allow-credentials" => "access-control-allow-credentials",
+            .@"access-control-max-age" => "access-control-max-age",
+            .expires => "expires",
+            .pragma => "pragma",
             else => null,
         };
     }
@@ -559,6 +591,22 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "cookie", .cookie },
     .{ "x-forwarded-for", .@"x-forwarded-for" },
     .{ "x-request-id", .@"x-request-id" },
+    // Additional CORS and caching headers
+    .{ "content-encoding", .@"content-encoding" },
+    .{ "transfer-encoding", .@"transfer-encoding" },
+    .{ "if-modified-since", .@"if-modified-since" },
+    .{ "if-none-match", .@"if-none-match" },
+    .{ "etag", .etag },
+    .{ "last-modified", .@"last-modified" },
+    .{ "vary", .vary },
+    .{ "origin", .origin },
+    .{ "access-control-allow-origin", .@"access-control-allow-origin" },
+    .{ "access-control-allow-methods", .@"access-control-allow-methods" },
+    .{ "access-control-allow-headers", .@"access-control-allow-headers" },
+    .{ "access-control-allow-credentials", .@"access-control-allow-credentials" },
+    .{ "access-control-max-age", .@"access-control-max-age" },
+    .{ "expires", .expires },
+    .{ "pragma", .pragma },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map

@@ -75,12 +75,22 @@ pub const HttpResponseShape = struct {
 pub const HttpHeadersShape = struct {
     class_idx: object.HiddenClassIndex,
     content_type_slot: u16,
+    content_length_slot: u16,
+    cache_control_slot: u16,
+};
+
+pub const HttpRequestHeadersShape = struct {
+    class_idx: object.HiddenClassIndex,
+    authorization_slot: u16,
+    content_type_slot: u16,
+    accept_slot: u16,
 };
 
 pub const HttpShapeCache = struct {
     request: HttpRequestShape,
     response: HttpResponseShape,
     response_headers: HttpHeadersShape,
+    request_headers: HttpRequestHeadersShape,
 };
 
 pub const HttpStringCache = struct {
@@ -296,6 +306,14 @@ pub const Context = struct {
 
         var resp_headers_class = pool.getEmptyClass();
         const content_type_slot = try addProp(pool, &resp_headers_class, content_type_atom);
+        const content_length_slot = try addProp(pool, &resp_headers_class, .@"content-length");
+        const cache_control_slot = try addProp(pool, &resp_headers_class, .@"cache-control");
+
+        // Request headers shape: authorization, Content-Type, accept
+        var req_headers_class = pool.getEmptyClass();
+        const req_auth_slot = try addProp(pool, &req_headers_class, .authorization);
+        const req_content_type_slot = try addProp(pool, &req_headers_class, content_type_atom);
+        const req_accept_slot = try addProp(pool, &req_headers_class, .accept);
 
         self.http_shapes = .{
             .request = .{
@@ -316,6 +334,14 @@ pub const Context = struct {
             .response_headers = .{
                 .class_idx = resp_headers_class,
                 .content_type_slot = content_type_slot,
+                .content_length_slot = content_length_slot,
+                .cache_control_slot = cache_control_slot,
+            },
+            .request_headers = .{
+                .class_idx = req_headers_class,
+                .authorization_slot = req_auth_slot,
+                .content_type_slot = req_content_type_slot,
+                .accept_slot = req_accept_slot,
             },
         };
     }
