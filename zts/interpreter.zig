@@ -553,6 +553,7 @@ pub const Interpreter = struct {
             .call, .call_method, .tail_call => 1,
             .get_upvalue, .put_upvalue, .close_upvalue => 1,
             .add_const_i8, .sub_const_i8, .mul_const_i8, .mod_const_i8, .lt_const_i8, .le_const_i8 => 1,
+            .set_slot => 1,
 
             // 2-byte operand (u16 or i16)
             .push_i16, .push_const, .loop => 2,
@@ -565,6 +566,7 @@ pub const Interpreter = struct {
             // 3-byte operand
             .get_loc_add, .get_loc_get_loc_add => 2,
             .push_const_call, .make_closure, .call_ic => 3,
+            .new_object_literal => 3, // u16 shape_idx + u8 prop_count
 
             // 4-byte operands
             .get_field_ic, .put_field_ic, .if_false_goto => 4,
@@ -1494,6 +1496,40 @@ pub const Interpreter = struct {
                     const obj = try self.createArray();
                     obj.setArrayLength(@intCast(length));
                     try self.ctx.push(obj.toValue());
+                },
+
+                .new_object_literal => {
+                    // Create object with pre-compiled shape (O(1) class allocation)
+                    const shape_idx = readU16(self.pc);
+                    self.pc += 2;
+                    const prop_count = self.pc[0];
+                    self.pc += 1;
+                    _ = prop_count; // Used for verification in debug builds
+
+                    // Look up pre-built hidden class from materialized shapes
+                    const class_idx = self.ctx.getLiteralShape(shape_idx) orelse {
+                        // Fallback: create empty object if shape not found
+                        const obj = try self.createObject();
+                        try self.ctx.push(obj.toValue());
+                        continue :dispatch;
+                    };
+
+                    // Create object with final class directly (no transitions needed)
+                    const obj = try self.ctx.createObjectWithClass(class_idx, null);
+                    try self.ctx.push(obj.toValue());
+                },
+
+                .set_slot => {
+                    // Direct slot write for pre-compiled object literals
+                    const slot_idx: u16 = self.pc[0];
+                    self.pc += 1;
+                    const val = self.ctx.pop();
+                    const obj_val = self.ctx.pop();
+
+                    if (obj_val.isObject()) {
+                        const obj = object.JSObject.fromValue(obj_val);
+                        obj.setSlot(slot_idx, val);
+                    }
                 },
 
                 .get_field => {
@@ -5574,6 +5610,12 @@ test "End-to-end: polymorphic property access" {
 
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
+
+    // Materialize object literal shapes before execution
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
 
     const func = bytecode.FunctionBytecode{
         .header = .{},

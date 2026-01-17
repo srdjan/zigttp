@@ -27,6 +27,7 @@ const bytecode = @import("../bytecode.zig");
 const value = @import("../value.zig");
 const string = @import("../string.zig");
 const context = @import("../context.zig");
+const object = @import("../object.zig");
 
 // Re-export all parser components
 pub const Token = @import("token.zig").Token;
@@ -202,6 +203,15 @@ pub const Parser = struct {
         self.constants = .{ .items = func_bc.constants };
 
         return func_bc.code;
+    }
+
+    /// Get the object literal shapes collected during compilation.
+    /// Must be called after parse(). Returns empty slice if parse() wasn't called.
+    pub fn getShapes(self: *const Parser) []const []const object.Atom {
+        if (self.code_gen) |*cg| {
+            return cg.shapes.items;
+        }
+        return &[_][]const object.Atom{};
     }
 };
 

@@ -193,6 +193,9 @@ pub const Context = struct {
     http_shapes: ?HttpShapeCache,
     /// Cached HTTP strings and atoms for common values
     http_strings: ?HttpStringCache,
+    /// Pre-built hidden class indices for object literal shapes.
+    /// Indexed by shape_idx from bytecode, populated via materializeShapes().
+    literal_shapes: std.ArrayList(object.HiddenClassIndex),
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -248,6 +251,7 @@ pub const Context = struct {
             .builtin_objects = .{},
             .http_shapes = null,
             .http_strings = null,
+            .literal_shapes = .{},
         };
 
         if (config.use_http_shape_cache) {
@@ -396,6 +400,33 @@ pub const Context = struct {
             .status_text_atom = status_text_atom,
             .content_type_atom = content_type_atom,
         };
+    }
+
+    /// Materialize object literal shapes from bytecode.
+    /// Builds hidden class chains for each shape and stores the final class indices.
+    /// Called when loading bytecode that uses the new_object_literal opcode.
+    pub fn materializeShapes(self: *Context, shapes: []const []const object.Atom) !void {
+        const pool = self.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+        try self.literal_shapes.ensureTotalCapacity(self.allocator, shapes.len);
+
+        for (shapes) |shape| {
+            var class_idx = pool.getEmptyClass();
+
+            // Build the hidden class chain by adding properties in declaration order
+            for (shape) |atom| {
+                class_idx = try pool.addProperty(class_idx, atom);
+            }
+
+            try self.literal_shapes.append(self.allocator, class_idx);
+        }
+    }
+
+    /// Get a pre-built hidden class index for an object literal shape.
+    /// Returns null if the shape_idx is out of bounds.
+    pub fn getLiteralShape(self: *const Context, shape_idx: u16) ?object.HiddenClassIndex {
+        if (shape_idx >= self.literal_shapes.items.len) return null;
+        return self.literal_shapes.items[shape_idx];
     }
 
     pub fn getCachedStatusText(self: *const Context, status: u16) ?*string.JSString {
@@ -632,6 +663,9 @@ pub const Context = struct {
             ca.deinit();
             self.allocator.destroy(ca);
         }
+
+        // Clean up object literal shapes
+        self.literal_shapes.deinit(self.allocator);
 
         self.atoms.deinit();
         self.json_writer.deinit();

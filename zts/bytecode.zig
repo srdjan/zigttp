@@ -126,6 +126,7 @@ pub const Opcode = enum(u8) {
     // Object operations
     new_object = 0x80,
     new_array = 0x81, // +u16 length
+    new_object_literal = 0x82, // +u16 shape_idx +u8 prop_count (creates object with pre-compiled shape)
     get_global = 0x83, // +u16 atom_idx
     put_global = 0x84, // +u16 atom_idx
     define_global = 0x85, // +u16 atom_idx (declare global var)
@@ -190,6 +191,9 @@ pub const Opcode = enum(u8) {
     put_upvalue = 0xC1, // +u8 upvalue_idx
     close_upvalue = 0xC2, // +u8 local_idx (close when leaving scope)
     make_closure = 0xC3, // +u16 func_idx +u8 upvalue_count
+
+    // Object literal optimization
+    set_slot = 0xC4, // +u8 slot_idx (direct slot write for pre-compiled object literals)
 
     // Reserved for future
     _,
@@ -299,6 +303,7 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         // Object operations
         .new_object => .{ .size = 1, .n_pop = 0, .n_push = 1, .name = "new_object" },
         .new_array => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "new_array" },
+        .new_object_literal => .{ .size = 4, .n_pop = 0, .n_push = 1, .name = "new_object_literal" },
         .get_global => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "get_global" },
         .put_global => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "put_global" },
         .define_global => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "define_global" },
@@ -362,6 +367,9 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .put_upvalue => .{ .size = 2, .n_pop = 1, .n_push = 0, .name = "put_upvalue" },
         .close_upvalue => .{ .size = 2, .n_pop = 0, .n_push = 0, .name = "close_upvalue" },
         .make_closure => .{ .size = 4, .n_pop = 0, .n_push = 1, .name = "make_closure" },
+
+        // Object literal optimization
+        .set_slot => .{ .size = 2, .n_pop = 2, .n_push = 0, .name = "set_slot" },
 
         // Unknown/reserved opcodes
         _ => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "unknown" },

@@ -452,6 +452,12 @@ pub const Runtime = struct {
             return err;
         };
 
+        // Materialize object literal shapes before execution
+        const shapes = p.getShapes();
+        if (shapes.len > 0) {
+            try self.ctx.materializeShapes(shapes);
+        }
+
         // Create FunctionBytecode struct to wrap the parsed result
         const func = zq.FunctionBytecode{
             .header = .{},

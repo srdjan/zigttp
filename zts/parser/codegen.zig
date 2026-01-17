@@ -87,6 +87,13 @@ pub const CodeGen = struct {
     /// Optimization statistics (accumulated across all functions)
     opt_stats: bytecode_opt.OptStats,
 
+    /// Object literal shapes collected during compilation.
+    /// Each entry is an array of atoms representing property names in declaration order.
+    shapes: std.ArrayList([]const js_object.Atom),
+
+    /// Map from shape content hash to shape index for deduplication.
+    shape_dedup: std.AutoHashMapUnmanaged(u64, u16),
+
     /// Maximum inline cache slots per function (must match interpreter.IC_CACHE_SIZE)
     pub const IC_CACHE_SIZE: u16 = 256;
 
@@ -125,6 +132,8 @@ pub const CodeGen = struct {
             .current_stack_depth = 0,
             .ic_cache_idx = 0,
             .opt_stats = .{},
+            .shapes = .{},
+            .shape_dedup = .{},
         };
     }
 
@@ -153,6 +162,8 @@ pub const CodeGen = struct {
             .current_stack_depth = 0,
             .ic_cache_idx = 0,
             .opt_stats = .{},
+            .shapes = .{},
+            .shape_dedup = .{},
         };
     }
 
@@ -170,6 +181,13 @@ pub const CodeGen = struct {
         self.labels.deinit(self.allocator);
         self.pending_jumps.deinit(self.allocator);
         self.loop_stack.deinit(self.allocator);
+
+        // Free object literal shapes
+        for (self.shapes.items) |shape| {
+            self.allocator.free(shape);
+        }
+        self.shapes.deinit(self.allocator);
+        self.shape_dedup.deinit(self.allocator);
     }
 
     /// Free heap-allocated objects stored in constants array (FunctionBytecode, Float64Box)
@@ -990,7 +1008,116 @@ pub const CodeGen = struct {
         // Array remains on stack
     }
 
+    /// Register a shape for object literal optimization.
+    /// Returns the shape index for use in new_object_literal opcode.
+    fn registerShape(self: *CodeGen, atoms: []const js_object.Atom) !u16 {
+        // Hash the shape for deduplication
+        var hasher = std.hash.Wyhash.init(0);
+        for (atoms) |atom| {
+            hasher.update(std.mem.asBytes(&@intFromEnum(atom)));
+        }
+        const hash = hasher.final();
+
+        // Check for existing shape with same hash
+        if (self.shape_dedup.get(hash)) |existing_idx| {
+            return existing_idx;
+        }
+
+        // Register new shape
+        const shape_idx: u16 = @intCast(self.shapes.items.len);
+        const atoms_copy = try self.allocator.dupe(js_object.Atom, atoms);
+        try self.shapes.append(self.allocator, atoms_copy);
+        try self.shape_dedup.put(self.allocator, hash, shape_idx);
+        return shape_idx;
+    }
+
     fn emitObjectLiteral(self: *CodeGen, object: Node.ObjectExpr) !void {
+        // Try to collect static string keys for shape pre-compilation
+        var static_atoms: std.ArrayList(js_object.Atom) = .empty;
+        defer static_atoms.deinit(self.allocator);
+
+        var all_static = true;
+        var i: u16 = 0;
+        while (i < object.properties_count) : (i += 1) {
+            const prop_idx = self.ir.getListIndex(object.properties_start, i);
+            const prop_tag = self.ir.getTag(prop_idx) orelse {
+                all_static = false;
+                break;
+            };
+
+            if (prop_tag != .object_property) {
+                all_static = false;
+                break;
+            }
+
+            const prop = self.ir.getProperty(prop_idx).?;
+            const key_tag = self.ir.getTag(prop.key) orelse {
+                all_static = false;
+                break;
+            };
+
+            // Only optimize string literal keys
+            if (key_tag != .lit_string) {
+                all_static = false;
+                break;
+            }
+
+            const key_str_idx = self.ir.getStringIdx(prop.key).?;
+            const key_str = self.ir.getString(key_str_idx) orelse "";
+
+            // Intern atom
+            const atom: js_object.Atom = if (js_object.lookupPredefinedAtom(key_str)) |a|
+                a
+            else if (self.atoms) |atoms|
+                try atoms.intern(key_str)
+            else
+                @enumFromInt(js_object.Atom.FIRST_DYNAMIC + key_str_idx);
+
+            try static_atoms.append(self.allocator, atom);
+        }
+
+        // Use optimized path if all keys are static strings and we have at least one property
+        if (all_static and static_atoms.items.len > 0) {
+            try self.emitPrecompiledObjectLiteral(object, static_atoms.items);
+        } else {
+            try self.emitDynamicObjectLiteral(object);
+        }
+    }
+
+    /// Emit object literal using pre-compiled shape (O(1) class allocation).
+    fn emitPrecompiledObjectLiteral(
+        self: *CodeGen,
+        object: Node.ObjectExpr,
+        atoms: []const js_object.Atom,
+    ) !void {
+        // Register shape and get index
+        const shape_idx = try self.registerShape(atoms);
+
+        // Emit new_object_literal opcode: creates object with pre-built shape
+        try self.emit(.new_object_literal);
+        try self.emitU16(shape_idx);
+        try self.emitU8(@intCast(atoms.len));
+        self.pushStack(1);
+
+        // Emit values and direct slot writes (in declaration order)
+        var i: u16 = 0;
+        while (i < object.properties_count) : (i += 1) {
+            const prop_idx = self.ir.getListIndex(object.properties_start, i);
+            const prop = self.ir.getProperty(prop_idx).?;
+
+            try self.emit(.dup);
+            self.pushStack(1);
+
+            try self.emitNode(prop.value); // Push value
+
+            try self.emit(.set_slot);
+            try self.emitU8(@intCast(i)); // Slot index = property index
+            self.popStack(2); // Pops value and object copy
+        }
+    }
+
+    /// Emit object literal using dynamic property setting (original behavior).
+    fn emitDynamicObjectLiteral(self: *CodeGen, object: Node.ObjectExpr) !void {
         try self.emit(.new_object);
         self.pushStack(1);
 
@@ -1675,6 +1802,10 @@ pub const CodeGen = struct {
 
     fn emitByte(self: *CodeGen, b: u8) !void {
         try self.code.append(self.allocator, b);
+    }
+
+    fn emitU8(self: *CodeGen, val: u8) !void {
+        try self.code.append(self.allocator, val);
     }
 
     fn emitU16(self: *CodeGen, val: u16) !void {
