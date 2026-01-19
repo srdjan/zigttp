@@ -252,16 +252,10 @@ const ConnectionPool = struct {
     fn handleSingleRequestSync(self: *ConnectionPool, fd: std.posix.fd_t, request_num: u32, req_allocator: std.mem.Allocator) !bool {
         _ = request_num;
 
-        // Read request
-        var buf: [8192]u8 = undefined;
-        const n = std.posix.read(fd, &buf) catch |err| {
-            if (err == error.WouldBlock or err == error.ConnectionResetByPeer) return false;
+        const request_data = self.readRequestData(fd, req_allocator) catch |err| {
+            if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return false;
             return err;
         };
-        if (n == 0) return false;
-
-        // Simple HTTP parsing
-        const request_data = buf[0..n];
         var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return false;
         defer request.deinit(req_allocator);
 
@@ -305,6 +299,45 @@ const ConnectionPool = struct {
         }
 
         return keep_alive;
+    }
+
+    fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
+        var buffer = std.ArrayList(u8).init(allocator);
+        errdefer buffer.deinit();
+
+        const max_header_bytes: usize = 32 * 1024;
+        var header_end: ?usize = null;
+        var content_length: usize = 0;
+        var total_needed: usize = 0;
+
+        while (true) {
+            var chunk: [4096]u8 = undefined;
+            const n = std.posix.read(fd, &chunk) catch |err| {
+                if (err == error.ConnectionResetByPeer or err == error.WouldBlock) return err;
+                return err;
+            };
+            if (n == 0) return error.EndOfStream;
+            try buffer.appendSlice(chunk[0..n]);
+
+            if (header_end == null) {
+                if (findHeaderEnd(buffer.items)) |offset| {
+                    header_end = offset;
+                    const body_start = offset + 4;
+                    content_length = parseContentLength(buffer.items[0..offset]) orelse 0;
+                    if (content_length > self.server.config.max_body_size) {
+                        return error.FileTooBig;
+                    }
+                    total_needed = body_start + content_length;
+                    if (buffer.items.len >= total_needed) break;
+                } else if (buffer.items.len > max_header_bytes) {
+                    return error.InvalidRequest;
+                }
+            } else if (buffer.items.len >= total_needed) {
+                break;
+            }
+        }
+
+        return buffer.toOwnedSlice();
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
@@ -1152,7 +1185,9 @@ pub const Server = struct {
         }
 
         // Serve from cache if available
-        if (self.static_cache.get(full_path, size, stat.mtime)) |entry| {
+        if (self.static_cache.get(full_path, size, stat.mtime)) |handle| {
+            defer handle.release();
+            const entry = handle.entry;
             var out_buf: [4096]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
             const out = &writer.interface;
@@ -1241,6 +1276,8 @@ const CacheEntry = struct {
     size: usize,
     mtime: Io.Timestamp,
     content_type: []const u8,
+    ref_count: u32 = 0,
+    stale: bool = false,
 };
 
 /// LRU node for tracking access order (intrusive doubly-linked list)
@@ -1262,6 +1299,17 @@ const StaticFileCache = struct {
     total_bytes: usize,
     max_bytes: usize,
     max_file_size: usize,
+    mutex: std.Thread.Mutex,
+
+    pub const Handle = struct {
+        entry: CacheEntry,
+        cache: *StaticFileCache,
+        path: []const u8,
+
+        pub fn release(self: *Handle) void {
+            self.cache.release(self.path);
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator, max_bytes: usize, max_file_size: usize) StaticFileCache {
         return .{
@@ -1273,6 +1321,7 @@ const StaticFileCache = struct {
             .total_bytes = 0,
             .max_bytes = max_bytes,
             .max_file_size = max_file_size,
+            .mutex = .{},
         };
     }
 
@@ -1287,6 +1336,8 @@ const StaticFileCache = struct {
     }
 
     fn clear(self: *StaticFileCache) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -1304,17 +1355,17 @@ const StaticFileCache = struct {
         self.total_bytes = 0;
     }
 
-    fn remove(self: *StaticFileCache, path: []const u8) void {
-        if (self.entries.fetchRemove(path)) |kv| {
-            self.allocator.free(kv.key);
-            self.allocator.free(kv.value.data);
-            self.total_bytes -= kv.value.data.len;
-        }
-        // Remove from LRU list
+    fn removeLocked(self: *StaticFileCache, path: []const u8) void {
+        // Remove from LRU list first to avoid comparing against freed keys.
         if (self.lru_nodes.fetchRemove(path)) |lru_kv| {
             const node = lru_kv.value;
             self.unlinkNode(node);
             self.allocator.destroy(node);
+        }
+        if (self.entries.fetchRemove(path)) |kv| {
+            self.allocator.free(kv.key);
+            self.allocator.free(kv.value.data);
+            self.total_bytes -= kv.value.data.len;
         }
     }
 
@@ -1353,32 +1404,43 @@ const StaticFileCache = struct {
     /// Evict least recently used entries until we have enough space
     fn evictLru(self: *StaticFileCache, needed_bytes: usize) void {
         var freed: usize = 0;
-        while (freed < needed_bytes and self.lru_tail != null) {
-            const tail = self.lru_tail.?;
-            const path = tail.path;
-            // Get entry size before removing
-            const entry_size = if (self.entries.get(path)) |e| e.data.len else 0;
-            self.remove(path);
-            freed += entry_size;
+        var node = self.lru_tail;
+        while (freed < needed_bytes and node != null) {
+            const current = node.?;
+            node = current.prev;
+            if (self.entries.getPtr(current.path)) |entry| {
+                if (entry.ref_count > 0) continue;
+                const entry_size = entry.data.len;
+                self.removeLocked(current.path);
+                freed += entry_size;
+            }
         }
     }
 
-    fn get(self: *StaticFileCache, path: []const u8, size: usize, mtime: Io.Timestamp) ?CacheEntry {
+    fn get(self: *StaticFileCache, path: []const u8, size: usize, mtime: Io.Timestamp) ?Handle {
         if (!self.enabled()) return null;
-        if (self.entries.get(path)) |entry| {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.entries.getPtr(path)) |entry| {
             if (entry.size == size and entry.mtime.nanoseconds == mtime.nanoseconds) {
                 // Update LRU on access
                 if (self.lru_nodes.get(path)) |node| {
                     self.touchNode(node);
                 }
-                return entry;
+                entry.ref_count += 1;
+                return .{ .entry = entry.*, .cache = self, .path = path };
             }
-            self.remove(path);
+            entry.stale = true;
+            if (entry.ref_count == 0) {
+                self.removeLocked(path);
+            }
         }
         return null;
     }
 
     fn put(self: *StaticFileCache, path: []const u8, entry: CacheEntry) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         if (!self.enabled()) {
             self.allocator.free(entry.data);
             return;
@@ -1386,6 +1448,14 @@ const StaticFileCache = struct {
         if (entry.data.len > self.max_file_size or entry.data.len > self.max_bytes) {
             self.allocator.free(entry.data);
             return;
+        }
+        if (self.entries.getPtr(path)) |existing| {
+            if (existing.ref_count > 0) {
+                existing.stale = true;
+                self.allocator.free(entry.data);
+                return;
+            }
+            self.removeLocked(path);
         }
         // Evict LRU entries instead of clearing everything
         if (self.total_bytes + entry.data.len > self.max_bytes) {
@@ -1413,6 +1483,19 @@ const StaticFileCache = struct {
             self.lru_tail = node;
         }
         try self.lru_nodes.put(self.allocator, key_dup, node);
+    }
+
+    fn release(self: *StaticFileCache, path: []const u8) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.entries.getPtr(path)) |entry| {
+            if (entry.ref_count > 0) {
+                entry.ref_count -= 1;
+            }
+            if (entry.ref_count == 0 and entry.stale) {
+                self.removeLocked(path);
+            }
+        }
     }
 };
 
@@ -1463,6 +1546,19 @@ fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u
         value = value[1..];
     }
     return .{ .key = key, .value = value };
+}
+
+fn parseContentLength(header_section: []const u8) ?usize {
+    var lines = std.mem.splitSequence(u8, header_section, "\r\n");
+    _ = lines.next() orelse return null; // request line
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const header = splitHeaderLine(line) orelse continue;
+        if (std.ascii.eqlIgnoreCase(header.key, "content-length")) {
+            return std.fmt.parseInt(usize, header.value, 10) catch 0;
+        }
+    }
+    return null;
 }
 
 fn getStatusText(status: u16) []const u8 {
@@ -1641,11 +1737,43 @@ test "static file cache hit and invalidation" {
 
     const hit_opt = cache.get("a.txt", payload.len, mtime1);
     try std.testing.expect(hit_opt != null);
-    const hit = hit_opt.?;
+    var handle = hit_opt.?;
+    const hit = handle.entry;
     try std.testing.expectEqual(payload.len, hit.data.len);
     try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
+    handle.release();
 
     const miss = cache.get("a.txt", payload.len, mtime2);
     try std.testing.expect(miss == null);
     try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
+}
+
+test "threaded readRequestData handles partial headers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = allocator,
+    };
+
+    const fds = try std.posix.pipe();
+    defer std.posix.close(fds[0]);
+
+    _ = try std.posix.write(fds[1], "GET / HTTP/1.1\r\nHost: example.com\r\n");
+    _ = try std.posix.write(fds[1], "Content-Length: 5\r\n\r\nhello");
+    std.posix.close(fds[1]);
+
+    const data = try pool.readRequestData(fds[0], allocator);
+    var request = try server.parseRequestFromBuffer(allocator, data);
+    defer request.deinit(allocator);
+    try std.testing.expect(request.body != null);
+    try std.testing.expectEqualStrings("hello", request.body.?);
 }

@@ -1179,6 +1179,10 @@ pub const Context = struct {
         return value.JSValue.exception_val;
     }
 
+    pub fn jitStackOverflow(self: *Context) callconv(.c) value.JSValue {
+        return self.jitThrow();
+    }
+
     /// Get or create the JIT code allocator (lazy initialization)
     pub fn getOrCreateCodeAllocator(self: *Context) !*jit.CodeAllocator {
         if (self.code_allocator) |ca| {

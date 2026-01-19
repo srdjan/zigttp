@@ -37,6 +37,7 @@ const jitDeoptimize = deopt.jitDeoptimize;
 // Context field offsets for JIT code generation
 // These are computed at compile time using @offsetOf
 const CTX_STACK_PTR_OFF: i32 = @intCast(@offsetOf(Context, "stack"));
+const CTX_STACK_LEN_OFF: i32 = @intCast(@offsetOf(Context, "stack") + @sizeOf(*value_mod.JSValue));
 const CTX_SP_OFF: i32 = @intCast(@offsetOf(Context, "sp"));
 const CTX_FP_OFF: i32 = @intCast(@offsetOf(Context, "fp"));
 const CTX_JIT_INTERP_OFF: i32 = @intCast(@offsetOf(Context, "jit_interpreter"));
@@ -127,6 +128,7 @@ pub const BaselineCompiler = struct {
     total_inlined_size: u32,
     inline_exit_label: ?u32,
     inline_is_method: bool,
+    stack_overflow_label: ?u32,
 
     const PendingJump = struct {
         native_offset: u32, // Offset in emitted code where the rel32/imm is
@@ -162,6 +164,7 @@ pub const BaselineCompiler = struct {
             .total_inlined_size = 0,
             .inline_exit_label = null,
             .inline_is_method = false,
+            .stack_overflow_label = null,
         };
     }
 
@@ -769,6 +772,14 @@ pub const BaselineCompiler = struct {
             pc += 1;
 
             pc = try self.compileOpcode(op, pc, code);
+        }
+
+        if (self.stack_overflow_label) |label| {
+            const done_label = self.newLocalLabel();
+            try self.emitJmpToLabel(done_label);
+            try self.markLabel(label);
+            try self.emitStackOverflowExit();
+            try self.markLabel(done_label);
         }
 
         // Emit epilogue if we haven't returned yet
@@ -1546,7 +1557,46 @@ pub const BaselineCompiler = struct {
         }
     }
 
+    fn getStackOverflowLabel(self: *BaselineCompiler) u32 {
+        if (self.stack_overflow_label == null) {
+            self.stack_overflow_label = self.newLocalLabel();
+        }
+        return self.stack_overflow_label.?;
+    }
+
+    fn emitStackCheck(self: *BaselineCompiler) CompileError!void {
+        const ctx = getCtxReg();
+        const sp = getSpCacheReg();
+        const tmp = getReg(.tmp0);
+        const overflow_label = self.getStackOverflowLabel();
+        if (is_x86_64) {
+            self.emitter.movRegMem(tmp, ctx, CTX_STACK_LEN_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(sp, tmp) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ae, overflow_label);
+        } else if (is_aarch64) {
+            self.emitter.ldrImm(tmp, ctx, @intCast(@as(u32, @bitCast(CTX_STACK_LEN_OFF)))) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(sp, tmp) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.hs, overflow_label);
+        }
+    }
+
+    fn emitStackOverflowExit(self: *BaselineCompiler) CompileError!void {
+        const fn_ptr = @intFromPtr(&Context.jitStackOverflow);
+        if (is_x86_64) {
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitEpilogue();
+        } else if (is_aarch64) {
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitEpilogue();
+        }
+    }
+
     fn emitPushReg(self: *BaselineCompiler, val_reg: Register) CompileError!void {
+        try self.emitStackCheck();
         if (is_x86_64) {
             // r12 = cached sp, r13 = cached stack_ptr, r10 = addr
             const sp = getSpCacheReg();
@@ -2099,7 +2149,7 @@ pub const BaselineCompiler = struct {
             self.emitter.ldrImm(.x12, .x10, 0) catch return CompileError.OutOfMemory;
 
             // Pointer tag check: (raw & 0x7) == 1
-            self.emitter.andRegImm(.x11, .x12, 2) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x11, .x12, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
@@ -2110,7 +2160,7 @@ pub const BaselineCompiler = struct {
             // Check MemTag.object in header
             self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
             self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x10, .x10, 0xF) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
@@ -2121,7 +2171,7 @@ pub const BaselineCompiler = struct {
 
             // Load function data pointer and verify it's a pointer
             self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x9, .x10, 2) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x9, .x10, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
@@ -2333,7 +2383,7 @@ pub const BaselineCompiler = struct {
             self.emitter.addRegRegShift(.x10, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
             self.emitter.ldrImm(.x12, .x10, 0) catch return CompileError.OutOfMemory;
 
-            self.emitter.andRegImm(.x11, .x12, 2) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x11, .x12, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, deopt_label);
 
@@ -2342,7 +2392,7 @@ pub const BaselineCompiler = struct {
 
             self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
             self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x10, .x10, 0xF) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, deopt_label);
 
@@ -2351,7 +2401,7 @@ pub const BaselineCompiler = struct {
             try self.emitBcondToLabel(.ne, deopt_label);
 
             self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x9, .x10, 2) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x9, .x10, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, deopt_label);
 

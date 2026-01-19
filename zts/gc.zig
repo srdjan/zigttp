@@ -71,7 +71,11 @@ pub const TenuredHeap = struct {
     /// Mark bits: 1 bit per object slot, densely packed for SIMD
     mark_bitvector: []u64,
     /// Object slots (indexed by mark bits)
-    objects: std.ArrayList(*anyopaque),
+    objects: std.ArrayList(?*anyopaque),
+    /// Pointer -> slot index mapping for fast marking
+    object_index: std.AutoHashMap(*anyopaque, usize),
+    /// Free slot indices for reuse
+    free_indices: std.ArrayListUnmanaged(usize),
     /// Free list heads by size class
     free_lists: [16]?*FreeBlock,
     /// Total allocated bytes
@@ -93,6 +97,8 @@ pub const TenuredHeap = struct {
         return .{
             .mark_bitvector = bitvector,
             .objects = .empty,
+            .object_index = std.AutoHashMap(*anyopaque, usize).init(allocator),
+            .free_indices = .{},
             .free_lists = [_]?*FreeBlock{null} ** 16,
             .allocated = 0,
             .last_sweep_freed = 0,
@@ -102,13 +108,21 @@ pub const TenuredHeap = struct {
 
     pub fn deinit(self: *TenuredHeap) void {
         self.objects.deinit(self.allocator);
+        self.object_index.deinit();
+        self.free_indices.deinit(self.allocator);
         self.allocator.free(self.mark_bitvector);
     }
 
     /// Register an object in tenured space
     pub fn registerObject(self: *TenuredHeap, ptr: *anyopaque) !usize {
+        if (self.free_indices.popOrNull()) |idx| {
+            self.objects.items[idx] = ptr;
+            try self.object_index.put(ptr, idx);
+            return idx;
+        }
         const idx = self.objects.items.len;
         try self.objects.append(self.allocator, ptr);
+        try self.object_index.put(ptr, idx);
         return idx;
     }
 
@@ -119,6 +133,19 @@ pub const TenuredHeap = struct {
         if (word_idx < self.mark_bitvector.len) {
             self.mark_bitvector[word_idx] |= (@as(u64, 1) << bit_idx);
         }
+    }
+
+    pub fn isMarked(self: *const TenuredHeap, idx: usize) bool {
+        const word_idx = idx / 64;
+        const bit_idx: u6 = @intCast(idx % 64);
+        if (word_idx < self.mark_bitvector.len) {
+            return (self.mark_bitvector[word_idx] & (@as(u64, 1) << bit_idx)) != 0;
+        }
+        return false;
+    }
+
+    pub fn getIndex(self: *const TenuredHeap, ptr: *anyopaque) ?usize {
+        return self.object_index.get(ptr);
     }
 
     /// Check if object is marked
@@ -179,24 +206,28 @@ pub const TenuredHeap = struct {
             const obj_idx = word_idx * 64 + bit_idx;
 
             if (obj_idx < self.objects.items.len) {
-                const obj = self.objects.items[obj_idx];
+                const obj_opt = self.objects.items[obj_idx];
+                if (obj_opt) |obj| {
+                    // Call optional callback first (for finalizers)
+                    if (free_callback) |cb| {
+                        cb(obj);
+                    }
 
-                // Call optional callback first (for finalizers)
-                if (free_callback) |cb| {
-                    cb(obj);
+                    // CRITICAL: Actually free the memory to prevent leak
+                    // Objects in tenured were allocated via heap, so we must use heap.free()
+                    if (heap_ptr) |h| {
+                        h.free(obj);
+                    } else {
+                        // Cannot safely free without heap - objects have MemBlockHeader
+                        // This is a programming error: majorGC should be called with heap_ptr
+                        std.log.warn("GC sweep: cannot free object without heap reference (memory leak)", .{});
+                    }
+
+                    _ = self.object_index.remove(obj);
+                    self.objects.items[obj_idx] = null;
+                    self.free_indices.append(self.allocator, obj_idx) catch {};
+                    self.last_sweep_freed += 1;
                 }
-
-                // CRITICAL: Actually free the memory to prevent leak
-                // Objects in tenured were allocated via heap, so we must use heap.free()
-                if (heap_ptr) |h| {
-                    h.free(obj);
-                } else {
-                    // Cannot safely free without heap - objects have MemBlockHeader
-                    // This is a programming error: majorGC should be called with heap_ptr
-                    std.log.warn("GC sweep: cannot free object without heap reference (memory leak)", .{});
-                }
-
-                self.last_sweep_freed += 1;
             }
 
             bits &= bits - 1; // Clear lowest set bit
@@ -647,22 +678,98 @@ pub const GC = struct {
 
     /// Evacuate surviving nursery objects to tenured space
     fn evacuateSurvivors(self: *GC) void {
-        // Walk through all objects that were pushed to gray stack (marked as live)
-        // For each object in nursery, copy to tenured and record forwarding pointer
+        var worklist = std.ArrayList(*anyopaque).init(self.allocator);
+        defer worklist.deinit();
+
+        // Evacuate nursery roots and enqueue new copies for scanning.
         for (self.root_set.iterator()) |root| {
             if (root.isPtr()) {
                 const ptr: *anyopaque = @ptrCast(root.toPtr(u8));
-                if (self.isInNursery(ptr)) {
-                    _ = self.evacuateObject(ptr) catch continue;
-                }
+                self.evacuateIfNursery(ptr, &worklist);
             }
         }
 
-        // Also evacuate objects from remembered set
+        // Scan remembered-set entries (tenured objects) for nursery references.
         for (self.remembered_set.entries.items) |ptr| {
-            if (self.isInNursery(ptr)) {
-                _ = self.evacuateObject(ptr) catch continue;
+            self.scanObjectForEvacuation(ptr, &worklist);
+        }
+
+        // Cheney-style scan of evacuated objects to find transitive nursery refs.
+        var i: usize = 0;
+        while (i < worklist.items.len) : (i += 1) {
+            self.scanObjectForEvacuation(worklist.items[i], &worklist);
+        }
+    }
+
+    fn evacuateIfNursery(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        if (!self.isInNursery(ptr)) return;
+        if (self.getForwardingPointer(ptr)) |_| return;
+        const new_ptr = self.evacuateObject(ptr) catch return;
+        worklist.append(new_ptr) catch {};
+    }
+
+    fn scanObjectForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
+        switch (header.tag) {
+            .object => self.scanJSObjectForEvacuation(ptr, worklist),
+            .value_array => self.scanValueArrayForEvacuation(ptr, header.sizeBytes(), worklist),
+            .varref => self.scanVarRefForEvacuation(ptr, worklist),
+            else => {},
+        }
+    }
+
+    fn scanJSObjectForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        const obj: *object.JSObject = @ptrCast(@alignCast(ptr));
+
+        if (obj.prototype) |proto| {
+            self.evacuateIfNursery(@ptrCast(proto), worklist);
+        }
+
+        for (&obj.inline_slots) |slot| {
+            if (slot.isPtr()) {
+                const child_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
+                self.evacuateIfNursery(child_ptr, worklist);
             }
+        }
+
+        if (obj.overflow_slots) |slots| {
+            for (slots[0..obj.overflow_capacity]) |slot| {
+                if (slot.isPtr()) {
+                    const child_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
+                    self.evacuateIfNursery(child_ptr, worklist);
+                }
+            }
+        }
+    }
+
+    fn scanValueArrayForEvacuation(self: *GC, ptr: *anyopaque, size_bytes: usize, worklist: *std.ArrayList(*anyopaque)) void {
+        const header_size = @sizeOf(heap.MemBlockHeader);
+        const data_size = size_bytes - header_size;
+        const num_values = data_size / @sizeOf(value.JSValue);
+
+        if (num_values == 0) return;
+
+        const values_ptr: [*]value.JSValue = @ptrCast(@alignCast(@as([*]u8, @ptrCast(ptr)) + header_size));
+
+        for (values_ptr[0..num_values]) |val| {
+            if (val.isPtr()) {
+                const child_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+                self.evacuateIfNursery(child_ptr, worklist);
+            }
+        }
+    }
+
+    fn scanVarRefForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        const upvalue: *object.Upvalue = @ptrCast(@alignCast(ptr));
+
+        switch (upvalue.location) {
+            .closed => |val| {
+                if (val.isPtr()) {
+                    const child_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
+                    self.evacuateIfNursery(child_ptr, worklist);
+                }
+            },
+            .open => {},
         }
     }
 
@@ -723,8 +830,10 @@ pub const GC = struct {
         }
 
         // Update pointers within tenured objects
-        for (self.tenured.objects.items) |obj_ptr| {
-            self.updateObjectPointers(obj_ptr);
+        for (self.tenured.objects.items) |obj_opt| {
+            if (obj_opt) |obj_ptr| {
+                self.updateObjectPointers(obj_ptr);
+            }
         }
     }
 
@@ -868,7 +977,7 @@ pub const GC = struct {
     /// Mark objects from remembered set
     fn markRememberedSet(self: *GC) void {
         for (self.remembered_set.entries.items) |ptr| {
-            self.gray_stack.push(ptr) catch {};
+            self.markPtr(ptr);
         }
     }
 
@@ -879,13 +988,30 @@ pub const GC = struct {
         }
     }
 
+    fn markTenured(self: *GC, ptr: *anyopaque) bool {
+        const idx = self.tenured.getIndex(ptr) orelse return false;
+        if (self.tenured.isMarked(idx)) return false;
+        self.tenured.setMark(idx);
+        return true;
+    }
+
+    fn markPtr(self: *GC, ptr: *anyopaque) void {
+        if (self.isInTenured(ptr)) {
+            if (self.markTenured(ptr)) {
+                self.gray_stack.push(ptr) catch {};
+            }
+            return;
+        }
+        // Nursery or unknown pointer: push for scanning
+        self.gray_stack.push(ptr) catch {};
+    }
+
     /// Mark a value (if it's a pointer, add to gray stack)
     fn markValue(self: *GC, val: value.JSValue) void {
         if (val.isPtr()) {
             // toPtr returns *T, so we use u8 to get *u8 then cast to *anyopaque
             const ptr: *anyopaque = @ptrCast(val.toPtr(u8));
-            // Add to gray stack for processing
-            self.gray_stack.push(ptr) catch {};
+            self.markPtr(ptr);
         }
     }
 
@@ -914,24 +1040,18 @@ pub const GC = struct {
 
         // Mark prototype (if present)
         if (obj.prototype) |proto| {
-            self.gray_stack.push(@ptrCast(proto)) catch {};
+            self.markPtr(@ptrCast(proto));
         }
 
         // Scan inline slots - each may contain pointer values
         for (&obj.inline_slots) |slot| {
-            if (slot.isPtr()) {
-                const child_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
-                self.gray_stack.push(child_ptr) catch {};
-            }
+            self.markValue(slot);
         }
 
         // Scan overflow slots (if present)
         if (obj.overflow_slots) |slots| {
             for (slots[0..obj.overflow_capacity]) |slot| {
-                if (slot.isPtr()) {
-                    const child_ptr: *anyopaque = @ptrCast(slot.toPtr(u8));
-                    self.gray_stack.push(child_ptr) catch {};
-                }
+                self.markValue(slot);
             }
         }
     }
@@ -948,10 +1068,7 @@ pub const GC = struct {
         const values_ptr: [*]value.JSValue = @ptrCast(@alignCast(@as([*]u8, @ptrCast(ptr)) + header_size));
 
         for (values_ptr[0..num_values]) |val| {
-            if (val.isPtr()) {
-                const child_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
-                self.gray_stack.push(child_ptr) catch {};
-            }
+            self.markValue(val);
         }
     }
 
@@ -962,10 +1079,7 @@ pub const GC = struct {
         // If closed, the value is stored inline
         switch (upvalue.location) {
             .closed => |val| {
-                if (val.isPtr()) {
-                    const child_ptr: *anyopaque = @ptrCast(val.toPtr(u8));
-                    self.gray_stack.push(child_ptr) catch {};
-                }
+                self.markValue(val);
             },
             .open => {}, // Open upvalues point to stack, not heap
         }
@@ -975,7 +1089,7 @@ pub const GC = struct {
     /// Call this when storing a pointer into an old-generation object
     pub fn writeBarrier(self: *GC, old_ptr: *anyopaque, new_val: value.JSValue) !void {
         if (new_val.isPtr()) {
-            const new_ptr = new_val.toPtr(*anyopaque);
+            const new_ptr: *anyopaque = @ptrCast(new_val.toPtr(u8));
             // Check if old is in tenured and new is in nursery
             if (self.isInTenured(old_ptr) and self.isInNursery(new_ptr)) {
                 try self.remembered_set.add(old_ptr);
