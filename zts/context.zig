@@ -743,6 +743,20 @@ pub const Context = struct {
         return obj.toValue();
     }
 
+    /// JIT helper: create object with pre-compiled literal shape
+    /// Used for object literals with static keys - O(1) hidden class allocation
+    pub fn jitNewObjectLiteral(self: *Context, shape_idx: u16) callconv(.c) value.JSValue {
+        // Look up pre-built hidden class from materialized shapes
+        const class_idx = self.getLiteralShape(shape_idx) orelse {
+            // Fallback: create empty object if shape not found
+            const obj = self.createObject(null) catch return self.jitThrow();
+            return obj.toValue();
+        };
+        // Create object with final class directly (no transitions needed)
+        const obj = self.createObjectWithClass(class_idx, null) catch return self.jitThrow();
+        return obj.toValue();
+    }
+
     /// JIT helper: set property by atom index
     /// Returns the assigned value (or exception_val on error).
     pub fn jitPutField(self: *Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {

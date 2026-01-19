@@ -1563,6 +1563,21 @@ pub const BaselineCompiler = struct {
                 try self.emitNewArray(length);
             },
 
+            .new_object_literal => {
+                const shape_idx = readU16(code, new_pc);
+                new_pc += 2;
+                const prop_count = code[new_pc];
+                new_pc += 1;
+                _ = prop_count; // Used for verification in debug builds
+                try self.emitNewObjectLiteral(shape_idx);
+            },
+
+            .set_slot => {
+                const slot_idx = code[new_pc];
+                new_pc += 1;
+                try self.emitSetSlot(slot_idx);
+            },
+
             .get_field => {
                 const atom_idx = readU16(code, new_pc);
                 new_pc += 2;
@@ -3619,6 +3634,54 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
+        }
+    }
+
+    /// Emit code to create object with pre-compiled literal shape via helper
+    fn emitNewObjectLiteral(self: *BaselineCompiler, shape_idx: u16) CompileError!void {
+        const fn_ptr = @intFromPtr(&Context.jitNewObjectLiteral);
+        if (is_x86_64) {
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rsi, shape_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitPushReg(.rax);
+        } else if (is_aarch64) {
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x1, shape_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitPushReg(.x0);
+        }
+    }
+
+    /// Emit code for direct slot write (used for pre-compiled object literals)
+    /// Stack: [..., obj, val] -> [...]
+    fn emitSetSlot(self: *BaselineCompiler, slot_idx: u8) CompileError!void {
+        // Calculate the offset into inline_slots array
+        const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot_idx) * 8;
+
+        if (is_x86_64) {
+            // Pop value into scratch register
+            try self.emitPopReg(.rax);
+            // Pop object pointer into another register
+            try self.emitPopReg(.rcx);
+            // Extract object pointer from JSValue (clear low 3 tag bits)
+            // Pointers are tagged with (raw & 0x7) == 1, so clear with & -8
+            self.emitter.andRegImm32(.rcx, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Store value to obj->inline_slots[slot_idx]
+            self.emitter.movMemReg(.rcx, slot_offset, .rax) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // Pop value into x0
+            try self.emitPopReg(.x0);
+            // Pop object into x1
+            try self.emitPopReg(.x1);
+            // Extract object pointer from JSValue (clear low 3 tag bits)
+            // Use lsr/lsl pair: shift right 3, then left 3
+            self.emitter.lsrRegImm(.x1, .x1, 3) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x1, .x1, 3) catch return CompileError.OutOfMemory;
+            // Store value to obj->inline_slots[slot_idx]
+            self.emitter.strImm(.x0, .x1, slot_offset) catch return CompileError.OutOfMemory;
         }
     }
 
