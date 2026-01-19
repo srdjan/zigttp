@@ -88,7 +88,9 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 
 **Binary Search for Large Objects** (`zts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
 
-**JIT Baseline IC Integration** (`zts/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
+**JIT Baseline IC Integration** (`zts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
+
+**JIT Object Literal Shapes** (`zts/context.zig:746-759`, `zts/jit/baseline.zig:3640-3685`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead. Supports both x86-64 and ARM64.
 
 #### String Optimizations
 
