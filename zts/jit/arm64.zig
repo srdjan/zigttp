@@ -518,13 +518,15 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
-    /// AND Xd, Xn, #imm (AND with immediate)
-    /// Note: ARM64 AND immediate uses a bitmask encoding, this only supports simple masks
-    pub fn andRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
-        // For simple masks like 0x1F (5 bits), use UBFX or manual AND
-        // For 0x1F (5 bits set): N=1, immr=0, imms=4 gives a 5-bit mask
-        // AND Xd, Xn, #0x1F
-        const imms: u6 = imm; // For mask 0x1F, imms=4 (5-1 bits)
+    /// AND Xd, Xn, #mask (AND with immediate)
+    /// Note: ARM64 AND immediate uses a bitmask encoding, this only supports low-bit masks
+    /// like 0x1, 0x3, 0x7, 0xF, 0x1F.
+    pub fn andRegImm(self: *Arm64Emitter, dst: Register, src: Register, mask: u6) !void {
+        std.debug.assert(mask != 0);
+        const mask_u7: u7 = mask;
+        std.debug.assert((mask_u7 & (mask_u7 + 1)) == 0);
+        const ones: u6 = @intCast(@popCount(mask));
+        const imms: u6 = ones - 1;
         const inst: u32 = 0x92400000 |
             (@as(u32, imms) << 10) |
             (@as(u32, src.encode()) << 5) |

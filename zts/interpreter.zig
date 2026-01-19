@@ -1819,8 +1819,8 @@ pub const Interpreter = struct {
                     self.pc += 2;
                     // Get bytecode pointer from constant pool
                     const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+                    if (!bc_val.isExternPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
                     // Create function object
                     const root_class_idx = self.ctx.root_class_idx;
                     const func_obj = try object.JSObject.createBytecodeFunction(
@@ -1837,8 +1837,8 @@ pub const Interpreter = struct {
                     self.pc += 2;
                     // Get bytecode pointer from constant pool
                     const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+                    if (!bc_val.isExternPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
                     // Create async function object (marked as async via slot 3)
                     const root_class_idx = self.ctx.root_class_idx;
                     const func_obj = try object.JSObject.createBytecodeFunction(
@@ -2520,8 +2520,8 @@ pub const Interpreter = struct {
 
                     // Get bytecode pointer from constant pool
                     const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toPtr(bytecode.FunctionBytecode);
+                    if (!bc_val.isExternPtr()) return error.TypeError;
+                    const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
 
                     // Allocate upvalue array
                     const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);

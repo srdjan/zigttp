@@ -173,8 +173,7 @@ pub const CodeGen = struct {
     }
 
     pub fn deinit(self: *CodeGen) void {
-        // Free heap-allocated objects stored in constants before freeing the array
-        self.freeConstantsContents(self.constants.items);
+        // Constants may be retained by runtime-owned FunctionBytecode; don't free here.
         self.code.deinit(self.allocator);
         self.constants.deinit(self.allocator);
         self.upvalue_info.deinit(self.allocator);
@@ -193,11 +192,8 @@ pub const CodeGen = struct {
     /// Free heap-allocated objects stored in constants array (FunctionBytecode, Float64Box)
     fn freeConstantsContents(self: *CodeGen, constants: []const JSValue) void {
         for (constants) |val| {
-            if (!val.isPtr()) continue;
-
-            // Check if it's a FunctionBytecode (nested function)
-            if (val.isFunction()) {
-                const func_bc = val.toPtr(FunctionBytecode);
+            if (val.isExternPtr()) {
+                const func_bc = val.toExternPtr(FunctionBytecode);
                 // Recursively free nested constants
                 self.freeConstantsContents(func_bc.constants);
                 // Free the duped slices
@@ -1253,7 +1249,7 @@ pub const CodeGen = struct {
         self.ic_cache_idx = saved_ic_cache_idx;
 
         // Add function bytecode to parent constants and emit opcode
-        const func_idx = try self.addConstant(JSValue.fromPtr(func_bc));
+        const func_idx = try self.addConstant(JSValue.fromExternPtr(func_bc));
         const upvalue_count: u8 = @intCast(scope.upvalues.items.len);
 
         if (upvalue_count > 0) {

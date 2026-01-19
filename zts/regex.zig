@@ -58,13 +58,13 @@ pub const Regex = struct {
 
     /// Execute and return all matches (for global flag)
     pub fn execAll(self: *const Regex, allocator: std.mem.Allocator, input: []const u8) ![]Match {
-        var matches = std.ArrayList(Match).init(allocator);
-        errdefer matches.deinit();
+        var matches: std.ArrayList(Match) = .empty;
+        errdefer matches.deinit(allocator);
 
         var pos: usize = 0;
         while (pos <= input.len) {
             if (self.matchAt(input, pos)) |end| {
-                try matches.append(Match{
+                try matches.append(allocator, Match{
                     .start = pos,
                     .end = end,
                     .input = input,
@@ -76,7 +76,7 @@ pub const Regex = struct {
             }
         }
 
-        return matches.toOwnedSlice();
+        return matches.toOwnedSlice(allocator);
     }
 
     /// Try to match the pattern starting at a specific position

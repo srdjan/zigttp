@@ -3521,7 +3521,7 @@ pub fn createSymbol(allocator: std.mem.Allocator, description: ?[]const u8) !val
         .description_ptr = if (description) |d| d.ptr else null,
         .description_len = if (description) |d| @intCast(d.len) else 0,
     };
-    return value.JSValue.fromPtr(symbol_box);
+    return value.JSValue.fromExternPtr(symbol_box);
 }
 
 /// Create a well-known symbol
@@ -3533,7 +3533,7 @@ pub fn createWellKnownSymbol(allocator: std.mem.Allocator, which: value.JSValue.
         .description_ptr = description.ptr,
         .description_len = @intCast(description.len),
     };
-    return value.JSValue.fromPtr(symbol_box);
+    return value.JSValue.fromExternPtr(symbol_box);
 }
 
 /// Symbol() - Create a new unique symbol
@@ -3683,7 +3683,7 @@ pub fn weakMapConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     else
         ctx.allocator.create(WeakMapData) catch return value.JSValue.undefined_val;
     data.* = WeakMapData.init(data_allocator);
-    weak_map.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromPtr(data);
+    weak_map.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromExternPtr(data);
 
     // If iterable argument provided, add entries
     if (args.len > 0 and args[0].isObject()) {
@@ -3702,8 +3702,8 @@ pub fn weakMapGet(_: *context.Context, this: value.JSValue, args: []const value.
     if (map_obj.class_id != .weak_map) return value.JSValue.undefined_val;
 
     const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.undefined_val;
-    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+    if (!data_val.isExternPtr()) return value.JSValue.undefined_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toExternPtr(WeakMapData)));
 
     return data.get(args[0]) orelse value.JSValue.undefined_val;
 }
@@ -3717,8 +3717,8 @@ pub fn weakMapSet(_: *context.Context, this: value.JSValue, args: []const value.
     if (map_obj.class_id != .weak_map) return value.JSValue.undefined_val;
 
     const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.undefined_val;
-    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+    if (!data_val.isExternPtr()) return value.JSValue.undefined_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toExternPtr(WeakMapData)));
 
     data.set(args[0], args[1]) catch return value.JSValue.undefined_val;
     return this; // Return the WeakMap for chaining
@@ -3733,8 +3733,8 @@ pub fn weakMapHas(_: *context.Context, this: value.JSValue, args: []const value.
     if (map_obj.class_id != .weak_map) return value.JSValue.false_val;
 
     const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.false_val;
-    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+    if (!data_val.isExternPtr()) return value.JSValue.false_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toExternPtr(WeakMapData)));
 
     return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
@@ -3748,8 +3748,8 @@ pub fn weakMapDelete(_: *context.Context, this: value.JSValue, args: []const val
     if (map_obj.class_id != .weak_map) return value.JSValue.false_val;
 
     const data_val = map_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.false_val;
-    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toPtr(WeakMapData)));
+    if (!data_val.isExternPtr()) return value.JSValue.false_val;
+    const data: *WeakMapData = @ptrCast(@alignCast(data_val.toExternPtr(WeakMapData)));
 
     return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
@@ -3804,7 +3804,7 @@ pub fn weakSetConstructor(ctx: *context.Context, _: value.JSValue, args: []const
     else
         ctx.allocator.create(WeakSetData) catch return value.JSValue.undefined_val;
     data.* = WeakSetData.init(data_allocator);
-    weak_set.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromPtr(data);
+    weak_set.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA] = value.JSValue.fromExternPtr(data);
 
     // If iterable argument provided, add entries
     if (args.len > 0 and args[0].isObject()) {
@@ -3823,8 +3823,8 @@ pub fn weakSetAdd(_: *context.Context, this: value.JSValue, args: []const value.
     if (set_obj.class_id != .weak_set) return value.JSValue.undefined_val;
 
     const data_val = set_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.undefined_val;
-    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
+    if (!data_val.isExternPtr()) return value.JSValue.undefined_val;
+    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toExternPtr(WeakSetData)));
 
     data.add(args[0]) catch return value.JSValue.undefined_val;
     return this; // Return the WeakSet for chaining
@@ -3839,8 +3839,8 @@ pub fn weakSetHas(_: *context.Context, this: value.JSValue, args: []const value.
     if (set_obj.class_id != .weak_set) return value.JSValue.false_val;
 
     const data_val = set_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.false_val;
-    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
+    if (!data_val.isExternPtr()) return value.JSValue.false_val;
+    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toExternPtr(WeakSetData)));
 
     return if (data.has(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
@@ -3854,8 +3854,8 @@ pub fn weakSetDelete(_: *context.Context, this: value.JSValue, args: []const val
     if (set_obj.class_id != .weak_set) return value.JSValue.false_val;
 
     const data_val = set_obj.inline_slots[object.JSObject.Slots.WEAK_COLLECTION_DATA];
-    if (!data_val.isPtr()) return value.JSValue.false_val;
-    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toPtr(WeakSetData)));
+    if (!data_val.isExternPtr()) return value.JSValue.false_val;
+    const data: *WeakSetData = @ptrCast(@alignCast(data_val.toExternPtr(WeakSetData)));
 
     return if (data.delete(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }

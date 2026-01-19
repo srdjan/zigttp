@@ -1480,10 +1480,10 @@ pub const AtomTable = struct {
     /// Takes a set of atoms that are still in use (referenced by live objects)
     pub fn pruneUnused(self: *AtomTable, used_atoms: *const std.AutoHashMap(object.Atom, void)) void {
         // Build list of keys to remove (can't remove during iteration)
-        var to_remove = std.ArrayList([]const u8).init(self.allocator);
-        var atoms_to_remove = std.ArrayList(object.Atom).init(self.allocator);
-        defer to_remove.deinit();
-        defer atoms_to_remove.deinit();
+        var to_remove: std.ArrayList([]const u8) = .empty;
+        var atoms_to_remove: std.ArrayList(object.Atom) = .empty;
+        defer to_remove.deinit(self.allocator);
+        defer atoms_to_remove.deinit(self.allocator);
 
         var it = self.strings.iterator();
         while (it.next()) |entry| {
@@ -1493,8 +1493,8 @@ pub const AtomTable = struct {
 
             // Check if this dynamic atom is still referenced
             if (!used_atoms.contains(atom)) {
-                to_remove.append(entry.key_ptr.*) catch continue;
-                atoms_to_remove.append(atom) catch continue;
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+                atoms_to_remove.append(self.allocator, atom) catch continue;
             }
         }
 

@@ -16,6 +16,7 @@ pub const JSValue = packed struct {
         ptr = 1, // Heap object pointer
         special = 3, // Bool/null/undefined/exception
         short_float = 5, // Short float (64-bit mode)
+        extern_ptr = 7, // Non-GC external pointer (internal slots)
     };
 
     // Special values: tag 3 in lower 3 bits, payload in upper bits
@@ -43,7 +44,7 @@ pub const JSValue = packed struct {
         return .{ .raw = @as(u64, as_u32) << 1 };
     }
 
-    /// Check if value is a pointer
+    /// Check if value is a GC-managed pointer
     pub inline fn isPtr(self: JSValue) bool {
         return (self.raw & 0x7) == 1;
     }
@@ -56,6 +57,22 @@ pub const JSValue = packed struct {
     /// Extract pointer (unsafe - caller must verify isPtr)
     pub inline fn toPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isPtr());
+        return @ptrFromInt(self.raw & ~@as(u64, 0x7));
+    }
+
+    /// Check if value is a non-GC external pointer
+    pub inline fn isExternPtr(self: JSValue) bool {
+        return (self.raw & 0x7) == 7;
+    }
+
+    /// Create value from external pointer
+    pub inline fn fromExternPtr(ptr: *anyopaque) JSValue {
+        return .{ .raw = @intFromPtr(ptr) | 7 };
+    }
+
+    /// Extract external pointer (unsafe - caller must verify isExternPtr)
+    pub inline fn toExternPtr(self: JSValue, comptime T: type) *T {
+        std.debug.assert(self.isExternPtr());
         return @ptrFromInt(self.raw & ~@as(u64, 0x7));
     }
 
@@ -197,6 +214,10 @@ pub const JSValue = packed struct {
 
     /// Check if value is a symbol
     pub inline fn isSymbol(self: JSValue) bool {
+        if (self.isExternPtr()) {
+            const header = self.toExternPtr(u32);
+            return ((header.* >> 1) & 0xF) == 8; // MemTag.symbol
+        }
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
         return ((header.* >> 1) & 0xF) == 8; // MemTag.symbol
@@ -205,14 +226,20 @@ pub const JSValue = packed struct {
     /// Get symbol ID (unsafe - caller must verify isSymbol)
     pub inline fn getSymbolId(self: JSValue) u32 {
         std.debug.assert(self.isSymbol());
-        const box = self.toPtr(SymbolBox);
+        const box = if (self.isExternPtr())
+            self.toExternPtr(SymbolBox)
+        else
+            self.toPtr(SymbolBox);
         return box.id;
     }
 
     /// Get symbol description (unsafe - caller must verify isSymbol)
     pub inline fn getSymbolDescription(self: JSValue) ?[]const u8 {
         std.debug.assert(self.isSymbol());
-        const box = self.toPtr(SymbolBox);
+        const box = if (self.isExternPtr())
+            self.toExternPtr(SymbolBox)
+        else
+            self.toPtr(SymbolBox);
         return box.getDescription();
     }
 
@@ -440,6 +467,19 @@ test "JSValue pointer encoding" {
     try std.testing.expect(!ptr_val.isSpecial());
 
     const recovered = ptr_val.toPtr(u64);
+    try std.testing.expectEqual(&dummy, recovered);
+}
+
+test "JSValue extern pointer encoding" {
+    var dummy: u64 = 0x87654321;
+    const ptr_val = JSValue.fromExternPtr(&dummy);
+
+    try std.testing.expect(ptr_val.isExternPtr());
+    try std.testing.expect(!ptr_val.isPtr());
+    try std.testing.expect(!ptr_val.isInt());
+    try std.testing.expect(!ptr_val.isSpecial());
+
+    const recovered = ptr_val.toExternPtr(u64);
     try std.testing.expectEqual(&dummy, recovered);
 }
 

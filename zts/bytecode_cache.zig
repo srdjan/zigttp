@@ -114,11 +114,11 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
 
     // Check for FunctionBytecode by magic number (val.isFunction() doesn't work
     // for parser-created FunctionBytecode because it uses BytecodeHeader, not MemBlockHeader)
-    if (val.isPtr()) {
-        const ptr = val.toPtr(u32);
+    if (val.isExternPtr()) {
+        const ptr = val.toExternPtr(u32);
         if (ptr.* == bytecode.MAGIC) {
             // This is a FunctionBytecode - magic matches
-            const func = val.toPtr(bytecode.FunctionBytecode);
+            const func = val.toExternPtr(bytecode.FunctionBytecode);
             try writer.writeByte(@intFromEnum(ConstantTag.nested_function));
             try serializeFunctionBytecode(func, writer, allocator);
             return;
@@ -126,7 +126,7 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
     }
 
     // Unknown pointer type - serialize as undefined
-    if (val.isPtr()) {
+    if (val.isPtr() or val.isExternPtr()) {
         try writer.writeByte(@intFromEnum(ConstantTag.special));
         try writer.writeByte(@intFromEnum(SpecialCode.undefined_val));
     }
@@ -235,7 +235,7 @@ fn deserializeConstant(
         },
         .nested_function => {
             const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
-            return value.JSValue.fromPtr(func);
+            return value.JSValue.fromExternPtr(func);
         },
     }
 }
@@ -1002,8 +1002,8 @@ pub fn collectAtoms(func: *const bytecode.FunctionBytecode, allocator: std.mem.A
 
     // Recursively collect atoms from nested functions in constants
     for (func.constants) |constant| {
-        if (constant.isFunction()) {
-            const nested_func = constant.toPtr(bytecode.FunctionBytecode);
+        if (constant.isExternPtr()) {
+            const nested_func = constant.toExternPtr(bytecode.FunctionBytecode);
             const nested_atoms = try collectAtoms(nested_func, allocator);
             defer allocator.free(nested_atoms);
             for (nested_atoms) |atom| {
@@ -1140,8 +1140,8 @@ pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRe
 
     // Recursively remap nested functions in constants
     for (func.constants) |constant| {
-        if (constant.isFunction()) {
-            const nested_func = constant.toPtr(bytecode.FunctionBytecode);
+        if (constant.isExternPtr()) {
+            const nested_func = constant.toExternPtr(bytecode.FunctionBytecode);
             remapBytecodeAtoms(nested_func, remap);
         }
     }

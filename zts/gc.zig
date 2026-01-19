@@ -115,7 +115,9 @@ pub const TenuredHeap = struct {
 
     /// Register an object in tenured space
     pub fn registerObject(self: *TenuredHeap, ptr: *anyopaque) !usize {
-        if (self.free_indices.popOrNull()) |idx| {
+        if (self.free_indices.items.len != 0) {
+            const idx = self.free_indices.items[self.free_indices.items.len - 1];
+            self.free_indices.items.len -= 1;
             self.objects.items[idx] = ptr;
             try self.object_index.put(ptr, idx);
             return idx;
@@ -133,15 +135,6 @@ pub const TenuredHeap = struct {
         if (word_idx < self.mark_bitvector.len) {
             self.mark_bitvector[word_idx] |= (@as(u64, 1) << bit_idx);
         }
-    }
-
-    pub fn isMarked(self: *const TenuredHeap, idx: usize) bool {
-        const word_idx = idx / 64;
-        const bit_idx: u6 = @intCast(idx % 64);
-        if (word_idx < self.mark_bitvector.len) {
-            return (self.mark_bitvector[word_idx] & (@as(u64, 1) << bit_idx)) != 0;
-        }
-        return false;
     }
 
     pub fn getIndex(self: *const TenuredHeap, ptr: *anyopaque) ?usize {
@@ -678,8 +671,8 @@ pub const GC = struct {
 
     /// Evacuate surviving nursery objects to tenured space
     fn evacuateSurvivors(self: *GC) void {
-        var worklist = std.ArrayList(*anyopaque).init(self.allocator);
-        defer worklist.deinit();
+        var worklist: std.ArrayList(*anyopaque) = .empty;
+        defer worklist.deinit(self.allocator);
 
         // Evacuate nursery roots and enqueue new copies for scanning.
         for (self.root_set.iterator()) |root| {
@@ -705,7 +698,7 @@ pub const GC = struct {
         if (!self.isInNursery(ptr)) return;
         if (self.getForwardingPointer(ptr)) |_| return;
         const new_ptr = self.evacuateObject(ptr) catch return;
-        worklist.append(new_ptr) catch {};
+        worklist.append(self.allocator, new_ptr) catch {};
     }
 
     fn scanObjectForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {

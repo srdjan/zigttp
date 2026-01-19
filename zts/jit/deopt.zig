@@ -90,6 +90,7 @@ pub export fn jitDeoptimize(ctx: *context.Context, bytecode_offset: u32, reason:
     const func = interp.current_func orelse {
         return value.JSValue.undefined_val.raw;
     };
+    std.log.debug("jit deopt: reason={} offset={d} tier={}", .{ deopt_reason, bytecode_offset, func.tier });
 
     // Mark function for recompilation with updated type feedback
     // The next time this function is called, it will be re-JITted with

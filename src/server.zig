@@ -46,6 +46,7 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     return buffer[0..total_read];
 }
 
+
 // ============================================================================
 // Fast Header Normalization
 // ============================================================================
@@ -302,8 +303,8 @@ const ConnectionPool = struct {
     }
 
     fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
-        var buffer = std.ArrayList(u8).init(allocator);
-        errdefer buffer.deinit();
+        var buffer: std.ArrayList(u8) = .empty;
+        errdefer buffer.deinit(allocator);
 
         const max_header_bytes: usize = 32 * 1024;
         var header_end: ?usize = null;
@@ -317,7 +318,7 @@ const ConnectionPool = struct {
                 return err;
             };
             if (n == 0) return error.EndOfStream;
-            try buffer.appendSlice(chunk[0..n]);
+            try buffer.appendSlice(allocator, chunk[0..n]);
 
             if (header_end == null) {
                 if (findHeaderEnd(buffer.items)) |offset| {
@@ -337,7 +338,7 @@ const ConnectionPool = struct {
             }
         }
 
-        return buffer.toOwnedSlice();
+        return buffer.toOwnedSlice(allocator);
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
@@ -1764,11 +1765,11 @@ test "threaded readRequestData handles partial headers" {
         .allocator = allocator,
     };
 
-    const fds = try std.posix.pipe();
+    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(fds[0]);
 
-    _ = try std.posix.write(fds[1], "GET / HTTP/1.1\r\nHost: example.com\r\n");
-    _ = try std.posix.write(fds[1], "Content-Length: 5\r\n\r\nhello");
+    try writeAllFd(fds[1], "GET / HTTP/1.1\r\nHost: example.com\r\n");
+    try writeAllFd(fds[1], "Content-Length: 5\r\n\r\nhello");
     std.posix.close(fds[1]);
 
     const data = try pool.readRequestData(fds[0], allocator);

@@ -262,6 +262,7 @@ pub const Atom = enum(u32) {
     @"access-control-max-age" = 231,
     expires = 232,
     pragma = 233,
+    toJSON = 234,
     // Reserved for more builtins
     __count__ = 235,
 
@@ -379,6 +380,7 @@ pub const Atom = enum(u32) {
             .@"access-control-max-age" => "access-control-max-age",
             .expires => "expires",
             .pragma => "pragma",
+            .toJSON => "toJSON",
             else => null,
         };
     }
@@ -607,6 +609,7 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "access-control-max-age", .@"access-control-max-age" },
     .{ "expires", .expires },
     .{ "pragma", .pragma },
+    .{ "toJSON", .toJSON },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map
@@ -1416,14 +1419,14 @@ pub const JSObject = extern struct {
             const data_val = self.inline_slots[Slots.FUNC_DATA];
             if (is_bytecode_val.isUndefined()) {
                 // Native function - free the NativeFunctionData
-                if (data_val.isPtr()) {
-                    const data = data_val.toPtr(NativeFunctionData);
+                if (data_val.isExternPtr()) {
+                    const data = data_val.toExternPtr(NativeFunctionData);
                     allocator.destroy(data);
                 }
-            } else if (data_val.isPtr()) {
+            } else if (data_val.isExternPtr()) {
                 // Bytecode function - free the BytecodeFunctionData and FunctionBytecode internals
                 const jit = @import("jit/alloc.zig");
-                const bc_data = data_val.toPtr(BytecodeFunctionData);
+                const bc_data = data_val.toExternPtr(BytecodeFunctionData);
                 const bc = bc_data.bytecode;
                 // Free JIT compiled code struct if present (code slice is freed by CodeAllocator)
                 if (bc.compiled_code) |cc| {
@@ -1505,7 +1508,7 @@ pub const JSObject = extern struct {
             .arena_ptr = null,
         };
         // Store native function data pointer
-        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         return obj;
     }
 
@@ -1513,10 +1516,10 @@ pub const JSObject = extern struct {
     pub fn getNativeFunctionData(self: *const JSObject) ?*NativeFunctionData {
         if (self.class_id != .function or !self.flags.is_callable) return null;
         const slot = self.inline_slots[Slots.FUNC_DATA];
-        if (!slot.isPtr()) return null;
+        if (!slot.isExternPtr()) return null;
         // Native functions have undefined in FUNC_IS_BYTECODE slot
         if (!self.inline_slots[Slots.FUNC_IS_BYTECODE].isUndefined()) return null;
-        return slot.toPtr(NativeFunctionData);
+        return slot.toExternPtr(NativeFunctionData);
     }
 
     /// Create a JS bytecode function object
@@ -1548,7 +1551,7 @@ pub const JSObject = extern struct {
             .arena_ptr = null,
         };
         // Store bytecode function data and marker
-        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
         return obj;
     }
@@ -1560,8 +1563,8 @@ pub const JSObject = extern struct {
             return null;
         }
         const slot = self.inline_slots[Slots.FUNC_DATA];
-        if (!slot.isPtr()) {
-            std.log.debug("getBytecodeFunc fail: FUNC_DATA not ptr, raw={x}", .{slot.raw});
+        if (!slot.isExternPtr()) {
+            std.log.debug("getBytecodeFunc fail: FUNC_DATA not ext ptr, raw={x}", .{slot.raw});
             return null;
         }
         // Bytecode functions have non-undefined in FUNC_IS_BYTECODE slot
@@ -1570,7 +1573,7 @@ pub const JSObject = extern struct {
             return null;
         }
         std.log.debug("getBytecodeFunc success!", .{});
-        return slot.toPtr(BytecodeFunctionData);
+        return slot.toExternPtr(BytecodeFunctionData);
     }
 
     /// Create a closure (function with captured upvalues)
@@ -1609,7 +1612,7 @@ pub const JSObject = extern struct {
             .arena_ptr = null,
         };
         // Store closure data and markers
-        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
         obj.inline_slots[Slots.FUNC_IS_CLOSURE] = value.JSValue.true_val;
         return obj;
@@ -1621,8 +1624,8 @@ pub const JSObject = extern struct {
         // Check if it's a closure
         if (!self.inline_slots[Slots.FUNC_IS_CLOSURE].isTrue()) return null;
         const slot = self.inline_slots[Slots.FUNC_DATA];
-        if (!slot.isPtr()) return null;
-        return slot.toPtr(ClosureData);
+        if (!slot.isExternPtr()) return null;
+        return slot.toExternPtr(ClosureData);
     }
 
     /// Create a generator object from bytecode function
@@ -1663,7 +1666,7 @@ pub const JSObject = extern struct {
             .arena_ptr = null,
         };
         // Store generator data pointer
-        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromExternPtr(data);
         return obj;
     }
 
@@ -1696,7 +1699,7 @@ pub const JSObject = extern struct {
             .overflow_capacity = 0,
             .arena_ptr = arena,
         };
-        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromPtr(data);
+        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromExternPtr(data);
         return obj;
     }
 
@@ -1704,8 +1707,8 @@ pub const JSObject = extern struct {
     pub fn getGeneratorData(self: *const JSObject) ?*GeneratorData {
         if (self.class_id != .generator) return null;
         const slot = self.inline_slots[Slots.GENERATOR_DATA];
-        if (!slot.isPtr()) return null;
-        return slot.toPtr(GeneratorData);
+        if (!slot.isExternPtr()) return null;
+        return slot.toExternPtr(GeneratorData);
     }
 
     /// Fast property access by slot offset
