@@ -1164,6 +1164,175 @@ pub fn serializeBytecodeWithAtoms(
 
     // Write bytecode and constants
     try serializeFunctionBytecode(func, writer, allocator);
+
+    // Write empty shapes section (no shapes in this variant)
+    try writer.writeInt(u16, 0, .little);
+}
+
+// ============================================================================
+// Phase 1d: Object Literal Shape Serialization
+// ============================================================================
+//
+// Object literals with static keys use pre-built hidden classes for O(1) creation.
+// Shapes are arrays of atom IDs representing property names in order.
+// These must be serialized with bytecode and remapped on deserialization.
+
+/// Serialize object literal shapes
+/// Format: count(u16) + [shape...]
+/// shape: prop_count(u16) + [atom_id(u32)...]
+pub fn serializeShapes(
+    shapes: []const []const object.Atom,
+    writer: anytype,
+) !void {
+    try writer.writeInt(u16, @intCast(shapes.len), .little);
+
+    for (shapes) |shape| {
+        try writer.writeInt(u16, @intCast(shape.len), .little);
+        for (shape) |atom| {
+            try writer.writeInt(u32, @intFromEnum(atom), .little);
+        }
+    }
+}
+
+/// Deserialize object literal shapes with atom remapping
+/// Returns owned slices that must be freed by caller
+pub fn deserializeShapes(
+    reader: anytype,
+    remap: *const AtomRemap,
+    allocator: std.mem.Allocator,
+) ![][]object.Atom {
+    const count = try reader.readInt(u16, .little);
+
+    const shapes = try allocator.alloc([]object.Atom, count);
+    errdefer {
+        for (shapes) |shape| {
+            allocator.free(shape);
+        }
+        allocator.free(shapes);
+    }
+
+    for (shapes, 0..) |*shape, i| {
+        const prop_count = try reader.readInt(u16, .little);
+        shape.* = try allocator.alloc(object.Atom, prop_count);
+        errdefer allocator.free(shape.*);
+
+        for (0..prop_count) |j| {
+            const old_atom = try reader.readInt(u32, .little);
+            const new_atom = remap.get(old_atom);
+            shapes[i][j] = @enumFromInt(new_atom);
+        }
+    }
+
+    return shapes;
+}
+
+/// Full bytecode serialization with atoms AND shapes (Phase 1d)
+/// Format: [atoms] + [bytecode] + [shapes]
+pub fn serializeBytecodeWithAtomsAndShapes(
+    func: *const bytecode.FunctionBytecode,
+    atom_table: *AtomTable,
+    shapes: []const []const object.Atom,
+    writer: anytype,
+    allocator: std.mem.Allocator,
+) !void {
+    // Collect all referenced atoms (from bytecode AND shapes)
+    var all_atoms = std.AutoHashMapUnmanaged(u32, void){};
+    defer all_atoms.deinit(allocator);
+
+    // Atoms from bytecode
+    const bytecode_atoms = try collectAtoms(func, allocator);
+    defer allocator.free(bytecode_atoms);
+    for (bytecode_atoms) |atom| {
+        try all_atoms.put(allocator, atom, {});
+    }
+
+    // Atoms from shapes
+    for (shapes) |shape| {
+        for (shape) |atom| {
+            try all_atoms.put(allocator, @intFromEnum(atom), {});
+        }
+    }
+
+    // Convert to sorted slice
+    const atoms = try allocator.alloc(u32, all_atoms.count());
+    defer allocator.free(atoms);
+    var idx: usize = 0;
+    var it = all_atoms.keyIterator();
+    while (it.next()) |key| {
+        atoms[idx] = key.*;
+        idx += 1;
+    }
+    std.mem.sort(u32, atoms, {}, std.sort.asc(u32));
+
+    // Write atoms first
+    try serializeAtoms(atoms, atom_table, writer);
+
+    // Write bytecode and constants
+    try serializeFunctionBytecode(func, writer, allocator);
+
+    // Write shapes
+    try serializeShapes(shapes, writer);
+}
+
+/// Result of deserializing bytecode with shapes
+pub const DeserializedBytecode = struct {
+    func: *bytecode.FunctionBytecode,
+    shapes: [][]object.Atom,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *DeserializedBytecode) void {
+        // Free shapes
+        for (self.shapes) |shape| {
+            self.allocator.free(shape);
+        }
+        self.allocator.free(self.shapes);
+
+        // Free function
+        self.allocator.free(self.func.code);
+        self.allocator.free(self.func.upvalue_info);
+        for (self.func.constants) |c| {
+            if (c.isFloat64()) {
+                self.allocator.destroy(c.toPtr(value.JSValue.Float64Box));
+            } else if (c.isString()) {
+                string.freeString(self.allocator, c.toPtr(string.JSString));
+            }
+        }
+        self.allocator.free(self.func.constants);
+        self.allocator.destroy(self.func);
+    }
+};
+
+/// Full bytecode deserialization with atom remapping AND shapes (Phase 1d)
+pub fn deserializeBytecodeWithAtomsAndShapes(
+    reader: anytype,
+    target_atoms: *AtomTable,
+    allocator: std.mem.Allocator,
+    strings_table: ?*string.StringTable,
+) !DeserializedBytecode {
+    // Deserialize atoms and build remapping
+    var remap = try deserializeAtoms(reader, target_atoms, allocator);
+    defer remap.deinit();
+
+    // Deserialize bytecode
+    const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
+    errdefer {
+        allocator.free(func.code);
+        allocator.free(func.upvalue_info);
+        allocator.free(func.constants);
+        allocator.destroy(func);
+    }
+
+    // Remap all atom references in bytecode
+    remapBytecodeAtoms(func, &remap);
+
+    // Deserialize shapes with remapping
+    const shapes = try deserializeShapes(reader, &remap, allocator);
+
+    return .{
+        .func = func,
+        .shapes = shapes,
+        .allocator = allocator,
+    };
 }
 
 /// Full bytecode deserialization with atom remapping (Phase 1c)

@@ -498,6 +498,9 @@ pub const HandlerSource = union(enum) {
 
     /// Path to JavaScript file
     file_path: []const u8,
+
+    /// Pre-compiled bytecode embedded at build time (via -Dhandler)
+    embedded_bytecode: []const u8,
 };
 
 // ============================================================================
@@ -513,6 +516,7 @@ pub const Server = struct {
     pool: ?HandlerPool,
     handler_code: []const u8,
     handler_filename: []const u8,
+    embedded_bytecode: ?[]const u8,
     static_cache: StaticFileCache,
     running: bool,
     request_count: std.atomic.Value(u64),
@@ -528,13 +532,21 @@ pub const Server = struct {
             cfg.pool_size = defaultPoolSize();
         }
 
-        // Load handler code
+        // Load handler code (or use embedded bytecode)
+        var embedded_bytecode: ?[]const u8 = null;
         const handler_code, const handler_filename = switch (cfg.handler) {
             .inline_code => |code| .{ code, "<inline>" },
             .file_path => |path| blk: {
                 const source = try readFilePosix(allocator, path, 10 * 1024 * 1024);
                 // JSX transformation is now handled by the parser via filename detection
                 break :blk .{ source, path };
+            },
+            .embedded_bytecode => |bytecode| blk: {
+                // Embedded bytecode from build-time compilation
+                embedded_bytecode = bytecode;
+                // Handler code is not needed when using embedded bytecode,
+                // but we provide a placeholder for API compatibility
+                break :blk .{ "", "<embedded>" };
             },
         };
 
@@ -547,6 +559,7 @@ pub const Server = struct {
             .pool = null,
             .handler_code = handler_code,
             .handler_filename = handler_filename,
+            .embedded_bytecode = embedded_bytecode,
             .static_cache = StaticFileCache.init(
                 allocator,
                 cfg.static_cache_max_bytes,
@@ -581,14 +594,15 @@ pub const Server = struct {
         self.evented_ready = true;
         const io = self.io_backend.io();
 
-        // Initialize runtime pool
-        self.pool = try HandlerPool.init(
+        // Initialize runtime pool with embedded bytecode (must be set before prewarm)
+        self.pool = try HandlerPool.initWithEmbedded(
             self.allocator,
             self.config.runtime_config,
             self.handler_code,
             self.handler_filename,
             self.config.pool_size,
             self.config.pool_wait_timeout_ms,
+            self.embedded_bytecode,
         );
 
         // Parse address and create listener

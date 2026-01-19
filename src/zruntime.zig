@@ -504,20 +504,36 @@ pub const Runtime = struct {
         return try self.callFunction(func_obj, args);
     }
 
-    /// Load from cached serialized bytecode (Phase 1c: true cache hit with atoms)
+    /// Load from cached serialized bytecode (Phase 1d: true cache hit with atoms and shapes)
     pub fn loadFromCachedBytecode(self: *Self, cached_data: []const u8) !void {
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
-        // Deserialize bytecode with atoms - skips parsing entirely
-        const func = try bytecode_cache.deserializeBytecodeWithAtoms(
+        // Deserialize bytecode with atoms and shapes - skips parsing entirely
+        var result = try bytecode_cache.deserializeBytecodeWithAtomsAndShapes(
             &reader,
             &self.ctx.atoms,
             self.allocator,
             &self.strings,
         );
+        // Note: We don't defer result.deinit() because the function and constants
+        // need to stay alive. Shapes can be freed after materialization.
+        defer {
+            // Free shapes after materialization (they're copied into hidden classes)
+            for (result.shapes) |shape| {
+                self.allocator.free(shape);
+            }
+            self.allocator.free(result.shapes);
+        }
+
+        // Materialize object literal shapes before execution
+        if (result.shapes.len > 0) {
+            // Convert [][]object.Atom to []const []const object.Atom for materializeShapes
+            const shapes_const: []const []const zq.object.Atom = @ptrCast(result.shapes);
+            try self.ctx.materializeShapes(shapes_const);
+        }
 
         // Execute the deserialized bytecode
-        _ = try self.interpreter.run(func);
+        _ = try self.interpreter.run(result.func);
     }
 
     /// Serialize bytecode for caching (Phase 1b: cache miss path)
@@ -876,6 +892,8 @@ pub const HandlerPool = struct {
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
     cache_mutex: std.Thread.Mutex,
+    /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
+    embedded_bytecode: ?[]const u8,
 
     const Self = @This();
 
@@ -899,6 +917,19 @@ pub const HandlerPool = struct {
         handler_filename: []const u8,
         max_size: usize,
         acquire_timeout_ms: u32,
+    ) !Self {
+        return initWithEmbedded(allocator, config, handler_code, handler_filename, max_size, acquire_timeout_ms, null);
+    }
+
+    /// Initialize with optional embedded bytecode (set before prewarm)
+    pub fn initWithEmbedded(
+        allocator: std.mem.Allocator,
+        config: RuntimeConfig,
+        handler_code: []const u8,
+        handler_filename: []const u8,
+        max_size: usize,
+        acquire_timeout_ms: u32,
+        embedded_bytecode: ?[]const u8,
     ) !Self {
         const pool = try zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
@@ -924,11 +955,19 @@ pub const HandlerPool = struct {
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
             .cache_mutex = .{},
+            .embedded_bytecode = embedded_bytecode,
         };
 
         errdefer self.deinit();
         try self.prewarm();
         return self;
+    }
+
+    /// Set embedded bytecode (precompiled at build time)
+    /// When set, this bytecode is used directly without parsing.
+    /// Note: For proper prewarm, use initWithEmbedded instead.
+    pub fn setEmbeddedBytecode(self: *Self, bytecode: []const u8) void {
+        self.embedded_bytecode = bytecode;
     }
 
     pub fn deinit(self: *Self) void {
@@ -1230,8 +1269,6 @@ pub const HandlerPool = struct {
     }
 
     fn loadHandlerCached(self: *Self, rt: *Runtime) !void {
-        const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
-
         // Temporarily disable hybrid mode during handler loading.
         // Handler function objects must use persistent allocation so they survive
         // arena resets between requests. Without this, closures or function objects
@@ -1244,6 +1281,15 @@ pub const HandlerPool = struct {
             rt.ctx.hybrid = saved_hybrid;
             rt.gc_state.hybrid_mode = saved_hybrid_mode;
         }
+
+        // Fast path: use embedded bytecode if available (precompiled at build time)
+        if (self.embedded_bytecode) |bytecode| {
+            try rt.loadFromCachedBytecode(bytecode);
+            return;
+        }
+
+        // Fallback: runtime compilation (for development without -Dhandler)
+        const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
 
         // Fast path: check cache without lock (read-only, safe for concurrent access)
         if (self.cache.getRaw(key)) |cached_data| {
