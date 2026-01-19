@@ -360,6 +360,34 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// STP Xt1, Xt2, [Xn, #imm] (signed offset, no writeback)
+    pub fn stpOffset(self: *Arm64Emitter, rt1: Register, rt2: Register, base: Register, offset_bytes: i32) !void {
+        if (@mod(offset_bytes, 8) != 0 or offset_bytes < -512 or offset_bytes > 504) {
+            return error.OffsetTooLarge;
+        }
+        const imm7: u7 = @bitCast(@as(i7, @intCast(@divExact(offset_bytes, 8))));
+        const inst: u32 = 0xA9000000 |
+            (@as(u32, imm7) << 15) |
+            (@as(u32, rt2.encode()) << 10) |
+            (@as(u32, base.encode()) << 5) |
+            @as(u32, rt1.encode());
+        try self.emit32(inst);
+    }
+
+    /// LDP Xt1, Xt2, [Xn, #imm] (signed offset, no writeback)
+    pub fn ldpOffset(self: *Arm64Emitter, rt1: Register, rt2: Register, base: Register, offset_bytes: i32) !void {
+        if (@mod(offset_bytes, 8) != 0 or offset_bytes < -512 or offset_bytes > 504) {
+            return error.OffsetTooLarge;
+        }
+        const imm7: u7 = @bitCast(@as(i7, @intCast(@divExact(offset_bytes, 8))));
+        const inst: u32 = 0xA9400000 |
+            (@as(u32, imm7) << 15) |
+            (@as(u32, rt2.encode()) << 10) |
+            (@as(u32, base.encode()) << 5) |
+            @as(u32, rt1.encode());
+        try self.emit32(inst);
+    }
+
     // ========================================
     // Arithmetic instructions
     // ========================================

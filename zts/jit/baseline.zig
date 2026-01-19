@@ -95,6 +95,80 @@ pub const DeoptPoint = struct {
     reason: DeoptReason,
 };
 
+// ========================================================================
+// Register Allocation for Hot Locals (ARM64 only)
+// ========================================================================
+
+/// Registers available for local variable allocation on ARM64.
+/// These are callee-saved registers not used by the baseline JIT:
+/// x19 = ctx pointer, x20 = JS stack pointer, x21-x22 = reserved
+/// x23-x28 = available for hot locals (6 registers)
+pub const LocalAllocRegs = if (is_aarch64) [_]arm64.Register{
+    .x23,
+    .x24,
+    .x25,
+    .x26,
+    .x27,
+    .x28,
+} else [_]void{};
+
+pub const MAX_REG_LOCALS: u8 = if (is_aarch64) 2 else 0;
+
+/// Allocation info for a single local variable
+pub const LocalAlloc = struct {
+    register: ?arm64.Register, // null = in memory (slow path)
+    access_count: u16, // Number of get_loc/put_loc accesses
+    helper_written: bool, // true if written by helper (can't allocate)
+};
+
+/// Register allocation state for a compiled function
+pub const RegAllocState = struct {
+    /// Allocation info for each local (indexed by local variable index)
+    local_allocs: []LocalAlloc,
+    /// Maps register index (0-5 for x23-x28) to local variable index
+    reg_to_local: [MAX_REG_LOCALS]?u8,
+    /// Number of locals actually allocated to registers
+    reg_local_count: u8,
+
+    /// Codegen tracking: which allocated locals have been loaded into their register
+    /// Reset to false at jump targets (conservative)
+    loaded: [MAX_REG_LOCALS]bool,
+    /// Codegen tracking: which allocated locals have been modified (need spill before helpers/exit)
+    dirty: [MAX_REG_LOCALS]bool,
+
+    pub fn init(allocator: std.mem.Allocator, local_count: u16) !RegAllocState {
+        const allocs = try allocator.alloc(LocalAlloc, local_count);
+        for (allocs) |*a| {
+            a.* = .{ .register = null, .access_count = 0, .helper_written = false };
+        }
+        return .{
+            .local_allocs = allocs,
+            .reg_to_local = .{null} ** MAX_REG_LOCALS,
+            .reg_local_count = 0,
+            .loaded = .{false} ** MAX_REG_LOCALS,
+            .dirty = .{false} ** MAX_REG_LOCALS,
+        };
+    }
+
+    pub fn deinit(self: *RegAllocState, allocator: std.mem.Allocator) void {
+        allocator.free(self.local_allocs);
+    }
+
+    /// Reset loaded state at control flow merge points (jump targets)
+    pub fn resetLoadedState(self: *RegAllocState) void {
+        self.loaded = .{false} ** MAX_REG_LOCALS;
+    }
+
+    /// Mark all dirty registers as needing spill (before helper calls)
+    /// Returns true if any registers need spilling
+    pub fn hasDirtyRegisters(self: *const RegAllocState) bool {
+        for (0..self.reg_local_count) |i| {
+            if (self.dirty[i]) return true;
+        }
+        return false;
+    }
+};
+
 /// Baseline compiler state
 pub const BaselineCompiler = struct {
     emitter: Emitter,
@@ -130,6 +204,9 @@ pub const BaselineCompiler = struct {
     inline_is_method: bool,
     stack_overflow_label: ?u32,
     suppress_stack_checks: bool,
+
+    /// Register allocation state for hot locals (ARM64 only)
+    reg_alloc: ?RegAllocState,
 
     const PendingJump = struct {
         native_offset: u32, // Offset in emitted code where the rel32/imm is
@@ -167,6 +244,7 @@ pub const BaselineCompiler = struct {
             .inline_is_method = false,
             .stack_overflow_label = null,
             .suppress_stack_checks = false,
+            .reg_alloc = null,
         };
     }
 
@@ -176,6 +254,9 @@ pub const BaselineCompiler = struct {
         self.pending_jumps.deinit(self.allocator);
         self.jump_targets.deinit(self.allocator);
         self.deopt_points.deinit(self.allocator);
+        if (self.reg_alloc) |*ra| {
+            ra.deinit(self.allocator);
+        }
     }
 
     // ========================================================================
@@ -297,6 +378,175 @@ pub const BaselineCompiler = struct {
 
         if (decision != .yes) return null;
         return callee;
+    }
+
+    // ========================================================================
+    // Register Allocation for Hot Locals
+    // ========================================================================
+
+    /// Pre-scan bytecode to count local variable accesses.
+    /// Returns true if register allocation should be used for this function.
+    fn scanLocalAccesses(self: *BaselineCompiler) CompileError!bool {
+        // Only ARM64 supports register allocation for now
+        if (!is_aarch64) return false;
+
+        const local_count = self.func.local_count;
+        if (local_count == 0) return false;
+
+        // Initialize register allocation state
+        self.reg_alloc = RegAllocState.init(self.allocator, local_count) catch return CompileError.OutOfMemory;
+        var ra = &self.reg_alloc.?;
+
+        // Single pass over bytecode to count accesses and detect problematic patterns
+        const code = self.func.code;
+        var pc: u32 = 0;
+        var has_closure = false;
+        var has_loop = false;
+
+        while (pc < code.len) {
+            const op: Opcode = @enumFromInt(code[pc]);
+            pc += 1;
+
+            switch (op) {
+                // Direct local access opcodes
+                .get_loc_0, .put_loc_0 => {
+                    ra.local_allocs[0].access_count +|= 1;
+                },
+                .get_loc_1, .put_loc_1 => {
+                    if (local_count > 1) ra.local_allocs[1].access_count +|= 1;
+                },
+                .get_loc_2, .put_loc_2 => {
+                    if (local_count > 2) ra.local_allocs[2].access_count +|= 1;
+                },
+                .get_loc_3, .put_loc_3 => {
+                    if (local_count > 3) ra.local_allocs[3].access_count +|= 1;
+                },
+                .get_loc, .put_loc => {
+                    const idx = code[pc];
+                    pc += 1;
+                    if (idx < local_count) {
+                        ra.local_allocs[idx].access_count +|= 1;
+                    }
+                },
+                .get_loc_add => {
+                    const idx = code[pc];
+                    pc += 1;
+                    if (idx < local_count) {
+                        ra.local_allocs[idx].access_count +|= 1;
+                    }
+                },
+                .get_loc_get_loc_add => {
+                    const idx1 = code[pc];
+                    const idx2 = code[pc + 1];
+                    pc += 2;
+                    if (idx1 < local_count) ra.local_allocs[idx1].access_count +|= 1;
+                    if (idx2 < local_count) ra.local_allocs[idx2].access_count +|= 1;
+                },
+                // Closure creation - locals might be captured
+                .make_closure => {
+                    has_closure = true;
+                    pc += 4;
+                },
+                // Loop detection (backward jump and for-of loops)
+                .loop => {
+                    has_loop = true;
+                    pc += 2;
+                },
+                .for_of_next => {
+                    has_loop = true;
+                    pc += 2;
+                },
+                // for_of_next_put_loc writes via helper - can't allocate that local
+                .for_of_next_put_loc => {
+                    has_loop = true;
+                    const idx = code[pc];
+                    if (idx < local_count) {
+                        ra.local_allocs[idx].helper_written = true;
+                    }
+                    pc += 3;
+                },
+                // Skip other opcodes by their operand size
+                .push_const, .push_const_call => pc += if (op == .push_const) 2 else 3,
+                .push_i8 => pc += 1,
+                .push_i16 => pc += 2,
+                .new_array, .get_field, .put_field, .put_field_keep, .get_global, .put_global => pc += 2,
+                .get_field_ic, .put_field_ic => pc += 4,
+                .call, .call_method, .tail_call => pc += 1,
+                .add_mod, .sub_mod, .mul_mod, .mod_const => pc += 2,
+                .mod_const_i8, .add_const_i8, .sub_const_i8, .mul_const_i8, .lt_const_i8, .le_const_i8 => pc += 1,
+                .get_upvalue, .put_upvalue, .close_upvalue => pc += 1,
+                .get_field_call => pc += 3,
+                .goto, .if_true, .if_false, .if_false_goto => pc += 2,
+                else => {},
+            }
+        }
+
+        // If function creates closures, disable register allocation
+        if (has_closure) {
+            ra.deinit(self.allocator);
+            self.reg_alloc = null;
+            return false;
+        }
+
+        // Only enable for functions with loops (where the benefit is significant)
+        if (!has_loop) {
+            ra.deinit(self.allocator);
+            self.reg_alloc = null;
+            return false;
+        }
+
+        return true;
+    }
+
+    /// Minimum access count for a local to be worth allocating to a register.
+    /// With lazy loading and deferred stores, overhead is low, so we can be aggressive.
+    /// A local accessed just twice in a loop body will be accessed many times at runtime.
+    const MIN_ACCESS_COUNT_FOR_REG: u16 = 2;
+
+    /// Assign registers to the most frequently accessed locals.
+    /// Only allocates if a local has at least MIN_ACCESS_COUNT_FOR_REG accesses.
+    fn assignRegistersToLocals(self: *BaselineCompiler) void {
+        var ra = &(self.reg_alloc orelse return);
+        const local_count = self.func.local_count;
+        if (local_count == 0) return;
+
+        // Find top N locals by access count using simple selection
+        // (N = MAX_REG_LOCALS = 6 for ARM64)
+        var assigned: u8 = 0;
+
+        while (assigned < MAX_REG_LOCALS) {
+            var best_idx: ?u8 = null;
+            var best_count: u16 = 0;
+
+            // Find the local with highest access count that isn't already assigned
+            // Skip locals that are written by helpers (can't be safely allocated)
+            for (0..local_count) |i| {
+                const idx: u8 = @intCast(i);
+                const local_alloc = &ra.local_allocs[idx];
+                if (local_alloc.register == null and !local_alloc.helper_written and local_alloc.access_count > best_count) {
+                    best_count = local_alloc.access_count;
+                    best_idx = idx;
+                }
+            }
+
+            // Stop if no more locals with sufficient accesses
+            // A local needs at least MIN_ACCESS_COUNT_FOR_REG accesses to justify register overhead
+            if (best_idx == null or best_count < MIN_ACCESS_COUNT_FOR_REG) break;
+
+            // Assign register to this local
+            const reg = LocalAllocRegs[assigned];
+            ra.local_allocs[best_idx.?].register = reg;
+            ra.reg_to_local[assigned] = best_idx;
+            assigned += 1;
+        }
+
+        ra.reg_local_count = assigned;
+
+        // If no locals qualified for register allocation, clean up
+        if (assigned == 0) {
+            ra.deinit(self.allocator);
+            self.reg_alloc = null;
+        }
     }
 
     /// Record a deoptimization point and return its index
@@ -757,6 +1007,12 @@ pub const BaselineCompiler = struct {
         // Pre-scan to find jump targets (lazy label optimization)
         try self.findJumpTargets();
 
+        // Pre-scan for register allocation (ARM64 only)
+        // Counts local variable accesses and assigns hot locals to registers
+        if (try self.scanLocalAccesses()) {
+            self.assignRegistersToLocals();
+        }
+
         // Emit prologue
         try self.emitPrologue();
 
@@ -768,6 +1024,10 @@ pub const BaselineCompiler = struct {
             // Only record labels for jump targets (reduces hash ops by ~80%)
             if (self.jump_targets.contains(pc)) {
                 self.labels.put(self.allocator, pc, @intCast(self.emitter.buffer.items.len)) catch return CompileError.OutOfMemory;
+                // NOTE: We don't reset loaded state at jump targets.
+                // Register-allocated locals use callee-saved regs (x23-x28) which are
+                // preserved across helper calls. Locals that helpers might modify are
+                // excluded via helper_written flag. So register values stay valid.
             }
 
             const op: Opcode = @enumFromInt(code[pc]);
@@ -820,9 +1080,30 @@ pub const BaselineCompiler = struct {
             // Save callee-saved registers we use
             self.emitter.stpPreIndex(.x19, .x20, .sp, -16) catch return CompileError.OutOfMemory;
             self.emitter.stpPreIndex(.x21, .x22, .sp, -16) catch return CompileError.OutOfMemory;
+
+            // Save additional callee-saved registers for local allocation (x23-x28)
+            if (self.reg_alloc) |ra| {
+                if (ra.reg_local_count > 0) {
+                    // Save x23-x24 if using 1-2 locals
+                    self.emitter.stpPreIndex(.x23, .x24, .sp, -16) catch return CompileError.OutOfMemory;
+                }
+                if (ra.reg_local_count > 2) {
+                    // Save x25-x26 if using 3-4 locals
+                    self.emitter.stpPreIndex(.x25, .x26, .sp, -16) catch return CompileError.OutOfMemory;
+                }
+                if (ra.reg_local_count > 4) {
+                    // Save x27-x28 if using 5-6 locals
+                    self.emitter.stpPreIndex(.x27, .x28, .sp, -16) catch return CompileError.OutOfMemory;
+                }
+            }
+
             // Save context pointer (x0) to x19 for later use
             self.emitter.movRegReg(.x19, .x0) catch return CompileError.OutOfMemory;
             try self.emitInitStackCache();
+
+            // NOTE: With lazy loading, we DON'T load locals here.
+            // They will be loaded on first access in emitGetLocal.
+            // This avoids loading locals that might not be used on all code paths.
         }
     }
 
@@ -837,13 +1118,130 @@ pub const BaselineCompiler = struct {
             self.emitter.popReg(.rbp) catch return CompileError.OutOfMemory;
             self.emitter.ret() catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            // ARM64 epilogue: restore registers and return
+            // ARM64 epilogue: store register locals back to memory, restore registers and return
+
+            // Store DIRTY allocated locals back from registers to memory
+            // Only locals that were written (put_loc emitted) need to be stored back
+            if (self.reg_alloc) |ra| {
+                // Check if any locals are dirty (written to)
+                var has_dirty = false;
+                for (0..ra.reg_local_count) |i| {
+                    if (ra.dirty[i]) {
+                        has_dirty = true;
+                        break;
+                    }
+                }
+
+                if (has_dirty) {
+                    // Load ctx->fp into x9
+                    self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+                    // Load ctx->stack.ptr into x10
+                    self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+
+                    // Store only dirty locals back to memory
+                    for (0..ra.reg_local_count) |i| {
+                        if (!ra.dirty[i]) continue;
+
+                        const local_idx = ra.reg_to_local[i] orelse continue;
+                        const reg = ra.local_allocs[local_idx].register orelse continue;
+
+                        // Compute address: x11 = x10 + (x9 + local_idx) * 8
+                        if (local_idx > 0) {
+                            self.emitter.addRegImm12(.x11, .x9, local_idx) catch return CompileError.OutOfMemory;
+                            self.emitter.addRegRegShift(.x11, .x10, .x11, 3) catch return CompileError.OutOfMemory;
+                        } else {
+                            // local_idx == 0, just x11 = x10 + x9 * 8
+                            self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
+                        }
+                        // Store value from allocated register
+                        self.emitter.strImm(reg, .x11, 0) catch return CompileError.OutOfMemory;
+                    }
+                }
+            }
+
             try self.emitFlushStackCache();
+
+            // Restore additional callee-saved registers (reverse order of prologue)
+            if (self.reg_alloc) |ra| {
+                if (ra.reg_local_count > 4) {
+                    // Restore x27-x28 if we saved them
+                    self.emitter.ldpPostIndex(.x27, .x28, .sp, 16) catch return CompileError.OutOfMemory;
+                }
+                if (ra.reg_local_count > 2) {
+                    // Restore x25-x26 if we saved them
+                    self.emitter.ldpPostIndex(.x25, .x26, .sp, 16) catch return CompileError.OutOfMemory;
+                }
+                if (ra.reg_local_count > 0) {
+                    // Restore x23-x24 if we saved them
+                    self.emitter.ldpPostIndex(.x23, .x24, .sp, 16) catch return CompileError.OutOfMemory;
+                }
+            }
+
             self.emitter.ldpPostIndex(.x21, .x22, .sp, 16) catch return CompileError.OutOfMemory;
             self.emitter.ldpPostIndex(.x19, .x20, .sp, 16) catch return CompileError.OutOfMemory;
             self.emitter.ldpPostIndex(.x29, .x30, .sp, 16) catch return CompileError.OutOfMemory;
             self.emitter.ret() catch return CompileError.OutOfMemory;
         }
+    }
+
+    /// Spill dirty register-allocated locals to memory before helper calls.
+    /// Helpers might access locals through ctx->stack, so we need consistent memory state.
+    fn emitSpillDirtyLocals(self: *BaselineCompiler) CompileError!void {
+        if (!is_aarch64) return;
+
+        var ra = &(self.reg_alloc orelse return);
+        if (ra.reg_local_count == 0) return;
+
+        // Check if any registers are dirty
+        var has_dirty = false;
+        for (0..ra.reg_local_count) |i| {
+            if (ra.dirty[i]) {
+                has_dirty = true;
+                break;
+            }
+        }
+        if (!has_dirty) return;
+
+        // Load ctx->fp and ctx->stack.ptr once
+        self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+        self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+
+        // Store each dirty local
+        for (0..ra.reg_local_count) |i| {
+            if (!ra.dirty[i]) continue;
+
+            const local_idx = ra.reg_to_local[i] orelse continue;
+            const reg = ra.local_allocs[local_idx].register orelse continue;
+
+            // Compute address: x11 = x10 + (x9 + local_idx) * 8
+            if (local_idx > 0) {
+                self.emitter.addRegImm12(.x11, .x9, local_idx) catch return CompileError.OutOfMemory;
+                self.emitter.addRegRegShift(.x11, .x10, .x11, 3) catch return CompileError.OutOfMemory;
+            } else {
+                self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
+            }
+            self.emitter.strImm(reg, .x11, 0) catch return CompileError.OutOfMemory;
+
+            // After spilling, clear dirty flag (memory is now consistent)
+            ra.dirty[i] = false;
+        }
+    }
+
+    /// Reset loaded state at jump targets (control flow merge points).
+    /// Called when emitting code at a label that could be jumped to.
+    fn resetRegAllocLoadedState(self: *BaselineCompiler) void {
+        if (self.reg_alloc) |*ra| {
+            ra.resetLoadedState();
+        }
+    }
+
+    /// Get the register index for a local variable, or null if not allocated.
+    fn getRegIndexForLocal(self: *BaselineCompiler, local_idx: u8) ?usize {
+        const ra = self.reg_alloc orelse return null;
+        for (0..ra.reg_local_count) |i| {
+            if (ra.reg_to_local[i] == local_idx) return i;
+        }
+        return null;
     }
 
     fn compileOpcode(self: *BaselineCompiler, op: Opcode, pc: u32, code: []const u8) CompileError!u32 {
@@ -1457,6 +1855,10 @@ pub const BaselineCompiler = struct {
 
     fn emitCallHelperReg(self: *BaselineCompiler, reg: Register) CompileError!void {
         try self.emitFlushStackCache();
+        // NOTE: We don't spill before helper calls because:
+        // 1. Locals written by helpers are excluded from register allocation (helper_written)
+        // 2. Helpers don't read other locals via ctx->stack (they use params/operand stack)
+        // 3. We use callee-saved registers so helper calls preserve our values
         if (is_x86_64) {
             self.emitter.callReg(reg) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
@@ -2651,6 +3053,7 @@ pub const BaselineCompiler = struct {
 
     /// Emit code to get a local variable and push it onto the JS operand stack
     /// Local variables are stored at ctx->stack[ctx->fp + idx]
+    /// With lazy loading: first access loads from memory, subsequent accesses use register.
     fn emitGetLocal(self: *BaselineCompiler, idx: u8) CompileError!void {
         if (is_x86_64) {
             // rbx = ctx pointer (saved in prologue)
@@ -2663,66 +3066,87 @@ pub const BaselineCompiler = struct {
             // 3. Load ctx->stack.ptr into rcx
             self.emitter.movRegMem(.rcx, .rbx, CTX_STACK_PTR_OFF) catch return CompileError.OutOfMemory;
             // 4. Load value from stack[fp + idx] into rax
-            // Address = rcx + rax * 8 (but we need scaled addressing)
-            // Use: rax = rcx + rax * 8, then load [rax]
-            self.emitter.shlRegImm(.rax, 3) catch return CompileError.OutOfMemory; // rax *= 8
-            self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory; // rax = stack_ptr + offset*8
-            self.emitter.movRegMem(.rax, .rax, 0) catch return CompileError.OutOfMemory; // rax = [rax]
+            self.emitter.shlRegImm(.rax, 3) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegMem(.rax, .rax, 0) catch return CompileError.OutOfMemory;
             // 5. Push onto operand stack
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
-            // x19 = ctx pointer (saved in prologue)
-            // 1. Load ctx->fp into x9
+            // Check if local is allocated to a register
+            if (self.reg_alloc) |*ra| {
+                if (self.getRegIndexForLocal(idx)) |reg_idx| {
+                    const reg = ra.local_allocs[idx].register.?;
+
+                    // Lazy loading: if not yet loaded, load from memory first
+                    if (!ra.loaded[reg_idx]) {
+                        // Load from memory into the allocated register
+                        self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+                        self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
+                        if (idx > 0) {
+                            self.emitter.addRegImm12(.x11, .x9, idx) catch return CompileError.OutOfMemory;
+                            self.emitter.addRegRegShift(.x11, .x10, .x11, 3) catch return CompileError.OutOfMemory;
+                        } else {
+                            self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
+                        }
+                        self.emitter.ldrImm(reg, .x11, 0) catch return CompileError.OutOfMemory;
+                        ra.loaded[reg_idx] = true;
+                    }
+
+                    // Now just push the register value
+                    return self.emitPushReg(reg);
+                }
+            }
+
+            // Slow path: load from memory (not allocated to register)
             self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
-            // 2. Add local index
             if (idx > 0) {
                 self.emitter.addRegImm12(.x9, .x9, idx) catch return CompileError.OutOfMemory;
             }
-            // 3. Load ctx->stack.ptr into x10
             self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
-            // 4. Compute address: x11 = x10 + x9 * 8 using single shifted add instruction
-            // addRegRegShift does: Xd = Xn + (Xm << shift), replaces 4 ADDs with 1 instruction
             self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
-            self.emitter.ldrImm(.x9, .x11, 0) catch return CompileError.OutOfMemory; // x9 = [x11]
-            // 5. Push onto operand stack
+            self.emitter.ldrImm(.x9, .x11, 0) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x9);
         }
     }
 
-    /// Emit code to pop a value from the JS operand stack and store it in a local variable
-    /// Local variables are stored at ctx->stack[ctx->fp + idx]
+    /// Emit code to pop a value from the JS operand stack and store it in a local variable.
+    /// With deferred stores: value stays in register, only written to memory before helpers/exit.
     fn emitPutLocal(self: *BaselineCompiler, idx: u8) CompileError!void {
         if (is_x86_64) {
             // Pop value from operand stack into rax
             try self.emitPopReg(.rax);
             // rbx = ctx pointer
-            // 1. Load ctx->fp into rcx
             self.emitter.movRegMem(.rcx, .rbx, CTX_FP_OFF) catch return CompileError.OutOfMemory;
-            // 2. Add local index
             if (idx > 0) {
                 self.emitter.addRegImm32(.rcx, idx) catch return CompileError.OutOfMemory;
             }
-            // 3. Load ctx->stack.ptr into rdx
             self.emitter.movRegMem(.rdx, .rbx, CTX_STACK_PTR_OFF) catch return CompileError.OutOfMemory;
-            // 4. Compute address: stack_ptr + (fp + idx) * 8
-            self.emitter.shlRegImm(.rcx, 3) catch return CompileError.OutOfMemory; // rcx *= 8
-            self.emitter.addRegReg(.rcx, .rdx) catch return CompileError.OutOfMemory; // rcx = address
-            // 5. Store value
+            self.emitter.shlRegImm(.rcx, 3) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.rcx, .rdx) catch return CompileError.OutOfMemory;
             self.emitter.movMemReg(.rcx, 0, .rax) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            // Pop value from operand stack into x9
+            // Check if local is allocated to a register
+            if (self.reg_alloc) |*ra| {
+                if (self.getRegIndexForLocal(idx)) |reg_idx| {
+                    const reg = ra.local_allocs[idx].register.?;
+
+                    // Pop directly into the allocated register (no memory store)
+                    try self.emitPopReg(reg);
+
+                    // Mark as loaded (we now have the value) and dirty (needs spill before helpers)
+                    ra.loaded[reg_idx] = true;
+                    ra.dirty[reg_idx] = true;
+                    return;
+                }
+            }
+
+            // Slow path: store to memory (not allocated to register)
             try self.emitPopReg(.x9);
-            // x19 = ctx pointer
-            // 1. Load ctx->fp into x10
             self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
-            // 2. Add local index
             if (idx > 0) {
                 self.emitter.addRegImm12(.x10, .x10, idx) catch return CompileError.OutOfMemory;
             }
-            // 3. Load ctx->stack.ptr into x11
             self.emitter.ldrImm(.x11, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
-            // 4. Compute address: x12 = x11 + x10 * 8 using single shifted add instruction
-            // addRegRegShift does: Xd = Xn + (Xm << shift), replaces 4 ADDs with 1 instruction
             self.emitter.addRegRegShift(.x12, .x11, .x10, 3) catch return CompileError.OutOfMemory;
             // 5. Store value
             self.emitter.strImm(.x9, .x12, 0) catch return CompileError.OutOfMemory;
