@@ -622,11 +622,27 @@ pub fn lookupPredefinedAtom(name: []const u8) ?Atom {
 /// Returns: result value or error
 pub const NativeFn = *const fn (ctx: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue;
 
+/// Builtin function identifiers for fast dispatch in interpreter.
+/// Hot builtins bypass the generic wrapper for reduced call overhead.
+pub const BuiltinId = enum(u8) {
+    none = 0,
+    // JSON methods - high frequency in HTTP handlers
+    json_parse = 1,
+    json_stringify = 2,
+    // String methods - common in request processing
+    string_index_of = 3,
+    string_slice = 4,
+    // Array methods
+    array_push = 5,
+    array_pop = 6,
+};
+
 /// Native function data stored in function objects
 pub const NativeFunctionData = struct {
     func: NativeFn,
     name: Atom,
     arg_count: u8, // Expected argument count (0 = variadic)
+    builtin_id: BuiltinId = .none, // For fast dispatch of hot builtins
 };
 
 /// JS bytecode function data stored in function objects
@@ -1480,7 +1496,13 @@ pub const JSObject = extern struct {
     }
 
     /// Create a native function object
+    /// Set builtin_id for hot builtins to enable fast dispatch in interpreter
     pub fn createNativeFunction(allocator: std.mem.Allocator, pool: *HiddenClassPool, class_idx: HiddenClassIndex, func: NativeFn, name: Atom, arg_count: u8) !*JSObject {
+        return createNativeFunctionWithId(allocator, pool, class_idx, func, name, arg_count, .none);
+    }
+
+    /// Create a native function object with explicit builtin ID for fast dispatch
+    pub fn createNativeFunctionWithId(allocator: std.mem.Allocator, pool: *HiddenClassPool, class_idx: HiddenClassIndex, func: NativeFn, name: Atom, arg_count: u8, builtin_id: BuiltinId) !*JSObject {
         // Allocate native function data
         const data = try allocator.create(NativeFunctionData);
         errdefer allocator.destroy(data);
@@ -1488,6 +1510,7 @@ pub const JSObject = extern struct {
             .func = func,
             .name = name,
             .arg_count = arg_count,
+            .builtin_id = builtin_id,
         };
 
         // Create a hidden class that reserves slots 0-1 for internal function data

@@ -12,6 +12,7 @@ const object = @import("object.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const type_feedback = @import("type_feedback.zig");
+const builtins = @import("builtins.zig");
 
 const empty_code: [0]u8 = .{};
 
@@ -2905,15 +2906,28 @@ pub const Interpreter = struct {
 
         // Check for native function
         if (func_obj.getNativeFunctionData()) |native_data| {
-            // Call native function
-            const result = native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
-                // Create error message with function name for better debugging
-                const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
-                std.log.err("Native function '{s}' error: {}", .{ func_name, err });
-                // Set exception on context for JS-level error handling
-                self.ctx.throwException(value.JSValue.exception_val);
-                return error.NativeFunctionError;
+            // Fast dispatch for hot builtins - bypass wrapper overhead
+            const result: value.JSValue = switch (native_data.builtin_id) {
+                .json_parse => builtins.jsonParse(self.ctx, this_val, args[0..argc]),
+                .json_stringify => builtins.jsonStringify(self.ctx, this_val, args[0..argc]),
+                .string_index_of => builtins.stringIndexOf(self.ctx, this_val, args[0..argc]),
+                .string_slice => builtins.stringSlice(self.ctx, this_val, args[0..argc]),
+                .array_push => builtins.arrayPush(self.ctx, this_val, args[0..argc]),
+                .array_pop => builtins.arrayPop(self.ctx, this_val, args[0..argc]),
+                .none => blk: {
+                    // Generic path for non-hot builtins
+                    break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
+                        const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
+                        std.log.err("Native function '{s}' error: {}", .{ func_name, err });
+                        self.ctx.throwException(value.JSValue.exception_val);
+                        return error.NativeFunctionError;
+                    };
+                },
             };
+            // Check for exception from direct builtin calls
+            if (self.ctx.hasException()) {
+                return error.NativeFunctionError;
+            }
             try self.ctx.push(result);
             return;
         }
@@ -4000,7 +4014,7 @@ test "End-to-end: JSX parse, compile, and execute" {
     const gc_mod = @import("gc.zig");
     const parser_mod = @import("parser/root.zig");
     const string_mod = @import("string.zig");
-    const builtins = @import("builtins.zig");
+    // builtins imported at module level
 
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
     defer gc_state.deinit();

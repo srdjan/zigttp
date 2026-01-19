@@ -1307,7 +1307,7 @@ const StaticFileCache = struct {
         cache: *StaticFileCache,
         path: []const u8,
 
-        pub fn release(self: *Handle) void {
+        pub fn release(self: *const Handle) void {
             self.cache.release(self.path);
         }
     };

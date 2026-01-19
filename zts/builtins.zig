@@ -1253,6 +1253,90 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
 
 const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass, ArenaObjectEscape, NoHiddenClassPool };
 
+// ============================================================================
+// JSON Shape Cache - Avoids hidden class transitions in JSON.parse
+// ============================================================================
+
+/// Maximum properties to cache per object shape
+const JSON_SHAPE_MAX_PROPS = 16;
+
+/// Number of cache entries (power of 2 for fast modulo)
+const JSON_SHAPE_CACHE_SIZE = 64;
+
+/// Entry in the JSON shape cache
+const JSONShapeCacheEntry = struct {
+    /// Hash of the property atom sequence
+    hash: u64 = 0,
+    /// Number of properties in this shape
+    prop_count: u8 = 0,
+    /// Property atoms in order
+    atoms: [JSON_SHAPE_MAX_PROPS]object.Atom = undefined,
+    /// Cached hidden class index for this shape
+    class_idx: object.HiddenClassIndex = .none,
+    /// Whether this entry is valid
+    valid: bool = false,
+};
+
+/// Thread-local JSON shape cache
+/// Maps property-atom-sequence to pre-built HiddenClassIndex
+var json_shape_cache: [JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
+
+/// Compute hash for a sequence of atoms
+fn hashAtomSequence(atoms: []const object.Atom) u64 {
+    var h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for (atoms) |atom| {
+        h ^= @intFromEnum(atom);
+        h *%= 0x100000001b3; // FNV-1a prime
+    }
+    return h;
+}
+
+/// Look up a cached shape by atom sequence
+fn lookupJsonShape(atoms: []const object.Atom) ?object.HiddenClassIndex {
+    if (atoms.len == 0 or atoms.len > JSON_SHAPE_MAX_PROPS) return null;
+
+    const hash = hashAtomSequence(atoms);
+    const idx = hash % JSON_SHAPE_CACHE_SIZE;
+    const entry = &json_shape_cache[idx];
+
+    if (!entry.valid or entry.hash != hash or entry.prop_count != atoms.len) {
+        return null;
+    }
+
+    // Verify atoms match exactly (hash collision check)
+    for (atoms, 0..) |atom, i| {
+        if (entry.atoms[i] != atom) return null;
+    }
+
+    return entry.class_idx;
+}
+
+/// Cache a shape for future lookups
+fn cacheJsonShape(atoms: []const object.Atom, class_idx: object.HiddenClassIndex) void {
+    if (atoms.len == 0 or atoms.len > JSON_SHAPE_MAX_PROPS) return;
+
+    const hash = hashAtomSequence(atoms);
+    const idx = hash % JSON_SHAPE_CACHE_SIZE;
+    const entry = &json_shape_cache[idx];
+
+    entry.hash = hash;
+    entry.prop_count = @intCast(atoms.len);
+    for (atoms, 0..) |atom, i| {
+        entry.atoms[i] = atom;
+    }
+    entry.class_idx = class_idx;
+    entry.valid = true;
+}
+
+/// Build a hidden class with all properties in one go
+fn buildClassForAtoms(pool: *object.HiddenClassPool, atoms: []const object.Atom) !object.HiddenClassIndex {
+    var class_idx = pool.getEmptyClass();
+    for (atoms) |atom| {
+        class_idx = try pool.addProperty(class_idx, atom);
+    }
+    return class_idx;
+}
+
 /// Skip JSON whitespace characters (space, newline, carriage return, tab)
 inline fn skipJsonWhitespace(text: []const u8, pos: *usize) void {
     while (pos.* < text.len) {
@@ -1318,19 +1402,26 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonEr
     return error.InvalidJson;
 }
 
-/// Parse JSON object
+/// Parse JSON object with shape caching
+/// Buffers properties first, then creates object with cached shape to avoid hidden class transitions
 fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!value.JSValue {
     pos.* += 1; // skip '{'
 
-    const obj = try ctx.createObject(null);
-
     skipJsonWhitespace(text, pos);
 
+    // Empty object fast path
     if (pos.* < text.len and text[pos.*] == '}') {
         pos.* += 1;
+        const obj = try ctx.createObject(null);
         return obj.toValue();
     }
 
+    // Buffer for collecting properties before object creation
+    var atoms: [JSON_SHAPE_MAX_PROPS]object.Atom = undefined;
+    var values: [JSON_SHAPE_MAX_PROPS]value.JSValue = undefined;
+    var prop_count: usize = 0;
+
+    // Parse all properties into buffer
     while (pos.* < text.len) {
         skipJsonWhitespace(text, pos);
 
@@ -1348,9 +1439,53 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
         // Parse value
         const val = try parseJsonValueAt(ctx, text, pos);
 
-        // Store in object using dynamic atom
+        // Intern atom and buffer property
         const atom = try ctx.atoms.intern(key_str.data());
-        try ctx.setPropertyChecked(obj, atom, val);
+
+        if (prop_count < JSON_SHAPE_MAX_PROPS) {
+            atoms[prop_count] = atom;
+            values[prop_count] = val;
+            prop_count += 1;
+        } else {
+            // Overflow: fall back to slow path for remaining properties
+            // First create object with buffered properties
+            const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+            const class_idx = lookupJsonShape(atoms[0..prop_count]) orelse
+                try buildClassForAtoms(pool, atoms[0..prop_count]);
+
+            const obj = try ctx.createObjectWithClass(class_idx, ctx.object_prototype);
+            for (0..prop_count) |i| {
+                obj.setSlot(@intCast(i), values[i]);
+            }
+
+            // Add overflow property via slow path
+            try ctx.setPropertyChecked(obj, atom, val);
+
+            // Continue with slow path for any remaining properties
+            skipJsonWhitespace(text, pos);
+            while (pos.* < text.len and text[pos.*] != '}') {
+                if (text[pos.*] == ',') {
+                    pos.* += 1;
+                    skipJsonWhitespace(text, pos);
+                    if (pos.* >= text.len or text[pos.*] != '"') return error.InvalidJson;
+                    const k = try parseJsonString(ctx, text, pos);
+                    skipJsonWhitespace(text, pos);
+                    if (pos.* >= text.len or text[pos.*] != ':') return error.InvalidJson;
+                    pos.* += 1;
+                    const v = try parseJsonValueAt(ctx, text, pos);
+                    const a = try ctx.atoms.intern(k.toPtr(string.JSString).data());
+                    try ctx.setPropertyChecked(obj, a, v);
+                    skipJsonWhitespace(text, pos);
+                } else {
+                    return error.InvalidJson;
+                }
+            }
+            if (pos.* < text.len and text[pos.*] == '}') {
+                pos.* += 1;
+                return obj.toValue();
+            }
+            return error.InvalidJson;
+        }
 
         skipJsonWhitespace(text, pos);
 
@@ -1358,7 +1493,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
         if (pos.* >= text.len) return error.InvalidJson;
         if (text[pos.*] == '}') {
             pos.* += 1;
-            return obj.toValue();
+            break;
         }
         if (text[pos.*] == ',') {
             pos.* += 1;
@@ -1367,7 +1502,27 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
         return error.InvalidJson;
     }
 
-    return error.InvalidJson;
+    // Create object with cached or new shape
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const atom_slice = atoms[0..prop_count];
+
+    // Try to find cached shape
+    var class_idx = lookupJsonShape(atom_slice);
+    if (class_idx == null) {
+        // Build new shape and cache it
+        class_idx = try buildClassForAtoms(pool, atom_slice);
+        cacheJsonShape(atom_slice, class_idx.?);
+    }
+
+    // Create object with the shape - no hidden class transitions!
+    const obj = try ctx.createObjectWithClass(class_idx.?, ctx.object_prototype);
+
+    // Set all property values directly by slot
+    for (0..prop_count) |i| {
+        obj.setSlot(@intCast(i), values[i]);
+    }
+
+    return obj.toValue();
 }
 
 /// Parse JSON array
@@ -2827,16 +2982,28 @@ fn addMethodDynamic(
     func: object.NativeFn,
     arg_count: u8,
 ) !void {
+    return addMethodDynamicWithId(ctx, obj, name, func, arg_count, .none);
+}
+
+/// Helper to add a method with builtin ID for fast dispatch
+fn addMethodDynamicWithId(
+    ctx: *context.Context,
+    obj: *object.JSObject,
+    name: []const u8,
+    func: object.NativeFn,
+    arg_count: u8,
+    builtin_id: object.BuiltinId,
+) !void {
     const allocator = ctx.allocator;
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const root_class_idx = ctx.root_class_idx;
     if (object.lookupPredefinedAtom(name)) |atom| {
-        const func_obj = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, func, atom, arg_count);
+        const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, atom, arg_count, builtin_id);
         try ctx.setPropertyChecked(obj, atom, func_obj.toValue());
         return;
     }
     const atom = try ctx.atoms.intern(name);
-    const func_obj = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, func, atom, arg_count);
+    const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, atom, arg_count, builtin_id);
     try ctx.setPropertyChecked(obj, atom, func_obj.toValue());
 }
 
@@ -2852,6 +3019,22 @@ fn addMethod(
     arg_count: u8,
 ) !void {
     const func_obj = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, func, name, arg_count);
+    try ctx.setPropertyChecked(obj, name, func_obj.toValue());
+}
+
+/// Create a native function with builtin ID for fast dispatch
+fn addMethodWithId(
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    pool: *object.HiddenClassPool,
+    obj: *object.JSObject,
+    root_class_idx: object.HiddenClassIndex,
+    name: object.Atom,
+    func: object.NativeFn,
+    arg_count: u8,
+    builtin_id: object.BuiltinId,
+) !void {
+    const func_obj = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, func, name, arg_count, builtin_id);
     try ctx.setPropertyChecked(obj, name, func_obj.toValue());
 }
 
@@ -2897,11 +3080,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Register Math on global
     try ctx.setGlobal(.Math, math_obj.toValue());
 
-    // Create JSON object
+    // Create JSON object - parse and stringify are hot builtins with fast dispatch
     const json_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .parse, wrap(jsonParse), 1);
+    try addMethodWithId(ctx, allocator, pool, json_obj, root_class_idx, .parse, wrap(jsonParse), 1, .json_parse);
     try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .tryParse, wrap(jsonTryParse), 1);
-    try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .stringify, wrap(jsonStringify), 1);
+    try addMethodWithId(ctx, allocator, pool, json_obj, root_class_idx, .stringify, wrap(jsonStringify), 1, .json_stringify);
     try ctx.builtin_objects.append(allocator,json_obj);
 
     // Register JSON on global
@@ -3114,8 +3297,8 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Array.prototype
     // ========================================================================
     const array_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    try addMethodDynamic(ctx, array_proto, "push", wrap(arrayPush), 1);
-    try addMethodDynamic(ctx, array_proto, "pop", wrap(arrayPop), 0);
+    try addMethodDynamicWithId(ctx, array_proto, "push", wrap(arrayPush), 1, .array_push);
+    try addMethodDynamicWithId(ctx, array_proto, "pop", wrap(arrayPop), 0, .array_pop);
     try addMethodDynamic(ctx, array_proto, "shift", wrap(arrayShift), 0);
     try addMethodDynamic(ctx, array_proto, "unshift", wrap(arrayUnshift), 1);
     try addMethodDynamic(ctx, array_proto, "indexOf", wrap(arrayIndexOf), 1);
@@ -3152,12 +3335,12 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const string_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, string_proto, "charAt", wrap(stringCharAt), 1);
     try addMethodDynamic(ctx, string_proto, "charCodeAt", wrap(stringCharCodeAt), 1);
-    try addMethodDynamic(ctx, string_proto, "indexOf", wrap(stringIndexOf), 1);
+    try addMethodDynamicWithId(ctx, string_proto, "indexOf", wrap(stringIndexOf), 1, .string_index_of);
     try addMethodDynamic(ctx, string_proto, "lastIndexOf", wrap(stringLastIndexOf), 1);
     try addMethodDynamic(ctx, string_proto, "startsWith", wrap(stringStartsWith), 1);
     try addMethodDynamic(ctx, string_proto, "endsWith", wrap(stringEndsWith), 1);
     try addMethodDynamic(ctx, string_proto, "includes", wrap(stringIncludes), 1);
-    try addMethodDynamic(ctx, string_proto, "slice", wrap(stringSlice), 2);
+    try addMethodDynamicWithId(ctx, string_proto, "slice", wrap(stringSlice), 2, .string_slice);
     try addMethodDynamic(ctx, string_proto, "substring", wrap(stringSubstring), 2);
     try addMethodDynamic(ctx, string_proto, "toLowerCase", wrap(stringToLowerCase), 0);
     try addMethodDynamic(ctx, string_proto, "toUpperCase", wrap(stringToUpperCase), 0);
