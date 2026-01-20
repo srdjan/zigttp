@@ -807,8 +807,11 @@ pub const HiddenClassPool = struct {
     sorted_starts: std.ArrayListUnmanaged(u32),
 
     /// Transition table: flat array with entries [from_class: u32, atom: u32, to_class: u32]
-    /// Looked up via linear scan (small number of transitions per class)
+    /// Kept for serialization, but lookups use transition_map
     transitions: std.ArrayListUnmanaged(u32),
+
+    /// Fast O(1) transition lookup: (from_class << 32 | atom) -> to_class
+    transition_map: std.AutoHashMapUnmanaged(u64, HiddenClassIndex),
 
     /// Number of allocated classes
     count: u32,
@@ -833,6 +836,7 @@ pub const HiddenClassPool = struct {
             .sorted_property_offsets = .empty,
             .sorted_starts = .empty,
             .transitions = .empty,
+            .transition_map = .empty,
             .count = 0,
         };
 
@@ -853,6 +857,7 @@ pub const HiddenClassPool = struct {
         self.sorted_property_offsets.deinit(self.allocator);
         self.sorted_starts.deinit(self.allocator);
         self.transitions.deinit(self.allocator);
+        self.transition_map.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 
@@ -933,13 +938,10 @@ pub const HiddenClassPool = struct {
     pub fn addProperty(self: *HiddenClassPool, from_idx: HiddenClassIndex, name: Atom) !HiddenClassIndex {
         const from = from_idx.toInt();
 
-        // Check for existing transition
-        const trans = self.transitions.items;
-        var i: usize = 0;
-        while (i + TRANSITION_ENTRY_SIZE <= trans.len) : (i += TRANSITION_ENTRY_SIZE) {
-            if (trans[i] == from and trans[i + 1] == @intFromEnum(name)) {
-                return HiddenClassIndex.fromInt(trans[i + 2]);
-            }
+        // O(1) lookup for existing transition using hash map
+        const key: u64 = (@as(u64, from) << 32) | @intFromEnum(name);
+        if (self.transition_map.get(key)) |to_idx| {
+            return to_idx;
         }
 
         // Create new class
@@ -971,10 +973,11 @@ pub const HiddenClassPool = struct {
         try self.property_offsets.append(self.allocator, old_prop_count); // offset = old count
         try self.property_flags.append(self.allocator, .{}); // default flags
 
-        // Record transition
+        // Record transition in both flat array (for serialization) and hash map (for O(1) lookup)
         try self.transitions.append(self.allocator, from);
         try self.transitions.append(self.allocator, @intFromEnum(name));
         try self.transitions.append(self.allocator, new_idx.toInt());
+        try self.transition_map.put(self.allocator, key, new_idx);
 
         if (new_prop_count >= BINARY_SEARCH_THRESHOLD) {
             try self.buildSortedProperties(new_idx, new_prop_count);

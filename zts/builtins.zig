@@ -1425,10 +1425,9 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
     while (pos.* < text.len) {
         skipJsonWhitespace(text, pos);
 
-        // Parse key (must be string)
+        // Parse key directly to atom (avoids JSString allocation)
         if (pos.* >= text.len or text[pos.*] != '"') return error.InvalidJson;
-        const key_val = try parseJsonString(ctx, text, pos);
-        const key_str = key_val.toPtr(string.JSString);
+        const atom = try parseJsonKey(ctx, text, pos);
 
         skipJsonWhitespace(text, pos);
 
@@ -1438,9 +1437,6 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
 
         // Parse value
         const val = try parseJsonValueAt(ctx, text, pos);
-
-        // Intern atom and buffer property
-        const atom = try ctx.atoms.intern(key_str.data());
 
         if (prop_count < JSON_SHAPE_MAX_PROPS) {
             atoms[prop_count] = atom;
@@ -1468,12 +1464,11 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
                     pos.* += 1;
                     skipJsonWhitespace(text, pos);
                     if (pos.* >= text.len or text[pos.*] != '"') return error.InvalidJson;
-                    const k = try parseJsonString(ctx, text, pos);
+                    const a = try parseJsonKey(ctx, text, pos);
                     skipJsonWhitespace(text, pos);
                     if (pos.* >= text.len or text[pos.*] != ':') return error.InvalidJson;
                     pos.* += 1;
                     const v = try parseJsonValueAt(ctx, text, pos);
-                    const a = try ctx.atoms.intern(k.toPtr(string.JSString).data());
                     try ctx.setPropertyChecked(obj, a, v);
                     skipJsonWhitespace(text, pos);
                 } else {
@@ -1561,6 +1556,71 @@ fn parseJsonArray(ctx: *context.Context, text: []const u8, pos: *usize) JsonErro
             continue;
         }
         return error.InvalidJson;
+    }
+
+    return error.InvalidJson;
+}
+
+/// Parse JSON object key directly to atom without creating JSString
+/// Optimization: avoids string allocation for property keys
+fn parseJsonKey(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!object.Atom {
+    pos.* += 1; // skip opening '"'
+    const start = pos.*;
+
+    // Fast path: scan for closing quote without escapes
+    while (pos.* < text.len) {
+        const c = text[pos.*];
+        if (c == '"') {
+            // No escapes - intern directly from JSON text slice
+            const key_slice = text[start..pos.*];
+            pos.* += 1;
+            return ctx.atoms.intern(key_slice) catch return error.OutOfMemory;
+        }
+        if (c == '\\') {
+            // Has escapes - use slow path with temporary buffer
+            return parseJsonKeyWithEscapes(ctx, text, pos, start);
+        }
+        pos.* += 1;
+    }
+
+    return error.InvalidJson;
+}
+
+/// Slow path for JSON keys with escape sequences
+fn parseJsonKeyWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize, start: usize) JsonError!object.Atom {
+    // Build unescaped key string
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
+
+    buffer.appendSlice(ctx.allocator, text[start..pos.*]) catch return error.OutOfMemory;
+
+    while (pos.* < text.len) {
+        const c = text[pos.*];
+        if (c == '"') {
+            pos.* += 1;
+            return ctx.atoms.intern(buffer.items) catch return error.OutOfMemory;
+        }
+        if (c == '\\') {
+            pos.* += 1;
+            if (pos.* >= text.len) return error.InvalidJson;
+            const escaped = text[pos.*];
+            pos.* += 1;
+            const byte: u8 = switch (escaped) {
+                '"' => '"',
+                '\\' => '\\',
+                '/' => '/',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'b' => 0x08,
+                'f' => 0x0C,
+                else => return error.InvalidJson,
+            };
+            buffer.append(ctx.allocator, byte) catch return error.OutOfMemory;
+        } else {
+            buffer.append(ctx.allocator, c) catch return error.OutOfMemory;
+            pos.* += 1;
+        }
     }
 
     return error.InvalidJson;
