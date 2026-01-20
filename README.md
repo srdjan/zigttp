@@ -46,7 +46,9 @@ A high-performance serverless JavaScript runtime for FaaS (Function-as-a-Service
 
 - **Baseline JIT compiler** - x86-64 and ARM64 native code generation
 - **Inline cache integration** - JIT fast paths for property access
-- **Adaptive compilation** - Hot functions compiled after threshold executions
+- **Object literal shapes** - Pre-compiled hidden classes with arena fast path allocation
+- **Type feedback** - Call site profiling with megamorphic early exit
+- **Adaptive compilation** - Hot functions compiled after 5 executions (tuned for FaaS warmup)
 
 ### Developer Experience
 
@@ -68,6 +70,9 @@ A high-performance serverless JavaScript runtime for FaaS (Function-as-a-Service
 
 ```bash
 zig build -Doptimize=ReleaseFast
+
+# Or with build-time handler precompilation (fastest cold starts)
+zig build -Doptimize=ReleaseFast -Dhandler=handler.js
 ```
 
 ### 2. Run
@@ -407,6 +412,8 @@ zigttp-server/
 │   ├── main.zig           # CLI entry point
 │   ├── zruntime.zig       # HandlerPool, JS context management
 │   ├── server.zig         # HTTP server implementation
+├── tools/
+│   └── precompile.zig     # Build-time bytecode compiler
 └── examples/
     ├── handler.jsx        # Example JSX handler
     ├── htmx-todo/         # HTMX Todo app example
@@ -427,6 +434,9 @@ zig build
 
 # Release build (optimized)
 zig build -Doptimize=ReleaseFast
+
+# Release build with precompiled handler (production)
+zig build -Doptimize=ReleaseFast -Dhandler=handler.js
 
 # Run tests
 zig build test              # Main runtime tests
@@ -482,6 +492,7 @@ compiler (compiler.zig) modules exist in `zts/` but are not exported.
 ### FaaS Optimizations
 
 - **Cold start**: < 1ms to initialize runtime and load handler
+- **Build-time precompilation**: `-Dhandler=<path>` embeds bytecode directly, eliminating all runtime parsing
 - **Warm invocations**: HandlerPool reuses pre-warmed contexts
 - **Memory**: 256KB default JS heap (configurable per function)
 - **Deployment size**: ~500KB binary, zero runtime dependencies
