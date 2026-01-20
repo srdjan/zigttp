@@ -363,17 +363,117 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 
 ---
 
-## 6. Candidates for Removal/Simplification
+## 6. Light Functional TypeScript: OOP Feature Removal Plan
 
-### 6.1 Candidates for Removal
+The goal is to create a performant, light functional TypeScript runtime. This requires removing OOP constructs that conflict with functional programming principles.
+
+### 6.1 Must Remove: OOP Core Features
+
+| Feature | Files | Complexity | Rationale |
+|---------|-------|------------|-----------|
+| **Classes** | ir.zig (class_decl, class_expr), codegen.zig, interpreter.zig | 4 | Core OOP construct, enables inheritance and mutable state encapsulation |
+| **RegExp** | builtins.zig:3426, interpreter.zig | 5 | High complexity, stateful (lastIndex), not essential for functional patterns |
+| **new operator** | ir.zig (new_expr), bytecode.zig, interpreter.zig | 3 | OOP instantiation mechanism, promotes constructor pattern |
+| **this binding** | interpreter.zig, codegen.zig | 3 | OOP context, promotes method-based programming |
+| **instanceof** | interpreter.zig, bytecode.zig | 2 | OOP type hierarchy check, use discriminated unions instead |
+| **Prototype manipulation** | builtins.zig (Object.getPrototypeOf, setPrototypeOf, __proto__) | 3 | Prototype chain is OOP inheritance mechanism |
+| **Constructor functions** | interpreter.zig | 3 | Pre-class OOP pattern, remove with `new` |
+
+### 6.2 Must Remove: TypeScript OOP Syntax
+
+| Feature | Files | Complexity | Rationale |
+|---------|-------|------------|-----------|
+| **class keyword** | stripper.zig, parser | 3 | OOP class declarations |
+| **extends** | stripper.zig, parser | 2 | Class inheritance |
+| **implements** | stripper.zig | 2 | Interface conformance (OOP pattern) |
+| **abstract** | stripper.zig | 2 | Abstract classes (pure OOP) |
+| **Access modifiers** (public/private/protected) | stripper.zig | 2 | Encapsulation is OOP; use module-level privacy |
+| **static members** | stripper.zig, parser | 2 | Class-level state |
+
+### 6.3 Must Remove: Mutating Array Methods
+
+| Method | Complexity | Rationale |
+|--------|------------|-----------|
+| push() | 2 | In-place mutation; use spread `[...arr, item]` |
+| pop() | 2 | In-place mutation; use `slice(0, -1)` + last element |
+| shift() | 2 | In-place mutation; use `slice(1)` |
+| unshift() | 2 | In-place mutation; use spread `[item, ...arr]` |
+| splice() | 3 | In-place mutation; use slice + spread |
+| sort() (mutating) | 3 | In-place mutation; provide `toSorted()` instead |
+| reverse() (mutating) | 2 | In-place mutation; provide `toReversed()` instead |
+| fill() | 2 | In-place mutation; use Array.from or map |
+
+### 6.4 Must Remove: Other OOP/Mutation Features
+
+| Feature | Files | Complexity | Rationale |
+|---------|-------|------------|-----------|
+| **delete operator** | interpreter.zig, bytecode.zig | 2 | Property deletion is mutation |
+| **Promise** | builtins.zig:3198 | 4 | Callback-based async; use Result types or effect system |
+| **Object.assign()** | builtins.zig | 2 | Mutating target object; use spread `{...a, ...b}` |
+| **Object.defineProperty()** | builtins.zig | 3 | Mutation of property descriptors |
+| **Object.freeze/seal** | builtins.zig | 2 | Implies unfrozen state exists |
+
+### 6.5 Complexity Savings Estimate
+
+| Category | Estimated LOC Removed | Complexity Reduction |
+|----------|----------------------|---------------------|
+| Classes (parser + codegen + runtime) | ~500 | High |
+| RegExp engine | ~200 | Very High |
+| new/this/instanceof | ~300 | Medium |
+| Mutating array methods | ~150 | Low |
+| Prototype manipulation | ~100 | Low |
+| TypeScript OOP syntax | ~200 | Medium |
+| Promise | ~100 | Medium |
+| **Total** | **~1,550** | **Significant** |
+
+### 6.6 Features to Keep (Functional Patterns)
+
+| Feature | Rationale |
+|---------|-----------|
+| Arrow functions | First-class functions, lexical scope |
+| Closures | Core functional pattern |
+| const/let | Immutable bindings encouraged |
+| Destructuring | Pattern matching for data extraction |
+| Spread operator | Immutable data transformation |
+| map/filter/reduce/find/findIndex | Pure transformations (non-mutating) |
+| slice/concat | Non-mutating array operations |
+| Object.keys/values/entries | Data inspection |
+| Object.fromEntries | Functional object construction |
+| Optional chaining/nullish coalescing | Safe data access |
+| Result type | Functional error handling |
+| JSON.parse/stringify | Pure serialization |
+| Template literals | String construction |
+| Type annotations | Type safety |
+| Generics | Parametric polymorphism |
+| type/interface declarations | Structural typing |
+
+### 6.7 Replacements for Removed Features
+
+| Removed | Functional Replacement |
+|---------|------------------------|
+| Classes | Factory functions + type aliases |
+| new Foo() | createFoo() factory function |
+| this.method() | Pure functions with explicit data parameter |
+| instanceof | Discriminated unions with tag field |
+| RegExp | String methods (includes, startsWith, endsWith, indexOf) or simple pattern DSL |
+| push/pop/etc | Spread operator, slice, concat |
+| Promise | Result<T, E> with explicit error handling |
+| Object.assign | Spread: `{...obj, newProp: value}` |
+| Prototype inheritance | Composition with factory functions |
+
+---
+
+## 7. Legacy Candidates for Removal/Simplification
+
+### 7.1 Additional Candidates for Removal
 
 | Feature | Complexity | Usage in FaaS | Recommendation |
 |---------|------------|---------------|----------------|
-| Promise | 4 | Low (no async) | Remove if async not planned |
-| Full RegExp engine | 5 | Low | Replace with basic string matching |
-| Array shift/unshift | 2 | Low | Mark as slow, discourage use |
+| Promise | 4 | Low (no async) | Remove - use Result types |
+| Full RegExp engine | 5 | Low | Remove - use string methods |
+| Array shift/unshift | 2 | Low | Remove - mutating methods |
 
-### 6.2 Candidates for Simplification
+### 7.2 Candidates for Simplification
 
 | Feature | Current | Simplified | Savings |
 |---------|---------|------------|---------|
@@ -382,7 +482,7 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 | Destructuring | Full nested patterns | Limit depth to 2 | ~50 LOC |
 | Type feedback | 4-entry polymorphic | 2-entry | ~100 LOC |
 
-### 6.3 Features to Keep Despite Complexity
+### 7.3 Features to Keep Despite Complexity
 
 | Feature | Complexity | Justification |
 |---------|------------|---------------|
@@ -393,7 +493,7 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 
 ---
 
-## 7. Key File References
+## 8. Key File References
 
 | Component | File | LOC | Key Lines |
 |-----------|------|-----|-----------|
@@ -417,22 +517,36 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 
 ---
 
-## Summary
+## 9. Summary
 
-The zts engine implements a focused subset of JavaScript optimized for FaaS workloads:
+### Current State
+The zts engine implements a focused subset of JavaScript optimized for FaaS workloads with ~14,347 LOC of performance-critical code.
 
-**Total Performance-Critical Code**: ~14,347 LOC across 10+ files
+### Light Functional TypeScript Vision
 
-**Architecture Tradeoffs**:
-1. Single-threaded execution trades parallelism for isolation
-2. Arena allocation trades per-object GC for O(1) request cleanup
-3. JIT compilation trades cold start for throughput (aggressive 5-call threshold)
-4. Limited ES6+ features trade compatibility for simplicity
-5. TypeScript stripping trades type safety for runtime simplicity
+The removal plan targets ~1,550 LOC of OOP-related code, transforming zts into a pure functional TypeScript runtime:
 
-**Recommended Focus**:
-- Maintain current core JS + ES6 subset
-- Keep all performance optimizations (critical for FaaS latency)
-- Consider removing Promise if async/await not planned
-- Consider simplifying RegExp to basic patterns
-- Keep TypeScript support (developer experience)
+**Remove**:
+- Classes, new operator, this binding, instanceof
+- Prototype chain manipulation
+- RegExp engine (high complexity, stateful)
+- Mutating array methods (push, pop, shift, unshift, splice, sort, reverse, fill)
+- Promise (callback-based async)
+- delete operator, Object.assign (mutations)
+- TypeScript OOP syntax (access modifiers, abstract, implements)
+
+**Keep**:
+- Pure functions, closures, arrow functions
+- Non-mutating transformations (map, filter, reduce, slice, concat, spread)
+- Destructuring, optional chaining, nullish coalescing
+- Result type for functional error handling
+- Type annotations, generics, type/interface declarations
+- JSON parse/stringify
+- All performance optimizations (JIT, IC, hidden classes, arena allocation)
+
+**Benefits**:
+1. Simpler mental model: data in, data out
+2. Easier reasoning about code: no hidden state, no prototype surprises
+3. Reduced runtime complexity: ~10% LOC reduction
+4. Better alignment with FaaS: stateless handlers are natural fit
+5. Compile-time guarantees: immutability by design
