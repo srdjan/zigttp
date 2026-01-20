@@ -907,14 +907,39 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
     } else if (val.isString()) {
         try writer.writeByte('"');
         const str = val.toPtr(string.JSString);
-        for (str.data()) |c| {
-            switch (c) {
-                '"' => try writer.writeAll("\\\""),
-                '\\' => try writer.writeAll("\\\\"),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\t' => try writer.writeAll("\\t"),
-                else => try writer.writeByte(c),
+        const data = str.data();
+        // Fast path: check if any escaping is needed
+        var needs_escape = false;
+        for (data) |c| {
+            if (c == '"' or c == '\\' or c == '\n' or c == '\r' or c == '\t' or c < 0x20) {
+                needs_escape = true;
+                break;
+            }
+        }
+        if (!needs_escape) {
+            // No escaping needed - write entire string at once
+            try writer.writeAll(data);
+        } else {
+            // Slow path: escape special characters
+            for (data) |c| {
+                switch (c) {
+                    '"' => try writer.writeAll("\\\""),
+                    '\\' => try writer.writeAll("\\\\"),
+                    '\n' => try writer.writeAll("\\n"),
+                    '\r' => try writer.writeAll("\\r"),
+                    '\t' => try writer.writeAll("\\t"),
+                    else => {
+                        if (c < 0x20) {
+                            // Control characters as \u00XX
+                            try writer.writeAll("\\u00");
+                            const hex = "0123456789abcdef";
+                            try writer.writeByte(hex[c >> 4]);
+                            try writer.writeByte(hex[c & 0xF]);
+                        } else {
+                            try writer.writeByte(c);
+                        }
+                    },
+                }
             }
         }
         try writer.writeByte('"');

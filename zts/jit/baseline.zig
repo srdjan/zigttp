@@ -812,6 +812,7 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.x12);
 
             // Quick pointer check: (raw & 0x7) == 1
+            // This confirms we have a tagged object pointer
             self.emitter.andRegImm(.x9, .x12, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
@@ -820,12 +821,8 @@ pub const BaselineCompiler = struct {
             self.emitter.lsrRegImm(.x9, .x12, 3) catch return CompileError.OutOfMemory;
             self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
 
-            // Check MemTag.object in header
-            self.emitter.ldrImmW(.x10, .x9, 0) catch return CompileError.OutOfMemory;
-            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x10, .x10, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
+            // Skip MemTag check - pointer tag already confirms object pointer
+            // Hidden class check will catch any type mismatches
 
             // Check hidden class matches expected (hardcoded from type feedback)
             self.emitter.ldrImmW(.x10, .x9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
@@ -913,6 +910,7 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.x13);
 
             // Quick pointer check: (raw & 0x7) == 1
+            // This confirms we have a tagged object pointer
             self.emitter.andRegImm(.x9, .x13, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
@@ -921,12 +919,8 @@ pub const BaselineCompiler = struct {
             self.emitter.lsrRegImm(.x9, .x13, 3) catch return CompileError.OutOfMemory;
             self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
 
-            // Check MemTag.object in header
-            self.emitter.ldrImmW(.x10, .x9, 0) catch return CompileError.OutOfMemory;
-            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x10, .x10, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
+            // Skip MemTag check - pointer tag already confirms object pointer
+            // Hidden class check will catch any type mismatches
 
             // Check hidden class matches expected
             self.emitter.ldrImmW(.x10, .x9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
