@@ -88,7 +88,7 @@ pub const UnaryOp = enum(u4) {
     bit_not,
     typeof_op,
     void_op,
-    delete_op,
+    // delete_op removed - delete operator not supported
 };
 
 /// Function flags

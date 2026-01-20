@@ -1365,7 +1365,10 @@ pub const Parser = struct {
             .false_lit => self.parseBoolLiteral(false),
             .null_lit => self.parseNullLiteral(),
             .undefined_lit => self.parseUndefinedLiteral(),
-            .regex_literal => self.parseRegexLiteral(),
+            .regex_literal => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "regular expressions are not supported; use string methods instead");
+                return error.ParseError;
+            },
 
             // Template literals
             .template_literal, .template_head => self.parseTemplateLiteral(),
@@ -1400,7 +1403,10 @@ pub const Parser = struct {
             .kw_await => self.parseAwaitExpression(),
             .kw_typeof => self.parseUnaryKeyword(.typeof_op),
             .kw_void => self.parseUnaryKeyword(.void_op),
-            .kw_delete => self.parseUnaryKeyword(.delete_op),
+            .kw_delete => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'delete' is not supported; use object spread to omit properties");
+                return error.ParseError;
+            },
 
             // Grouping and array/object literals
             .lparen => self.parseGroupedOrArrowParams(),
@@ -1470,7 +1476,6 @@ pub const Parser = struct {
             .pipe_pipe,
             .question_question,
             .kw_in,
-            .kw_instanceof,
             => {
                 self.advance();
                 const right_prec = if (op_tok.type == .star_star)
@@ -1479,6 +1484,12 @@ pub const Parser = struct {
                     prec;
                 const right = try self.parseExpression(right_prec);
                 return try self.nodes.add(Node.binaryOp(loc, self.tokenToBinaryOp(op_tok.type), left, right));
+            },
+
+            // instanceof not supported - use discriminated unions with tag property
+            .kw_instanceof => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'instanceof' is not supported; use discriminated unions with tag property instead");
+                return error.ParseError;
             },
 
             // Simple assignment only
@@ -1579,7 +1590,31 @@ pub const Parser = struct {
             .dot => {
                 self.advance();
                 const prop = try self.expectIdentifier("property name");
-                const prop_atom = try self.addAtom(prop.text(self.source));
+                const prop_name = prop.text(self.source);
+
+                // Check for removed Object methods
+                if (self.nodes.get(left)) |left_node| {
+                    if (left_node.tag == .identifier) {
+                        const binding = left_node.data.binding;
+                        // Check if it's a global binding with "Object" atom (predefined = 131)
+                        if (binding.kind == .global and binding.slot == @intFromEnum(object.Atom.Object)) {
+                            if (std.mem.eql(u8, prop_name, "assign")) {
+                                self.errors.addErrorAt(.unsupported_feature, prop, "'Object.assign' is not supported; use object spread {...obj1, ...obj2} instead");
+                                return error.ParseError;
+                            }
+                            if (std.mem.eql(u8, prop_name, "freeze")) {
+                                self.errors.addErrorAt(.unsupported_feature, prop, "'Object.freeze' is not supported; objects are mutable by design");
+                                return error.ParseError;
+                            }
+                            if (std.mem.eql(u8, prop_name, "isFrozen")) {
+                                self.errors.addErrorAt(.unsupported_feature, prop, "'Object.isFrozen' is not supported; objects are mutable by design");
+                                return error.ParseError;
+                            }
+                        }
+                    }
+                }
+
+                const prop_atom = try self.addAtom(prop_name);
                 return try self.nodes.add(.{
                     .tag = .member_access,
                     .loc = loc,
@@ -1758,47 +1793,6 @@ pub const Parser = struct {
         return try self.nodes.add(Node.litUndefined(loc));
     }
 
-    fn parseRegexLiteral(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        const text = self.current.text(self.source);
-        self.advance();
-
-        // Parse /pattern/flags
-        var pattern_end: usize = 1;
-        var in_class = false;
-        while (pattern_end < text.len) {
-            const c = text[pattern_end];
-            if (c == '\\' and pattern_end + 1 < text.len) {
-                pattern_end += 2;
-            } else if (c == '[') {
-                in_class = true;
-                pattern_end += 1;
-            } else if (c == ']' and in_class) {
-                in_class = false;
-                pattern_end += 1;
-            } else if (c == '/' and !in_class) {
-                break;
-            } else {
-                pattern_end += 1;
-            }
-        }
-
-        const pattern = text[1..pattern_end];
-        const flags = if (pattern_end + 1 < text.len) text[pattern_end + 1 ..] else "";
-
-        const pattern_idx = try self.addString(pattern);
-        const flags_idx = try self.addString(flags);
-
-        return try self.nodes.add(.{
-            .tag = .lit_regex,
-            .loc = loc,
-            .data = .{ .regex = .{
-                .pattern_idx = pattern_idx,
-                .flags_idx = flags_idx,
-            } },
-        });
-    }
-
     fn parseTemplateLiteral(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
 
@@ -1885,6 +1879,17 @@ pub const Parser = struct {
     fn parseIdentifier(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         const name = self.current.text(self.source);
+
+        // Check for removed global identifiers
+        if (std.mem.eql(u8, name, "Promise")) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'Promise' is not supported; use Result types or callbacks instead");
+            return error.ParseError;
+        }
+        if (std.mem.eql(u8, name, "RegExp")) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'RegExp' is not supported; use string methods instead");
+            return error.ParseError;
+        }
+
         self.advance();
 
         const name_atom = try self.addAtom(name);

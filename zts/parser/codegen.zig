@@ -822,7 +822,7 @@ pub const CodeGen = struct {
             .bit_not => .bit_not,
             .typeof_op => .typeof,
             .void_op => .push_undefined,
-            .delete_op => .nop, // delete not fully supported
+            // delete_op removed - parser rejects delete expressions
         };
 
         try self.emit(opcode);

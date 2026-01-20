@@ -2913,13 +2913,13 @@ pub const Interpreter = struct {
         // Check for native function
         if (func_obj.getNativeFunctionData()) |native_data| {
             // Fast dispatch for hot builtins - bypass wrapper overhead
+            // Note: array_push/array_pop removed (mutating methods not supported)
             const result: value.JSValue = switch (native_data.builtin_id) {
                 .json_parse => builtins.jsonParse(self.ctx, this_val, args[0..argc]),
                 .json_stringify => builtins.jsonStringify(self.ctx, this_val, args[0..argc]),
                 .string_index_of => builtins.stringIndexOf(self.ctx, this_val, args[0..argc]),
                 .string_slice => builtins.stringSlice(self.ctx, this_val, args[0..argc]),
-                .array_push => builtins.arrayPush(self.ctx, this_val, args[0..argc]),
-                .array_pop => builtins.arrayPop(self.ctx, this_val, args[0..argc]),
+                .array_push, .array_pop => value.JSValue.undefined_val, // Removed - mutating
                 .none => blk: {
                     // Generic path for non-hot builtins
                     break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {

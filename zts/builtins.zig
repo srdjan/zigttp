@@ -9,7 +9,6 @@ const object = @import("object.zig");
 const context = @import("context.zig");
 const string = @import("string.zig");
 const http = @import("http.zig");
-const regex = @import("regex.zig");
 
 /// Built-in class IDs
 pub const ClassId = enum(u8) {
@@ -122,15 +121,7 @@ pub fn objectEntries(ctx: *context.Context, this: value.JSValue, args: []const v
     return value.JSValue.fromInt(@intCast(keys.len));
 }
 
-/// Object.assign(target, ...sources) - Copy properties from sources to target
-pub fn objectAssign(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    if (args.len == 0) return value.JSValue.undefined_val;
-
-    // Return target (in full implementation, would copy properties)
-    return args[0];
-}
+// Object.assign removed - use spread syntax {...obj1, ...obj2} instead
 
 /// Object.hasOwnProperty(prop) - Check if object has own property
 pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -146,30 +137,7 @@ pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const va
     return value.JSValue.false_val;
 }
 
-/// Object.freeze(obj) - Freeze an object
-pub fn objectFreeze(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    if (args.len == 0) return value.JSValue.undefined_val;
-
-    if (getObject(args[0])) |obj| {
-        obj.preventExtensions();
-        // In full implementation, would also make all properties non-writable/non-configurable
-    }
-    return args[0];
-}
-
-/// Object.isFrozen(obj) - Check if object is frozen
-pub fn objectIsFrozen(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    if (args.len == 0) return value.JSValue.true_val;
-
-    if (getObject(args[0])) |obj| {
-        return if (obj.isExtensible()) value.JSValue.false_val else value.JSValue.true_val;
-    }
-    return value.JSValue.true_val;
-}
+// Object.freeze and Object.isFrozen removed - immutability is a design choice, not enforced
 
 /// Date.now() - Returns milliseconds since Unix epoch
 pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -396,141 +364,9 @@ fn valueToStringSimple(allocator: std.mem.Allocator, val: value.JSValue) !*strin
 }
 
 // ============================================================================
-// Promise implementation
+// Promise removed - use Result types for async error handling
 // ============================================================================
 
-/// Promise state
-pub const PromiseState = enum(u8) {
-    pending = 0,
-    fulfilled = 1,
-    rejected = 2,
-};
-
-/// Promise data stored in object's extra data
-pub const PromiseData = struct {
-    state: PromiseState,
-    result: value.JSValue,
-    then_handlers: ?*object.JSObject, // Array of {onFulfilled, onRejected} pairs
-    catch_handler: value.JSValue,
-};
-
-/// Promise constructor: new Promise((resolve, reject) => {...})
-pub fn promiseConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = this;
-
-    // Create the promise object
-    const promise_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
-    promise_obj.class_id = .promise;
-
-    // Store initial state (pending)
-    const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(0)) catch {};
-
-    const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(promise_obj, result_atom, value.JSValue.undefined_val) catch {};
-
-    // If executor function provided, call it with resolve/reject
-    if (args.len > 0 and args[0].isObject()) {
-        // For now, immediately resolve with undefined
-        // A full implementation would create resolve/reject functions and call the executor
-        ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(1)) catch {};
-    }
-
-    return promise_obj.toValue();
-}
-
-/// Promise.resolve(value) - Create fulfilled promise
-pub fn promiseResolve(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = this;
-
-    const promise_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
-    promise_obj.class_id = .promise;
-
-    const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
-    const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
-
-    // Set state to fulfilled
-    ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(1)) catch {};
-
-    // Set result
-    const result_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
-    ctx.setPropertyChecked(promise_obj, result_atom, result_val) catch {};
-
-    return promise_obj.toValue();
-}
-
-/// Promise.reject(reason) - Create rejected promise
-pub fn promiseReject(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = this;
-
-    const promise_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
-    promise_obj.class_id = .promise;
-
-    const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
-    const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
-
-    // Set state to rejected
-    ctx.setPropertyChecked(promise_obj, state_atom, value.JSValue.fromInt(2)) catch {};
-
-    // Set reason
-    const reason_val = if (args.len > 0) args[0] else value.JSValue.undefined_val;
-    ctx.setPropertyChecked(promise_obj, result_atom, reason_val) catch {};
-
-    return promise_obj.toValue();
-}
-
-/// promise.then(onFulfilled, onRejected) - Add callbacks
-pub fn promiseThen(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (!this.isObject()) return value.JSValue.undefined_val;
-
-    const promise = object.JSObject.fromValue(this);
-    if (promise.class_id != .promise) return value.JSValue.undefined_val;
-
-    const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
-    const state_atom = ctx.atoms.intern("__state") catch return value.JSValue.undefined_val;
-    const result_atom = ctx.atoms.intern("__result") catch return value.JSValue.undefined_val;
-
-    // Get current state
-    const state_val = promise.getProperty(pool, state_atom) orelse return value.JSValue.undefined_val;
-    const state: PromiseState = if (state_val.isInt()) @enumFromInt(@as(u8, @intCast(state_val.getInt()))) else .pending;
-
-    // Get result
-    const result = promise.getProperty(pool, result_atom) orelse value.JSValue.undefined_val;
-
-    // Get callbacks
-    const on_fulfilled = if (args.len > 0 and args[0].isObject()) args[0] else value.JSValue.undefined_val;
-    const on_rejected = if (args.len > 1 and args[1].isObject()) args[1] else value.JSValue.undefined_val;
-
-    // If already settled, we could call the appropriate callback
-    // For this simplified implementation, return a new resolved promise
-    switch (state) {
-        .fulfilled => {
-            if (on_fulfilled.isObject()) {
-                // Would call on_fulfilled(result) and return new promise with result
-                // For now, just return Promise.resolve(result)
-                return promiseResolve(ctx, this, &[_]value.JSValue{result});
-            }
-            return promiseResolve(ctx, this, &[_]value.JSValue{result});
-        },
-        .rejected => {
-            if (on_rejected.isObject()) {
-                return promiseResolve(ctx, this, &[_]value.JSValue{result});
-            }
-            return promiseReject(ctx, this, &[_]value.JSValue{result});
-        },
-        .pending => {
-            // Would queue handlers for later execution
-            // For now, return a pending promise
-            return promiseConstructor(ctx, this, &[_]value.JSValue{});
-        },
-    }
-}
-
-/// promise.catch(onRejected) - Add rejection handler (shorthand for then(undefined, onRejected))
-pub fn promiseCatch(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const on_rejected = if (args.len > 0) args[0] else value.JSValue.undefined_val;
-    return promiseThen(ctx, this, &[_]value.JSValue{ value.JSValue.undefined_val, on_rejected });
-}
 // ============================================================================
 // Number methods
 // ============================================================================
@@ -1872,144 +1708,8 @@ pub fn arrayOf(ctx: *context.Context, _: value.JSValue, args: []const value.JSVa
     return result.toValue();
 }
 
-/// Array.prototype.push(...items) - Add elements to end, return new length
-pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    for (args) |arg| {
-        ctx.setIndexChecked(obj, obj.getArrayLength(), arg) catch return value.JSValue.undefined_val;
-    }
-
-    return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
-}
-
-/// Array.prototype.pop() - Remove and return last element
-pub fn arrayPop(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    _ = ctx;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    if (len == 0) return value.JSValue.undefined_val;
-
-    const last_idx: u32 = len - 1;
-    const result = obj.getIndex(last_idx) orelse value.JSValue.undefined_val;
-    obj.setArrayLength(last_idx);
-    return result;
-}
-
-/// Array.prototype.shift() - Remove and return first element
-pub fn arrayShift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    if (len == 0) return value.JSValue.undefined_val;
-
-    const result = obj.getIndex(0) orelse value.JSValue.undefined_val;
-    if (len > 1) {
-        var i: u32 = 1;
-        while (i < len) : (i += 1) {
-            const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-            ctx.setIndexChecked(obj, i - 1, val) catch return value.JSValue.undefined_val;
-        }
-    }
-    obj.setArrayLength(len - 1);
-    return result;
-}
-
-/// Array.prototype.unshift(...items) - Add elements to beginning
-pub fn arrayUnshift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    const insert_count: u32 = @intCast(args.len);
-    if (insert_count == 0) return value.JSValue.fromInt(@intCast(len));
-
-    var i: u32 = len;
-    while (i > 0) : (i -= 1) {
-        const from_idx = i - 1;
-        const val = obj.getIndex(from_idx) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(obj, from_idx + insert_count, val) catch return value.JSValue.undefined_val;
-    }
-    for (args, 0..) |arg, idx| {
-        ctx.setIndexChecked(obj, @intCast(idx), arg) catch return value.JSValue.undefined_val;
-    }
-    obj.setArrayLength(len + insert_count);
-    return value.JSValue.fromInt(@intCast(len + insert_count));
-}
-
-/// Array.prototype.splice(start, deleteCount?, ...items) - Remove/insert elements
-pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const obj = getObject(this) orelse return value.JSValue.undefined_val;
-    if (obj.class_id != .array) return value.JSValue.undefined_val;
-
-    const len = obj.getArrayLength();
-    if (len == 0) {
-        const removed = ctx.createArray() catch return value.JSValue.undefined_val;
-        removed.prototype = ctx.array_prototype;
-        return removed.toValue();
-    }
-
-    var start: i32 = 0;
-    if (args.len > 0 and args[0].isInt()) {
-        start = args[0].getInt();
-        if (start < 0) start = @max(0, @as(i32, @intCast(len)) + start);
-    }
-    if (start > @as(i32, @intCast(len))) start = @intCast(len);
-
-    var delete_count: i32 = @as(i32, @intCast(len)) - start;
-    if (args.len > 1 and args[1].isInt()) {
-        delete_count = args[1].getInt();
-    }
-    if (delete_count < 0) delete_count = 0;
-    if (delete_count > (@as(i32, @intCast(len)) - start)) {
-        delete_count = @as(i32, @intCast(len)) - start;
-    }
-
-    const insert_count: u32 = if (args.len > 2) @intCast(args.len - 2) else 0;
-
-    const removed = ctx.createArray() catch return value.JSValue.undefined_val;
-    removed.prototype = ctx.array_prototype;
-
-    const start_u32: u32 = @intCast(start);
-    var i: u32 = 0;
-    while (i < @as(u32, @intCast(delete_count))) : (i += 1) {
-        const val = obj.getIndex(start_u32 + i) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(removed, i, val) catch return value.JSValue.undefined_val;
-    }
-
-    if (insert_count < @as(u32, @intCast(delete_count))) {
-        var from: u32 = @intCast(start + delete_count);
-        while (from < len) : (from += 1) {
-            const val = obj.getIndex(from) orelse value.JSValue.undefined_val;
-            ctx.setIndexChecked(obj, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
-        }
-    } else if (insert_count > @as(u32, @intCast(delete_count))) {
-        var from: u32 = len;
-        while (from > @as(u32, @intCast(start + delete_count))) {
-            from -= 1;
-            const val = obj.getIndex(from) orelse value.JSValue.undefined_val;
-            ctx.setIndexChecked(obj, from - @as(u32, @intCast(delete_count)) + insert_count, val) catch return value.JSValue.undefined_val;
-        }
-    }
-
-    if (insert_count > 0) {
-        var j: u32 = 0;
-        while (j < insert_count) : (j += 1) {
-            ctx.setIndexChecked(obj, start_u32 + j, args[2 + j]) catch return value.JSValue.undefined_val;
-        }
-    }
-
-    const new_len = @as(i32, @intCast(len)) - delete_count + @as(i32, @intCast(insert_count));
-    obj.setArrayLength(@intCast(@max(new_len, 0)));
-
-    return removed.toValue();
-}
+// Mutating array methods (push, pop, shift, unshift, splice) removed for functional paradigm.
+// Use spread operator [...arr, item] or slice() for immutable operations.
 
 /// Array.prototype.indexOf(searchElement, fromIndex?) - Find first index of element
 pub fn arrayIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -2078,12 +1778,24 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
     return value.JSValue.fromPtr(result);
 }
 
-/// Array.prototype.reverse() - Reverse array in place
-pub fn arrayReverse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
+/// Array.prototype.toReversed() - Return new reversed array (non-mutating)
+pub fn arrayToReversed(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
-    // Return this (in-place modification)
-    return this;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+
+    const len = obj.getArrayLength();
+    const result = ctx.createArray() catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
+
+    // Copy elements in reverse order
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        const val = obj.getIndex(len - 1 - i) orelse value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, i, val) catch return value.JSValue.undefined_val;
+    }
+    result.setArrayLength(len);
+    return result.toValue();
 }
 
 /// Array.prototype.slice(start?, end?) - Return shallow copy of portion
@@ -2193,18 +1905,25 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
     return value.JSValue.fromInt(-1);
 }
 
-/// Array.prototype.fill(value, start?, end?) - Fill with static value
-pub fn arrayFill(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
+/// Array.prototype.toSorted(compareFunc?) - Return new sorted array (non-mutating)
+pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
-    return this;
-}
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
 
-/// Array.prototype.sort(compareFunc?) - Sort array in place
-pub fn arraySort(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = args;
-    return this;
+    const len = obj.getArrayLength();
+    const result = ctx.createArray() catch return value.JSValue.undefined_val;
+    result.prototype = ctx.array_prototype;
+
+    // Copy elements (sorting would require compare function infrastructure)
+    // For now, return a copy - full implementation would sort
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        ctx.setIndexChecked(result, i, val) catch return value.JSValue.undefined_val;
+    }
+    result.setArrayLength(len);
+    return result.toValue();
 }
 
 // ============================================================================
@@ -2575,63 +2294,7 @@ pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const v
 
     const replacement = if (args[1].isString()) args[1].toPtr(string.JSString).data() else "";
 
-    // Check if searchValue is a RegExp
-    if (args[0].isObject()) {
-        const search_obj = object.JSObject.fromValue(args[0]);
-        const pool = ctx.hidden_class_pool orelse return this;
-        const source_atom = ctx.atoms.intern("source") catch return this;
-        if (search_obj.getProperty(pool, source_atom)) |source_val| {
-            if (source_val.isString()) {
-                // It's a RegExp
-                const pattern = source_val.toPtr(string.JSString).data();
-                const _regex_atom = ctx.atoms.intern("_regex") catch return this;
-                const flags_val = search_obj.getProperty(pool, _regex_atom) orelse value.JSValue.fromInt(0);
-                const flags_int: u8 = if (flags_val.isInt()) @intCast(flags_val.getInt()) else 0;
-                const flags = regex.Flags{
-                    .global = (flags_int & 1) != 0,
-                    .ignore_case = (flags_int & 2) != 0,
-                    .multiline = (flags_int & 4) != 0,
-                    .dot_all = (flags_int & 8) != 0,
-                };
-
-                const compiled = regex.Regex.compile(pattern, flags);
-
-                if (flags.global) {
-                    // Replace all matches
-                    var result = std.ArrayList(u8).empty;
-                    defer result.deinit(allocator);
-                    var pos: usize = 0;
-                    while (pos <= input.len) {
-                        if (compiled.exec(input[pos..])) |match| {
-                            result.appendSlice(allocator, input[pos .. pos + match.start]) catch return this;
-                            result.appendSlice(allocator, replacement) catch return this;
-                            pos = pos + match.end;
-                            if (match.end == match.start) pos += 1; // Avoid infinite loop
-                        } else {
-                            break;
-                        }
-                    }
-                    result.appendSlice(allocator, input[pos..]) catch return this;
-                    const new_str = string.createString(allocator, result.items) catch return this;
-                    return value.JSValue.fromPtr(new_str);
-                } else {
-                    // Replace first match
-                    if (compiled.exec(input)) |match| {
-                        var result = std.ArrayList(u8).empty;
-                        defer result.deinit(allocator);
-                        result.appendSlice(allocator, input[0..match.start]) catch return this;
-                        result.appendSlice(allocator, replacement) catch return this;
-                        result.appendSlice(allocator, input[match.end..]) catch return this;
-                        const new_str = string.createString(allocator, result.items) catch return this;
-                        return value.JSValue.fromPtr(new_str);
-                    }
-                }
-                return this;
-            }
-        }
-    }
-
-    // String search
+    // String search only - RegExp not supported
     if (args[0].isString()) {
         const search = args[0].toPtr(string.JSString).data();
         if (std.mem.indexOf(u8, input, search)) |idx| {
@@ -2677,100 +2340,6 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
     }
 
     return this;
-}
-
-/// String.prototype.match(regexp) - Returns array of matches or null
-pub fn stringMatch(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-
-    if (!this.isString() or args.len < 1) return value.JSValue.null_val;
-    const str = this.toPtr(string.JSString);
-    const input = str.data();
-
-    // Get RegExp pattern
-    if (!args[0].isObject()) return value.JSValue.null_val;
-    const regexp_obj = object.JSObject.fromValue(args[0]);
-    const source_atom = ctx.atoms.intern("source") catch return value.JSValue.null_val;
-    const source_val = regexp_obj.getProperty(source_atom) orelse return value.JSValue.null_val;
-    if (!source_val.isString()) return value.JSValue.null_val;
-
-    const pattern = source_val.toPtr(string.JSString).data();
-    const _regex_atom = ctx.atoms.intern("_regex") catch return value.JSValue.null_val;
-    const flags_val = regexp_obj.getProperty(_regex_atom) orelse value.JSValue.fromInt(0);
-    const flags_int: u8 = if (flags_val.isInt()) @intCast(flags_val.getInt()) else 0;
-    const flags = regex.Flags{
-        .global = (flags_int & 1) != 0,
-        .ignore_case = (flags_int & 2) != 0,
-        .multiline = (flags_int & 4) != 0,
-        .dot_all = (flags_int & 8) != 0,
-    };
-
-    const compiled = regex.Regex.compile(pattern, flags);
-
-    if (flags.global) {
-        // Return array of all matches
-        const matches = compiled.execAll(allocator, input) catch return value.JSValue.null_val;
-        if (matches.len == 0) {
-            allocator.free(matches);
-            return value.JSValue.null_val;
-        }
-
-        const result_arr = ctx.createObject(null) catch return value.JSValue.null_val;
-        for (matches, 0..) |match, i| {
-            const match_str = string.createString(allocator, match.slice()) catch continue;
-            ctx.setIndexChecked(result_arr, @intCast(i), match_str.toValue()) catch {};
-        }
-        ctx.setPropertyChecked(result_arr, .length, value.JSValue.fromInt(@intCast(matches.len))) catch {};
-        allocator.free(matches);
-        return result_arr.toValue();
-    } else {
-        // Return first match array (like exec)
-        if (compiled.exec(input)) |match| {
-            const result_arr = ctx.createObject(null) catch return value.JSValue.null_val;
-            const matched_str = string.createString(allocator, match.slice()) catch return value.JSValue.null_val;
-            ctx.setIndexChecked(result_arr, 0, matched_str.toValue()) catch return value.JSValue.null_val;
-            ctx.setPropertyChecked(result_arr, .length, value.JSValue.fromInt(1)) catch {};
-
-            const index_atom = ctx.atoms.intern("index") catch return result_arr.toValue();
-            ctx.setPropertyChecked(result_arr, index_atom, value.JSValue.fromInt(@intCast(match.start))) catch {};
-
-            return result_arr.toValue();
-        }
-    }
-
-    return value.JSValue.null_val;
-}
-
-/// String.prototype.search(regexp) - Returns index of first match or -1
-pub fn stringSearch(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (!this.isString() or args.len < 1) return value.JSValue.fromInt(-1);
-    const str = this.toPtr(string.JSString);
-    const input = str.data();
-
-    // Get RegExp pattern
-    if (!args[0].isObject()) return value.JSValue.fromInt(-1);
-    const regexp_obj = object.JSObject.fromValue(args[0]);
-    const source_atom = ctx.atoms.intern("source") catch return value.JSValue.fromInt(-1);
-    const source_val = regexp_obj.getProperty(source_atom) orelse return value.JSValue.fromInt(-1);
-    if (!source_val.isString()) return value.JSValue.fromInt(-1);
-
-    const pattern = source_val.toPtr(string.JSString).data();
-    const _regex_atom = ctx.atoms.intern("_regex") catch return value.JSValue.fromInt(-1);
-    const flags_val = regexp_obj.getProperty(_regex_atom) orelse value.JSValue.fromInt(0);
-    const flags_int: u8 = if (flags_val.isInt()) @intCast(flags_val.getInt()) else 0;
-    const flags = regex.Flags{
-        .global = false, // search always finds first
-        .ignore_case = (flags_int & 2) != 0,
-        .multiline = (flags_int & 4) != 0,
-        .dot_all = (flags_int & 8) != 0,
-    };
-
-    const compiled = regex.Regex.compile(pattern, flags);
-    if (compiled.exec(input)) |match| {
-        return value.JSValue.fromInt(@intCast(match.start));
-    }
-
-    return value.JSValue.fromInt(-1);
 }
 
 /// String.fromCharCode(...charCodes) - Create string from char codes
@@ -3155,10 +2724,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, object_obj, "keys", wrap(objectKeys), 1);
     try addMethodDynamic(ctx, object_obj, "values", wrap(objectValues), 1);
     try addMethodDynamic(ctx, object_obj, "entries", wrap(objectEntries), 1);
-    try addMethodDynamic(ctx, object_obj, "assign", wrap(objectAssign), 2);
+    // Object.assign removed - use spread syntax {...obj1, ...obj2}
     try addMethodDynamic(ctx, object_obj, "hasOwn", wrap(objectHasOwn), 2);
-    try addMethodDynamic(ctx, object_obj, "freeze", wrap(objectFreeze), 1);
-    try addMethodDynamic(ctx, object_obj, "isFrozen", wrap(objectIsFrozen), 1);
+    // Object.freeze and Object.isFrozen removed - immutability is a design choice
     try ctx.builtin_objects.append(allocator,object_obj);
 
     // Register Object on global
@@ -3195,22 +2763,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setPropertyChecked(ref_error_ctor, .prototype, error_proto.toValue());
     try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
 
-    // Create Promise prototype with then/catch methods
-    const promise_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    try addMethodDynamic(ctx, promise_proto, "then", wrap(promiseThen), 2);
-    try addMethodDynamic(ctx, promise_proto, "catch", wrap(promiseCatch), 1);
-    try ctx.builtin_objects.append(allocator,promise_proto);
-
-    // Create Promise constructor with static methods
-    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
-    const promise_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(promiseConstructor), .Promise, 1);
-    try ctx.setPropertyChecked(promise_ctor, .prototype, promise_proto.toValue());
-
-    // Add static methods: Promise.resolve, Promise.reject
-    try addMethodDynamic(ctx, promise_ctor, "resolve", wrap(promiseResolve), 1);
-    try addMethodDynamic(ctx, promise_ctor, "reject", wrap(promiseReject), 1);
-
-    try ctx.setGlobal(.Promise, promise_ctor.toValue());
+    // Promise removed - use Result types for async error handling
 
     // Create Number object with static methods
     const number_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
@@ -3354,19 +2907,15 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(performance_atom, performance_obj.toValue());
 
     // ========================================================================
-    // Array.prototype
+    // Array.prototype (functional - no mutating methods)
     // ========================================================================
     const array_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    try addMethodDynamicWithId(ctx, array_proto, "push", wrap(arrayPush), 1, .array_push);
-    try addMethodDynamicWithId(ctx, array_proto, "pop", wrap(arrayPop), 0, .array_pop);
-    try addMethodDynamic(ctx, array_proto, "shift", wrap(arrayShift), 0);
-    try addMethodDynamic(ctx, array_proto, "unshift", wrap(arrayUnshift), 1);
+    // Removed mutating methods: push, pop, shift, unshift, splice, reverse, fill, sort
+    // Use spread operator [...arr, item] or slice() for immutable operations
     try addMethodDynamic(ctx, array_proto, "indexOf", wrap(arrayIndexOf), 1);
     try addMethodDynamic(ctx, array_proto, "includes", wrap(arrayIncludes), 1);
     try addMethodDynamic(ctx, array_proto, "join", wrap(arrayJoin), 1);
-    try addMethodDynamic(ctx, array_proto, "reverse", wrap(arrayReverse), 0);
     try addMethodDynamic(ctx, array_proto, "slice", wrap(arraySlice), 2);
-    try addMethodDynamic(ctx, array_proto, "splice", wrap(arraySplice), 2);
     try addMethodDynamic(ctx, array_proto, "concat", wrap(arrayConcat), 1);
     try addMethodDynamic(ctx, array_proto, "map", wrap(arrayMap), 1);
     try addMethodDynamic(ctx, array_proto, "filter", wrap(arrayFilter), 1);
@@ -3376,8 +2925,8 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_proto, "some", wrap(arraySome), 1);
     try addMethodDynamic(ctx, array_proto, "find", wrap(arrayFind), 1);
     try addMethodDynamic(ctx, array_proto, "findIndex", wrap(arrayFindIndex), 1);
-    try addMethodDynamic(ctx, array_proto, "fill", wrap(arrayFill), 3);
-    try addMethodDynamic(ctx, array_proto, "sort", wrap(arraySort), 1);
+    try addMethodDynamic(ctx, array_proto, "toSorted", wrap(arrayToSorted), 1);
+    try addMethodDynamic(ctx, array_proto, "toReversed", wrap(arrayToReversed), 0);
     ctx.array_prototype = array_proto;
 
     // Create Array constructor function on global
@@ -3423,17 +2972,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.builtin_objects.append(allocator,string_ctor);
     try ctx.setGlobal(.String, string_ctor.toValue());
 
-    // Create RegExp prototype with test/exec methods
-    const regexp_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    try addMethodDynamic(ctx, regexp_proto, "test", wrap(regExpTest), 1);
-    try addMethodDynamic(ctx, regexp_proto, "exec", wrap(regExpExec), 1);
-    try ctx.builtin_objects.append(allocator,regexp_proto);
-
-    // Create RegExp constructor
-    // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
-    const regexp_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(regExpConstructor), .RegExp, 2);
-    try ctx.setPropertyChecked(regexp_ctor, .prototype, regexp_proto.toValue());
-    try ctx.setGlobal(.RegExp, regexp_ctor.toValue());
+    // RegExp removed - use string methods for pattern matching
 
     // Create Result prototype with instance methods
     const result_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
@@ -3459,189 +2998,8 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 }
 
 // ============================================================================
-// RegExp implementation
+// RegExp removed - use string methods for pattern matching
 // ============================================================================
-
-/// RegExp constructor - new RegExp(pattern, flags) or RegExp(pattern, flags)
-pub fn regExpConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // Get pattern string
-    var pattern: []const u8 = "";
-    if (args.len > 0) {
-        if (args[0].isString()) {
-            const str = args[0].toPtr(string.JSString);
-            pattern = str.data();
-        }
-    }
-
-    // Get flags string
-    var flags_str: []const u8 = "";
-    if (args.len > 1) {
-        if (args[1].isString()) {
-            const str = args[1].toPtr(string.JSString);
-            flags_str = str.data();
-        }
-    }
-
-    // Create RegExp object
-    const regexp_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
-
-    // Store pattern and flags as properties
-    const source_atom = ctx.atoms.intern("source") catch return value.JSValue.undefined_val;
-    const flags_atom = ctx.atoms.intern("flags") catch return value.JSValue.undefined_val;
-    const global_atom = ctx.atoms.intern("global") catch return value.JSValue.undefined_val;
-    const ignore_case_atom = ctx.atoms.intern("ignoreCase") catch return value.JSValue.undefined_val;
-    const multiline_atom = ctx.atoms.intern("multiline") catch return value.JSValue.undefined_val;
-    const last_index_atom = ctx.atoms.intern("lastIndex") catch return value.JSValue.undefined_val;
-    const _regex_atom = ctx.atoms.intern("_regex") catch return value.JSValue.undefined_val;
-
-    // Create JS strings for source and flags
-    const source_js = ctx.createString(pattern) catch return value.JSValue.undefined_val;
-    const flags_js = ctx.createString(flags_str) catch return value.JSValue.undefined_val;
-
-    ctx.setPropertyChecked(regexp_obj, source_atom, source_js) catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(regexp_obj, flags_atom, flags_js) catch return value.JSValue.undefined_val;
-
-    // Parse flags
-    const flags = regex.parseFlags(flags_str);
-    ctx.setPropertyChecked(regexp_obj, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(regexp_obj, ignore_case_atom, if (flags.ignore_case) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(regexp_obj, multiline_atom, if (flags.multiline) value.JSValue.true_val else value.JSValue.false_val) catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(regexp_obj, last_index_atom, value.JSValue.fromInt(0)) catch return value.JSValue.undefined_val;
-
-    // Store compiled regex as internal property
-    // For now we just store the pattern and flags separately, compile on demand
-    const flags_bits: u8 =
-        (if (flags.global) @as(u8, 1) else 0) |
-        (if (flags.ignore_case) @as(u8, 1) else 0) << 1 |
-        (if (flags.multiline) @as(u8, 1) else 0) << 2 |
-        (if (flags.dot_all) @as(u8, 1) else 0) << 3;
-    ctx.setPropertyChecked(regexp_obj, _regex_atom, value.JSValue.fromInt(@as(i32, @intCast(flags_bits)))) catch return value.JSValue.undefined_val;
-
-    return regexp_obj.toValue();
-}
-
-/// RegExp.prototype.test(string) - Returns true if pattern matches
-pub fn regExpTest(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (!this.isObject() or args.len < 1) return value.JSValue.false_val;
-
-    // Get pattern from this
-    const regexp_obj = object.JSObject.fromValue(this);
-    const pool = ctx.hidden_class_pool orelse return value.JSValue.false_val;
-    const source_atom = ctx.atoms.intern("source") catch return value.JSValue.false_val;
-    const source_val = regexp_obj.getProperty(pool, source_atom) orelse return value.JSValue.false_val;
-    if (!source_val.isString()) return value.JSValue.false_val;
-
-    const pattern = source_val.toPtr(string.JSString).data();
-
-    // Get flags
-    const _regex_atom = ctx.atoms.intern("_regex") catch return value.JSValue.false_val;
-    const flags_val = regexp_obj.getProperty(pool, _regex_atom) orelse value.JSValue.fromInt(0);
-    const flags_int: u8 = if (flags_val.isInt()) @intCast(flags_val.getInt()) else 0;
-    const flags = regex.Flags{
-        .global = (flags_int & 1) != 0,
-        .ignore_case = (flags_int & 2) != 0,
-        .multiline = (flags_int & 4) != 0,
-        .dot_all = (flags_int & 8) != 0,
-    };
-
-    // Get input string
-    if (!args[0].isString()) return value.JSValue.false_val;
-    const input = args[0].toPtr(string.JSString).data();
-
-    // Compile and test
-    const compiled = regex.Regex.compile(pattern, flags);
-    return if (compiled.match(input)) value.JSValue.true_val else value.JSValue.false_val;
-}
-
-/// RegExp.prototype.exec(string) - Returns match array or null
-pub fn regExpExec(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
-
-    if (!this.isObject() or args.len < 1) return value.JSValue.null_val;
-
-    // Get pattern from this
-    const regexp_obj = object.JSObject.fromValue(this);
-    const pool = ctx.hidden_class_pool orelse return value.JSValue.null_val;
-    const source_atom = ctx.atoms.intern("source") catch return value.JSValue.null_val;
-    const source_val = regexp_obj.getProperty(pool, source_atom) orelse return value.JSValue.null_val;
-    if (!source_val.isString()) return value.JSValue.null_val;
-
-    const pattern = source_val.toPtr(string.JSString).data();
-
-    // Get flags
-    const _regex_atom = ctx.atoms.intern("_regex") catch return value.JSValue.null_val;
-    const flags_val = regexp_obj.getProperty(pool, _regex_atom) orelse value.JSValue.fromInt(0);
-    const flags_int: u8 = if (flags_val.isInt()) @intCast(flags_val.getInt()) else 0;
-    const flags = regex.Flags{
-        .global = (flags_int & 1) != 0,
-        .ignore_case = (flags_int & 2) != 0,
-        .multiline = (flags_int & 4) != 0,
-        .dot_all = (flags_int & 8) != 0,
-    };
-
-    // Get input string
-    if (!args[0].isString()) return value.JSValue.null_val;
-    const input = args[0].toPtr(string.JSString).data();
-
-    // Compile and exec
-    const compiled = regex.Regex.compile(pattern, flags);
-    const match_result = compiled.exec(input);
-
-    if (match_result) |match| {
-        // Create result array
-        const result_arr = ctx.createObject(null) catch return value.JSValue.null_val;
-
-        // Set matched string as index 0
-        const matched_str = string.createString(allocator, match.slice()) catch return value.JSValue.null_val;
-        ctx.setIndexChecked(result_arr, 0, value.JSValue.fromPtr(matched_str)) catch return value.JSValue.null_val;
-        ctx.setPropertyChecked(result_arr, .length, value.JSValue.fromInt(1)) catch return value.JSValue.null_val;
-
-        // Set index property
-        const index_atom = ctx.atoms.intern("index") catch return result_arr.toValue();
-        ctx.setPropertyChecked(result_arr, index_atom, value.JSValue.fromInt(@intCast(match.start))) catch return result_arr.toValue();
-
-        // Set input property
-        const input_atom = ctx.atoms.intern("input") catch return result_arr.toValue();
-        ctx.setPropertyChecked(result_arr, input_atom, args[0]) catch return result_arr.toValue();
-
-        return result_arr.toValue();
-    }
-
-    return value.JSValue.null_val;
-}
-
-/// Create a RegExp object from pattern and flags strings (used by parser for literals)
-pub fn createRegExp(ctx: *context.Context, pattern: []const u8, flags_str: []const u8) !*object.JSObject {
-    const allocator = ctx.allocator;
-    const root_class_idx = ctx.root_class_idx;
-
-    const regexp_obj = try object.JSObject.create(allocator, root_class_idx, null, ctx.hidden_class_pool);
-
-    const source_atom = try ctx.atoms.intern("source");
-    const flags_atom = try ctx.atoms.intern("flags");
-    const global_atom = try ctx.atoms.intern("global");
-    const ignore_case_atom = try ctx.atoms.intern("ignoreCase");
-    const multiline_atom = try ctx.atoms.intern("multiline");
-    const last_index_atom = try ctx.atoms.intern("lastIndex");
-    const _regex_atom = try ctx.atoms.intern("_regex");
-
-    const source_js = try string.createString(allocator, pattern);
-    const flags_js = try string.createString(allocator, flags_str);
-
-    try ctx.setPropertyChecked(regexp_obj, source_atom, value.JSValue.fromPtr(source_js));
-    try ctx.setPropertyChecked(regexp_obj, flags_atom, value.JSValue.fromPtr(flags_js));
-
-    const flags = regex.parseFlags(flags_str);
-    try ctx.setPropertyChecked(regexp_obj, global_atom, if (flags.global) value.JSValue.true_val else value.JSValue.false_val);
-    try ctx.setPropertyChecked(regexp_obj, ignore_case_atom, if (flags.ignore_case) value.JSValue.true_val else value.JSValue.false_val);
-    try ctx.setPropertyChecked(regexp_obj, multiline_atom, if (flags.multiline) value.JSValue.true_val else value.JSValue.false_val);
-    try ctx.setPropertyChecked(regexp_obj, last_index_atom, value.JSValue.fromInt(0));
-
-    const flags_packed: u8 = @intFromBool(flags.global) | (@as(u8, @intFromBool(flags.ignore_case)) << 1) | (@as(u8, @intFromBool(flags.multiline)) << 2) | (@as(u8, @intFromBool(flags.dot_all)) << 3);
-    try ctx.setPropertyChecked(regexp_obj, _regex_atom, value.JSValue.fromInt(@as(i32, flags_packed)));
-
-    return regexp_obj;
-}
 
 // ============================================================================
 // Result type implementation - functional error handling
@@ -4315,32 +3673,7 @@ test "Math constants" {
     try std.testing.expect(math_constants.SQRT2 > 1.41 and math_constants.SQRT2 < 1.42);
 }
 
-test "Object.isFrozen" {
-    const gc = @import("gc.zig");
-    const allocator = std.testing.allocator;
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    var pool = try object.HiddenClassPool.init(allocator);
-    defer pool.deinit();
-
-    var obj = try object.JSObject.create(allocator, pool.getEmptyClass(), null, pool);
-    defer obj.destroy(allocator);
-
-    // Object is extensible by default
-    const obj_val = obj.toValue();
-    const not_frozen = objectIsFrozen(ctx, value.JSValue.undefined_val, &[_]value.JSValue{obj_val});
-    try std.testing.expect(not_frozen.isFalse());
-
-    // Freeze the object
-    _ = objectFreeze(ctx, value.JSValue.undefined_val, &[_]value.JSValue{obj_val});
-    const is_frozen = objectIsFrozen(ctx, value.JSValue.undefined_val, &[_]value.JSValue{obj_val});
-    try std.testing.expect(is_frozen.isTrue());
-}
+// Object.isFrozen test removed - freeze/isFrozen methods removed
 
 test "Array.isArray" {
     const gc = @import("gc.zig");
@@ -5107,148 +4440,9 @@ test "String.concat multiple strings" {
 }
 
 // ============================================================================
-// Array Method Tests
+// Array Method Tests (non-mutating methods only)
+// Mutating tests removed: push, pop, shift, unshift, splice, reverse
 // ============================================================================
-
-test "Array.push adds elements" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-    arr.setArrayLength(0);
-
-    // Push 3 elements
-    const result = arrayPush(ctx, arr.toValue(), &[_]value.JSValue{
-        value.JSValue.fromInt(1),
-        value.JSValue.fromInt(2),
-        value.JSValue.fromInt(3),
-    });
-
-    // Should return new length = 3
-    try std.testing.expectEqual(@as(i32, 3), result.getInt());
-    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
-}
-
-test "Array.pop removes last element" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-
-    // Add elements
-    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
-    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
-    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
-    arr.setArrayLength(3);
-
-    // Pop should return 30 and reduce length
-    const result = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
-    try std.testing.expectEqual(@as(i32, 30), result.getInt());
-    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
-}
-
-test "Array.pop on empty array" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-    arr.setArrayLength(0);
-
-    // Pop on empty array should return undefined
-    const result = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
-    try std.testing.expect(result.isUndefined());
-}
-
-test "Array.shift removes first element" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-
-    // Add elements [10, 20, 30]
-    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
-    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
-    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
-    arr.setArrayLength(3);
-
-    // Shift should return 10 and elements should shift
-    const result = arrayShift(ctx, arr.toValue(), &[_]value.JSValue{});
-    try std.testing.expectEqual(@as(i32, 10), result.getInt());
-    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
-
-    // First element should now be 20
-    const first = arr.getIndex(0) orelse value.JSValue.undefined_val;
-    try std.testing.expectEqual(@as(i32, 20), first.getInt());
-}
-
-test "Array.unshift adds to beginning" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-
-    // Start with [30]
-    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(30));
-    arr.setArrayLength(1);
-
-    // Unshift [10, 20] to get [10, 20, 30]
-    const result = arrayUnshift(ctx, arr.toValue(), &[_]value.JSValue{
-        value.JSValue.fromInt(10),
-        value.JSValue.fromInt(20),
-    });
-
-    try std.testing.expectEqual(@as(i32, 3), result.getInt());
-    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
-
-    // First element should be 10
-    const first = arr.getIndex(0) orelse value.JSValue.undefined_val;
-    try std.testing.expectEqual(@as(i32, 10), first.getInt());
-}
 
 test "Array.indexOf finds element" {
     const gc = @import("gc.zig");
@@ -5354,75 +4548,6 @@ test "Array.includes not found" {
     try std.testing.expect(result.getBool() == false);
 }
 
-test "Array.splice delete elements" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-
-    // [1, 2, 3, 4, 5]
-    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
-    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(2));
-    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(3));
-    try ctx.setIndexChecked(arr, 3, value.JSValue.fromInt(4));
-    try ctx.setIndexChecked(arr, 4, value.JSValue.fromInt(5));
-    arr.setArrayLength(5);
-
-    // splice(1, 2) removes elements at index 1 and 2
-    const removed = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
-        value.JSValue.fromInt(1),
-        value.JSValue.fromInt(2),
-    });
-
-    try std.testing.expect(removed.isObject());
-    const removed_arr = removed.toPtr(object.JSObject);
-    try std.testing.expectEqual(@as(u32, 2), removed_arr.getArrayLength());
-
-    // Original array should now be [1, 4, 5]
-    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
-}
-
-test "Array.splice insert elements" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-
-    // [1, 4]
-    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
-    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(4));
-    arr.setArrayLength(2);
-
-    // splice(1, 0, 2, 3) inserts 2 and 3 at index 1
-    _ = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
-        value.JSValue.fromInt(1),
-        value.JSValue.fromInt(0),
-        value.JSValue.fromInt(2),
-        value.JSValue.fromInt(3),
-    });
-
-    // Array should now be [1, 2, 3, 4]
-    try std.testing.expectEqual(@as(u32, 4), arr.getArrayLength());
-}
-
 test "Array.join with separator" {
     const gc = @import("gc.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -5476,27 +4601,6 @@ test "Array.join default separator" {
     const result = arrayJoin(ctx, arr.toValue(), &[_]value.JSValue{});
     try std.testing.expect(result.isString());
     try std.testing.expectEqualStrings("1,2", result.toPtr(string.JSString).data());
-}
-
-test "Array.reverse returns this" {
-    const gc = @import("gc.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
-    arr.prototype = ctx.array_prototype;
-    arr.setArrayLength(3);
-
-    // reverse() returns this (stub behavior - actual reversal not implemented)
-    const result = arrayReverse(ctx, arr.toValue(), &[_]value.JSValue{});
-    try std.testing.expect(result.isObject());
 }
 
 test "Array.concat returns total length" {
@@ -5963,45 +5067,7 @@ test "Hybrid: Map and Set accept arena values" {
     try std.testing.expect(has.getBool() == true);
 }
 
-test "Hybrid: Promise.resolve stores arena value" {
-    const gc = @import("gc.zig");
-    const heap_mod = @import("heap.zig");
-    const arena_mod = @import("arena.zig");
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var heap_state = heap_mod.Heap.init(allocator, .{});
-    defer heap_state.deinit();
-    gc_state.setHeap(&heap_state);
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
-    defer req_arena.deinit();
-    var hybrid = arena_mod.HybridAllocator{
-        .persistent = allocator,
-        .arena = &req_arena,
-    };
-    ctx.setHybridAllocator(&hybrid);
-
-    const arena_obj = try ctx.createObject(null);
-    const promise_val = promiseResolve(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arena_obj.toValue()});
-    try std.testing.expect(promise_val.isObject());
-
-    const promise_obj = object.JSObject.fromValue(promise_val);
-    try std.testing.expect(promise_obj.flags.is_arena);
-
-    const result_atom = try ctx.atoms.intern("__result");
-    const pool = ctx.hidden_class_pool.?;
-    const stored = promise_obj.getProperty(pool, result_atom) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(stored.strictEquals(arena_obj.toValue()));
-    try std.testing.expect(!ctx.hasException());
-}
+// Promise test removed - Promise implementation removed
 
 test "Hybrid: WeakMap and WeakSet accept arena values" {
     const gc = @import("gc.zig");

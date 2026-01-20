@@ -184,7 +184,7 @@ pub const Tokenizer = struct {
 
     fn scanSlash(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
         if (self.match('=')) return self.tok2(start, col, line, .slash_assign);
-        if (self.can_be_regex) return self.scanRegex(start, col, line);
+        // RegExp literals not supported - always treat / as division
         return self.tok1(start, col, line, .slash);
     }
 
@@ -372,32 +372,6 @@ pub const Tokenizer = struct {
         const text = self.source[start..self.pos];
         const token_type = lookupKeyword(text) orelse .identifier;
         return self.tokN(start, col, line, token_type);
-    }
-
-    fn scanRegex(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
-        var in_class = false;
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == '\\' and self.pos + 1 < self.source.len) {
-                self.pos += 2;
-            } else if (c == '[') {
-                in_class = true;
-                self.pos += 1;
-            } else if (c == ']' and in_class) {
-                in_class = false;
-                self.pos += 1;
-            } else if (c == '/' and !in_class) {
-                self.pos += 1;
-                while (self.pos < self.source.len and isIdentifierChar(self.source[self.pos])) self.pos += 1;
-                return self.tokN(start, col, line, .regex_literal);
-            } else if (c == '\n') {
-                break;
-            } else {
-                self.pos += 1;
-            }
-        }
-        self.pos = start + 1;
-        return self.tok1(start, col, line, .slash);
     }
 
     // --- Utility ---

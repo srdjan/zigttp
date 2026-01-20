@@ -14,6 +14,9 @@
 //! Unsupported (errors):
 //! - enum / const enum
 //! - namespace / module
+//! - class / abstract class
+//! - implements keyword
+//! - public / private / protected modifiers
 //! - decorators (@something)
 //! - angle-bracket assertions in TSX (<T>expr)
 
@@ -25,6 +28,7 @@ pub const StripError = error{
     UnsupportedNamespace,
     UnsupportedDecorator,
     UnsupportedAngleBracketAssertion,
+    UnsupportedClass,
     UnclosedTypeAnnotation,
     UnclosedGeneric,
     UnterminatedString,
@@ -1012,6 +1016,31 @@ const Stripper = struct {
         if (std.mem.eql(u8, keyword.?, "namespace") or std.mem.eql(u8, keyword.?, "module")) {
             return StripError.UnsupportedNamespace;
         }
+        // Classes and OOP features
+        if (std.mem.eql(u8, keyword.?, "class")) {
+            return StripError.UnsupportedClass;
+        }
+        if (std.mem.eql(u8, keyword.?, "abstract")) {
+            // Check for abstract class
+            const saved = self.pos;
+            self.pos += 8; // "abstract"
+            self.skipWhitespaceTracked();
+            const next_kw = self.peekKeyword();
+            self.pos = saved;
+            if (next_kw != null and std.mem.eql(u8, next_kw.?, "class")) {
+                return StripError.UnsupportedClass;
+            }
+        }
+        if (std.mem.eql(u8, keyword.?, "implements")) {
+            return StripError.UnsupportedClass;
+        }
+        // Class member modifiers - only valid in class context which is already rejected
+        if (std.mem.eql(u8, keyword.?, "public") or
+            std.mem.eql(u8, keyword.?, "private") or
+            std.mem.eql(u8, keyword.?, "protected"))
+        {
+            return StripError.UnsupportedClass;
+        }
     }
 
     // ========================================================================
@@ -1493,6 +1522,37 @@ test "namespace errors" {
 test "decorator errors" {
     const result = strip(std.testing.allocator, "@sealed class X {}", .{});
     try std.testing.expectError(StripError.UnsupportedDecorator, result);
+}
+
+test "class errors" {
+    const result = strip(std.testing.allocator, "class Foo { }", .{});
+    try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "abstract class errors" {
+    const result = strip(std.testing.allocator, "abstract class Foo { }", .{});
+    try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "implements errors" {
+    // implements as a standalone statement would be invalid
+    const result = strip(std.testing.allocator, "implements Foo { }", .{});
+    try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "public modifier errors" {
+    const result = strip(std.testing.allocator, "public foo() { }", .{});
+    try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "private modifier errors" {
+    const result = strip(std.testing.allocator, "private x = 1;", .{});
+    try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "protected modifier errors" {
+    const result = strip(std.testing.allocator, "protected foo() { }", .{});
+    try std.testing.expectError(StripError.UnsupportedClass, result);
 }
 
 test "line preservation" {
