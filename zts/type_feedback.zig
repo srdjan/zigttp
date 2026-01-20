@@ -38,8 +38,12 @@ pub const TypeFeedbackSite = struct {
 
     /// Record a value's type at this feedback site
     pub fn record(self: *TypeFeedbackSite, val: value.JSValue) void {
-        const observed_type = classifyValue(val);
         self.total_hits +%= 1;
+
+        // Skip recording if already megamorphic - no point checking types
+        if (self.megamorphic) return;
+
+        const observed_type = classifyValue(val);
 
         // Check if this type was already recorded
         for (self.observed[0..self.count]) |t| {
@@ -111,6 +115,9 @@ pub const CallSiteFeedback = struct {
     /// Record a callee at this call site
     pub fn recordCallee(self: *CallSiteFeedback, func_bc: ?*const bytecode.FunctionBytecode) void {
         self.total_calls +%= 1;
+
+        // Skip recording if already megamorphic - no point checking callees
+        if (self.megamorphic) return;
 
         if (func_bc == null) return;
 
@@ -215,8 +222,8 @@ pub const InliningPolicy = struct {
     pub const MAX_INLINE_BYTECODE_SIZE: u32 = 50;
     /// Maximum inlining depth
     pub const MAX_INLINE_DEPTH: u32 = 3;
-    /// Minimum call count before considering inlining
-    pub const MIN_CALL_COUNT: u32 = 10;
+    /// Minimum call count before considering inlining (lower for faster FaaS warmup)
+    pub const MIN_CALL_COUNT: u32 = 5;
     /// Maximum total inlined bytecode budget per function
     pub const MAX_INLINED_SIZE: u32 = 500;
 

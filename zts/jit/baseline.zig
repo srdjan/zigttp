@@ -19,6 +19,7 @@ const context_mod = @import("../context.zig");
 const object = @import("../object.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const type_feedback = @import("../type_feedback.zig");
+const arena_mod = @import("../arena.zig");
 
 const CodeAllocator = alloc.CodeAllocator;
 const CompiledCode = alloc.CompiledCode;
@@ -41,6 +42,14 @@ const CTX_STACK_LEN_OFF: i32 = @intCast(@offsetOf(Context, "stack") + @sizeOf(*v
 const CTX_SP_OFF: i32 = @intCast(@offsetOf(Context, "sp"));
 const CTX_FP_OFF: i32 = @intCast(@offsetOf(Context, "fp"));
 const CTX_JIT_INTERP_OFF: i32 = @intCast(@offsetOf(Context, "jit_interpreter"));
+const CTX_HYBRID_OFF: i32 = @intCast(@offsetOf(Context, "hybrid"));
+
+// Arena offsets for inline bump allocation
+const HYBRID_ARENA_OFF: i32 = @intCast(@offsetOf(arena_mod.HybridAllocator, "arena"));
+const ARENA_PTR_OFF: i32 = @intCast(@offsetOf(arena_mod.Arena, "ptr"));
+const ARENA_LIMIT_OFF: i32 = @intCast(@offsetOf(arena_mod.Arena, "limit"));
+const JSOBJECT_SIZE: u32 = @sizeOf(JSObject);
+const JSOBJECT_SIZE_ALIGNED: u32 = (JSOBJECT_SIZE + 7) & ~@as(u32, 7); // 8-byte aligned
 
 // JSObject field offsets for inline cache fast path
 const OBJ_HIDDEN_CLASS_OFF: i32 = @intCast(@offsetOf(JSObject, "hidden_class_idx"));
@@ -860,7 +869,7 @@ pub const BaselineCompiler = struct {
             // Quick pointer check: (raw & 0x7) == 1
             self.emitter.movRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 7) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
             // Extract object pointer (clear low 3 bits)
@@ -1568,8 +1577,7 @@ pub const BaselineCompiler = struct {
                 new_pc += 2;
                 const prop_count = code[new_pc];
                 new_pc += 1;
-                _ = prop_count; // Used for verification in debug builds
-                try self.emitNewObjectLiteral(shape_idx);
+                try self.emitNewObjectLiteral(shape_idx, prop_count);
             },
 
             .set_slot => {
@@ -3638,17 +3646,20 @@ pub const BaselineCompiler = struct {
     }
 
     /// Emit code to create object with pre-compiled literal shape via helper
-    fn emitNewObjectLiteral(self: *BaselineCompiler, shape_idx: u16) CompileError!void {
-        const fn_ptr = @intFromPtr(&Context.jitNewObjectLiteral);
+    /// Uses fast path that only initializes needed slots when prop_count is known
+    fn emitNewObjectLiteral(self: *BaselineCompiler, shape_idx: u16, prop_count: u8) CompileError!void {
+        const fn_ptr = @intFromPtr(&Context.jitNewObjectLiteralFast);
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, shape_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, prop_count) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, shape_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, prop_count) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);

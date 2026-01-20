@@ -757,6 +757,23 @@ pub const Context = struct {
         return obj.toValue();
     }
 
+    /// JIT helper: create object with known property count (fast path)
+    /// Skips initializing unused inline slots for better performance
+    pub fn jitNewObjectLiteralFast(self: *Context, shape_idx: u16, prop_count: u8) callconv(.c) value.JSValue {
+        const class_idx = self.getLiteralShape(shape_idx) orelse {
+            const obj = self.createObject(null) catch return self.jitThrow();
+            return obj.toValue();
+        };
+        // Use fast path with arena allocation if available
+        if (self.hybrid) |h| {
+            const obj = object.JSObject.createWithArenaFast(h.arena, class_idx, prop_count) orelse return self.jitThrow();
+            return obj.toValue();
+        }
+        // Fall back to standard path for non-arena allocation
+        const obj = object.JSObject.create(self.allocator, class_idx, null, self.hidden_class_pool) catch return self.jitThrow();
+        return obj.toValue();
+    }
+
     /// JIT helper: set property by atom index
     /// Returns the assigned value (or exception_val on error).
     pub fn jitPutField(self: *Context, obj_val: value.JSValue, atom_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {

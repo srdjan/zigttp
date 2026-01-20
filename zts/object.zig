@@ -1400,6 +1400,27 @@ pub const JSObject = extern struct {
         return obj;
     }
 
+    /// Create object with arena allocation, only initializing needed slots (fast path)
+    /// Used by JIT when property count is known at compile time
+    pub fn createWithArenaFast(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, slot_count: u8) ?*JSObject {
+        const obj = arena.create(JSObject) orelse return null;
+        // Initialize header fields
+        obj.header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject));
+        obj.hidden_class_idx = class_idx;
+        obj.prototype = null;
+        obj.class_id = .object;
+        obj.flags = .{ .is_arena = true };
+        obj.overflow_slots = null;
+        obj.overflow_capacity = 0;
+        obj.arena_ptr = arena;
+        // Only initialize the slots we need (up to INLINE_SLOT_COUNT)
+        const count = @min(slot_count, INLINE_SLOT_COUNT);
+        for (0..count) |i| {
+            obj.inline_slots[i] = value.JSValue.undefined_val;
+        }
+        return obj;
+    }
+
     /// Create an array object using arena allocation
     pub fn createArrayWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex) ?*JSObject {
         const obj = arena.create(JSObject) orelse return null;
