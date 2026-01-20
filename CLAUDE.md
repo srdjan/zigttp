@@ -18,6 +18,7 @@ Requires Zig 0.16.0+ (nightly).
 # Build
 zig build                           # Debug build
 zig build -Doptimize=ReleaseFast   # Optimized build
+zig build -Dhandler=handler.js     # Precompile handler at build time
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
@@ -90,7 +91,9 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 
 **JIT Baseline IC Integration** (`zts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
 
-**JIT Object Literal Shapes** (`zts/context.zig:746-759`, `zts/jit/baseline.zig:3640-3685`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead. Supports both x86-64 and ARM64.
+**JIT Object Literal Shapes** (`zts/context.zig:746-779`, `zts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead. Fast path uses arena bump allocation with minimal slot initialization (`createWithArenaFast`). Supports both x86-64 and ARM64.
+
+**Type Feedback** (`zts/type_feedback.zig`): Call site and value type profiling for JIT optimization decisions. Early exits when sites become megamorphic avoid redundant type classification. Inlining threshold lowered to 5 calls (from 10) for faster FaaS warmup.
 
 #### String Optimizations
 
@@ -118,6 +121,12 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 - Phase 3: Circuit breaker fails fast after 100 retries
 
 **Zero-Copy Response** (`src/zruntime.zig`): Borrowed mode for both body and headers avoids memcpy when arena lifetime is guaranteed.
+
+#### Build-Time Precompilation
+
+**Handler Precompilation** (`tools/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely. This provides the fastest possible cold start for production deployments.
+
+Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
 
 ## TypeScript/TSX Support
 
