@@ -111,6 +111,36 @@ pub const HttpStringCache = struct {
     content_type_atom: object.Atom,
 };
 
+/// Cached strings for small integers (0-99) to avoid repeated allocations
+pub const SmallIntStringCache = struct {
+    /// Cached string representations for integers 0-99
+    strings: [100]*string.JSString,
+
+    pub fn init(allocator: std.mem.Allocator) !SmallIntStringCache {
+        var cache: SmallIntStringCache = undefined;
+        var buf: [3]u8 = undefined;
+        for (0..100) |i| {
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+            cache.strings[i] = try string.createString(allocator, slice);
+        }
+        return cache;
+    }
+
+    pub fn deinit(self: *const SmallIntStringCache, allocator: std.mem.Allocator) void {
+        for (self.strings) |str| {
+            string.freeString(allocator, str);
+        }
+    }
+
+    /// Get cached string for integer, or null if out of range
+    pub inline fn get(self: *const SmallIntStringCache, n: i32) ?*string.JSString {
+        if (n >= 0 and n < 100) {
+            return self.strings[@intCast(n)];
+        }
+        return null;
+    }
+};
+
 /// Call frame on the call stack
 pub const CallFrame = struct {
     return_pc: usize,
@@ -193,6 +223,8 @@ pub const Context = struct {
     http_shapes: ?HttpShapeCache,
     /// Cached HTTP strings and atoms for common values
     http_strings: ?HttpStringCache,
+    /// Cached strings for small integers (0-99) to avoid repeated allocations
+    small_int_cache: SmallIntStringCache,
     /// Pre-built hidden class indices for object literal shapes.
     /// Indexed by shape_idx from bytecode, populated via materializeShapes().
     literal_shapes: std.ArrayList(object.HiddenClassIndex),
@@ -218,6 +250,10 @@ pub const Context = struct {
         // Create global object using pool-based class
         const global_obj = try object.JSObject.create(allocator, hidden_class_pool.getEmptyClass(), null, hidden_class_pool);
         errdefer global_obj.destroy(allocator);
+
+        // Initialize small integer string cache (0-99)
+        const small_int_cache = try SmallIntStringCache.init(allocator);
+        errdefer small_int_cache.deinit(allocator);
 
         ctx.* = .{
             .allocator = allocator,
@@ -251,6 +287,7 @@ pub const Context = struct {
             .builtin_objects = .{},
             .http_shapes = null,
             .http_strings = null,
+            .small_int_cache = small_int_cache,
             .literal_shapes = .{},
         };
 
@@ -655,6 +692,7 @@ pub const Context = struct {
             string.freeString(self.allocator, cache.content_type_text);
             string.freeString(self.allocator, cache.content_type_html);
         }
+        self.small_int_cache.deinit(self.allocator);
         if (self.root_class) |root| root.deinitRecursive(self.allocator);
         if (self.hidden_class_pool) |p| p.deinit();
 
@@ -1178,8 +1216,14 @@ pub const Context = struct {
             return val.toPtr(string.JSString);
         }
         if (val.isInt()) {
+            const n = val.getInt();
+            // Fast path: use cached strings for small integers 0-99
+            if (self.small_int_cache.get(n)) |cached| {
+                return cached;
+            }
+            // Fallback: format larger integers
             var buf: [32]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return self.createStringPtr("0");
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return self.createStringPtr("0");
             return try self.createStringPtr(slice);
         }
         if (val.isNull()) {

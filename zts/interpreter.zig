@@ -2696,8 +2696,14 @@ pub const Interpreter = struct {
             return val.toPtr(string.JSString);
         }
         if (val.isInt()) {
+            const n = val.getInt();
+            // Fast path: use cached strings for small integers 0-99
+            if (self.ctx.small_int_cache.get(n)) |cached| {
+                return cached;
+            }
+            // Fallback: format larger integers
             var buf: [32]u8 = undefined;
-            const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return try self.createString("0");
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return try self.createString("0");
             return try self.createString(slice);
         }
         if (val.isNull()) {
