@@ -678,6 +678,14 @@ pub const Interpreter = struct {
             }
         }
 
+        // Hot loop promotion: compile immediately if promoted by back-edge counter
+        // (execution_count < JIT_THRESHOLD means it was promoted by hot loop, not call count)
+        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.execution_count < getJitThreshold()) {
+            self.tryCompileBaseline(func_mut) catch {
+                // Compilation failed - continue with interpreter
+            };
+        }
+
         // Allocate space for locals
         const local_count = func.local_count;
         try self.ctx.ensureStack(local_count);
@@ -1454,8 +1462,17 @@ pub const Interpreter = struct {
                 .loop => {
                     const offset = readI16(self.pc);
                     self.pc += 2;
-                    // Profile back-edge for hot loop detection (Phase 11)
-                    _ = self.profileBackedge();
+                    // Profile back-edge for hot loop detection
+                    // If loop is hot, promote containing function to JIT candidate
+                    if (self.profileBackedge()) {
+                        if (self.current_func) |func| {
+                            const func_mut = @constCast(func);
+                            if (func_mut.tier == .interpreted) {
+                                func_mut.tier = .baseline_candidate;
+                            }
+                        }
+                        self.backedge_count = 0; // Reset to avoid repeated promotion
+                    }
                     self.offsetPc(-offset);
                 },
 
@@ -2877,6 +2894,16 @@ pub const Interpreter = struct {
                 .json_stringify => builtins.jsonStringify(self.ctx, this_val, args[0..argc]),
                 .string_index_of => builtins.stringIndexOf(self.ctx, this_val, args[0..argc]),
                 .string_slice => builtins.stringSlice(self.ctx, this_val, args[0..argc]),
+                // Math methods - direct calls without error handling wrapper
+                .math_floor => builtins.mathFloor(self.ctx, this_val, args[0..argc]),
+                .math_ceil => builtins.mathCeil(self.ctx, this_val, args[0..argc]),
+                .math_round => builtins.mathRound(self.ctx, this_val, args[0..argc]),
+                .math_abs => builtins.mathAbs(self.ctx, this_val, args[0..argc]),
+                .math_min => builtins.mathMin(self.ctx, this_val, args[0..argc]),
+                .math_max => builtins.mathMax(self.ctx, this_val, args[0..argc]),
+                // Number parsing
+                .parse_int => builtins.numberParseInt(self.ctx, this_val, args[0..argc]),
+                .parse_float => builtins.numberParseFloat(self.ctx, this_val, args[0..argc]),
                 .none => blk: {
                     // Generic path for non-hot builtins
                     break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {

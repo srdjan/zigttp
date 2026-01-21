@@ -2040,8 +2040,38 @@ pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const v
 
     if (getJSString(this)) |str| {
         if (getJSString(args[0])) |needle| {
-            if (str.indexOf(needle.data())) |idx| {
-                return value.JSValue.fromInt(@intCast(idx));
+            const data = str.data();
+            const needle_data = needle.data();
+
+            // Get start position (default 0)
+            var start: usize = 0;
+            if (args.len > 1) {
+                if (args[1].isInt()) {
+                    const pos = args[1].getInt();
+                    if (pos >= 0) {
+                        start = @intCast(pos);
+                    }
+                } else if (args[1].toNumber()) |n| {
+                    if (n >= 0) {
+                        const floored = @floor(n);
+                        if (floored < @as(f64, @floatFromInt(data.len))) {
+                            start = @intFromFloat(floored);
+                        }
+                    }
+                }
+            }
+
+            // Clamp start to string length
+            if (start >= data.len) return value.JSValue.fromInt(-1);
+
+            // Search in substring from start position
+            if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(start));
+            if (needle_data.len > data.len - start) return value.JSValue.fromInt(-1);
+
+            // Search manually from start position
+            const search_area = data[start..];
+            if (std.mem.indexOf(u8, search_area, needle_data)) |rel_idx| {
+                return value.JSValue.fromInt(@intCast(start + rel_idx));
             }
         }
     }
@@ -2735,15 +2765,16 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Register console on global
     try ctx.setGlobal(.console, console_obj.toValue());
 
-    // Create Math object
+    // Create Math object - hot methods use fast dispatch IDs
     const math_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .abs, wrap(mathAbs), 1);
-    try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .floor, wrap(mathFloor), 1);
-    try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .ceil, wrap(mathCeil), 1);
-    try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .round, wrap(mathRound), 1);
-    try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .min, wrap(mathMin), 2);
-    try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .max, wrap(mathMax), 2);
+    try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .abs, wrap(mathAbs), 1, .math_abs);
+    try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .floor, wrap(mathFloor), 1, .math_floor);
+    try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .ceil, wrap(mathCeil), 1, .math_ceil);
+    try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .round, wrap(mathRound), 1, .math_round);
+    try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .min, wrap(mathMin), 2, .math_min);
+    try addMethodWithId(ctx, allocator, pool, math_obj, root_class_idx, .max, wrap(mathMax), 2, .math_max);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .pow, wrap(mathPow), 2);
+    try addMethodDynamic(ctx, math_obj, "trunc", wrap(mathTrunc), 1);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .sqrt, wrap(mathSqrt), 1);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .sin, wrap(mathSin), 1);
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .cos, wrap(mathCos), 1);
@@ -2849,15 +2880,15 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Register Number on global (predefined atom)
     try ctx.setGlobal(.Number, number_obj.toValue());
 
-    // Also register parseFloat and parseInt globally (JS convention)
+    // Also register parseFloat and parseInt globally (JS convention) - hot builtins with fast dispatch
     // Note: these are functions directly on global, not container objects.
     // They will be destroyed by global_obj.destroyBuiltin, so don't add to builtin_objects.
     const global_parse_float_atom = try ctx.atoms.intern("parseFloat");
-    const parse_float_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(numberParseFloat), global_parse_float_atom, 1);
+    const parse_float_func = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, wrap(numberParseFloat), global_parse_float_atom, 1, .parse_float);
     try ctx.setGlobal(global_parse_float_atom, parse_float_func.toValue());
 
     const global_parse_int_atom = try ctx.atoms.intern("parseInt");
-    const parse_int_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(numberParseInt), global_parse_int_atom, 2);
+    const parse_int_func = try object.JSObject.createNativeFunctionWithId(allocator, pool, root_class_idx, wrap(numberParseInt), global_parse_int_atom, 2, .parse_int);
     try ctx.setGlobal(global_parse_int_atom, parse_int_func.toValue());
 
     // Also register isNaN and isFinite globally (JS convention)

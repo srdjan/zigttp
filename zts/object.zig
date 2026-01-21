@@ -632,6 +632,16 @@ pub const BuiltinId = enum(u8) {
     // String methods - common in request processing
     string_index_of = 3,
     string_slice = 4,
+    // Math methods - high frequency in pagination/calculations
+    math_floor = 5,
+    math_ceil = 6,
+    math_round = 7,
+    math_abs = 8,
+    math_min = 9,
+    math_max = 10,
+    // Number parsing - high frequency for query params/IDs
+    parse_int = 11,
+    parse_float = 12,
 };
 
 /// Native function data stored in function objects
