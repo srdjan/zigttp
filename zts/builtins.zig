@@ -1115,7 +1115,14 @@ const JSONShapeCacheEntry = struct {
 
 /// Thread-local JSON shape cache
 /// Maps property-atom-sequence to pre-built HiddenClassIndex
+/// IMPORTANT: Must be cleared when creating a new Context to avoid stale class indices
 var json_shape_cache: [JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
+
+/// Clear the JSON shape cache. Must be called when creating a new Context
+/// to avoid stale HiddenClassIndex references from previous contexts.
+pub fn clearJsonShapeCache() void {
+    json_shape_cache = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
+}
 
 /// Compute hash for a sequence of atoms
 fn hashAtomSequence(atoms: []const object.Atom) u64 {
@@ -1906,21 +1913,66 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
 }
 
 /// Array.prototype.toSorted(compareFunc?) - Return new sorted array (non-mutating)
+/// Implements default string comparison per JS spec. Custom compare functions not yet supported.
 pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     if (obj.class_id != .array) return value.JSValue.undefined_val;
 
+    // Custom compare functions not yet supported
+    if (args.len > 0 and args[0].isObject()) {
+        // TODO: Implement callback invocation for custom comparators
+        // For now, ignore the compare function and use default sort
+    }
+
     const len = obj.getArrayLength();
+    if (len == 0) {
+        const result = ctx.createArray() catch return value.JSValue.undefined_val;
+        result.prototype = ctx.array_prototype;
+        return result.toValue();
+    }
+
+    // Copy elements to temporary buffer
+    const temp = ctx.allocator.alloc(value.JSValue, len) catch return value.JSValue.undefined_val;
+    defer ctx.allocator.free(temp);
+
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        temp[i] = obj.getIndex(i) orelse value.JSValue.undefined_val;
+    }
+
+    // Sort using default string comparison (per JS spec)
+    std.mem.sort(value.JSValue, temp, ctx.allocator, struct {
+        pub fn lessThan(allocator: std.mem.Allocator, a: value.JSValue, b: value.JSValue) bool {
+            // undefined values go to the end
+            if (a.isUndefined() and b.isUndefined()) return false;
+            if (a.isUndefined()) return false;
+            if (b.isUndefined()) return true;
+
+            // Convert to strings and compare lexicographically (JS default)
+            const str_a = valueToStringSimple(allocator, a) catch return false;
+            defer if (!a.isString()) allocator.destroy(str_a);
+            const str_b = valueToStringSimple(allocator, b) catch return false;
+            defer if (!b.isString()) allocator.destroy(str_b);
+
+            const slice_a = str_a.data();
+            const slice_b = str_b.data();
+
+            // Lexicographic comparison
+            const min_len = @min(slice_a.len, slice_b.len);
+            for (slice_a[0..min_len], slice_b[0..min_len]) |ca, cb| {
+                if (ca < cb) return true;
+                if (ca > cb) return false;
+            }
+            return slice_a.len < slice_b.len;
+        }
+    }.lessThan);
+
+    // Create result array with sorted elements
     const result = ctx.createArray() catch return value.JSValue.undefined_val;
     result.prototype = ctx.array_prototype;
 
-    // Copy elements (sorting would require compare function infrastructure)
-    // For now, return a copy - full implementation would sort
-    var i: u32 = 0;
-    while (i < len) : (i += 1) {
-        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        ctx.setIndexChecked(result, i, val) catch return value.JSValue.undefined_val;
+    for (temp, 0..) |val, idx| {
+        ctx.setIndexChecked(result, @intCast(idx), val) catch return value.JSValue.undefined_val;
     }
     result.setArrayLength(len);
     return result.toValue();

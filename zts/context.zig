@@ -11,6 +11,7 @@ const object = @import("object.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
+const builtins = @import("builtins.zig");
 
 pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
 
@@ -242,6 +243,9 @@ pub const Context = struct {
         // Create index-based hidden class pool
         const hidden_class_pool = try object.HiddenClassPool.init(allocator);
         errdefer hidden_class_pool.deinit();
+
+        // Clear global JSON shape cache to avoid stale references from previous contexts
+        builtins.clearJsonShapeCache();
 
         // Create root hidden class for all objects (legacy - to be removed)
         const root_class = try object.HiddenClass.init(allocator);

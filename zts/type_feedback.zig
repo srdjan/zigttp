@@ -426,7 +426,7 @@ test "InliningPolicy rejects cold calls" {
 
     var call_site = CallSiteFeedback{};
     call_site.recordCallee(&dummy_callee);
-    call_site.total_calls = 5; // Below threshold
+    call_site.total_calls = 4; // Below threshold (MIN_CALL_COUNT = 5)
 
     const decision = InliningPolicy.shouldInline(
         &dummy_caller,
