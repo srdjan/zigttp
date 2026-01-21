@@ -1039,7 +1039,21 @@ const Stripper = struct {
             std.mem.eql(u8, keyword.?, "private") or
             std.mem.eql(u8, keyword.?, "protected"))
         {
-            return StripError.UnsupportedClass;
+            // Allow labels like "public:" at statement start
+            const saved_pos = self.pos;
+            const saved_line = self.line;
+            const saved_col = self.col;
+            self.pos += @intCast(keyword.?.len);
+            self.col += @intCast(keyword.?.len);
+            self.skipWhitespaceTracked();
+            const is_label = self.pos < self.source.len and self.source[self.pos] == ':';
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+
+            if (!is_label) {
+                return StripError.UnsupportedClass;
+            }
         }
     }
 
@@ -1553,6 +1567,12 @@ test "private modifier errors" {
 test "protected modifier errors" {
     const result = strip(std.testing.allocator, "protected foo() { }", .{});
     try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "public label allowed" {
+    const result = try strip(std.testing.allocator, "public: foo();", .{});
+    defer result.deinit();
+    try std.testing.expectEqualStrings("public: foo();", result.code);
 }
 
 test "line preservation" {

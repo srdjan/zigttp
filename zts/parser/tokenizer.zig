@@ -184,7 +184,12 @@ pub const Tokenizer = struct {
 
     fn scanSlash(self: *Tokenizer, start: u32, col: u16, line: u32) Token {
         if (self.match('=')) return self.tok2(start, col, line, .slash_assign);
-        // RegExp literals not supported - always treat / as division
+        if (self.can_be_regex) {
+            if (self.scanRegexLiteral(start, col, line)) |tok| {
+                return tok;
+            }
+        }
+        // RegExp literals not supported - treat / as division when not a regex
         return self.tok1(start, col, line, .slash);
     }
 
@@ -230,6 +235,54 @@ pub const Tokenizer = struct {
         }
         if (self.match('=')) return self.tok2(start, col, line, .ge);
         return self.tok1(start, col, line, .gt);
+    }
+
+    fn scanRegexLiteral(self: *Tokenizer, start: u32, col: u16, line: u32) ?Token {
+        const saved = self.saveState();
+        var in_class = false;
+        var escaped = false;
+
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            if (c == '\n' or c == '\r') {
+                self.restoreState(saved);
+                return null;
+            }
+            self.pos += 1;
+
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (c == '[') {
+                in_class = true;
+                continue;
+            }
+            if (c == ']' and in_class) {
+                in_class = false;
+                continue;
+            }
+            if (c == '/' and !in_class) {
+                // Optional flags
+                while (self.pos < self.source.len) {
+                    const f = self.source[self.pos];
+                    if (std.ascii.isAlphabetic(f)) {
+                        self.pos += 1;
+                        continue;
+                    }
+                    break;
+                }
+                const len: u16 = @intCast(self.pos - start);
+                return .{ .type = .regex_literal, .start = start, .len = len, .line = line, .column = col };
+            }
+        }
+
+        self.restoreState(saved);
+        return null;
     }
 
     fn scanAmpersand(self: *Tokenizer, start: u32, col: u16, line: u32) Token {

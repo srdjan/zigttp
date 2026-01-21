@@ -1757,21 +1757,22 @@ pub const Parser = struct {
         const loc = self.current.location();
         const name = self.current.text(self.source);
 
-        // Check for removed global identifiers
-        if (std.mem.eql(u8, name, "Promise")) {
-            self.errors.addErrorAt(.unsupported_feature, self.current, "'Promise' is not supported; use Result types or callbacks instead");
-            return error.ParseError;
-        }
-        if (std.mem.eql(u8, name, "RegExp")) {
-            self.errors.addErrorAt(.unsupported_feature, self.current, "'RegExp' is not supported; use string methods instead");
-            return error.ParseError;
-        }
-
-        self.advance();
-
         const name_atom = try self.addAtom(name);
         const binding = self.scopes.resolveBinding(name, name_atom);
 
+        // Check for removed global identifiers (allow local bindings)
+        if (binding.kind == .global) {
+            if (std.mem.eql(u8, name, "Promise")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'Promise' is not supported; use Result types or callbacks instead");
+                return error.ParseError;
+            }
+            if (std.mem.eql(u8, name, "RegExp")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'RegExp' is not supported; use string methods instead");
+                return error.ParseError;
+            }
+        }
+
+        self.advance();
         return try self.nodes.add(Node.identifier(loc, binding));
     }
 
@@ -3068,6 +3069,36 @@ test "parse class rejected" {
 
     // Should have errored
     try std.testing.expect(false);
+}
+
+test "parse regex literal rejected" {
+    var parser = Parser.init(std.testing.allocator,
+        \\const r = /ab+/;
+    );
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "parse local Promise identifier" {
+    var parser = Parser.init(std.testing.allocator,
+        \\const Promise = 1;
+        \\Promise;
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "parse closure creates upvalue" {
