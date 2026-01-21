@@ -734,7 +734,6 @@ pub const CodeGen = struct {
             .shl => .shl,
             .shr => .shr,
             .ushr => .ushr,
-            .instanceof => .instanceof,
             else => .nop,
         };
 

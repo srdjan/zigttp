@@ -632,9 +632,6 @@ pub const BuiltinId = enum(u8) {
     // String methods - common in request processing
     string_index_of = 3,
     string_slice = 4,
-    // Array methods
-    array_push = 5,
-    array_pop = 6,
 };
 
 /// Native function data stored in function objects

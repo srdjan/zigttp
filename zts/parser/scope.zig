@@ -24,7 +24,6 @@ pub const Binding = struct {
         parameter, // Function parameter
         function, // Function declaration (hoisted)
         catch_param, // catch(e) parameter
-        class, // Class declaration
         import, // Import binding
     };
 };
@@ -53,7 +52,6 @@ pub const ScopeKind = enum {
     block, // Block scope (let/const are block-scoped)
     for_loop, // For loop initializer scope
     catch_block, // Catch clause scope
-    class_body, // Class body scope
     module, // ES module scope
 };
 

@@ -77,7 +77,6 @@ pub const BinaryOp = enum(u8) {
     nullish,
 
     // Other
-    instanceof,
     in_op,
 };
 
@@ -112,7 +111,6 @@ pub const NodeTag = enum(u8) {
     lit_bool,
     lit_null,
     lit_undefined,
-    lit_regex,
 
     // Identifiers and references
     identifier,
@@ -145,8 +143,6 @@ pub const NodeTag = enum(u8) {
     yield_expr,
     sequence_expr,
     comma_expr,
-    this_expr,
-    new_expr,
 
     // Statements
     expr_stmt,
@@ -171,8 +167,6 @@ pub const NodeTag = enum(u8) {
 
     // Declarations
     function_decl,
-    class_decl,
-    class_method,
 
     // Patterns (for destructuring)
     array_pattern,
@@ -218,7 +212,6 @@ pub const Node = struct {
         float_idx: u16, // Index into float constant pool
         string_idx: u16, // Index into string constant pool
         bool_value: bool,
-        regex: RegexData,
 
         // Identifier/binding reference
         binding: BindingRef,
@@ -304,12 +297,6 @@ pub const Node = struct {
         // Export declaration
         export_decl: ExportDecl,
 
-        // Class declaration
-        class_decl: ClassDecl,
-
-        // Class method/field
-        class_member: ClassMember,
-
         // Pattern element
         pattern_elem: PatternElem,
 
@@ -321,11 +308,6 @@ pub const Node = struct {
     };
 
     // --- Nested data structures ---
-
-    pub const RegexData = struct {
-        pattern_idx: u16, // String constant index for pattern
-        flags_idx: u16, // String constant index for flags
-    };
 
     pub const BinaryExpr = struct {
         op: BinaryOp,
@@ -496,25 +478,6 @@ pub const Node = struct {
         pub const ExportKind = enum(u2) { named, default, all };
     };
 
-    pub const ClassDecl = struct {
-        scope_id: ScopeId,
-        name_atom: u16, // 0 for anonymous class expressions
-        super_class: NodeIndex, // null_node if no extends
-        members_start: NodeIndex,
-        members_count: u8,
-        binding: BindingRef, // Where the class is bound
-    };
-
-    pub const ClassMember = struct {
-        key: NodeIndex,
-        value: NodeIndex, // Method body or field initializer
-        kind: MemberKind,
-        is_static: bool,
-        is_computed: bool,
-
-        pub const MemberKind = enum(u2) { method, getter, setter, field };
-    };
-
     pub const PatternElem = struct {
         kind: PatternKind,
         binding: BindingRef, // Final binding slot
@@ -581,15 +544,6 @@ pub const Node = struct {
             .tag = .identifier,
             .loc = loc,
             .data = .{ .binding = binding },
-        };
-    }
-
-    /// Create a this expression node
-    pub fn thisExpr(loc: SourceLocation) Node {
-        return .{
-            .tag = .this_expr,
-            .loc = loc,
-            .data = .{ .none = {} },
         };
     }
 
@@ -1003,11 +957,6 @@ pub const IRStore = struct {
             .lit_bool => self.addNode(.lit_bool, loc, .{ .a = if (node.data.bool_value) 1 else 0, .b = 0 }),
             .lit_null => self.addNode(.lit_null, loc, .{ .a = 0, .b = 0 }),
             .lit_undefined => self.addNode(.lit_undefined, loc, .{ .a = 0, .b = 0 }),
-            .lit_regex => blk: {
-                const r = node.data.regex;
-                break :blk self.addNode(.lit_regex, loc, .{ .a = r.pattern_idx, .b = r.flags_idx });
-            },
-
             // --- Expressions ---
             .identifier => blk: {
                 const b = node.data.binding;
@@ -1016,7 +965,6 @@ pub const IRStore = struct {
                     .b = @intFromEnum(b.kind),
                 });
             },
-            .this_expr => self.addNode(.this_expr, loc, .{ .a = 0, .b = 0 }),
             .binary_op => self.addNode(.binary_op, loc, DataPayload.fromBinary(
                 node.data.binary.op,
                 node.data.binary.left,
@@ -1083,11 +1031,6 @@ pub const IRStore = struct {
             },
             .object_spread => self.addNode(.object_spread, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
             .spread => self.addNode(.spread, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
-            .new_expr => blk: {
-                const c = node.data.call;
-                const b_val = @as(u32, c.args_count) | (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
-                break :blk self.addNode(.new_expr, loc, .{ .a = c.callee, .b = b_val });
-            },
             .yield_expr, .await_expr => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
 
             // --- Function expressions ---
@@ -1266,29 +1209,6 @@ pub const IRStore = struct {
             .jsx_text => self.addNode(.jsx_text, loc, .{ .a = node.data.jsx_text, .b = 0 }),
             .jsx_expr_container => self.addNode(.jsx_expr_container, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
 
-            // --- Classes ---
-            .class_decl => blk: {
-                const c = node.data.class_decl;
-                const binding_packed = (@as(u32, c.binding.scope_id) << 16) | c.binding.slot;
-                const extra_start = try self.addExtra(&.{
-                    c.scope_id,
-                    c.name_atom,
-                    c.super_class,
-                    c.members_start,
-                    c.members_count,
-                    binding_packed,
-                });
-                break :blk self.addNode(.class_decl, loc, .{ .a = extra_start, .b = 0 });
-            },
-            .class_method => blk: {
-                const m = node.data.class_member;
-                const flags = (@as(u32, @intFromEnum(m.kind))) |
-                    (@as(u32, if (m.is_static) 1 else 0) << 2) |
-                    (@as(u32, if (m.is_computed) 1 else 0) << 3);
-                const extra_start = try self.addExtra(&.{ m.key, m.value, flags });
-                break :blk self.addNode(.class_method, loc, .{ .a = extra_start, .b = 0 });
-            },
-
             // --- Imports/Exports ---
             .import_decl => blk: {
                 const i = node.data.import_decl;
@@ -1415,7 +1335,7 @@ pub const IRStore = struct {
                 .lit_float => .{ .float_idx = @truncate(d.a) },
                 .lit_string => .{ .string_idx = @truncate(d.a) },
                 .lit_bool => .{ .bool_value = d.a != 0 },
-                .lit_null, .lit_undefined, .this_expr, .empty_stmt, .debugger_stmt => .{ .none = {} },
+                .lit_null, .lit_undefined, .empty_stmt, .debugger_stmt => .{ .none = {} },
                 .identifier => .{ .binding = self.getBinding(idx) },
                 .binary_op => blk: {
                     const bin = d.toBinary();

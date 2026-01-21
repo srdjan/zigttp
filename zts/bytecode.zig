@@ -119,8 +119,6 @@ pub const Opcode = enum(u8) {
     put_field = 0x71, // +u16 atom_idx
     get_elem = 0x72,
     put_elem = 0x73,
-    delete_field = 0x74, // +u16 atom_idx
-    delete_elem = 0x75,
     put_field_keep = 0x76, // +u16 atom_idx - set property and keep value on stack
 
     // Object operations
@@ -136,7 +134,6 @@ pub const Opcode = enum(u8) {
 
     // Type checks
     typeof = 0x90,
-    instanceof = 0x91,
 
     // Async operations (kept for future implementation)
     await_val = 0x98, // Await a value/Promise, suspends execution
@@ -296,8 +293,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .put_field => .{ .size = 3, .n_pop = 2, .n_push = 0, .name = "put_field" },
         .get_elem => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "get_elem" },
         .put_elem => .{ .size = 1, .n_pop = 3, .n_push = 0, .name = "put_elem" },
-        .delete_field => .{ .size = 3, .n_pop = 1, .n_push = 1, .name = "delete_field" },
-        .delete_elem => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "delete_elem" },
         .put_field_keep => .{ .size = 3, .n_pop = 2, .n_push = 1, .name = "put_field_keep" },
 
         // Object operations
@@ -313,7 +308,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
 
         // Type checks
         .typeof => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "typeof" },
-        .instanceof => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "instanceof" },
 
         // Async operations
         .await_val => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "await_val" },

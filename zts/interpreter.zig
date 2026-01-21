@@ -544,9 +544,9 @@ pub const Interpreter = struct {
             .bit_and, .bit_or, .bit_xor, .bit_not, .shl, .shr, .ushr => 0,
             .lt, .lte, .gt, .gte, .eq, .neq, .strict_eq, .strict_neq, .not => 0,
             .ret, .ret_undefined => 0,
-            .get_elem, .put_elem, .delete_elem => 0,
+            .get_elem, .put_elem => 0,
             .new_object, .array_spread, .call_spread => 0,
-            .typeof, .instanceof => 0,
+            .typeof => 0,
             .shr_1, .mul_2, .await_val, .make_async, .import_default, .export_default => 0,
 
             // 1-byte operand
@@ -559,7 +559,7 @@ pub const Interpreter = struct {
             // 2-byte operand (u16 or i16)
             .push_i16, .push_const, .loop => 2,
             .goto, .if_true, .if_false => 2,
-            .get_field, .put_field, .delete_field, .put_field_keep => 2,
+            .get_field, .put_field, .put_field_keep => 2,
             .new_array, .get_global, .put_global, .define_global, .make_function => 2,
             .import_module, .import_name, .export_name => 2,
             .for_of_next, .add_mod, .sub_mod, .mul_mod, .mod_const => 2,
@@ -1982,47 +1982,6 @@ pub const Interpreter = struct {
                     try self.ctx.push(value.JSValue.fromPtr(js_str));
                 },
 
-                .instanceof => {
-                    const ctor = self.ctx.pop();
-                    const obj = self.ctx.pop();
-
-                    // obj instanceof Constructor checks if Constructor.prototype
-                    // is in the prototype chain of obj
-                    if (!ctor.isObject()) {
-                        try self.ctx.push(value.JSValue.false_val);
-                        continue;
-                    }
-
-                    if (!obj.isObject()) {
-                        try self.ctx.push(value.JSValue.false_val);
-                        continue;
-                    }
-
-                    const ctor_obj = object.JSObject.fromValue(ctor);
-                    const target_obj = object.JSObject.fromValue(obj);
-                    const pool = self.ctx.hidden_class_pool orelse {
-                        try self.ctx.push(value.JSValue.false_val);
-                        continue :dispatch;
-                    };
-
-                    // Get Constructor.prototype
-                    if (ctor_obj.getProperty(pool, .prototype)) |proto_val| {
-                        if (proto_val.isObject()) {
-                            const proto = object.JSObject.fromValue(proto_val);
-                            // Walk the prototype chain of obj
-                            var current: ?*object.JSObject = target_obj.prototype;
-                            while (current) |p| {
-                                if (p == proto) {
-                                    try self.ctx.push(value.JSValue.true_val);
-                                    continue :dispatch;
-                                }
-                                current = p.prototype;
-                            }
-                        }
-                    }
-                    try self.ctx.push(value.JSValue.false_val);
-                },
-
                 // ========================================
                 // Function Calls
                 // ========================================
@@ -2913,13 +2872,11 @@ pub const Interpreter = struct {
         // Check for native function
         if (func_obj.getNativeFunctionData()) |native_data| {
             // Fast dispatch for hot builtins - bypass wrapper overhead
-            // Note: array_push/array_pop removed (mutating methods not supported)
             const result: value.JSValue = switch (native_data.builtin_id) {
                 .json_parse => builtins.jsonParse(self.ctx, this_val, args[0..argc]),
                 .json_stringify => builtins.jsonStringify(self.ctx, this_val, args[0..argc]),
                 .string_index_of => builtins.stringIndexOf(self.ctx, this_val, args[0..argc]),
                 .string_slice => builtins.stringSlice(self.ctx, this_val, args[0..argc]),
-                .array_push, .array_pop => value.JSValue.undefined_val, // Removed - mutating
                 .none => blk: {
                     // Generic path for non-hot builtins
                     break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {

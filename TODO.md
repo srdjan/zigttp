@@ -97,3 +97,67 @@
 - [ ] HTTP partial reads, long headers, keep-alive pipelining.
 - [ ] Static cache concurrency + LRU correctness.
 - [ ] Corrupted bytecode cache rejection.
+
+## Post-OOP Removal Cleanup (Reassess 2026-01-21)
+### Dead / Unreachable Code
+- [x] **Remove unreachable class parsing paths** — `zts/parser/parse.zig:1134-1254`, `zts/parser/parse.zig:2029-2137`.
+  - Root cause: `kw_class` is rejected in statement and prefix parsing (`zts/parser/parse.zig:165-205`, `zts/parser/parse.zig:1394-1397`), so these functions are never called.
+  - Estimated LOC: ~230.
+  - Risk: safe if class syntax remains permanently rejected.
+  - Dependencies: `zts/parser/ir.zig` class nodes and `zts/parser/scope.zig` class scope/binding; parser tests `zts/parser/parse.zig:3406+`.
+- [x] **Remove unreachable new/this/super parsing paths** — `zts/parser/parse.zig:1901-2005`.
+  - Root cause: `kw_new`, `kw_this`, `kw_super` are rejected in prefix parsing (`zts/parser/parse.zig:1378-1388`).
+  - Estimated LOC: ~100.
+  - Risk: safe if `new`/`this`/`super` remain rejected.
+  - Dependencies: `NodeTag.new_expr`/`NodeTag.this_expr` in `zts/parser/ir.zig`.
+- [x] **Remove unreachable function-expression parsing** — `zts/parser/parse.zig:2008-2026`.
+  - Root cause: function expressions are rejected in prefix parsing (`zts/parser/parse.zig:1390-1392`).
+  - Estimated LOC: ~20.
+  - Risk: safe if function expressions remain unsupported.
+  - Dependencies: none beyond parse tests.
+- [x] **Remove dead IR nodes for removed constructs** — `zts/parser/ir.zig:80-82`, `zts/parser/ir.zig:115`, `zts/parser/ir.zig:148-149`, `zts/parser/ir.zig:172-176`, `zts/parser/ir.zig:325-328`, `zts/parser/ir.zig:499-516`.
+  - Root cause: parser rejects `instanceof`, regex literals, `this`, `new`, and class syntax before IR is built.
+  - Estimated LOC: ~70.
+  - Risk: safe if those constructs remain unsupported.
+  - Dependencies: parser helpers, tests, and any IR tooling.
+- [x] **Remove `instanceof` opcode and handler** — `zts/bytecode.zig:138-139`, `zts/interpreter.zig:547-550`, `zts/interpreter.zig:1985-2024`, `zts/parser/codegen.zig:716-737`, `zts/parser/ir.zig:80`.
+  - Root cause: parser rejects `instanceof` (`zts/parser/parse.zig:1489-1492`), so bytecode is never emitted.
+  - Estimated LOC: ~60.
+  - Risk: safe if bytecode cache is invalidated or version-bumped; otherwise needs compatibility handling for old bytecode.
+  - Dependencies: bytecode cache, any precompiled bytecode.
+- [x] **Remove delete opcodes and stack effect entries** — `zts/bytecode.zig:122-123`, `zts/interpreter.zig:547`, `zts/interpreter.zig:562`.
+  - Root cause: `delete` is rejected in parser (`zts/parser/parse.zig:1406-1408`) and not code-generated.
+  - Estimated LOC: ~10.
+  - Risk: safe if bytecode cache invalidated.
+  - Dependencies: bytecode cache validation/compat.
+- [ ] **Remove regex literal artifacts** — `zts/parser/token.zig:17`, `zts/parser/tokenizer.zig:27-45`, `zts/parser/tokenizer.zig:185-188`, `zts/parser/ir.zig:115`, `zts/parser/ir.zig:325-328`, `zts/parser/error.zig:18`.
+  - Partial: IR regex literal node removed; tokenizer-level regex handling remains for error reporting.
+- [x] **Bump bytecode cache version after opcode removals** — `zts/bytecode_cache.zig:304`.
+  - Notes: invalidates cached bytecode produced with removed `instanceof`/`delete` opcodes.
+  - Root cause: regex literals are disabled at the tokenizer and rejected at parse time.
+  - Estimated LOC: ~30–40.
+  - Risk: safe if regex is permanently removed; verify JSX lookahead no longer needs `can_be_regex`.
+  - Dependencies: tokenizer tests and any JSX edge-case handling that toggles `can_be_regex`.
+- [x] **Remove dead array mutator fast-path ids** — `zts/object.zig:636-637`, `zts/interpreter.zig:2922`.
+  - Root cause: mutating array methods are removed from builtins (`zts/builtins.zig:2910-2930`), so these fast paths are never reached.
+  - Estimated LOC: ~5–8.
+  - Risk: safe.
+  - Dependencies: builtin dispatch only.
+
+### Redundant / Duplicate Logic
+- [ ] **Consolidate duplicate "unsupported feature" error checks** — `zts/parser/parse.zig:1595-1611`, `zts/parser/parse.zig:1883-1890`, plus class errors in both statement/prefix parsing (`zts/parser/parse.zig:165-205`, `zts/parser/parse.zig:1394-1397`).
+  - Root cause: multiple hard-coded checks for features already removed from builtins or tokenizer.
+  - Estimated LOC: ~20–30.
+  - Risk: low; keep error quality while reducing duplication.
+  - Dependencies: parser tests expecting specific error strings.
+
+### Needs Careful Review (Big Behavior Changes)
+- [ ] **Prototype system remnants (defer: prototypes stay as placeholders)** — `zts/object.zig:1291-1813`, `zts/context.zig:186-192`, `zts/context.zig:660-667`, `zts/builtins.zig:2735-2997`, `zts/interpreter.zig:2035-2890`.
+  - Note: Keep as-is for now per product direction; only revisit when prototype removal is back on the roadmap.
+  - Dependencies: builtins initialization, call semantics (`call_method`), property lookup paths.
+- [ ] **`this` binding remnants (review only if `this` removal resumes)** — `zts/context.zig:144-151`, `zts/context.zig:1386-1395`, `zts/context.zig:1483-1486`, `zts/parser/codegen.zig:849-878`, `zts/interpreter.zig:2839-2890`.
+  - Note: Keep for now because method dispatch still relies on implicit receiver.
+- [ ] **Async/Promise remnants (defer: async/Promise placeholders stay)** — `zts/bytecode.zig:141-143`, `zts/interpreter.zig:1836-1864`, `zts/interpreter.zig:2991-3023`.
+  - Note: Keep as-is for now per product direction; only revisit if async is fully removed.
+- [ ] **Prototype atom tests after removal (defer)** — `zts/bytecode_cache.zig:1414-1429`, `zts/object.zig:2320-2340`.
+  - Note: Keep tests while prototypes remain.

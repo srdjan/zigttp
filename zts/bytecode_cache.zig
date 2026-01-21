@@ -296,7 +296,7 @@ pub fn deserializeFunctionBytecode(
 }
 
 /// Bytecode serialization format version
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
 
 /// Cache file magic bytes "ZTSC" (zts cache)
 pub const CACHE_MAGIC: u32 = 0x5A545343;
@@ -970,7 +970,6 @@ pub fn collectAtoms(func: *const bytecode.FunctionBytecode, allocator: std.mem.A
             // Property access opcodes with u16 atom index
             .get_field,
             .put_field,
-            .delete_field,
             .put_field_keep,
             .get_global,
             .put_global,
@@ -1116,7 +1115,6 @@ pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRe
             // Property access opcodes with u16 atom index
             .get_field,
             .put_field,
-            .delete_field,
             .put_field_keep,
             .get_global,
             .put_global,
