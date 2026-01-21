@@ -20,6 +20,7 @@ const object = @import("../object.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const type_feedback = @import("../type_feedback.zig");
 const arena_mod = @import("../arena.zig");
+const builtins = @import("../builtins.zig");
 
 const CodeAllocator = alloc.CodeAllocator;
 const CompiledCode = alloc.CompiledCode;
@@ -34,6 +35,7 @@ extern fn jitCallBytecode(ctx: *Context, func_bc: *const bytecode.FunctionByteco
 extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
 extern fn jitPutFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, val: value_mod.JSValue, cache_idx: u16) value_mod.JSValue;
 const jitDeoptimize = deopt.jitDeoptimize;
+
 
 // Context field offsets for JIT code generation
 // These are computed at compile time using @offsetOf

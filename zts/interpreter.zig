@@ -3414,6 +3414,40 @@ pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
 }
 
 // ============================================================================
+// JIT Math Intrinsics
+// ============================================================================
+
+/// JIT helper: Math.floor with one argument (pops from stack, returns result)
+pub export fn jitMathFloor(ctx: *context.Context, arg: value.JSValue) value.JSValue {
+    return builtins.mathFloor(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
+}
+
+/// JIT helper: Math.ceil with one argument
+pub export fn jitMathCeil(ctx: *context.Context, arg: value.JSValue) value.JSValue {
+    return builtins.mathCeil(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
+}
+
+/// JIT helper: Math.round with one argument
+pub export fn jitMathRound(ctx: *context.Context, arg: value.JSValue) value.JSValue {
+    return builtins.mathRound(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
+}
+
+/// JIT helper: Math.abs with one argument
+pub export fn jitMathAbs(ctx: *context.Context, arg: value.JSValue) value.JSValue {
+    return builtins.mathAbs(ctx, value.JSValue.undefined_val, &[_]value.JSValue{arg});
+}
+
+/// JIT helper: Math.min with two arguments
+pub export fn jitMathMin2(ctx: *context.Context, arg1: value.JSValue, arg2: value.JSValue) value.JSValue {
+    return builtins.mathMin(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ arg1, arg2 });
+}
+
+/// JIT helper: Math.max with two arguments
+pub export fn jitMathMax2(ctx: *context.Context, arg1: value.JSValue, arg2: value.JSValue) value.JSValue {
+    return builtins.mathMax(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ arg1, arg2 });
+}
+
+// ============================================================================
 // Helper Functions (standalone, used by interpreter)
 // ============================================================================
 
