@@ -60,6 +60,10 @@ pub const ErrorKind = @import("error.zig").ErrorKind;
 
 pub const JsParser = @import("parse.zig").Parser;
 pub const CodeGen = @import("codegen.zig").CodeGen;
+pub const ir_opt = @import("ir_opt.zig");
+pub const IROptimizer = ir_opt.IROptimizer;
+pub const IROptStats = ir_opt.IROptStats;
+pub const optimizeIR = ir_opt.optimizeIR;
 
 /// Parse options
 pub const ParseOptions = struct {
@@ -186,6 +190,15 @@ pub const Parser = struct {
         // Parse to IR
         const root = try self.js_parser.parse();
 
+        // Optimize IR (cold-start-friendly single pass)
+        // Non-fatal: optimization failures are silently ignored
+        _ = ir_opt.optimizeIR(
+            self.allocator,
+            &self.js_parser.nodes,
+            &self.js_parser.constants,
+            root,
+        ) catch {};
+
         // Generate bytecode with string table and atoms for proper string/property handling
         self.code_gen = CodeGen.initWithIRStore(
             self.allocator,
@@ -222,6 +235,12 @@ test "root module imports" {
     _ = Node;
     _ = JsParser;
     _ = CodeGen;
+    _ = ir_opt;
+}
+
+// Pull in tests from submodules
+test {
+    _ = @import("ir_opt.zig");
 }
 
 test "legacy Parser API" {
