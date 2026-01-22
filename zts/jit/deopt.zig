@@ -95,7 +95,11 @@ pub export fn jitDeoptimize(ctx: *context.Context, bytecode_offset: u32, reason:
     // Mark function for recompilation with updated type feedback
     // The next time this function is called, it will be re-JITted with
     // the new feedback which may produce different (more generic) code
-    if (func.tier == .baseline) {
+    if (func.tier == .optimized) {
+        // Demote optimized to baseline - the type feedback was wrong
+        // Don't try to re-optimize immediately, let it run in baseline
+        @constCast(func).tier = .baseline;
+    } else if (func.tier == .baseline) {
         // Demote to candidate so it gets recompiled on next hot call
         @constCast(func).tier = .baseline_candidate;
     }
@@ -121,6 +125,9 @@ pub export fn jitDeoptimize(ctx: *context.Context, bytecode_offset: u32, reason:
 pub fn shouldRecompile(func: *const bytecode.FunctionBytecode) bool {
     // Don't recompile if still interpreted
     if (func.tier == .interpreted) return false;
+
+    // Candidate tiers are already queued for compilation
+    if (func.tier == .baseline_candidate or func.tier == .optimized_candidate) return false;
 
     // Don't recompile if already at highest tier
     if (func.tier == .optimized) return false;

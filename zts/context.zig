@@ -112,15 +112,15 @@ pub const HttpStringCache = struct {
     content_type_atom: object.Atom,
 };
 
-/// Cached strings for small integers (0-99) to avoid repeated allocations
+/// Cached strings for small integers (0-999) to avoid repeated allocations
 pub const SmallIntStringCache = struct {
-    /// Cached string representations for integers 0-99
-    strings: [100]*string.JSString,
+    /// Cached string representations for integers 0-999
+    strings: [1000]*string.JSString,
 
     pub fn init(allocator: std.mem.Allocator) !SmallIntStringCache {
         var cache: SmallIntStringCache = undefined;
-        var buf: [3]u8 = undefined;
-        for (0..100) |i| {
+        var buf: [4]u8 = undefined;
+        for (0..1000) |i| {
             const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
             cache.strings[i] = try string.createString(allocator, slice);
         }
@@ -135,7 +135,7 @@ pub const SmallIntStringCache = struct {
 
     /// Get cached string for integer, or null if out of range
     pub inline fn get(self: *const SmallIntStringCache, n: i32) ?*string.JSString {
-        if (n >= 0 and n < 100) {
+        if (n >= 0 and n < 1000) {
             return self.strings[@intCast(n)];
         }
         return null;
@@ -1202,6 +1202,11 @@ pub const Context = struct {
     }
 
     fn jitAllocFloat(self: *Context, v: f64) value.JSValue {
+        // Try inline float first (allocation-free for f32-representable values)
+        if (value.JSValue.fromInlineFloat(v)) |inline_val| {
+            return inline_val;
+        }
+        // Fall back to heap-boxed float for full f64 precision
         if (self.hybrid) |h| {
             const box = h.arena.createAligned(value.JSValue.Float64Box) orelse return self.jitThrow();
             box.* = .{

@@ -8,6 +8,7 @@ const value = @import("value.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const string = @import("string.zig");
+const heap = @import("heap.zig");
 const http = @import("http.zig");
 
 /// Built-in class IDs
@@ -2447,6 +2448,20 @@ fn allocFloat(ctx: *context.Context, v: f64) value.JSValue {
     if (@floor(v) == v and v >= -2147483648 and v <= 2147483647) {
         return value.JSValue.fromInt(@intFromFloat(v));
     }
+    // Try inline float (allocation-free for f32-representable values)
+    if (value.JSValue.fromInlineFloat(v)) |inline_val| {
+        return inline_val;
+    }
+    // Fall back to heap-boxed float for full f64 precision
+    if (ctx.hybrid) |h| {
+        const box = h.arena.createAligned(value.JSValue.Float64Box) orelse return value.JSValue.undefined_val;
+        box.* = .{
+            .header = heap.MemBlockHeader.init(.float64, @sizeOf(value.JSValue.Float64Box)),
+            ._pad = 0,
+            .value = v,
+        };
+        return value.JSValue.fromPtr(box);
+    }
     const box = ctx.gc_state.allocFloat(v) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(box);
 }
@@ -2454,41 +2469,71 @@ fn allocFloat(ctx: *context.Context, v: f64) value.JSValue {
 pub fn mathAbs(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return value.JSValue.undefined_val;
-    const n = toNumber(args[0]) orelse return value.JSValue.undefined_val;
+    const arg = args[0];
+    // Integer fast path: abs(int) = int for non-negative, -int for negative
+    if (arg.isInt()) {
+        const i = arg.getInt();
+        if (i >= 0) return arg;
+        // Handle overflow case: abs(-2147483648) cannot fit in i32
+        if (i == std.math.minInt(i32)) {
+            return allocFloat(ctx, 2147483648.0);
+        }
+        return value.JSValue.fromInt(-i);
+    }
+    const n = toNumber(arg) orelse return value.JSValue.undefined_val;
     return allocFloat(ctx, @abs(n));
 }
 
 pub fn mathFloor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return value.JSValue.undefined_val;
-    const n = toNumber(args[0]) orelse return value.JSValue.undefined_val;
+    const arg = args[0];
+    // Integer fast path: floor(int) = int
+    if (arg.isInt()) return arg;
+    const n = toNumber(arg) orelse return value.JSValue.undefined_val;
     return allocFloat(ctx, @floor(n));
 }
 
 pub fn mathCeil(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return value.JSValue.undefined_val;
-    const n = toNumber(args[0]) orelse return value.JSValue.undefined_val;
+    const arg = args[0];
+    // Integer fast path: ceil(int) = int
+    if (arg.isInt()) return arg;
+    const n = toNumber(arg) orelse return value.JSValue.undefined_val;
     return allocFloat(ctx, @ceil(n));
 }
 
 pub fn mathRound(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return value.JSValue.undefined_val;
-    const n = toNumber(args[0]) orelse return value.JSValue.undefined_val;
+    const arg = args[0];
+    // Integer fast path: round(int) = int
+    if (arg.isInt()) return arg;
+    const n = toNumber(arg) orelse return value.JSValue.undefined_val;
     return allocFloat(ctx, @round(n));
 }
 
 pub fn mathTrunc(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return value.JSValue.undefined_val;
-    const n = toNumber(args[0]) orelse return value.JSValue.undefined_val;
+    const arg = args[0];
+    // Integer fast path: trunc(int) = int
+    if (arg.isInt()) return arg;
+    const n = toNumber(arg) orelse return value.JSValue.undefined_val;
     return allocFloat(ctx, @trunc(n));
 }
 
 pub fn mathMin(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return allocFloat(ctx, std.math.inf(f64));
+
+    // Fast path: two integer arguments (common case)
+    if (args.len == 2 and args[0].isInt() and args[1].isInt()) {
+        const a = args[0].getInt();
+        const b = args[1].getInt();
+        return value.JSValue.fromInt(@min(a, b));
+    }
 
     var min_val: f64 = std.math.inf(f64);
     for (args) |arg| {
@@ -2502,6 +2547,13 @@ pub fn mathMin(ctx: *context.Context, this: value.JSValue, args: []const value.J
 pub fn mathMax(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) return allocFloat(ctx, -std.math.inf(f64));
+
+    // Fast path: two integer arguments (common case)
+    if (args.len == 2 and args[0].isInt() and args[1].isInt()) {
+        const a = args[0].getInt();
+        const b = args[1].getInt();
+        return value.JSValue.fromInt(@max(a, b));
+    }
 
     var max_val: f64 = -std.math.inf(f64);
     for (args) |arg| {

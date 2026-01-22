@@ -41,6 +41,42 @@ pub const Register = enum(u4) {
     }
 };
 
+/// XMM registers for SSE/AVX operations
+pub const XmmRegister = enum(u4) {
+    xmm0 = 0,
+    xmm1 = 1,
+    xmm2 = 2,
+    xmm3 = 3,
+    xmm4 = 4,
+    xmm5 = 5,
+    xmm6 = 6,
+    xmm7 = 7,
+    xmm8 = 8,
+    xmm9 = 9,
+    xmm10 = 10,
+    xmm11 = 11,
+    xmm12 = 12,
+    xmm13 = 13,
+    xmm14 = 14,
+    xmm15 = 15,
+
+    pub fn isExtended(self: XmmRegister) bool {
+        return @intFromEnum(self) >= 8;
+    }
+
+    pub fn low3(self: XmmRegister) u3 {
+        return @truncate(@intFromEnum(self));
+    }
+};
+
+/// Rounding mode for ROUNDSD instruction (SSE4.1)
+pub const RoundMode = enum(u8) {
+    nearest = 0, // Round to nearest even
+    floor = 1, // Round toward negative infinity
+    ceil = 2, // Round toward positive infinity
+    trunc = 3, // Round toward zero
+};
+
 /// Register assignments for JIT code
 pub const Regs = struct {
     /// Context pointer - always in rdi (first argument)
@@ -695,6 +731,170 @@ pub const X86Emitter = struct {
             try self.emitRex(false, false, false, true);
         }
         try self.buffer.append(self.allocator, 0x58 + @as(u8, reg.low3()));
+    }
+
+    // ========================================
+    // SSE/SSE4.1 Instructions for Math operations
+    // ========================================
+
+    /// MOVSD xmm, r64 (move 64-bit integer to XMM as bits, then interpret as double)
+    /// Actually uses MOVQ xmm, r64 (66 REX.W 0F 6E /r)
+    pub fn movqXmmReg(self: *X86Emitter, xmm: XmmRegister, gpr: Register) !void {
+        // 66 prefix
+        try self.buffer.append(self.allocator, 0x66);
+        // REX.W (for 64-bit GPR) + REX.R (for xmm8-15) + REX.B (for r8-r15)
+        const rex: u8 = 0x48 | // REX.W
+            (if (xmm.isExtended()) @as(u8, 4) else 0) | // REX.R
+            (if (gpr.isExtended()) @as(u8, 1) else 0); // REX.B
+        try self.buffer.append(self.allocator, rex);
+        // 0F 6E /r
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x6E);
+        try self.emitModRM(0b11, xmm.low3(), gpr.low3());
+    }
+
+    /// MOVQ r64, xmm (move XMM bits to 64-bit integer register)
+    /// 66 REX.W 0F 7E /r
+    pub fn movqRegXmm(self: *X86Emitter, gpr: Register, xmm: XmmRegister) !void {
+        // 66 prefix
+        try self.buffer.append(self.allocator, 0x66);
+        // REX.W + REX.R (for xmm8-15) + REX.B (for r8-r15)
+        const rex: u8 = 0x48 | // REX.W
+            (if (xmm.isExtended()) @as(u8, 4) else 0) | // REX.R
+            (if (gpr.isExtended()) @as(u8, 1) else 0); // REX.B
+        try self.buffer.append(self.allocator, rex);
+        // 0F 7E /r
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x7E);
+        try self.emitModRM(0b11, xmm.low3(), gpr.low3());
+    }
+
+    /// ROUNDSD xmm1, xmm2, imm8 (SSE4.1 round scalar double)
+    /// 66 0F 3A 0B /r imm8
+    pub fn roundsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister, mode: RoundMode) !void {
+        // 66 prefix
+        try self.buffer.append(self.allocator, 0x66);
+        // REX if using xmm8-15
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) | // REX.R
+                (if (src.isExtended()) @as(u8, 1) else 0); // REX.B
+            try self.buffer.append(self.allocator, rex);
+        }
+        // 0F 3A 0B /r imm8
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x3A);
+        try self.buffer.append(self.allocator, 0x0B);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+        try self.buffer.append(self.allocator, @intFromEnum(mode));
+    }
+
+    /// CVTSI2SD xmm, r64 (convert signed 64-bit integer to double)
+    /// F2 REX.W 0F 2A /r
+    pub fn cvtsi2sdXmmReg(self: *X86Emitter, xmm: XmmRegister, gpr: Register) !void {
+        // F2 prefix
+        try self.buffer.append(self.allocator, 0xF2);
+        // REX.W + REX.R + REX.B
+        const rex: u8 = 0x48 | // REX.W for 64-bit integer
+            (if (xmm.isExtended()) @as(u8, 4) else 0) |
+            (if (gpr.isExtended()) @as(u8, 1) else 0);
+        try self.buffer.append(self.allocator, rex);
+        // 0F 2A /r
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x2A);
+        try self.emitModRM(0b11, xmm.low3(), gpr.low3());
+    }
+
+    /// CVTTSD2SI r64, xmm (convert double to signed 64-bit integer with truncation)
+    /// F2 REX.W 0F 2C /r
+    pub fn cvttsd2siRegXmm(self: *X86Emitter, gpr: Register, xmm: XmmRegister) !void {
+        // F2 prefix
+        try self.buffer.append(self.allocator, 0xF2);
+        // REX.W + REX.R + REX.B
+        const rex: u8 = 0x48 | // REX.W for 64-bit integer
+            (if (gpr.isExtended()) @as(u8, 4) else 0) |
+            (if (xmm.isExtended()) @as(u8, 1) else 0);
+        try self.buffer.append(self.allocator, rex);
+        // 0F 2C /r
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x2C);
+        try self.emitModRM(0b11, gpr.low3(), xmm.low3());
+    }
+
+    /// UCOMISD xmm1, xmm2 (unordered compare scalar double, sets EFLAGS)
+    /// 66 0F 2E /r
+    pub fn ucomisd(self: *X86Emitter, xmm1: XmmRegister, xmm2: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0x66);
+        if (xmm1.isExtended() or xmm2.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (xmm1.isExtended()) @as(u8, 4) else 0) |
+                (if (xmm2.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x2E);
+        try self.emitModRM(0b11, xmm1.low3(), xmm2.low3());
+    }
+
+    /// MOVD xmm, r32 (move 32-bit integer to XMM, zero-extend to 128 bits)
+    /// 66 0F 6E /r
+    pub fn movdXmmReg32(self: *X86Emitter, xmm: XmmRegister, gpr: Register) !void {
+        try self.buffer.append(self.allocator, 0x66);
+        // REX needed if xmm8-15 or gpr is r8-r15
+        if (xmm.isExtended() or gpr.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (xmm.isExtended()) @as(u8, 4) else 0) |
+                (if (gpr.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x6E);
+        try self.emitModRM(0b11, xmm.low3(), gpr.low3());
+    }
+
+    /// CVTSS2SD xmm1, xmm2 (convert scalar single to double)
+    /// F3 0F 5A /r
+    pub fn cvtss2sd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF3);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x5A);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// CVTSD2SS xmm1, xmm2 (convert scalar double to single)
+    /// F2 0F 5A /r
+    pub fn cvtsd2ss(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x5A);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// MOVD r32, xmm (move low 32 bits of XMM to GP register)
+    /// 66 0F 7E /r
+    pub fn movdReg32Xmm(self: *X86Emitter, gpr: Register, xmm: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0x66);
+        if (xmm.isExtended() or gpr.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (xmm.isExtended()) @as(u8, 4) else 0) |
+                (if (gpr.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x7E);
+        try self.emitModRM(0b11, xmm.low3(), gpr.low3());
     }
 
     // ========================================

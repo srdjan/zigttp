@@ -391,6 +391,11 @@ pub const Interpreter = struct {
             func.tier = .baseline_candidate;
             return true;
         }
+        // Promote baseline to optimized_candidate after OPTIMIZED_THRESHOLD calls
+        if (func.execution_count == bytecode.OPTIMIZED_THRESHOLD and func.tier == .baseline) {
+            func.tier = .optimized_candidate;
+            return true;
+        }
         return false;
     }
 
@@ -442,6 +447,47 @@ pub const Interpreter = struct {
         compiled_ptr.* = compiled;
         func.compiled_code = compiled_ptr;
         func.tier = .baseline;
+    }
+
+    /// Try to compile a function using the optimized JIT tier.
+    /// On success, stores compiled code in func.compiled_code and sets tier to .optimized.
+    /// On UnsupportedOpcode (no optimizable loops), stays at baseline tier.
+    fn tryCompileOptimized(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
+        // Get or create the JIT code allocator
+        const code_alloc = try self.ctx.getOrCreateCodeAllocator();
+
+        var timer: ?std.time.Timer = null;
+        if (context.enable_jit_metrics) {
+            timer = std.time.Timer.start() catch null;
+        }
+
+        // Try to compile with optimized tier
+        const compiled = jit.compileOptimized(self.ctx.allocator, code_alloc, func) catch |err| {
+            switch (err) {
+                jit.CompileError.UnsupportedOpcode => {
+                    // No optimizable loops found - stay at baseline
+                    func.tier = .baseline;
+                    return;
+                },
+                else => return err,
+            }
+        };
+
+        if (timer) |*t| {
+            self.ctx.recordJitCompile(t.read(), compiled.code.len, func.code.len);
+        }
+
+        // Free old baseline compiled code if it exists
+        if (func.compiled_code) |old_ptr| {
+            const old_code: *jit.CompiledCode = @ptrCast(@alignCast(old_ptr));
+            self.ctx.allocator.destroy(old_code);
+        }
+
+        // Allocate CompiledCode struct on heap and store it
+        const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
+        compiled_ptr.* = compiled;
+        func.compiled_code = compiled_ptr;
+        func.tier = .optimized;
     }
 
     /// Allocate type feedback vector for a function
@@ -678,11 +724,23 @@ pub const Interpreter = struct {
             }
         }
 
-        // Hot loop promotion: compile immediately if promoted by back-edge counter
+        // Hot loop promotion: wait for warmup before compiling
         // (execution_count < JIT_THRESHOLD means it was promoted by hot loop, not call count)
+        // We wait for a few calls to collect type feedback before baseline compilation
         if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.execution_count < getJitThreshold()) {
-            self.tryCompileBaseline(func_mut) catch {
-                // Compilation failed - continue with interpreter
+            const hot_loop_warmup: u32 = 5; // Collect type feedback for a few iterations
+            if (func_mut.execution_count >= hot_loop_warmup and func_mut.type_feedback_ptr != null) {
+                self.tryCompileBaseline(func_mut) catch {
+                    // Compilation failed - continue with interpreter
+                };
+            }
+        }
+
+        // Optimized tier promotion: compile when promoted from baseline
+        if (!jitDisabled() and func_mut.tier == .optimized_candidate) {
+            self.tryCompileOptimized(func_mut) catch {
+                // Compilation failed - stay at baseline
+                func_mut.tier = .baseline;
             };
         }
 
@@ -694,7 +752,7 @@ pub const Interpreter = struct {
         }
 
         // Check if function is JIT-compiled and execute via JIT
-        if (!jitDisabled() and func.tier == .baseline) {
+        if (!jitDisabled() and (func.tier == .baseline or func.tier == .optimized)) {
             if (func.compiled_code) |cc_opaque| {
                 const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
                 const prev_func = self.current_func;
@@ -884,6 +942,14 @@ pub const Interpreter = struct {
             }
         }
 
+        // Optimized tier promotion: compile when promoted from baseline by hot loop
+        if (!jitDisabled() and func_bc_mut.tier == .optimized_candidate) {
+            self.tryCompileOptimized(func_bc_mut) catch {
+                // Compilation failed - stay at baseline
+                func_bc_mut.tier = .baseline;
+            };
+        }
+
         try self.pushState();
         defer self.popState();
 
@@ -908,7 +974,7 @@ pub const Interpreter = struct {
         }
 
         // Check if function is JIT-compiled and execute via JIT
-        if (!jitDisabled() and func_bc.tier == .baseline) {
+        if (!jitDisabled() and (func_bc.tier == .baseline or func_bc.tier == .optimized)) {
             if (func_bc.compiled_code) |cc_opaque| {
                 const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
                 const prev_func = self.current_func;
@@ -1462,8 +1528,8 @@ pub const Interpreter = struct {
                 .loop => {
                     const offset = readI16(self.pc);
                     self.pc += 2;
-                    // Profile back-edge for hot loop detection
-                    // If loop is hot, promote containing function to JIT candidate
+                    // Profile back-edge for hot loop detection (interpreted code only)
+                    // If loop is hot, promote containing function to baseline candidate
                     if (self.profileBackedge()) {
                         if (self.current_func) |func| {
                             const func_mut = @constCast(func);
@@ -2645,7 +2711,60 @@ pub const Interpreter = struct {
 
     /// Convert value to string and concatenate
     fn concatToString(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        // Convert a to string
+        // Fast path: string + number (very common pattern)
+        if (self.ctx.hybrid) |h| {
+            if (a.isString()) {
+                const str_a = a.toPtr(string.JSString);
+                // Check if b is a number we can format directly
+                if (b.isInt()) {
+                    var buf: [32]u8 = undefined;
+                    const n = b.getInt();
+                    // Use cached string for small integers
+                    if (self.ctx.small_int_cache.get(n)) |cached| {
+                        const result = string.concatStringsWithArena(h.arena, str_a, cached) orelse
+                            return error.OutOfMemory;
+                        return value.JSValue.fromPtr(result);
+                    }
+                    const num_slice = string.formatIntToBuf(&buf, n);
+                    const result = string.concatStringNumberWithArena(h.arena, str_a, num_slice) orelse
+                        return error.OutOfMemory;
+                    return value.JSValue.fromPtr(result);
+                }
+                if (b.isFloat64()) {
+                    var buf: [64]u8 = undefined;
+                    const num_slice = string.formatFloatToBuf(&buf, b.getFloat64());
+                    const result = string.concatStringNumberWithArena(h.arena, str_a, num_slice) orelse
+                        return error.OutOfMemory;
+                    return value.JSValue.fromPtr(result);
+                }
+            }
+            // Fast path: number + string
+            if (b.isString()) {
+                const str_b = b.toPtr(string.JSString);
+                if (a.isInt()) {
+                    var buf: [32]u8 = undefined;
+                    const n = a.getInt();
+                    if (self.ctx.small_int_cache.get(n)) |cached| {
+                        const result = string.concatStringsWithArena(h.arena, cached, str_b) orelse
+                            return error.OutOfMemory;
+                        return value.JSValue.fromPtr(result);
+                    }
+                    const num_slice = string.formatIntToBuf(&buf, n);
+                    const result = string.concatNumberStringWithArena(h.arena, num_slice, str_b) orelse
+                        return error.OutOfMemory;
+                    return value.JSValue.fromPtr(result);
+                }
+                if (a.isFloat64()) {
+                    var buf: [64]u8 = undefined;
+                    const num_slice = string.formatFloatToBuf(&buf, a.getFloat64());
+                    const result = string.concatNumberStringWithArena(h.arena, num_slice, str_b) orelse
+                        return error.OutOfMemory;
+                    return value.JSValue.fromPtr(result);
+                }
+            }
+        }
+
+        // Fallback: Convert both values to strings
         const str_a = try self.valueToString(a);
         // Only free temp strings in non-hybrid mode (arena handles cleanup in hybrid mode)
         defer if (self.ctx.hybrid == null and !a.isString()) string.freeString(self.ctx.allocator, str_a);
@@ -2747,6 +2866,11 @@ pub const Interpreter = struct {
     }
 
     fn allocFloat(self: *Interpreter, v: f64) !value.JSValue {
+        // Try inline float first (allocation-free for f32-representable values)
+        if (value.JSValue.fromInlineFloat(v)) |inline_val| {
+            return inline_val;
+        }
+        // Fall back to heap-boxed float for full f64 precision
         // Use arena for ephemeral float allocation if hybrid mode enabled
         if (self.ctx.hybrid) |h| {
             // Use createAligned to respect Float64Box alignment requirements
@@ -4591,6 +4715,446 @@ test "JIT: deopt on type mismatch in specialized add" {
 
     const stats = jit.deopt.getDeoptStats();
     try std.testing.expectEqual(@as(u64, 1), stats.type_mismatch_count);
+}
+
+test "JIT: Math int fast paths" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    const prev_policy = getJitPolicy();
+    const prev_threshold = getJitThreshold();
+    const prev_warmup = getJitFeedbackWarmup();
+    defer {
+        setJitPolicy(prev_policy);
+        setJitThreshold(prev_threshold);
+        setJitFeedbackWarmup(prev_warmup);
+    }
+
+    setJitPolicy(.eager);
+    setJitThreshold(1);
+    setJitFeedbackWarmup(1);
+
+    if (jitDisabled()) return;
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try builtins.initBuiltins(ctx);
+
+    var interp = Interpreter.init(ctx);
+
+    const math_atom: u16 = @intFromEnum(object.Atom.Math);
+    const abs_atom: u16 = @intFromEnum(object.Atom.abs);
+    const floor_atom: u16 = @intFromEnum(object.Atom.floor);
+    const ceil_atom: u16 = @intFromEnum(object.Atom.ceil);
+    const round_atom: u16 = @intFromEnum(object.Atom.round);
+    const min_atom: u16 = @intFromEnum(object.Atom.min);
+    const max_atom: u16 = @intFromEnum(object.Atom.max);
+
+    const Runner = struct {
+        const Expect = union(enum) { int: i32, float: f64 };
+        fn run(runner: *Interpreter, func: *bytecode.FunctionBytecode, expect: Expect) !void {
+            var result: value.JSValue = value.JSValue.undefined_val;
+            var i: u32 = 0;
+            while (i < 3) : (i += 1) {
+                result = try runner.run(func);
+            }
+
+            switch (expect) {
+                .int => |v| {
+                    try std.testing.expect(result.isInt());
+                    try std.testing.expectEqual(v, result.getInt());
+                },
+                .float => |v| {
+                    try std.testing.expect(result.isFloat64());
+                    try std.testing.expectEqual(v, result.getFloat64());
+                },
+            }
+
+            try std.testing.expect(func.compiled_code != null);
+            try std.testing.expectEqual(bytecode.CompilationTier.baseline, func.tier);
+        }
+    };
+
+    // Math.abs(INT_MIN) -> 2147483648 (must be float)
+    const abs_consts = [_]value.JSValue{value.JSValue.fromInt(std.math.minInt(i32))};
+    const code_abs = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(abs_atom & 0xFF),
+        @intCast(abs_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_abs = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_abs,
+        .constants = &abs_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_abs);
+    defer cleanupCompiledCode(allocator, &func_abs);
+    try Runner.run(&interp, &func_abs, .{ .float = 2147483648.0 });
+
+    // Math.floor(5) -> 5
+    const code_floor = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(floor_atom & 0xFF),
+        @intCast(floor_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        5,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_floor = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_floor,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_floor);
+    defer cleanupCompiledCode(allocator, &func_floor);
+    try Runner.run(&interp, &func_floor, .{ .int = 5 });
+
+    // Math.ceil(5) -> 5
+    const code_ceil = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(ceil_atom & 0xFF),
+        @intCast(ceil_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        5,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_ceil = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_ceil,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_ceil);
+    defer cleanupCompiledCode(allocator, &func_ceil);
+    try Runner.run(&interp, &func_ceil, .{ .int = 5 });
+
+    // Math.round(5) -> 5
+    const code_round = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(round_atom & 0xFF),
+        @intCast(round_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        5,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_round = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_round,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_round);
+    defer cleanupCompiledCode(allocator, &func_round);
+    try Runner.run(&interp, &func_round, .{ .int = 5 });
+
+    // Math.min(7, -3) -> -3
+    const code_min = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(min_atom & 0xFF),
+        @intCast(min_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        7,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        @as(u8, @bitCast(@as(i8, -3))),
+        @intFromEnum(bytecode.Opcode.call),
+        2,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_min = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_min,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_min);
+    defer cleanupCompiledCode(allocator, &func_min);
+    try Runner.run(&interp, &func_min, .{ .int = -3 });
+
+    // Math.max(7, -3) -> 7
+    const code_max = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(max_atom & 0xFF),
+        @intCast(max_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        7,
+        @intFromEnum(bytecode.Opcode.push_i8),
+        @as(u8, @bitCast(@as(i8, -3))),
+        @intFromEnum(bytecode.Opcode.call),
+        2,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_max = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_max,
+        .constants = &.{},
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_max);
+    defer cleanupCompiledCode(allocator, &func_max);
+    try Runner.run(&interp, &func_max, .{ .int = 7 });
+
+    // Mixed int/float cases (force helper path)
+    const absf_box = try ctx.gc_state.allocFloat(-2.5);
+    const floorf_box = try ctx.gc_state.allocFloat(5.5);
+    const ceilf_box = try ctx.gc_state.allocFloat(-3.2);
+    const roundf_box = try ctx.gc_state.allocFloat(2.6);
+    const minf_box = try ctx.gc_state.allocFloat(3.5);
+    const maxf_box = try ctx.gc_state.allocFloat(4.75);
+
+    // Math.abs(-2.5) -> 2.5
+    const absf_consts = [_]value.JSValue{value.JSValue.fromPtr(absf_box)};
+    const code_absf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(abs_atom & 0xFF),
+        @intCast(abs_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_absf = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_absf,
+        .constants = &absf_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_absf);
+    defer cleanupCompiledCode(allocator, &func_absf);
+    try Runner.run(&interp, &func_absf, .{ .float = 2.5 });
+
+    // Math.floor(5.5) -> 5
+    const floorf_consts = [_]value.JSValue{value.JSValue.fromPtr(floorf_box)};
+    const code_floorf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(floor_atom & 0xFF),
+        @intCast(floor_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_floorf = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_floorf,
+        .constants = &floorf_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_floorf);
+    defer cleanupCompiledCode(allocator, &func_floorf);
+    try Runner.run(&interp, &func_floorf, .{ .int = 5 });
+
+    // Math.ceil(-3.2) -> -3
+    const ceilf_consts = [_]value.JSValue{value.JSValue.fromPtr(ceilf_box)};
+    const code_ceilf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(ceil_atom & 0xFF),
+        @intCast(ceil_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_ceilf = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_ceilf,
+        .constants = &ceilf_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_ceilf);
+    defer cleanupCompiledCode(allocator, &func_ceilf);
+    try Runner.run(&interp, &func_ceilf, .{ .int = -3 });
+
+    // Math.round(2.6) -> 3
+    const roundf_consts = [_]value.JSValue{value.JSValue.fromPtr(roundf_box)};
+    const code_roundf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(round_atom & 0xFF),
+        @intCast(round_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        1,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_roundf = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_roundf,
+        .constants = &roundf_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_roundf);
+    defer cleanupCompiledCode(allocator, &func_roundf);
+    try Runner.run(&interp, &func_roundf, .{ .int = 3 });
+
+    // Math.min(7, 3.5) -> 3.5
+    const minf_consts = [_]value.JSValue{value.JSValue.fromPtr(minf_box)};
+    const code_minf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(min_atom & 0xFF),
+        @intCast(min_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        7,
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        2,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_minf = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_minf,
+        .constants = &minf_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_minf);
+    defer cleanupCompiledCode(allocator, &func_minf);
+    try Runner.run(&interp, &func_minf, .{ .float = 3.5 });
+
+    // Math.max(-2, 4.75) -> 4.75
+    const maxf_consts = [_]value.JSValue{value.JSValue.fromPtr(maxf_box)};
+    const code_maxf = [_]u8{
+        @intFromEnum(bytecode.Opcode.get_global),
+        @intCast(math_atom & 0xFF),
+        @intCast(math_atom >> 8),
+        @intFromEnum(bytecode.Opcode.get_field),
+        @intCast(max_atom & 0xFF),
+        @intCast(max_atom >> 8),
+        @intFromEnum(bytecode.Opcode.push_i8),
+        @as(u8, @bitCast(@as(i8, -2))),
+        @intFromEnum(bytecode.Opcode.push_const),
+        0,
+        0,
+        @intFromEnum(bytecode.Opcode.call),
+        2,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func_maxf = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code_maxf,
+        .constants = &maxf_consts,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &func_maxf);
+    defer cleanupCompiledCode(allocator, &func_maxf);
+    try Runner.run(&interp, &func_maxf, .{ .float = 4.75 });
 }
 
 test "End-to-end: function declaration" {

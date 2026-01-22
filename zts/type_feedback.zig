@@ -306,6 +306,138 @@ pub fn classifyValue(val: value.JSValue) ObservedType {
 }
 
 // ============================================================================
+// Loop Analysis for Optimized JIT Tier
+// ============================================================================
+
+/// Maximum number of binary operation sites to track per loop
+pub const MAX_LOOP_BINARY_OPS: usize = 32;
+
+/// Loop information for optimized tier compilation
+/// Identifies loops suitable for type-specialized code generation
+pub const LoopInfo = struct {
+    /// Bytecode offset of loop header (target of backward jump)
+    header_bc_offset: u32,
+    /// Bytecode offset of back edge (the loop opcode)
+    back_edge_bc_offset: u32,
+    /// Type feedback site indices for binary ops within the loop
+    binary_op_sites: [MAX_LOOP_BINARY_OPS]u16,
+    /// Number of binary op sites recorded
+    binary_op_count: u8,
+    /// Local variables accessed in the loop (bitmask, up to 16 locals)
+    accessed_locals: u16,
+    /// True if all binary op sites in this loop are monomorphic SMI
+    all_smi: bool,
+    /// True if loop contains operations that prevent optimization
+    /// (e.g., function calls, property access, closures)
+    has_side_effects: bool,
+
+    pub fn init(header: u32, back_edge: u32) LoopInfo {
+        return .{
+            .header_bc_offset = header,
+            .back_edge_bc_offset = back_edge,
+            .binary_op_sites = .{0xFFFF} ** MAX_LOOP_BINARY_OPS,
+            .binary_op_count = 0,
+            .accessed_locals = 0,
+            .all_smi = true,
+            .has_side_effects = false,
+        };
+    }
+
+    /// Add a binary operation site to this loop
+    pub fn addBinaryOpSite(self: *LoopInfo, site_idx: u16) void {
+        if (self.binary_op_count < MAX_LOOP_BINARY_OPS) {
+            self.binary_op_sites[self.binary_op_count] = site_idx;
+            self.binary_op_count += 1;
+        }
+    }
+
+    /// Mark a local variable as accessed in this loop
+    pub fn markLocalAccessed(self: *LoopInfo, local_idx: u8) void {
+        if (local_idx < 16) {
+            self.accessed_locals |= @as(u16, 1) << @intCast(local_idx);
+        }
+    }
+
+    /// Check if a local variable is accessed in this loop
+    pub fn isLocalAccessed(self: *const LoopInfo, local_idx: u8) bool {
+        if (local_idx >= 16) return false;
+        return (self.accessed_locals & (@as(u16, 1) << @intCast(local_idx))) != 0;
+    }
+
+    /// Get number of locals accessed in this loop
+    pub fn accessedLocalCount(self: *const LoopInfo) u8 {
+        return @popCount(self.accessed_locals);
+    }
+};
+
+/// Analyze a loop to determine if it's suitable for optimized compilation.
+/// Returns true if the loop contains only monomorphic SMI operations and
+/// no side effects that would prevent type specialization.
+pub fn analyzeLoopTypes(
+    tf: *const TypeFeedback,
+    site_map: []const u16,
+    loop: *LoopInfo,
+) bool {
+    // Check all binary operation sites in the loop
+    for (loop.binary_op_sites[0..loop.binary_op_count]) |site_idx| {
+        if (site_idx == 0xFFFF) continue;
+        if (site_idx >= tf.sites.len) {
+            loop.all_smi = false;
+            return false;
+        }
+
+        const site = &tf.sites[site_idx];
+
+        // Must be monomorphic SMI
+        if (!site.isMonomorphic()) {
+            loop.all_smi = false;
+            return false;
+        }
+        if (site.dominantType() != .smi) {
+            loop.all_smi = false;
+            return false;
+        }
+    }
+
+    // Also check right operand sites (site_idx + 1 for binary ops)
+    for (loop.binary_op_sites[0..loop.binary_op_count]) |site_idx| {
+        if (site_idx == 0xFFFF) continue;
+        const right_idx = site_idx + 1;
+        if (right_idx >= tf.sites.len) {
+            loop.all_smi = false;
+            return false;
+        }
+
+        const right_site = &tf.sites[right_idx];
+        if (!right_site.isMonomorphic()) {
+            loop.all_smi = false;
+            return false;
+        }
+        if (right_site.dominantType() != .smi) {
+            loop.all_smi = false;
+            return false;
+        }
+    }
+
+    _ = site_map;
+    return loop.all_smi and !loop.has_side_effects;
+}
+
+/// Check if a loop is suitable for optimized tier compilation
+pub fn isLoopOptimizable(loop: *const LoopInfo) bool {
+    // Must have at least one binary op to optimize
+    if (loop.binary_op_count == 0) return false;
+
+    // All operations must be monomorphic SMI
+    if (!loop.all_smi) return false;
+
+    // Must not have side effects
+    if (loop.has_side_effects) return false;
+
+    return true;
+}
+
+// ============================================================================
 // Unit Tests
 // ============================================================================
 

@@ -8,12 +8,14 @@
 //! - arm64.zig: ARM64/AArch64 instruction emitter
 //! - alloc.zig: Executable memory allocator
 //! - baseline.zig: Baseline compiler (bytecode -> native, no optimization)
+//! - optimized.zig: Optimized tier compiler (type-specialized loop optimization)
 
 pub const x86 = @import("x86.zig");
 pub const arm64 = @import("arm64.zig");
 pub const alloc = @import("alloc.zig");
 pub const baseline = @import("baseline.zig");
 pub const deopt = @import("deopt.zig");
+pub const optimized = @import("optimized.zig");
 
 // Re-export common types (architecture-specific via baseline)
 pub const CodeAllocator = alloc.CodeAllocator;
@@ -21,8 +23,10 @@ pub const CodePage = alloc.CodePage;
 pub const CompiledCode = alloc.CompiledCode;
 pub const CompiledFn = alloc.CompiledFn;
 pub const BaselineCompiler = baseline.BaselineCompiler;
+pub const OptimizedCompiler = optimized.OptimizedCompiler;
 pub const CompileError = baseline.CompileError;
 pub const compileFunction = baseline.compileFunction;
+pub const compileOptimized = optimized.compileOptimized;
 
 // Architecture detection
 pub const is_x86_64 = baseline.is_x86_64;
@@ -36,4 +40,5 @@ test {
     _ = alloc;
     _ = baseline;
     _ = deopt;
+    _ = optimized;
 }

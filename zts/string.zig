@@ -710,6 +710,115 @@ pub const StringBuilder = struct {
     }
 };
 
+/// Format an integer to a buffer without allocation
+/// Returns the slice of the buffer that contains the formatted number
+pub fn formatIntToBuf(buf: []u8, n: i32) []const u8 {
+    if (n == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+
+    var value: u32 = if (n < 0) @intCast(-@as(i64, n)) else @intCast(n);
+    var end: usize = buf.len;
+
+    // Write digits from right to left
+    while (value > 0) {
+        end -= 1;
+        buf[end] = '0' + @as(u8, @intCast(value % 10));
+        value /= 10;
+    }
+
+    // Add negative sign if needed
+    if (n < 0) {
+        end -= 1;
+        buf[end] = '-';
+    }
+
+    return buf[end..];
+}
+
+/// Format a float to a buffer without allocation
+/// Returns the slice of the buffer that contains the formatted number
+pub fn formatFloatToBuf(buf: []u8, f: f64) []const u8 {
+    // Handle special cases
+    if (std.math.isNan(f)) {
+        @memcpy(buf[0..3], "NaN");
+        return buf[0..3];
+    }
+    if (std.math.isPositiveInf(f)) {
+        @memcpy(buf[0..8], "Infinity");
+        return buf[0..8];
+    }
+    if (std.math.isNegativeInf(f)) {
+        @memcpy(buf[0..9], "-Infinity");
+        return buf[0..9];
+    }
+
+    // Check if it's an integer value
+    if (@floor(f) == f and f >= -2147483648 and f <= 2147483647) {
+        return formatIntToBuf(buf, @intFromFloat(f));
+    }
+
+    // Use std.fmt for general float formatting
+    const result = std.fmt.bufPrint(buf, "{d}", .{f}) catch {
+        @memcpy(buf[0..3], "NaN");
+        return buf[0..3];
+    };
+    return result;
+}
+
+/// Concatenate a string and a number without intermediate string allocation
+/// Uses arena allocation for the result
+pub fn concatStringNumberWithArena(arena: *arena_mod.Arena, str: *const JSString, num_buf: []const u8) ?*JSString {
+    const total_len = str.len + @as(u32, @intCast(num_buf.len));
+    const total_size = @sizeOf(JSString) + total_len;
+    const mem = arena.alloc(total_size) orelse return null;
+
+    const result: *JSString = @ptrCast(@alignCast(mem));
+    result.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = str.flags.is_ascii and isAscii(num_buf),
+            .is_numeric = false,
+            .hash_computed = false,
+        },
+        .len = total_len,
+        .hash = 0,
+    };
+
+    const data_mut = result.dataMut();
+    @memcpy(data_mut[0..str.len], str.data());
+    @memcpy(data_mut[str.len..], num_buf);
+    return result;
+}
+
+/// Concatenate a number and a string without intermediate string allocation
+/// Uses arena allocation for the result
+pub fn concatNumberStringWithArena(arena: *arena_mod.Arena, num_buf: []const u8, str: *const JSString) ?*JSString {
+    const total_len = @as(u32, @intCast(num_buf.len)) + str.len;
+    const total_size = @sizeOf(JSString) + total_len;
+    const mem = arena.alloc(total_size) orelse return null;
+
+    const result: *JSString = @ptrCast(@alignCast(mem));
+    result.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = isAscii(num_buf) and str.flags.is_ascii,
+            .is_numeric = false,
+            .hash_computed = false,
+        },
+        .len = total_len,
+        .hash = 0,
+    };
+
+    const data_mut = result.dataMut();
+    @memcpy(data_mut[0..num_buf.len], num_buf);
+    @memcpy(data_mut[num_buf.len..], str.data());
+    return result;
+}
+
 // ============================================================================
 // Tests
 // ============================================================================

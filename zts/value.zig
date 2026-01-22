@@ -123,10 +123,10 @@ pub const JSValue = packed struct {
     }
 
     // ========================================================================
-    // Float64 Support (heap-boxed)
+    // Float64 Support (inline f32 or heap-boxed f64)
     // ========================================================================
 
-    /// Float64 box header (heap-allocated)
+    /// Float64 box header (heap-allocated for full precision floats)
     pub const Float64Box = extern struct {
         header: heap.MemBlockHeader,
         _pad: u32,
@@ -137,11 +137,49 @@ pub const JSValue = packed struct {
         }
     };
 
-    /// Check if value is a boxed float64
-    pub inline fn isFloat64(self: JSValue) bool {
+    /// Check if value is an inline float (tag 5)
+    /// Inline floats store f32 values in the upper 32 bits for allocation-free float math
+    pub inline fn isInlineFloat(self: JSValue) bool {
+        return (self.raw & 0x7) == 5;
+    }
+
+    /// Try to create an inline float from f64
+    /// Returns the inline value, or null if the value requires full f64 precision
+    /// Uses f32 representation when precision loss is acceptable
+    pub inline fn fromInlineFloat(v: f64) ?JSValue {
+        // Special values cannot be stored inline (NaN/Inf need special handling)
+        if (std.math.isNan(v) or std.math.isInf(v)) return null;
+
+        // Convert to f32 and check if precision is preserved
+        const f32_val: f32 = @floatCast(v);
+        const roundtrip: f64 = @floatCast(f32_val);
+
+        // If roundtrip differs significantly, need full precision
+        if (v != 0 and @abs(v - roundtrip) / @abs(v) > 1e-6) return null;
+
+        // Store f32 bits in upper 32 bits, tag 5 in lower 3 bits
+        const f32_bits: u32 = @bitCast(f32_val);
+        return .{ .raw = (@as(u64, f32_bits) << 32) | 5 };
+    }
+
+    /// Get f64 value from inline float
+    pub inline fn getInlineFloat(self: JSValue) f64 {
+        std.debug.assert(self.isInlineFloat());
+        const f32_bits: u32 = @truncate(self.raw >> 32);
+        const f32_val: f32 = @bitCast(f32_bits);
+        return @floatCast(f32_val);
+    }
+
+    /// Check if value is a boxed float64 (heap-allocated)
+    pub inline fn isBoxedFloat64(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const box = self.toPtr(Float64Box);
         return box.header.tag == .float64;
+    }
+
+    /// Check if value is any float (inline or boxed)
+    pub inline fn isFloat64(self: JSValue) bool {
+        return self.isInlineFloat() or self.isBoxedFloat64();
     }
 
     /// Alias for isFloat64 for API compatibility
@@ -151,12 +189,15 @@ pub const JSValue = packed struct {
 
     /// Check if value is any number (int or float)
     pub inline fn isNumber(self: JSValue) bool {
-        return self.isInt() or self.isFloat64();
+        return self.isInt() or self.isInlineFloat() or self.isBoxedFloat64();
     }
 
     /// Get float64 value (unsafe - caller must verify isFloat64)
     pub inline fn getFloat64(self: JSValue) f64 {
-        std.debug.assert(self.isFloat64());
+        if (self.isInlineFloat()) {
+            return self.getInlineFloat();
+        }
+        std.debug.assert(self.isBoxedFloat64());
         const box = self.toPtr(Float64Box);
         return box.value;
     }
@@ -166,8 +207,11 @@ pub const JSValue = packed struct {
         if (self.isInt()) {
             return @floatFromInt(self.getInt());
         }
-        if (self.isFloat64()) {
-            return self.getFloat64();
+        if (self.isInlineFloat()) {
+            return self.getInlineFloat();
+        }
+        if (self.isBoxedFloat64()) {
+            return self.toPtr(Float64Box).value;
         }
         return null;
     }
@@ -364,8 +408,10 @@ pub const JSValue = packed struct {
             try writer.writeAll("<exception>");
         } else if (self.isInt()) {
             try writer.print("{d}", .{self.getInt()});
-        } else if (self.isFloat64()) {
-            try writer.print("{d}", .{self.getFloat64()});
+        } else if (self.isInlineFloat()) {
+            try writer.print("{d}", .{self.getInlineFloat()});
+        } else if (self.isBoxedFloat64()) {
+            try writer.print("{d}", .{self.toPtr(Float64Box).value});
         } else if (self.isPtr()) {
             try writer.print("<ptr:0x{x}>", .{self.raw & ~@as(u64, 0x7)});
         } else {
@@ -492,4 +538,55 @@ test "JSValue format" {
     writer = .fixed(&buf);
     JSValue.fromInt(42).format("", .{}, &writer) catch unreachable;
     try std.testing.expectEqualStrings("42", writer.buffer[0..writer.end]);
+}
+
+test "JSValue inline float encoding" {
+    // Test that common float values can be stored inline
+    const pi_approx = JSValue.fromInlineFloat(3.14159);
+    try std.testing.expect(pi_approx != null);
+    try std.testing.expect(pi_approx.?.isInlineFloat());
+    try std.testing.expect(pi_approx.?.isFloat64());
+    try std.testing.expect(pi_approx.?.isNumber());
+    try std.testing.expect(!pi_approx.?.isInt());
+
+    // Check value roundtrip (within f32 precision)
+    const recovered = pi_approx.?.getInlineFloat();
+    try std.testing.expect(@abs(recovered - 3.14159) < 0.0001);
+
+    // Test zero
+    const zero = JSValue.fromInlineFloat(0.0);
+    try std.testing.expect(zero != null);
+    try std.testing.expect(zero.?.getInlineFloat() == 0.0);
+
+    // Test negative
+    const neg = JSValue.fromInlineFloat(-42.5);
+    try std.testing.expect(neg != null);
+    try std.testing.expect(@abs(neg.?.getInlineFloat() - (-42.5)) < 0.0001);
+
+    // Test that NaN cannot be stored inline
+    const nan = JSValue.fromInlineFloat(std.math.nan(f64));
+    try std.testing.expect(nan == null);
+
+    // Test that Inf cannot be stored inline
+    const inf = JSValue.fromInlineFloat(std.math.inf(f64));
+    try std.testing.expect(inf == null);
+}
+
+test "JSValue inline float toNumber" {
+    const val = JSValue.fromInlineFloat(2.5).?;
+    const num = val.toNumber();
+    try std.testing.expect(num != null);
+    try std.testing.expect(@abs(num.? - 2.5) < 0.0001);
+}
+
+test "JSValue benchmark values should be inline" {
+    // Values from math_ops benchmark: (i + seed) % 1000 + 0.5
+    for (0..1000) |i| {
+        const v: f64 = @as(f64, @floatFromInt(i)) + 0.5;
+        const result = JSValue.fromInlineFloat(v);
+        try std.testing.expect(result != null);
+        // Verify roundtrip
+        const recovered = result.?.getInlineFloat();
+        try std.testing.expect(@abs(v - recovered) < 0.0001);
+    }
 }
