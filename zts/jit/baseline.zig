@@ -1703,6 +1703,10 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                // Profile backward jumps (loop back-edges) for hot loop detection
+                if (offset < 0) {
+                    try self.emitProfileBackedge();
+                }
                 try self.emitJump(target, false);
             },
 
@@ -1732,11 +1736,13 @@ pub const BaselineCompiler = struct {
             .strict_eq => try self.emitStrictEquality(false),
             .strict_neq => try self.emitStrictEquality(true),
 
-            // Loop back-edge
+            // Loop back-edge with hot loop profiling
             .loop => {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                // Profile backedge for hot loop detection (promotes baseline -> optimized)
+                try self.emitProfileBackedge();
                 try self.emitJump(target, false);
             },
 
@@ -4294,6 +4300,29 @@ pub const BaselineCompiler = struct {
             try self.emitCallHelperReg(.x9);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
+        }
+    }
+
+    /// Emit call to jitProfileBackedge for hot loop detection.
+    /// This increments the function's backedge counter and may promote to optimized tier.
+    fn emitProfileBackedge(self: *BaselineCompiler) CompileError!void {
+        const fn_ptr = @intFromPtr(&Context.jitProfileBackedge);
+        const func_addr = @intFromPtr(self.func);
+
+        if (is_x86_64) {
+            // jitProfileBackedge(ctx, func_ptr)
+            // rdi = context (rbx), rsi = function bytecode pointer
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rsi, func_addr) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            // Return value ignored - promotion happens on next function entry
+        } else if (is_aarch64) {
+            // x0 = context (x19), x1 = function bytecode pointer
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x1, func_addr) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
         }
     }
 

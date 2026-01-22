@@ -12,6 +12,7 @@ const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const builtins = @import("builtins.zig");
+const bytecode = @import("bytecode.zig");
 
 pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
 
@@ -959,6 +960,24 @@ pub const Context = struct {
                 }
             }
         }
+        return false;
+    }
+
+    /// JIT helper: profile a loop back-edge for hot loop detection.
+    /// Called from baseline JIT at loop back-edges. Increments backedge count
+    /// and promotes baseline functions to optimized_candidate when hot.
+    /// Returns true if function was promoted (caller should continue executing current code).
+    pub fn jitProfileBackedge(_: *Context, func_ptr: *bytecode.FunctionBytecode) callconv(.c) bool {
+        // Increment backedge count (wrapping to avoid overflow issues)
+        func_ptr.backedge_count +%= 1;
+
+        // Check for hot loop promotion: baseline -> optimized_candidate
+        if (func_ptr.tier == .baseline and func_ptr.backedge_count >= bytecode.OPTIMIZED_LOOP_THRESHOLD) {
+            func_ptr.tier = .optimized_candidate;
+            func_ptr.backedge_count = 0; // Reset to avoid repeated promotion attempts
+            return true; // Promoted - next call will try optimized compilation
+        }
+
         return false;
     }
 

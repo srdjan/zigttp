@@ -1523,6 +1523,18 @@ pub const Interpreter = struct {
                 .goto => {
                     const offset = readI16(self.pc);
                     self.pc += 2;
+                    // Profile backward jumps (loop back-edges) for hot loop detection
+                    if (offset < 0) {
+                        if (self.profileBackedge()) {
+                            if (self.current_func) |func| {
+                                const func_mut = @constCast(func);
+                                if (func_mut.tier == .interpreted) {
+                                    func_mut.tier = .baseline_candidate;
+                                }
+                            }
+                            self.backedge_count = 0;
+                        }
+                    }
                     self.offsetPc(offset);
                 },
                 .loop => {

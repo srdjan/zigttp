@@ -401,9 +401,12 @@ pub const JIT_THRESHOLD: u32 = 100;
 /// Back-edge threshold for detecting hot loops
 pub const LOOP_THRESHOLD: u32 = 1000;
 
-/// Back-edge threshold for promoting baseline to optimized tier
-/// Higher than LOOP_THRESHOLD to ensure type feedback is stable
+/// Execution count threshold for promoting baseline to optimized tier
 pub const OPTIMIZED_THRESHOLD: u32 = 160; // Execution count for baseline -> optimized promotion (after baseline warmup at 150)
+
+/// Back-edge threshold for promoting baseline to optimized tier via hot loops
+/// Lower than call-based threshold since hot loops indicate optimization potential
+pub const OPTIMIZED_LOOP_THRESHOLD: u32 = 5000;
 
 /// Function bytecode structure
 pub const FunctionBytecode = struct {
@@ -421,6 +424,7 @@ pub const FunctionBytecode = struct {
 
     // JIT profiling fields (Phase 11)
     execution_count: u32 = 0, // Incremented on each call
+    backedge_count: u32 = 0, // Loop back-edge counter for hot loop detection
     tier: CompilationTier = .interpreted,
     compiled_code: ?*anyopaque = null, // Pointer to CompiledCode when JIT'd
 
