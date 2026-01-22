@@ -403,7 +403,7 @@ pub const LOOP_THRESHOLD: u32 = 1000;
 
 /// Back-edge threshold for promoting baseline to optimized tier
 /// Higher than LOOP_THRESHOLD to ensure type feedback is stable
-pub const OPTIMIZED_THRESHOLD: u32 = 25; // Execution count for baseline -> optimized promotion
+pub const OPTIMIZED_THRESHOLD: u32 = 160; // Execution count for baseline -> optimized promotion (after baseline warmup at 150)
 
 /// Function bytecode structure
 pub const FunctionBytecode = struct {

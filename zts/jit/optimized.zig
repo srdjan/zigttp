@@ -784,6 +784,30 @@ pub const OptimizedCompiler = struct {
             .mod => try self.emitMod(),
             .inc => try self.emitInc(),
             .dec => try self.emitDec(),
+            .get_loc_add => {
+                const local_idx = code[new_pc];
+                new_pc += 1;
+                try self.emitGetLocAdd(local_idx);
+            },
+            .get_loc_get_loc_add => {
+                const local_a = code[new_pc];
+                const local_b = code[new_pc + 1];
+                new_pc += 2;
+                try self.emitGetLocGetLocAdd(local_a, local_b);
+            },
+            .for_of_next => {
+                const end_offset: i16 = @bitCast(readU16(code, new_pc));
+                new_pc += 2;
+                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + end_offset);
+                try self.emitForOfNext(target);
+            },
+            .for_of_next_put_loc => {
+                const local_idx = code[new_pc];
+                const end_offset: i16 = @bitCast(readU16(code, new_pc + 1));
+                new_pc += 3;
+                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + end_offset);
+                try self.emitForOfNextPutLoc(local_idx, target);
+            },
             // Fallback for unsupported opcodes
             else => return CompileError.UnsupportedOpcode,
         }
@@ -999,6 +1023,78 @@ pub const OptimizedCompiler = struct {
             const offset: i12 = @intCast(@as(i32, @intCast(idx)) * 8);
             self.emitter.strImm(.x9, fp_reg, offset) catch return CompileError.OutOfMemory;
         }
+    }
+
+    /// Emit get_loc_add: stack[sp-1] = stack[sp-1] + locals[idx]
+    /// Optimized version uses registers when local is register-allocated
+    fn emitGetLocAdd(self: *OptimizedCompiler, local_idx: u8) CompileError!void {
+        if (self.current_loop_idx) |loop_idx| {
+            const loop = &self.loops[loop_idx];
+            if (loop.getLocalReg(local_idx)) |local_reg| {
+                // Local is in register - do register-based add
+                const deopt_label = loop.deopt_stub_offset;
+
+                if (is_x86_64) {
+                    // Pop stack top, unbox, add with register, rebox, push
+                    try self.emitPopReg(.rax);
+                    self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+                    self.emitter.addRegReg(.rax, local_reg) catch return CompileError.OutOfMemory;
+                    try self.emitJccToLabel(.o, deopt_label);
+                    self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+                    try self.emitPushReg(.rax);
+                } else if (is_aarch64) {
+                    try self.emitPopReg(.x9);
+                    self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+                    self.emitter.addsRegReg(.x9, .x9, local_reg) catch return CompileError.OutOfMemory;
+                    try self.emitBcondToLabel(.vs, deopt_label);
+                    self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+                    try self.emitPushReg(.x9);
+                }
+                return;
+            }
+        }
+
+        // Fallback: load local, then do stack-based add
+        try self.emitGetLocal(local_idx);
+        // Use unguarded add if in loop, otherwise error (optimized tier only handles loops)
+        const loop_idx = self.current_loop_idx orelse return CompileError.UnsupportedOpcode;
+        try self.emitUnguardedIntBinaryOp(.add, loop_idx);
+    }
+
+    /// Emit get_loc_get_loc_add: push locals[a] + locals[b]
+    /// Highly optimized when both locals are register-allocated
+    fn emitGetLocGetLocAdd(self: *OptimizedCompiler, local_a: u8, local_b: u8) CompileError!void {
+        if (self.current_loop_idx) |loop_idx| {
+            const loop = &self.loops[loop_idx];
+            const reg_a = loop.getLocalReg(local_a);
+            const reg_b = loop.getLocalReg(local_b);
+
+            if (reg_a != null and reg_b != null) {
+                // Both locals in registers - pure register add!
+                const deopt_label = loop.deopt_stub_offset;
+
+                if (is_x86_64) {
+                    self.emitter.movRegReg(.rax, reg_a.?) catch return CompileError.OutOfMemory;
+                    self.emitter.addRegReg(.rax, reg_b.?) catch return CompileError.OutOfMemory;
+                    try self.emitJccToLabel(.o, deopt_label);
+                    self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+                    try self.emitPushReg(.rax);
+                } else if (is_aarch64) {
+                    self.emitter.addsRegReg(.x9, reg_a.?, reg_b.?) catch return CompileError.OutOfMemory;
+                    try self.emitBcondToLabel(.vs, deopt_label);
+                    self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+                    try self.emitPushReg(.x9);
+                }
+                return;
+            }
+        }
+
+        // Fallback: load both locals, then add
+        try self.emitGetLocal(local_a);
+        try self.emitGetLocal(local_b);
+        // Use unguarded add if in loop, otherwise error
+        const loop_idx = self.current_loop_idx orelse return CompileError.UnsupportedOpcode;
+        try self.emitUnguardedIntBinaryOp(.add, loop_idx);
     }
 
     fn emitPushReg(self: *OptimizedCompiler, reg: Register) CompileError!void {
@@ -1272,6 +1368,48 @@ pub const OptimizedCompiler = struct {
             self.emitter.jmpRel32(0) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
             self.emitter.b(0) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitForOfNext(self: *OptimizedCompiler, target: u32) CompileError!void {
+        const fn_ptr = @intFromPtr(&Context.jitForOfNext);
+        if (is_x86_64) {
+            // ctx is in rbx
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            // Result in rax: 0 = done, 1 = continue
+            self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.e, target);
+        } else if (is_aarch64) {
+            // ctx is in x19
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, target);
+        }
+    }
+
+    fn emitForOfNextPutLoc(self: *OptimizedCompiler, local_idx: u8, target: u32) CompileError!void {
+        const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
+        if (is_x86_64) {
+            // ctx is in rbx
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            // Result in rax: 0 = done, 1 = continue
+            self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.e, target);
+        } else if (is_aarch64) {
+            // ctx is in x19
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x1, local_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, target);
         }
     }
 };
