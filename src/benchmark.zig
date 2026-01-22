@@ -409,6 +409,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .enable_fetch = false,
         .enable_fs = false,
         .use_hybrid_allocation = true, // Keep arena for performance
+        // Large arena prevents overflow churn in long-running microbenches.
+        .arena_size = 32 * 1024 * 1024,
         .enforce_arena_escape = false, // Allow arena escapes - script lifetime matches arena
     };
 

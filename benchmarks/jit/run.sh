@@ -27,6 +27,8 @@ run_case() {
 }
 
 run_case "$ROOT_DIR/benchmarks/jit/arith.js" run 200000 120 200
+run_case "$ROOT_DIR/benchmarks/jit/math.js" runInt 200000 120 200
+run_case "$ROOT_DIR/benchmarks/jit/math.js" runMixed 200000 120 200
 run_case "$ROOT_DIR/benchmarks/jit/branch.js" run 200000 120 200
 run_case "$ROOT_DIR/benchmarks/jit/object.js" run 100000 120 200
 run_case "$ROOT_DIR/benchmarks/jit/pic.js" runMono 150000 120 200

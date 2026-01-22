@@ -225,11 +225,20 @@ pub const OptimizedCompiler = struct {
                             var loop_info = type_feedback.LoopInfo.init(header_offset, back_edge_offset);
                             self.analyzeLoop(&loop_info, header_offset, back_edge_offset);
 
+                            std.log.info("[OPT] Loop found: header={} back_edge={} binary_ops={} all_smi={} side_effects={}", .{
+                                header_offset,
+                                back_edge_offset,
+                                loop_info.binary_op_count,
+                                loop_info.all_smi,
+                                loop_info.has_side_effects,
+                            });
+
                             // Check if loop is suitable for optimization
                             if (self.isLoopOptimizable(&loop_info)) {
                                 self.loops[self.loop_count] = OptimizedLoop.init(loop_info);
                                 self.loops[self.loop_count].assignRegisters();
                                 self.loop_count += 1;
+                                std.log.info("[OPT]   -> OPTIMIZABLE", .{});
                             }
                         }
                     } else {
@@ -429,6 +438,11 @@ pub const OptimizedCompiler = struct {
     pub fn compile(self: *OptimizedCompiler) CompileError!CompiledCode {
         // Phase 1: Detect and analyze loops
         try self.detectLoops();
+
+        std.log.info("[OPT] compile: code_len={} loops_found={}", .{
+            self.func.code.len,
+            self.loop_count,
+        });
 
         // If no loops are optimizable, fall back to baseline
         if (self.loop_count == 0) {
