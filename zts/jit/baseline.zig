@@ -4268,6 +4268,9 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitForOfNext(self: *BaselineCompiler, target: u32) CompileError!void {
+        // Profile backedge for hot loop detection (for-of loops)
+        try self.emitProfileBackedge();
+
         const fn_ptr = @intFromPtr(&Context.jitForOfNext);
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
@@ -4285,6 +4288,9 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitForOfNextPutLoc(self: *BaselineCompiler, local_idx: u8, target: u32) CompileError!void {
+        // Profile backedge for hot loop detection (for-of loops)
+        try self.emitProfileBackedge();
+
         const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;

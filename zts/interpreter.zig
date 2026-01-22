@@ -736,6 +736,17 @@ pub const Interpreter = struct {
             }
         }
 
+        // Fallback: compile baseline_candidate functions without type feedback
+        // This handles functions promoted via hot loop that have no feedback sites
+        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr == null) {
+            const hot_warmup: u32 = 3; // Wait a few calls before compiling
+            if (func_mut.execution_count >= hot_warmup) {
+                self.tryCompileBaseline(func_mut) catch {
+                    // Compilation failed - continue with interpreter
+                };
+            }
+        }
+
         // Optimized tier promotion: compile when promoted from baseline
         if (!jitDisabled() and func_mut.tier == .optimized_candidate) {
             self.tryCompileOptimized(func_mut) catch {
@@ -938,6 +949,17 @@ pub const Interpreter = struct {
             if (func_bc_mut.execution_count >= warmup_target) {
                 self.tryCompileBaseline(func_bc_mut) catch {
                     // Compilation failed (other than UnsupportedOpcode) - continue with interpreter
+                };
+            }
+        }
+
+        // Fallback: compile baseline_candidate functions without type feedback
+        // This handles functions promoted via hot loop that have no feedback sites
+        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr == null) {
+            const hot_warmup: u32 = 3; // Wait a few calls before compiling
+            if (func_bc_mut.execution_count >= hot_warmup) {
+                self.tryCompileBaseline(func_bc_mut) catch {
+                    // Compilation failed - continue with interpreter
                 };
             }
         }
