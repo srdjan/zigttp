@@ -386,10 +386,6 @@ pub const Interpreter = struct {
     inline fn profileFunctionEntry(func: *bytecode.FunctionBytecode) bool {
         // Use non-atomic increment for single-threaded interpreter
         func.execution_count +%= 1;
-        // Debug: trace all functions reaching high counts
-        if (func.execution_count == 100 or func.execution_count == 150 or func.execution_count == 200 or func.execution_count == 300) {
-            @import("std").debug.print("[TIER] Function code_len={} at count={}, tier={}\n", .{ func.code.len, func.execution_count, func.tier });
-        }
         if (jitDisabled()) return false;
         if (func.execution_count == getJitThreshold() and func.tier == .interpreted) {
             func.tier = .baseline_candidate;
