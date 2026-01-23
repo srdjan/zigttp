@@ -214,6 +214,18 @@ pub const TypeFeedback = struct {
             self.sites.len * @sizeOf(TypeFeedbackSite) +
             self.call_sites.len * @sizeOf(CallSiteFeedback);
     }
+
+    /// Get total hits across all feedback sites
+    pub fn totalHits(self: *const TypeFeedback) u32 {
+        var total: u32 = 0;
+        for (self.sites) |site| {
+            total +|= site.total_hits;
+        }
+        for (self.call_sites) |site| {
+            total +|= site.total_calls;
+        }
+        return total;
+    }
 };
 
 /// Inlining policy for function inlining decisions
@@ -382,6 +394,7 @@ pub fn analyzeLoopTypes(
     for (loop.binary_op_sites[0..loop.binary_op_count]) |site_idx| {
         if (site_idx == 0xFFFF) continue;
         if (site_idx >= tf.sites.len) {
+            std.debug.print("[TF] analyzeLoopTypes: site_idx={} >= sites.len={}\n", .{ site_idx, tf.sites.len });
             loop.all_smi = false;
             return false;
         }
@@ -390,10 +403,24 @@ pub fn analyzeLoopTypes(
 
         // Must be monomorphic SMI
         if (!site.isMonomorphic()) {
+            std.debug.print("[TF] analyzeLoopTypes: site {} not monomorphic (count={} hits={})\n", .{
+                site_idx,
+                site.count,
+                site.total_hits,
+            });
             loop.all_smi = false;
             return false;
         }
-        if (site.dominantType() != .smi) {
+        const dom_type = site.dominantType() orelse {
+            std.debug.print("[TF] analyzeLoopTypes: site {} no dominant type\n", .{site_idx});
+            loop.all_smi = false;
+            return false;
+        };
+        if (dom_type != .smi) {
+            std.debug.print("[TF] analyzeLoopTypes: site {} not SMI (type={s})\n", .{
+                site_idx,
+                @tagName(dom_type),
+            });
             loop.all_smi = false;
             return false;
         }

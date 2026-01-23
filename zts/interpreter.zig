@@ -736,14 +736,23 @@ pub const Interpreter = struct {
             }
         }
 
-        // Fallback: compile baseline_candidate functions without type feedback
-        // This handles functions promoted via hot loop that have no feedback sites
+        // Hot loop path: functions promoted via hot loop need type feedback warmup
+        // Step 1: Allocate type feedback early
         if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr == null) {
-            const hot_warmup: u32 = 3; // Wait a few calls before compiling
-            if (func_mut.execution_count >= hot_warmup) {
-                self.tryCompileBaseline(func_mut) catch {
-                    // Compilation failed - continue with interpreter
-                };
+            const tf_alloc_threshold: u32 = 3; // Allocate type feedback early
+            if (func_mut.execution_count >= tf_alloc_threshold) {
+                self.allocateTypeFeedback(func_mut) catch {};
+            }
+        }
+
+        // Step 2: After warmup with type feedback, compile to baseline
+        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.execution_count < getJitThreshold()) {
+            // Only compile if type feedback has been warmed up
+            if (func_mut.type_feedback_ptr) |tf| {
+                const baseline_warmup: u32 = 50; // Allow type feedback to warm up
+                if (func_mut.execution_count >= baseline_warmup or tf.totalHits() > 100) {
+                    self.tryCompileBaseline(func_mut) catch {};
+                }
             }
         }
 
@@ -953,14 +962,22 @@ pub const Interpreter = struct {
             }
         }
 
-        // Fallback: compile baseline_candidate functions without type feedback
-        // This handles functions promoted via hot loop that have no feedback sites
+        // Hot loop path: functions promoted via hot loop need type feedback warmup
+        // Step 1: Allocate type feedback early
         if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr == null) {
-            const hot_warmup: u32 = 3; // Wait a few calls before compiling
-            if (func_bc_mut.execution_count >= hot_warmup) {
-                self.tryCompileBaseline(func_bc_mut) catch {
-                    // Compilation failed - continue with interpreter
-                };
+            const tf_alloc_threshold: u32 = 3;
+            if (func_bc_mut.execution_count >= tf_alloc_threshold) {
+                self.allocateTypeFeedback(func_bc_mut) catch {};
+            }
+        }
+
+        // Step 2: After warmup with type feedback, compile to baseline
+        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.execution_count < getJitThreshold()) {
+            if (func_bc_mut.type_feedback_ptr) |tf| {
+                const baseline_warmup: u32 = 50;
+                if (func_bc_mut.execution_count >= baseline_warmup or tf.totalHits() > 100) {
+                    self.tryCompileBaseline(func_bc_mut) catch {};
+                }
             }
         }
 
@@ -2296,6 +2313,16 @@ pub const Interpreter = struct {
                                 const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
                                 if (idx_u < len) {
                                     @branchHint(.likely);
+                                    // Profile backedge for hot loop detection (for-of loops)
+                                    if (self.profileBackedge()) {
+                                        if (self.current_func) |func| {
+                                            const func_mut = @constCast(func);
+                                            if (func_mut.tier == .interpreted) {
+                                                func_mut.tier = .baseline_candidate;
+                                            }
+                                        }
+                                        self.backedge_count = 0;
+                                    }
                                     // Push element, increment index in-place
                                     try self.ctx.push(obj.getIndexUnchecked(idx_u));
                                     self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
@@ -2307,6 +2334,16 @@ pub const Interpreter = struct {
                                 const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
                                 if (idx_u < len) {
                                     @branchHint(.likely);
+                                    // Profile backedge for hot loop detection (for-of loops)
+                                    if (self.profileBackedge()) {
+                                        if (self.current_func) |func| {
+                                            const func_mut = @constCast(func);
+                                            if (func_mut.tier == .interpreted) {
+                                                func_mut.tier = .baseline_candidate;
+                                            }
+                                        }
+                                        self.backedge_count = 0;
+                                    }
                                     const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                     const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
                                     try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
@@ -2343,6 +2380,16 @@ pub const Interpreter = struct {
                                 const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
                                 if (idx_u < len) {
                                     @branchHint(.likely);
+                                    // Profile backedge for hot loop detection (for-of loops)
+                                    if (self.profileBackedge()) {
+                                        if (self.current_func) |func| {
+                                            const func_mut = @constCast(func);
+                                            if (func_mut.tier == .interpreted) {
+                                                func_mut.tier = .baseline_candidate;
+                                            }
+                                        }
+                                        self.backedge_count = 0;
+                                    }
                                     // Store element directly to local, increment index in-place
                                     self.ctx.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
                                     self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
@@ -2354,6 +2401,16 @@ pub const Interpreter = struct {
                                 const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
                                 if (idx_u < len) {
                                     @branchHint(.likely);
+                                    // Profile backedge for hot loop detection (for-of loops)
+                                    if (self.profileBackedge()) {
+                                        if (self.current_func) |func| {
+                                            const func_mut = @constCast(func);
+                                            if (func_mut.tier == .interpreted) {
+                                                func_mut.tier = .baseline_candidate;
+                                            }
+                                        }
+                                        self.backedge_count = 0;
+                                    }
                                     const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                                     const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
                                     self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
