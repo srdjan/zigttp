@@ -695,6 +695,151 @@ pub const Arm64Emitter = struct {
     }
 
     // ========================================
+    // Floating-Point Arithmetic (Scalar Double)
+    // ========================================
+
+    /// FADD Dd, Dn, Dm (scalar double-precision add)
+    /// Encoding: 0 0 0 11110 01 1 Rm 001010 Rn Rd
+    pub fn faddDouble(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0x1E602800 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FSUB Dd, Dn, Dm (scalar double-precision subtract)
+    /// Encoding: 0 0 0 11110 01 1 Rm 001110 Rn Rd
+    pub fn fsubDouble(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0x1E603800 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMUL Dd, Dn, Dm (scalar double-precision multiply)
+    /// Encoding: 0 0 0 11110 01 1 Rm 000010 Rn Rd
+    pub fn fmulDouble(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0x1E600800 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FDIV Dd, Dn, Dm (scalar double-precision divide)
+    /// Encoding: 0 0 0 11110 01 1 Rm 000110 Rn Rd
+    pub fn fdivDouble(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0x1E601800 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMIN Dd, Dn, Dm (scalar double-precision minimum)
+    /// Encoding: 0 0 0 11110 01 1 Rm 010110 Rn Rd
+    pub fn fminDouble(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0x1E605800 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMAX Dd, Dn, Dm (scalar double-precision maximum)
+    /// Encoding: 0 0 0 11110 01 1 Rm 010010 Rn Rd
+    pub fn fmaxDouble(self: *Arm64Emitter, dst: Register, src1: Register, src2: Register) !void {
+        const inst: u32 = 0x1E604800 |
+            (@as(u32, src2.encode()) << 16) |
+            (@as(u32, src1.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMOV Dd, Xn (move 64-bit GP register to double FP register)
+    /// Encoding: 1 0 0 11110 01 1 00111 000000 Rn Rd
+    pub fn fmovDoubleFromGpr(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x9E670000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMOV Xd, Dn (move double FP register to 64-bit GP register)
+    /// Encoding: 1 0 0 11110 01 1 00110 000000 Rn Rd
+    pub fn fmovGprFromDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x9E660000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// SCVTF Dd, Xn (convert signed 64-bit integer to double)
+    /// Encoding: 1 0 0 11110 01 1 00010 000000 Rn Rd
+    pub fn scvtfDoubleFromGpr(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x9E620000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FCVTZS Xd, Dn (convert double to signed 64-bit integer, round toward zero)
+    /// Encoding: 1 0 0 11110 01 1 11000 000000 Rn Rd
+    pub fn fcvtzsGprFromDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x9E780000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FCVT Sd, Dn (convert double to single)
+    /// Encoding: 0 0 0 11110 01 1 00100 10000 Rn Rd
+    pub fn fcvtSingleFromDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E624000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FCVT Dd, Sn (convert single to double)
+    /// Encoding: 0 0 0 11110 00 1 00101 10000 Rn Rd
+    pub fn fcvtDoubleFromSingle(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E22C000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMOV Sd, Wn (move 32-bit GP register to single FP register)
+    /// Encoding: 0 0 0 11110 00 1 00111 000000 Rn Rd
+    pub fn fmovSingleFromGpr32(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E270000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FMOV Wd, Sn (move single FP register to 32-bit GP register)
+    /// Encoding: 0 0 0 11110 00 1 00110 000000 Rn Rd
+    pub fn fmovGpr32FromSingle(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E260000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FCMP Dn, Dm (compare two double FP registers, sets NZCV flags)
+    /// Encoding: 0 0 0 11110 01 1 Rm 00 1000 Rn 00 000
+    pub fn fcmpDouble(self: *Arm64Emitter, rn: Register, rm: Register) !void {
+        const inst: u32 = 0x1E602000 |
+            (@as(u32, rm.encode()) << 16) |
+            (@as(u32, rn.encode()) << 5);
+        try self.emit32(inst);
+    }
+
+    // ========================================
     // Miscellaneous
     // ========================================
 
@@ -803,4 +948,32 @@ test "Arm64Emitter: stp and ldp" {
 
     const code = emitter.getCode();
     try testing.expectEqual(@as(usize, 8), code.len);
+}
+
+test "Arm64Emitter: floating-point arithmetic" {
+    const testing = std.testing;
+    var emitter = Arm64Emitter.init(testing.allocator);
+    defer emitter.deinit();
+
+    // Using x0-x3 as FP register aliases (d0-d3)
+    // FADD D0, D1, D2
+    try emitter.faddDouble(.x0, .x1, .x2);
+    // FSUB D0, D1, D2
+    try emitter.fsubDouble(.x0, .x1, .x2);
+    // FMUL D0, D1, D2
+    try emitter.fmulDouble(.x0, .x1, .x2);
+    // FDIV D0, D1, D2
+    try emitter.fdivDouble(.x0, .x1, .x2);
+
+    const code = emitter.getCode();
+    try testing.expectEqual(@as(usize, 16), code.len);
+
+    // FADD D0, D1, D2: 0x1E622820
+    try testing.expectEqual(@as(u32, 0x1E622820), @as(u32, @bitCast(code[0..4].*)));
+    // FSUB D0, D1, D2: 0x1E623820
+    try testing.expectEqual(@as(u32, 0x1E623820), @as(u32, @bitCast(code[4..8].*)));
+    // FMUL D0, D1, D2: 0x1E620820
+    try testing.expectEqual(@as(u32, 0x1E620820), @as(u32, @bitCast(code[8..12].*)));
+    // FDIV D0, D1, D2: 0x1E621820
+    try testing.expectEqual(@as(u32, 0x1E621820), @as(u32, @bitCast(code[12..16].*)));
 }

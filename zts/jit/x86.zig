@@ -898,6 +898,100 @@ pub const X86Emitter = struct {
     }
 
     // ========================================
+    // SSE Scalar Double-Precision Arithmetic
+    // ========================================
+
+    /// ADDSD xmm1, xmm2 (add scalar double)
+    /// F2 0F 58 /r
+    pub fn addsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x58);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// SUBSD xmm1, xmm2 (subtract scalar double)
+    /// F2 0F 5C /r
+    pub fn subsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x5C);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// MULSD xmm1, xmm2 (multiply scalar double)
+    /// F2 0F 59 /r
+    pub fn mulsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x59);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// DIVSD xmm1, xmm2 (divide scalar double)
+    /// F2 0F 5E /r
+    pub fn divsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x5E);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// MINSD xmm1, xmm2 (minimum of scalar doubles)
+    /// F2 0F 5D /r
+    pub fn minsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x5D);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    /// MAXSD xmm1, xmm2 (maximum of scalar doubles)
+    /// F2 0F 5F /r
+    pub fn maxsd(self: *X86Emitter, dst: XmmRegister, src: XmmRegister) !void {
+        try self.buffer.append(self.allocator, 0xF2);
+        if (dst.isExtended() or src.isExtended()) {
+            const rex: u8 = 0x40 |
+                (if (dst.isExtended()) @as(u8, 4) else 0) |
+                (if (src.isExtended()) @as(u8, 1) else 0);
+            try self.buffer.append(self.allocator, rex);
+        }
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0x5F);
+        try self.emitModRM(0b11, dst.low3(), src.low3());
+    }
+
+    // ========================================
     // Miscellaneous
     // ========================================
 
@@ -1016,4 +1110,44 @@ test "X86Emitter: mov memory" {
     try std.testing.expectEqual(@as(u8, 0x8B), code[1]); // MOV
     try std.testing.expectEqual(@as(u8, 0x43), code[2]); // ModRM: [rbx+disp8], rax
     try std.testing.expectEqual(@as(u8, 8), code[3]); // disp8
+}
+
+test "X86Emitter: SSE arithmetic" {
+    var emit = X86Emitter.init(std.testing.allocator);
+    defer emit.deinit();
+
+    // ADDSD xmm0, xmm1: F2 0F 58 C1
+    try emit.addsd(.xmm0, .xmm1);
+    // SUBSD xmm0, xmm1: F2 0F 5C C1
+    try emit.subsd(.xmm0, .xmm1);
+    // MULSD xmm0, xmm1: F2 0F 59 C1
+    try emit.mulsd(.xmm0, .xmm1);
+    // DIVSD xmm0, xmm1: F2 0F 5E C1
+    try emit.divsd(.xmm0, .xmm1);
+
+    const code = emit.getCode();
+
+    // Each instruction is 4 bytes: F2 0F xx ModRM
+    try std.testing.expectEqual(@as(usize, 16), code.len);
+
+    // ADDSD
+    try std.testing.expectEqual(@as(u8, 0xF2), code[0]);
+    try std.testing.expectEqual(@as(u8, 0x0F), code[1]);
+    try std.testing.expectEqual(@as(u8, 0x58), code[2]);
+    try std.testing.expectEqual(@as(u8, 0xC1), code[3]); // ModRM: xmm0, xmm1
+
+    // SUBSD
+    try std.testing.expectEqual(@as(u8, 0xF2), code[4]);
+    try std.testing.expectEqual(@as(u8, 0x0F), code[5]);
+    try std.testing.expectEqual(@as(u8, 0x5C), code[6]);
+
+    // MULSD
+    try std.testing.expectEqual(@as(u8, 0xF2), code[8]);
+    try std.testing.expectEqual(@as(u8, 0x0F), code[9]);
+    try std.testing.expectEqual(@as(u8, 0x59), code[10]);
+
+    // DIVSD
+    try std.testing.expectEqual(@as(u8, 0xF2), code[12]);
+    try std.testing.expectEqual(@as(u8, 0x0F), code[13]);
+    try std.testing.expectEqual(@as(u8, 0x5E), code[14]);
 }
