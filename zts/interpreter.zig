@@ -587,6 +587,7 @@ pub const Interpreter = struct {
             .dup, .drop, .swap, .rot3, .halt, .get_length, .dup2 => 0,
             .get_loc_0, .get_loc_1, .get_loc_2, .get_loc_3, .put_loc_0, .put_loc_1, .put_loc_2, .put_loc_3 => 0,
             .add, .sub, .mul, .div, .mod, .pow, .neg, .inc, .dec => 0,
+            .math_floor, .math_ceil, .math_round, .math_abs, .math_min2, .math_max2 => 0,
             .bit_and, .bit_or, .bit_xor, .bit_not, .shl, .shr, .ushr => 0,
             .lt, .lte, .gt, .gte, .eq, .neq, .strict_eq, .strict_neq, .not => 0,
             .ret, .ret_undefined => 0,
@@ -1402,6 +1403,139 @@ pub const Interpreter = struct {
                     self.pc += 1;
                     const result = try self.concatNValues(count);
                     try self.ctx.push(result);
+                },
+
+                // ========================================
+                // Math Builtins - compile-time specialized
+                // ========================================
+                .math_floor => {
+                    const sp = self.ctx.sp;
+                    const arg = self.ctx.stack[sp - 1];
+                    // Integer fast path: floor(int) = int
+                    if (arg.isInt()) {
+                        // Already on stack, nothing to do
+                    } else if (arg.isFloat64()) {
+                        const n = arg.getFloat64();
+                        const floored = @floor(n);
+                        // Convert to integer if it's a safe integer (matches builtins.allocFloat behavior)
+                        if (floored >= -2147483648 and floored <= 2147483647) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(floored));
+                        } else {
+                            self.ctx.stack[sp - 1] = try self.allocFloat(floored);
+                        }
+                    } else {
+                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                    }
+                },
+
+                .math_ceil => {
+                    const sp = self.ctx.sp;
+                    const arg = self.ctx.stack[sp - 1];
+                    if (arg.isInt()) {
+                        // ceil(int) = int
+                    } else if (arg.isFloat64()) {
+                        const n = arg.getFloat64();
+                        const ceiled = @ceil(n);
+                        // Convert to integer if it's a safe integer
+                        if (ceiled >= -2147483648 and ceiled <= 2147483647) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(ceiled));
+                        } else {
+                            self.ctx.stack[sp - 1] = try self.allocFloat(ceiled);
+                        }
+                    } else {
+                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                    }
+                },
+
+                .math_round => {
+                    const sp = self.ctx.sp;
+                    const arg = self.ctx.stack[sp - 1];
+                    if (arg.isInt()) {
+                        // round(int) = int
+                    } else if (arg.isFloat64()) {
+                        const n = arg.getFloat64();
+                        const rounded = @round(n);
+                        // Convert to integer if it's a safe integer
+                        if (rounded >= -2147483648 and rounded <= 2147483647) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(rounded));
+                        } else {
+                            self.ctx.stack[sp - 1] = try self.allocFloat(rounded);
+                        }
+                    } else {
+                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                    }
+                },
+
+                .math_abs => {
+                    const sp = self.ctx.sp;
+                    const arg = self.ctx.stack[sp - 1];
+                    if (arg.isInt()) {
+                        const v = arg.getInt();
+                        if (v == std.math.minInt(i32)) {
+                            // Negating minInt overflows, need float
+                            const result = try self.allocFloat(@as(f64, 2147483648.0));
+                            self.ctx.stack[sp - 1] = result;
+                        } else if (v < 0) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(-v);
+                        }
+                        // v >= 0: already correct
+                    } else if (arg.isFloat64()) {
+                        const n = arg.getFloat64();
+                        const absed = @abs(n);
+                        // Convert to integer if it's a safe integer
+                        if (absed >= 0 and absed <= 2147483647) {
+                            const truncated = @floor(absed);
+                            if (truncated == absed) {
+                                self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(absed));
+                            } else {
+                                self.ctx.stack[sp - 1] = try self.allocFloat(absed);
+                            }
+                        } else {
+                            self.ctx.stack[sp - 1] = try self.allocFloat(absed);
+                        }
+                    } else {
+                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                    }
+                },
+
+                .math_min2 => {
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        const av = a.getInt();
+                        const bv = b.getInt();
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@min(av, bv));
+                    } else {
+                        const an = a.toNumber() orelse std.math.nan(f64);
+                        const bn = b.toNumber() orelse std.math.nan(f64);
+                        if (std.math.isNan(an) or std.math.isNan(bn)) {
+                            self.ctx.stack[sp - 2] = try self.allocFloat(std.math.nan(f64));
+                        } else {
+                            self.ctx.stack[sp - 2] = try self.allocFloat(@min(an, bn));
+                        }
+                    }
+                    self.ctx.sp = sp - 1;
+                },
+
+                .math_max2 => {
+                    const sp = self.ctx.sp;
+                    const b = self.ctx.stack[sp - 1];
+                    const a = self.ctx.stack[sp - 2];
+                    if (a.isInt() and b.isInt()) {
+                        const av = a.getInt();
+                        const bv = b.getInt();
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@max(av, bv));
+                    } else {
+                        const an = a.toNumber() orelse std.math.nan(f64);
+                        const bn = b.toNumber() orelse std.math.nan(f64);
+                        if (std.math.isNan(an) or std.math.isNan(bn)) {
+                            self.ctx.stack[sp - 2] = try self.allocFloat(std.math.nan(f64));
+                        } else {
+                            self.ctx.stack[sp - 2] = try self.allocFloat(@max(an, bn));
+                        }
+                    }
+                    self.ctx.sp = sp - 1;
                 },
 
                 // ========================================

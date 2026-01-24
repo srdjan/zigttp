@@ -949,6 +949,12 @@ pub const CodeGen = struct {
 
         if (is_method) {
             const member = self.ir.getMember(call.callee).?;
+
+            // Check for Math.* pattern (compile-time specialization)
+            if (self.tryEmitMathBuiltin(member, call)) {
+                return;
+            }
+
             // Method call: obj.method(args)
             // Stack: [obj] -> [obj, obj] -> [obj, method] -> [obj, method, args...] -> [result]
             try self.emitNode(member.object);
@@ -985,6 +991,76 @@ pub const CodeGen = struct {
             const arg_idx = self.ir.getListIndex(call.args_start, i);
             try self.emitNode(arg_idx);
         }
+    }
+
+    /// Try to emit specialized Math.* opcode for known patterns.
+    /// Returns true if pattern was matched and opcode emitted.
+    fn tryEmitMathBuiltin(self: *CodeGen, member: Node.MemberExpr, call: Node.CallExpr) bool {
+        // Check if object is identifier
+        const obj_tag = self.ir.getTag(member.object) orelse return false;
+        if (obj_tag != .identifier) return false;
+
+        // Get binding for the identifier
+        const binding = self.ir.getBinding(member.object) orelse return false;
+
+        // Must be a global
+        if (binding.kind != .global) return false;
+
+        // Must be Math global (atom index)
+        const math_atom: u16 = @intFromEnum(js_object.Atom.Math);
+        if (binding.slot != math_atom) return false;
+
+        // Match property to known Math methods
+        const floor_atom: u16 = @intFromEnum(js_object.Atom.floor);
+        const ceil_atom: u16 = @intFromEnum(js_object.Atom.ceil);
+        const round_atom: u16 = @intFromEnum(js_object.Atom.round);
+        const abs_atom: u16 = @intFromEnum(js_object.Atom.abs);
+        const min_atom: u16 = @intFromEnum(js_object.Atom.min);
+        const max_atom: u16 = @intFromEnum(js_object.Atom.max);
+
+        const prop = member.property;
+
+        // floor/ceil/round/abs require 1 argument
+        if (call.args_count == 1) {
+            if (prop == floor_atom) {
+                self.emitCallArgs(call) catch return false;
+                self.emit(.math_floor) catch return false;
+                return true;
+            }
+            if (prop == ceil_atom) {
+                self.emitCallArgs(call) catch return false;
+                self.emit(.math_ceil) catch return false;
+                return true;
+            }
+            if (prop == round_atom) {
+                self.emitCallArgs(call) catch return false;
+                self.emit(.math_round) catch return false;
+                return true;
+            }
+            if (prop == abs_atom) {
+                self.emitCallArgs(call) catch return false;
+                self.emit(.math_abs) catch return false;
+                return true;
+            }
+        }
+
+        // min/max require 2 arguments (for the specialized opcode)
+        if (call.args_count == 2) {
+            if (prop == min_atom) {
+                self.emitCallArgs(call) catch return false;
+                self.emit(.math_min2) catch return false;
+                self.popStack(1); // Two args pushed, one result
+                return true;
+            }
+            if (prop == max_atom) {
+                self.emitCallArgs(call) catch return false;
+                self.emit(.math_max2) catch return false;
+                self.popStack(1);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     fn emitMemberAccess(self: *CodeGen, member: Node.MemberExpr) !void {

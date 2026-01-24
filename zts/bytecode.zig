@@ -81,6 +81,14 @@ pub const Opcode = enum(u8) {
     dec = 0x28,
     concat_n = 0x29, // +u8 count - concatenate N values from stack into single string
 
+    // Math builtins (compile-time specialized)
+    math_floor = 0x2A, // pop 1, push floor(arg)
+    math_ceil = 0x2B, // pop 1, push ceil(arg)
+    math_round = 0x2C, // pop 1, push round(arg)
+    math_abs = 0x2D, // pop 1, push abs(arg)
+    math_min2 = 0x2E, // pop 2, push min(a, b)
+    math_max2 = 0x2F, // pop 2, push max(a, b)
+
     // Bitwise
     bit_and = 0x30,
     bit_or = 0x31,
@@ -255,6 +263,14 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .inc => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "inc" },
         .dec => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "dec" },
         .concat_n => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "concat_n" }, // n_pop is dynamic (from operand)
+
+        // Math builtins
+        .math_floor => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "math_floor" },
+        .math_ceil => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "math_ceil" },
+        .math_round => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "math_round" },
+        .math_abs => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "math_abs" },
+        .math_min2 => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "math_min2" },
+        .math_max2 => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "math_max2" },
 
         // Bitwise
         .bit_and => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "bit_and" },
