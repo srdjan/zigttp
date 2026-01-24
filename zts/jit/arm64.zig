@@ -839,6 +839,51 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// FRINTM Dd, Dn (round toward -infinity = floor)
+    /// Encoding: 0 0 0 11110 01 1 001010 10000 Rn Rd
+    pub fn frintmDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E654000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FRINTP Dd, Dn (round toward +infinity = ceil)
+    /// Encoding: 0 0 0 11110 01 1 001001 10000 Rn Rd
+    pub fn frintpDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E64C000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FRINTN Dd, Dn (round to nearest with ties to even)
+    /// Encoding: 0 0 0 11110 01 1 001000 10000 Rn Rd
+    pub fn frintnDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E644000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FRINTA Dd, Dn (round to nearest with ties away from zero - for JS Math.round)
+    /// Encoding: 0 0 0 11110 01 1 001100 10000 Rn Rd
+    pub fn frintaDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E664000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
+    /// FABS Dd, Dn (absolute value of double)
+    /// Encoding: 0 0 0 11110 01 1 000001 10000 Rn Rd
+    pub fn fabsDouble(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        const inst: u32 = 0x1E618000 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     // ========================================
     // Miscellaneous
     // ========================================

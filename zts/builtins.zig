@@ -2710,6 +2710,10 @@ fn printValue(fd: std.c.fd_t, val: value.JSValue) void {
         var buf: [32]u8 = undefined;
         const s = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return;
         writeToFd(fd, s);
+    } else if (val.isFloat()) {
+        var buf: [32]u8 = undefined;
+        const s = std.fmt.bufPrint(&buf, "{d}", .{val.getFloat64()}) catch return;
+        writeToFd(fd, s);
     } else if (val.isNull()) {
         writeToFd(fd, "null");
     } else if (val.isUndefined()) {

@@ -22,18 +22,25 @@ pub const AllocError = error{
     OutOfMemory,
 };
 
-/// A single page of executable memory
+/// A region of executable memory (may span multiple OS pages)
 pub const CodePage = struct {
-    /// Base address of the page
+    /// Base address of the memory region
     memory: []align(PAGE_SIZE) u8,
-    /// Current write offset within the page
+    /// Current write offset within the region
     offset: usize,
-    /// Whether the page is currently writable (vs executable)
+    /// Whether the region is currently writable (vs executable)
     writable: bool,
 
-    /// Allocate a new code page
+    /// Allocate a new code region with default size
     pub fn init() AllocError!CodePage {
-        const memory = allocExecutablePage() catch return AllocError.MmapFailed;
+        return initWithSize(PAGE_SIZE);
+    }
+
+    /// Allocate a new code region with at least the specified size
+    pub fn initWithSize(min_size: usize) AllocError!CodePage {
+        // Round up to page boundary
+        const size = (min_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        const memory = allocExecutableRegion(size) catch return AllocError.MmapFailed;
         return .{
             .memory = memory,
             .offset = 0,
@@ -41,17 +48,17 @@ pub const CodePage = struct {
         };
     }
 
-    /// Free the code page
+    /// Free the code region
     pub fn deinit(self: *CodePage) void {
-        freeExecutablePage(self.memory);
+        freeExecutableRegion(self.memory);
     }
 
-    /// Get remaining space in this page
+    /// Get remaining space in this region
     pub fn remaining(self: *const CodePage) usize {
         return self.memory.len - self.offset;
     }
 
-    /// Allocate space from this page, returns slice to write code into
+    /// Allocate space from this region, returns slice to write code into
     pub fn alloc(self: *CodePage, size: usize) ?[]u8 {
         if (self.offset + size > self.memory.len) return null;
         const slice = self.memory[self.offset..][0..size];
@@ -59,17 +66,17 @@ pub const CodePage = struct {
         return slice;
     }
 
-    /// Make the page executable (and non-writable)
+    /// Make the region executable (and non-writable)
     pub fn makeExecutable(self: *CodePage) AllocError!void {
         if (!self.writable) return;
-        makePageExecutable(self.memory) catch return AllocError.MprotectFailed;
+        makeRegionExecutable(self.memory) catch return AllocError.MprotectFailed;
         self.writable = false;
     }
 
-    /// Make the page writable (and non-executable)
+    /// Make the region writable (and non-executable)
     pub fn makeWritable(self: *CodePage) AllocError!void {
         if (self.writable) return;
-        makePageWritable(self.memory) catch return AllocError.MprotectFailed;
+        makeRegionWritable(self.memory) catch return AllocError.MprotectFailed;
         self.writable = true;
     }
 };
@@ -141,8 +148,11 @@ pub const CodeAllocator = struct {
             }
         }
 
-        // Need a new page
-        var page = try CodePage.init();
+        // Need a new page - allocate with enough space for the request
+        var page = if (size > PAGE_SIZE)
+            try CodePage.initWithSize(size)
+        else
+            try CodePage.init();
         errdefer page.deinit();
 
         const slice = page.alloc(size) orelse return AllocError.OutOfMemory;
@@ -171,23 +181,23 @@ pub const CodeAllocator = struct {
 // Platform-specific implementation
 // ============================================================================
 
-fn allocExecutablePage() ![]align(PAGE_SIZE) u8 {
+fn allocExecutableRegion(size: usize) ![]align(PAGE_SIZE) u8 {
     if (builtin.os.tag == .macos) {
-        return allocExecutablePageMacOS();
+        return allocExecutableRegionMacOS(size);
     } else if (builtin.os.tag == .linux) {
-        return allocExecutablePageLinux();
+        return allocExecutableRegionLinux(size);
     } else {
         @compileError("Unsupported platform for JIT compilation");
     }
 }
 
-fn freeExecutablePage(memory: []align(PAGE_SIZE) u8) void {
+fn freeExecutableRegion(memory: []align(PAGE_SIZE) u8) void {
     if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
         _ = std.posix.munmap(memory);
     }
 }
 
-fn makePageExecutable(memory: []align(PAGE_SIZE) u8) !void {
+fn makeRegionExecutable(memory: []align(PAGE_SIZE) u8) !void {
     const prot_rx: std.c.PROT = .{ .READ = true, .EXEC = true };
     if (builtin.os.tag == .macos) {
         // On macOS with MAP_JIT, we need to use pthread_jit_write_protect_np
@@ -203,7 +213,7 @@ fn makePageExecutable(memory: []align(PAGE_SIZE) u8) !void {
     }
 }
 
-fn makePageWritable(memory: []align(PAGE_SIZE) u8) !void {
+fn makeRegionWritable(memory: []align(PAGE_SIZE) u8) !void {
     const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     if (builtin.os.tag == .macos) {
         if (builtin.cpu.arch == .aarch64) {
@@ -215,7 +225,7 @@ fn makePageWritable(memory: []align(PAGE_SIZE) u8) !void {
     }
 }
 
-fn allocExecutablePageMacOS() ![]align(PAGE_SIZE) u8 {
+fn allocExecutableRegionMacOS(size: usize) ![]align(PAGE_SIZE) u8 {
     // On macOS, we use MAP_JIT which allows JIT code to be written and executed
     // with proper W^X handling via pthread_jit_write_protect_np
     const flags: std.posix.MAP = .{
@@ -230,28 +240,28 @@ fn allocExecutablePageMacOS() ![]align(PAGE_SIZE) u8 {
     const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     const result = std.posix.mmap(
         null,
-        PAGE_SIZE,
+        size,
         prot_rw,
         @bitCast(flags_with_jit),
         -1,
         0,
     ) catch return error.MmapFailed;
 
-    return @alignCast(result[0..PAGE_SIZE]);
+    return @alignCast(result[0..size]);
 }
 
-fn allocExecutablePageLinux() ![]align(PAGE_SIZE) u8 {
+fn allocExecutableRegionLinux(size: usize) ![]align(PAGE_SIZE) u8 {
     const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     const result = std.posix.mmap(
         null,
-        PAGE_SIZE,
+        size,
         prot_rw,
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
     ) catch return error.MmapFailed;
 
-    return @alignCast(result[0..PAGE_SIZE]);
+    return @alignCast(result[0..size]);
 }
 
 // External declaration for macOS JIT write protection
