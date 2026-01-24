@@ -663,6 +663,55 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
     return str;
 }
 
+/// Concatenate multiple strings using arena allocation (single allocation, no intermediate strings)
+/// Returns null on allocation failure
+pub fn concatManyWithArena(arena: *arena_mod.Arena, strings: []const *const JSString) ?*JSString {
+    if (strings.len == 0) {
+        return createStringWithArena(arena, "");
+    }
+    if (strings.len == 1) {
+        return createStringWithArena(arena, strings[0].data());
+    }
+    if (strings.len == 2) {
+        return concatStringsWithArena(arena, strings[0], strings[1]);
+    }
+
+    // Calculate total length and check ASCII
+    var total_len: u32 = 0;
+    var all_ascii = true;
+    for (strings) |s| {
+        total_len += s.len;
+        all_ascii = all_ascii and s.flags.is_ascii;
+    }
+
+    // Single allocation for result
+    const total_size = @sizeOf(JSString) + total_len;
+    const mem = arena.alloc(total_size) orelse return null;
+
+    const str: *JSString = @ptrCast(@alignCast(mem));
+    str.* = .{
+        .header = heap.MemBlockHeader.init(.string, total_size),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = all_ascii,
+            .is_numeric = false,
+            .hash_computed = false,
+        },
+        .len = total_len,
+        .hash = 0,
+    };
+
+    // Copy all strings into result
+    const data_mut = str.dataMut();
+    var offset: usize = 0;
+    for (strings) |s| {
+        @memcpy(data_mut[offset .. offset + s.len], s.data());
+        offset += s.len;
+    }
+
+    return str;
+}
+
 /// StringBuilder for efficient incremental string building
 /// Use when building a string from multiple parts dynamically
 pub const StringBuilder = struct {

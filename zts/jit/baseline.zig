@@ -40,6 +40,7 @@ extern fn jitMathMin2(ctx: *Context, arg1: value_mod.JSValue, arg2: value_mod.JS
 extern fn jitMathMax2(ctx: *Context, arg1: value_mod.JSValue, arg2: value_mod.JSValue) value_mod.JSValue;
 extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
 extern fn jitPutFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, val: value_mod.JSValue, cache_idx: u16) value_mod.JSValue;
+extern fn jitConcatN(ctx: *Context, count: u8) value_mod.JSValue;
 const jitDeoptimize = deopt.jitDeoptimize;
 
 
@@ -1409,6 +1410,12 @@ pub const BaselineCompiler = struct {
 
             .dec => {
                 try self.emitIncDec(false);
+            },
+
+            .concat_n => {
+                const count = code[new_pc];
+                new_pc += 1;
+                try self.emitConcatN(count);
             },
 
             .ret => {
@@ -3622,6 +3629,30 @@ pub const BaselineCompiler = struct {
             try self.emitPushReg(.x0);
 
             try self.markLabel(done);
+        }
+    }
+
+    /// Emit code for concat_n: concatenate N values from stack into a single string.
+    /// This is a simple helper call since string concatenation is complex and
+    /// the performance gain comes from single allocation in the helper, not from inlining.
+    fn emitConcatN(self: *BaselineCompiler, count: u8) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitConcatN);
+
+        if (is_x86_64) {
+            // Call jitConcatN(ctx, count)
+            // The helper will pop count values from the stack and push the result
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory; // ctx
+            self.emitter.movRegImm64(.rsi, count) catch return CompileError.OutOfMemory; // count
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            try self.emitPushReg(.rax);
+        } else if (is_aarch64) {
+            // Call jitConcatN(ctx, count)
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
+            self.emitter.movRegImm64(.x1, count) catch return CompileError.OutOfMemory; // count
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.x9);
+            try self.emitPushReg(.x0);
         }
     }
 

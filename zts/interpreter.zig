@@ -600,7 +600,7 @@ pub const Interpreter = struct {
             .call, .call_method, .tail_call => 1,
             .get_upvalue, .put_upvalue, .close_upvalue => 1,
             .add_const_i8, .sub_const_i8, .mul_const_i8, .mod_const_i8, .lt_const_i8, .le_const_i8 => 1,
-            .set_slot => 1,
+            .set_slot, .concat_n => 1,
 
             // 2-byte operand (u16 or i16)
             .push_i16, .push_const, .loop => 2,
@@ -1392,6 +1392,16 @@ pub const Interpreter = struct {
                     } else {
                         return error.TypeError;
                     }
+                },
+
+                // ========================================
+                // String Concatenation - batched allocation
+                // ========================================
+                .concat_n => {
+                    const count = self.pc[0];
+                    self.pc += 1;
+                    const result = try self.concatNValues(count);
+                    try self.ctx.push(result);
                 },
 
                 // ========================================
@@ -2876,6 +2886,43 @@ pub const Interpreter = struct {
         return value.JSValue.fromPtr(result);
     }
 
+    /// Concatenate N values from the stack into a single string.
+    /// This is much more efficient than chained binary concatenation
+    /// because it calculates total length once and allocates a single buffer.
+    fn concatNValues(self: *Interpreter, count: u8) !value.JSValue {
+        if (count == 0) {
+            return value.JSValue.fromPtr(try self.createString(""));
+        }
+        if (count == 1) {
+            const val = self.ctx.pop();
+            const str = try self.valueToString(val);
+            return value.JSValue.fromPtr(str);
+        }
+
+        // Pop all values in reverse order to get left-to-right order
+        var values: [16]value.JSValue = undefined;
+        var i: u8 = count;
+        while (i > 0) : (i -= 1) {
+            values[i - 1] = self.ctx.pop();
+        }
+
+        // Convert all values to strings
+        var strings: [16]*const string.JSString = undefined;
+        for (0..count) |j| {
+            strings[j] = try self.valueToString(values[j]);
+        }
+
+        // Use concatMany for single-allocation concatenation
+        if (self.ctx.hybrid) |h| {
+            const result = string.concatManyWithArena(h.arena, strings[0..count]) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
+        const result = try string.concatMany(self.ctx.allocator, strings[0..count]);
+        return value.JSValue.fromPtr(result);
+    }
+
     /// Convert a JSValue to a JSString
     fn valueToString(self: *Interpreter, val: value.JSValue) !*string.JSString {
         if (val.isString()) {
@@ -3419,6 +3466,13 @@ pub const Interpreter = struct {
                 }
                 return error.NoTransition;
             },
+            .concat_n => {
+                const count = self.pc[0];
+                self.pc += 1;
+                const result = try self.concatNValues(count);
+                try self.ctx.push(result);
+                return error.NoTransition;
+            },
             .dup => {
                 try self.ctx.push(self.ctx.peek());
                 return error.NoTransition;
@@ -3660,6 +3714,22 @@ pub export fn jitMathMin2(ctx: *context.Context, arg1: value.JSValue, arg2: valu
 /// JIT helper: Math.max with two arguments
 pub export fn jitMathMax2(ctx: *context.Context, arg1: value.JSValue, arg2: value.JSValue) value.JSValue {
     return builtins.mathMax(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ arg1, arg2 });
+}
+
+/// JIT helper: concatenate N values from the stack into a single string
+/// Uses the interpreter's concatNValues which leverages concatMany for single-allocation
+pub export fn jitConcatN(ctx: *context.Context, count: u8) value.JSValue {
+    const interp = current_interpreter orelse {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    const result = interp.concatNValues(count) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    return result;
 }
 
 // ============================================================================

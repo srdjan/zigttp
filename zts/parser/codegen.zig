@@ -565,6 +565,86 @@ pub const CodeGen = struct {
         self.popStack(1); // Two operands -> one result
     }
 
+    /// Try to detect and emit a string concatenation chain.
+    /// Pattern: 'str' + a + b + c  (left-associative chain where leftmost is string literal)
+    /// Returns true if chain was emitted, false if not a valid string concat chain.
+    fn tryEmitStringConcatChain(self: *CodeGen, binary: Node.BinaryExpr) bool {
+        // Collect all operands in the chain by walking left-associative tree
+        // Maximum 16 operands to avoid stack overflow
+        var operands: [16]NodeIndex = undefined;
+        var count: u8 = 0;
+
+        // Start with the right operand of the current node
+        operands[0] = binary.right;
+        count = 1;
+
+        // Walk left through the chain
+        var current = binary.left;
+        while (count < 16) {
+            const tag = self.ir.getTag(current) orelse break;
+
+            if (tag == .binary_op) {
+                const inner = self.ir.getBinary(current) orelse break;
+                if (inner.op != .add) break;
+
+                // Shift existing operands right and add this right operand
+                var i: u8 = count;
+                while (i > 0) : (i -= 1) {
+                    operands[i] = operands[i - 1];
+                }
+                operands[0] = inner.right;
+                count += 1;
+                current = inner.left;
+            } else {
+                // Reached the end of the chain
+                break;
+            }
+        }
+
+        // Add the leftmost operand
+        if (count >= 16) return false;
+        {
+            var i: u8 = count;
+            while (i > 0) : (i -= 1) {
+                operands[i] = operands[i - 1];
+            }
+            operands[0] = current;
+            count += 1;
+        }
+
+        // Check if we have at least 3 operands (otherwise regular add is fine)
+        if (count < 3) return false;
+
+        // Check if any operand is a string literal (heuristic for string concat)
+        var has_string = false;
+        for (0..count) |i| {
+            const tag = self.ir.getTag(operands[i]) orelse continue;
+            if (tag == .lit_string) {
+                has_string = true;
+                break;
+            }
+        }
+
+        if (!has_string) return false;
+
+        // Emit all operands left-to-right
+        for (0..count) |i| {
+            self.emitNode(operands[i]) catch return false;
+        }
+
+        // Emit concat_n opcode
+        self.emit(.concat_n) catch return false;
+        self.emitByte(count) catch return false;
+
+        // Stack: pushed count values, popped count, pushed 1 result
+        // Net effect: no stack change from before first emitNode
+        // (each emitNode pushed 1, concat_n pops count and pushes 1)
+        // We already tracked pushes in emitNode calls, now account for concat_n
+        self.popStack(count - 1);
+
+        return true;
+    }
+
     fn emitBinaryOp(self: *CodeGen, binary: Node.BinaryExpr) !void {
         // Short-circuit operators need special handling
         switch (binary.op) {
@@ -650,6 +730,15 @@ pub const CodeGen = struct {
                     try self.emitByte(@bitCast(@as(i8, @intCast(val))));
                     return;
                 }
+            }
+        }
+
+        // Pattern: string concatenation chain -> concat_n
+        // Detects patterns like 'str' + a + b + c and emits single concat_n opcode
+        // This avoids N-1 intermediate string allocations
+        if (binary.op == .add) {
+            if (self.tryEmitStringConcatChain(binary)) {
+                return;
             }
         }
 

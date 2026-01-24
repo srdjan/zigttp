@@ -79,6 +79,7 @@ pub const Opcode = enum(u8) {
     neg = 0x26,
     inc = 0x27,
     dec = 0x28,
+    concat_n = 0x29, // +u8 count - concatenate N values from stack into single string
 
     // Bitwise
     bit_and = 0x30,
@@ -253,6 +254,7 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .neg => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "neg" },
         .inc => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "inc" },
         .dec => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "dec" },
+        .concat_n => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "concat_n" }, // n_pop is dynamic (from operand)
 
         // Bitwise
         .bit_and => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "bit_and" },
