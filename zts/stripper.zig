@@ -1570,7 +1570,7 @@ test "protected modifier errors" {
 }
 
 test "public label allowed" {
-    const result = try strip(std.testing.allocator, "public: foo();", .{});
+    var result = try strip(std.testing.allocator, "public: foo();", .{});
     defer result.deinit();
     try std.testing.expectEqualStrings("public: foo();", result.code);
 }

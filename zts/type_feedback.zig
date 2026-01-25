@@ -230,12 +230,16 @@ pub const TypeFeedback = struct {
 
 /// Inlining policy for function inlining decisions
 pub const InliningPolicy = struct {
-    /// Maximum bytecode size of a function to inline
-    pub const MAX_INLINE_BYTECODE_SIZE: u32 = 50;
+    /// Maximum bytecode size of a function to inline (increased for small utility functions)
+    pub const MAX_INLINE_BYTECODE_SIZE: u32 = 64;
     /// Maximum inlining depth
     pub const MAX_INLINE_DEPTH: u32 = 3;
     /// Minimum call count before considering inlining (lower for faster FaaS warmup)
     pub const MIN_CALL_COUNT: u32 = 5;
+    /// Reduced call count threshold for hot callees (execution_count > HOT_CALLEE_THRESHOLD)
+    pub const MIN_CALL_COUNT_HOT: u32 = 2;
+    /// Threshold for considering a callee "hot" based on its execution count
+    pub const HOT_CALLEE_THRESHOLD: u32 = 1000;
     /// Maximum total inlined bytecode budget per function
     pub const MAX_INLINED_SIZE: u32 = 500;
 
@@ -263,8 +267,13 @@ pub const InliningPolicy = struct {
         // Must be monomorphic
         if (!call_site.isMonomorphic()) return .no_polymorphic;
 
-        // Must have enough calls to justify
-        if (call_site.total_calls < MIN_CALL_COUNT) return .no_cold;
+        // Must have enough calls to justify inlining
+        // Use lower threshold for hot callees (already proven to be frequently executed)
+        const min_calls = if (callee.execution_count > HOT_CALLEE_THRESHOLD)
+            MIN_CALL_COUNT_HOT
+        else
+            MIN_CALL_COUNT;
+        if (call_site.total_calls < min_calls) return .no_cold;
 
         // Callee must be small enough
         if (callee.code.len > MAX_INLINE_BYTECODE_SIZE) return .no_too_large;
@@ -582,6 +591,7 @@ test "InliningPolicy rejects cold calls" {
     var dummy_callee: bytecode.FunctionBytecode = undefined;
     dummy_callee.code = &[_]u8{0} ** 10; // Small function
     dummy_callee.upvalue_count = 0;
+    dummy_callee.execution_count = 0; // Cold callee - uses standard MIN_CALL_COUNT threshold
 
     var call_site = CallSiteFeedback{};
     call_site.recordCallee(&dummy_callee);
@@ -596,4 +606,27 @@ test "InliningPolicy rejects cold calls" {
     );
 
     try std.testing.expectEqual(InliningPolicy.InlineDecision.no_cold, decision);
+}
+
+test "InliningPolicy uses lower threshold for hot callees" {
+    const dummy_caller: bytecode.FunctionBytecode = undefined;
+    var dummy_callee: bytecode.FunctionBytecode = undefined;
+    dummy_callee.code = &[_]u8{0} ** 10; // Small function
+    dummy_callee.upvalue_count = 0;
+    dummy_callee.execution_count = InliningPolicy.HOT_CALLEE_THRESHOLD + 1; // Hot callee
+
+    var call_site = CallSiteFeedback{};
+    call_site.recordCallee(&dummy_callee);
+    call_site.total_calls = InliningPolicy.MIN_CALL_COUNT_HOT; // At reduced threshold
+
+    const decision = InliningPolicy.shouldInline(
+        &dummy_caller,
+        &dummy_callee,
+        &call_site,
+        0,
+        0,
+    );
+
+    // Should pass because hot callees use MIN_CALL_COUNT_HOT (2) threshold
+    try std.testing.expectEqual(InliningPolicy.InlineDecision.yes, decision);
 }

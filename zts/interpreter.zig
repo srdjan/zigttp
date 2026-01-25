@@ -725,35 +725,20 @@ pub const Interpreter = struct {
             }
         }
 
-        // Hot loop promotion: wait for warmup before compiling
-        // (execution_count < JIT_THRESHOLD means it was promoted by hot loop, not call count)
-        // We wait for a few calls to collect type feedback before baseline compilation
-        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.execution_count < getJitThreshold()) {
-            const hot_loop_warmup: u32 = 5; // Collect type feedback for a few iterations
-            if (func_mut.execution_count >= hot_loop_warmup and func_mut.type_feedback_ptr != null) {
-                self.tryCompileBaseline(func_mut) catch {
-                    // Compilation failed - continue with interpreter
-                };
-            }
-        }
-
-        // Hot loop path: functions promoted via hot loop need type feedback warmup
-        // Step 1: Allocate type feedback early
-        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.type_feedback_ptr == null) {
-            const tf_alloc_threshold: u32 = 3; // Allocate type feedback early
-            if (func_mut.execution_count >= tf_alloc_threshold) {
+        // Hot loop promotion: compile after type feedback warmup for functions with hot loops
+        // Functions can become baseline_candidate via execution_count OR hot loop detection
+        if (!jitDisabled() and func_mut.tier == .baseline_candidate and
+            func_mut.backedge_count >= bytecode.LOOP_JIT_THRESHOLD)
+        {
+            // Allocate type feedback if not present
+            if (func_mut.type_feedback_ptr == null) {
                 self.allocateTypeFeedback(func_mut) catch {};
             }
-        }
-
-        // Step 2: After warmup with type feedback, compile to baseline
-        if (!jitDisabled() and func_mut.tier == .baseline_candidate and func_mut.execution_count < getJitThreshold()) {
-            // Only compile if type feedback has been warmed up
-            if (func_mut.type_feedback_ptr) |tf| {
-                const baseline_warmup: u32 = 50; // Allow type feedback to warm up
-                if (func_mut.execution_count >= baseline_warmup or tf.totalHits() > 100) {
-                    self.tryCompileBaseline(func_mut) catch {};
-                }
+            // Wait for feedback warmup before compiling (need call site feedback for inlining)
+            // Use a shorter warmup than normal since hot loops execute frequently
+            const hot_loop_warmup: u32 = 5;
+            if (func_mut.type_feedback_ptr != null and func_mut.execution_count >= hot_loop_warmup) {
+                self.tryCompileBaseline(func_mut) catch {};
             }
         }
 
@@ -1714,6 +1699,8 @@ pub const Interpreter = struct {
                                 if (func_mut.tier == .interpreted) {
                                     func_mut.tier = .baseline_candidate;
                                 }
+                                // Also update function's backedge count for cross-call tracking
+                                func_mut.backedge_count = self.backedge_count;
                             }
                             self.backedge_count = 0;
                         }
@@ -1731,6 +1718,8 @@ pub const Interpreter = struct {
                             if (func_mut.tier == .interpreted) {
                                 func_mut.tier = .baseline_candidate;
                             }
+                            // Also update function's backedge count for cross-call tracking
+                            func_mut.backedge_count = self.backedge_count;
                         }
                         self.backedge_count = 0; // Reset to avoid repeated promotion
                     }
@@ -2464,6 +2453,7 @@ pub const Interpreter = struct {
                                             if (func_mut.tier == .interpreted) {
                                                 func_mut.tier = .baseline_candidate;
                                             }
+                                            func_mut.backedge_count = self.backedge_count;
                                         }
                                         self.backedge_count = 0;
                                     }
@@ -2485,6 +2475,7 @@ pub const Interpreter = struct {
                                             if (func_mut.tier == .interpreted) {
                                                 func_mut.tier = .baseline_candidate;
                                             }
+                                            func_mut.backedge_count = self.backedge_count;
                                         }
                                         self.backedge_count = 0;
                                     }
@@ -2531,6 +2522,7 @@ pub const Interpreter = struct {
                                             if (func_mut.tier == .interpreted) {
                                                 func_mut.tier = .baseline_candidate;
                                             }
+                                            func_mut.backedge_count = self.backedge_count;
                                         }
                                         self.backedge_count = 0;
                                     }
@@ -2552,6 +2544,7 @@ pub const Interpreter = struct {
                                             if (func_mut.tier == .interpreted) {
                                                 func_mut.tier = .baseline_candidate;
                                             }
+                                            func_mut.backedge_count = self.backedge_count;
                                         }
                                         self.backedge_count = 0;
                                     }
@@ -3727,6 +3720,70 @@ pub export fn jitCallBytecode(
     return result;
 }
 
+/// JIT helper: fast path for monomorphic bytecode call when guards have already verified:
+/// - The value is a pointer to an object
+/// - The object is a bytecode function (not generator/async)
+/// - The bytecode matches expected_bc
+/// This skips redundant validation for maximum performance.
+pub export fn jitCallBytecodeFast(
+    ctx: *context.Context,
+    expected_bc: *const bytecode.FunctionBytecode,
+    argc: u8,
+    is_method: u8,
+) value.JSValue {
+    const interp = current_interpreter orelse {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    const is_method_bool = is_method != 0;
+    const sp = ctx.sp;
+
+    // Minimal stack bounds check
+    const needed: usize = @as(usize, argc) + 1 + @as(usize, @intFromBool(is_method_bool));
+    if (sp < needed) {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    }
+
+    // Get function value - guards already verified it's a valid bytecode function
+    const func_idx = sp - 1 - @as(usize, argc);
+    const func_val = ctx.stack[func_idx];
+    const func_obj = object.JSObject.fromValue(func_val);
+
+    // Get closure data - guards verified this is a bytecode function
+    const closure_data = func_obj.getClosureData();
+
+    // Collect arguments (in reverse order from stack)
+    if (argc > Interpreter.MAX_STACK_ARGS) {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    }
+    var args: [Interpreter.MAX_STACK_ARGS]value.JSValue = undefined;
+    var i: usize = argc;
+    while (i > 0) {
+        i -= 1;
+        args[i] = ctx.pop();
+    }
+
+    // Pop function and optional this
+    _ = ctx.pop(); // func_val
+    const this_val = if (is_method_bool) ctx.pop() else value.JSValue.undefined_val;
+
+    // Set current closure context if needed
+    const prev_closure = interp.current_closure;
+    interp.current_closure = closure_data;
+    defer interp.current_closure = prev_closure;
+
+    // Direct call to bytecode function - no additional validation needed
+    const result = interp.callBytecodeFunction(func_val, expected_bc, this_val, args[0..argc]) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    return result;
+}
+
 /// JIT helper: get_field_ic using the interpreter's PIC cache.
 pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_idx: u16, cache_idx: u16) value.JSValue {
     const interp = current_interpreter orelse {
@@ -3864,6 +3921,73 @@ pub export fn jitConcatN(ctx: *context.Context, count: u8) value.JSValue {
     };
 
     return result;
+}
+
+/// JIT helper: for_of_next iteration step
+/// Stack before: [iterable, index]
+/// If not done: updates index to index+1, pushes element, returns 1
+/// If done: returns 0 (caller should jump to end_offset)
+/// On error: returns 0 (treat as done)
+pub export fn jitForOfNext(ctx: *context.Context) u64 {
+    const sp = ctx.sp;
+    if (sp < 2) return 0; // Error: not enough stack
+
+    const idx_val = ctx.stack[sp - 1];
+    const iter_val = ctx.stack[sp - 2];
+
+    // Array fast path
+    if (iter_val.isObject() and idx_val.isInt()) {
+        const obj = object.JSObject.fromValue(iter_val);
+        const idx = idx_val.getInt();
+        if (idx >= 0 and obj.class_id == .array) {
+            const idx_u: u32 = @intCast(idx);
+            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+            if (idx_u < len) {
+                // Get element
+                const element = obj.getIndexUnchecked(idx_u);
+                // Update index on stack
+                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                // Push element
+                ctx.stack[sp] = element;
+                ctx.sp = sp + 1;
+                return 1; // Continue iteration
+            }
+        }
+    }
+    return 0; // Done (or error)
+}
+
+/// JIT helper: for_of_next_put_loc - same as forOfNext but stores to local
+/// Stack before: [iterable, index]
+/// If not done: updates index to index+1, stores element to local, returns 1
+/// If done: returns 0 (caller should jump to end_offset)
+pub export fn jitForOfNextPutLoc(ctx: *context.Context, local_idx: u8) u64 {
+    const sp = ctx.sp;
+    const fp = ctx.fp;
+    if (sp < 2) return 0;
+
+    const idx_val = ctx.stack[sp - 1];
+    const iter_val = ctx.stack[sp - 2];
+
+    // Array fast path
+    if (iter_val.isObject() and idx_val.isInt()) {
+        const obj = object.JSObject.fromValue(iter_val);
+        const idx = idx_val.getInt();
+        if (idx >= 0 and obj.class_id == .array) {
+            const idx_u: u32 = @intCast(idx);
+            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+            if (idx_u < len) {
+                // Get element
+                const element = obj.getIndexUnchecked(idx_u);
+                // Update index on stack
+                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                // Store to local (no push)
+                ctx.stack[fp + local_idx] = element;
+                return 1; // Continue iteration
+            }
+        }
+    }
+    return 0; // Done
 }
 
 // ============================================================================

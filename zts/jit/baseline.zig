@@ -32,6 +32,7 @@ const PolymorphicInlineCache = interpreter_mod.PolymorphicInlineCache;
 
 extern fn jitCall(ctx: *Context, argc: u8, is_method: u8) value_mod.JSValue;
 extern fn jitCallBytecode(ctx: *Context, func_bc: *const bytecode.FunctionBytecode, argc: u8, is_method: u8) value_mod.JSValue;
+extern fn jitCallBytecodeFast(ctx: *Context, func_bc: *const bytecode.FunctionBytecode, argc: u8, is_method: u8) value_mod.JSValue;
 extern fn jitMathFloor(ctx: *Context, arg: value_mod.JSValue) value_mod.JSValue;
 extern fn jitMathCeil(ctx: *Context, arg: value_mod.JSValue) value_mod.JSValue;
 extern fn jitMathRound(ctx: *Context, arg: value_mod.JSValue) value_mod.JSValue;
@@ -41,6 +42,8 @@ extern fn jitMathMax2(ctx: *Context, arg1: value_mod.JSValue, arg2: value_mod.JS
 extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
 extern fn jitPutFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, val: value_mod.JSValue, cache_idx: u16) value_mod.JSValue;
 extern fn jitConcatN(ctx: *Context, count: u8) value_mod.JSValue;
+extern fn jitForOfNext(ctx: *Context) u64;
+extern fn jitForOfNextPutLoc(ctx: *Context, local_idx: u8) u64;
 const jitDeoptimize = deopt.jitDeoptimize;
 
 
@@ -373,8 +376,13 @@ pub const BaselineCompiler = struct {
     fn getMonomorphicCallTarget(self: *BaselineCompiler, bytecode_offset: u32) ?*const bytecode.FunctionBytecode {
         const cs = self.getCallSiteFeedback(bytecode_offset) orelse return null;
         if (!cs.isMonomorphic()) return null;
-        if (cs.total_calls < type_feedback.InliningPolicy.MIN_CALL_COUNT) return null;
         const callee = cs.getMonomorphicCallee() orelse return null;
+        // Use lower threshold for hot callees (already proven to be frequently executed)
+        const min_calls = if (callee.execution_count > type_feedback.InliningPolicy.HOT_CALLEE_THRESHOLD)
+            type_feedback.InliningPolicy.MIN_CALL_COUNT_HOT
+        else
+            type_feedback.InliningPolicy.MIN_CALL_COUNT;
+        if (cs.total_calls < min_calls) return null;
         if (callee.flags.is_generator or callee.flags.is_async) return null;
         return callee;
     }
@@ -1656,6 +1664,8 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                // Profile backedge for hot loop detection
+                try self.emitProfileBackedge();
                 try self.emitForOfNext(target);
             },
 
@@ -1664,6 +1674,8 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc + 1));
                 new_pc += 3;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                // Profile backedge for hot loop detection
+                try self.emitProfileBackedge();
                 try self.emitForOfNextPutLoc(local_idx, target);
             },
 
@@ -3369,7 +3381,8 @@ pub const BaselineCompiler = struct {
     /// Emit monomorphic call fast path with callee guard.
     /// Falls back to generic call helper on mismatch.
     fn emitMonomorphicCall(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8, is_method: bool) CompileError!void {
-        const fn_ptr = @intFromPtr(&jitCallBytecode);
+        // Use fast helper that skips redundant validation since guards already checked
+        const fn_ptr = @intFromPtr(&jitCallBytecodeFast);
         const expected_ptr: u64 = @intFromPtr(callee);
         const true_raw: u12 = @intCast(value_mod.JSValue.true_val.raw);
         const slow = self.newLocalLabel();
@@ -3421,7 +3434,7 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Fast path: call jitCallBytecode
+            // Fast path: call jitCallBytecodeFast (guards verified, skip redundant checks)
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rsi, expected_ptr) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rdx, @intCast(argc)) catch return CompileError.OutOfMemory;
@@ -3480,7 +3493,7 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Fast path: call jitCallBytecode
+            // Fast path: call jitCallBytecodeFast (guards verified, skip redundant checks)
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, expected_ptr) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, argc) catch return CompileError.OutOfMemory;
@@ -5129,10 +5142,8 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitForOfNext(self: *BaselineCompiler, target: u32) CompileError!void {
-        // Profile backedge for hot loop detection (for-of loops)
-        try self.emitProfileBackedge();
-
-        const fn_ptr = @intFromPtr(&Context.jitForOfNext);
+        // Call jitForOfNext(ctx) -> returns 0 if done, 1 if continue
+        const fn_ptr = @intFromPtr(&jitForOfNext);
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
@@ -5149,10 +5160,8 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitForOfNextPutLoc(self: *BaselineCompiler, local_idx: u8, target: u32) CompileError!void {
-        // Profile backedge for hot loop detection (for-of loops)
-        try self.emitProfileBackedge();
-
-        const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
+        // Call jitForOfNextPutLoc(ctx, local_idx) -> returns 0 if done, 1 if continue
+        const fn_ptr = @intFromPtr(&jitForOfNextPutLoc);
         if (is_x86_64) {
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;

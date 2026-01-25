@@ -419,12 +419,27 @@ pub const JIT_THRESHOLD: u32 = 100;
 /// Back-edge threshold for detecting hot loops
 pub const LOOP_THRESHOLD: u32 = 1000;
 
+/// Back-edge threshold for triggering early JIT compilation of functions with hot loops.
+/// Lower than LOOP_THRESHOLD because functions with loops should JIT faster than
+/// functions that get called many times - the loop already proves the function is hot.
+pub const LOOP_JIT_THRESHOLD: u32 = 50;
+
 /// Execution count threshold for promoting baseline to optimized tier
 pub const OPTIMIZED_THRESHOLD: u32 = 160; // Execution count for baseline -> optimized promotion (after baseline warmup at 150)
 
 /// Back-edge threshold for promoting baseline to optimized tier via hot loops
 /// Lower than call-based threshold since hot loops indicate optimization potential
 pub const OPTIMIZED_LOOP_THRESHOLD: u32 = 5000;
+
+/// Global counter for generating unique guard IDs
+var guard_id_counter: u64 = 1;
+
+/// Generate a new unique guard ID for a function
+pub fn nextGuardId() u64 {
+    const id = guard_id_counter;
+    guard_id_counter +%= 1;
+    return id;
+}
 
 /// Function bytecode structure
 pub const FunctionBytecode = struct {
@@ -446,6 +461,10 @@ pub const FunctionBytecode = struct {
     tier: CompilationTier = .interpreted,
     compiled_code: ?*anyopaque = null, // Pointer to CompiledCode when JIT'd
 
+    // Unique identifier for JIT guard fast path
+    // Enables single 64-bit comparison instead of multiple field checks
+    guard_id: u64 = 0,
+
     // Type feedback for speculative optimization (Phase 12)
     type_feedback_ptr: ?*type_feedback.TypeFeedback = null,
     feedback_site_map: ?[]u16 = null, // bytecode_offset -> site_index
@@ -458,6 +477,13 @@ pub const FunctionBytecode = struct {
     /// Set the type feedback vector
     pub fn setTypeFeedback(self: *FunctionBytecode, tf: *type_feedback.TypeFeedback) void {
         self.type_feedback_ptr = tf;
+    }
+
+    /// Initialize guard_id if not already set
+    pub fn ensureGuardId(self: *FunctionBytecode) void {
+        if (self.guard_id == 0) {
+            self.guard_id = nextGuardId();
+        }
     }
 };
 
