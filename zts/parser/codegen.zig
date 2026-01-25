@@ -2079,12 +2079,6 @@ pub const CodeGen = struct {
         }
     }
 
-    fn addFunctionConstant(self: *CodeGen, node_idx: NodeIndex) !u16 {
-        // Would compile function and add bytecode to constants
-        _ = node_idx;
-        return try self.addConstant(JSValue.undefined_val);
-    }
-
     // ============ Stack Tracking ============
 
     fn pushStack(self: *CodeGen, count: u16) void {

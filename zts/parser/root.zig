@@ -98,9 +98,15 @@ pub fn parse(
     source: []const u8,
     options: ParseOptions,
 ) !ParseResult {
-    _ = options; // TODO: Use options
-
     var p = JsParser.init(allocator, source);
+
+    // Apply options
+    if (options.jsx_enabled) {
+        p.tokenizer.enableJsx();
+    }
+    // Note: strict_mode is always true in zts (var keyword rejected)
+    // Note: module_mode affects import/export handling (future)
+
     const root = p.parse() catch {
         return ParseResult{
             .nodes = p.nodes,

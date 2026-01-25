@@ -60,9 +60,8 @@ pub const Compiler = struct {
     allocator: std.mem.Allocator,
     /// Thread-safe intern pool for shared constant storage
     shared_intern_pool: ?*intern_pool.ThreadSafeInternPool,
-    /// Compilation results (protected by mutex)
+    /// Compilation results (per-thread writes to unique indices)
     results: std.ArrayListUnmanaged(CompileResult),
-    results_mutex: std.Thread.Mutex,
     /// Maximum thread count for parallel compilation
     max_threads: u32,
 
@@ -75,7 +74,6 @@ pub const Compiler = struct {
             .allocator = allocator,
             .shared_intern_pool = null,
             .results = .{},
-            .results_mutex = .{},
             .max_threads = thread_count,
         };
     }
@@ -167,9 +165,7 @@ pub const Compiler = struct {
     fn workerThread(self: *Compiler, units: []const CompileUnit, start_idx: usize) void {
         for (units, 0..) |unit, i| {
             const result = self.compileOneInternal(unit);
-
-            self.results_mutex.lock();
-            defer self.results_mutex.unlock();
+            // No mutex needed: each thread writes to a unique index (start_idx + i)
             self.results.items[start_idx + i] = result;
         }
     }
@@ -204,16 +200,32 @@ pub const Compiler = struct {
         defer p.deinit();
 
         const code = p.parse() catch |err| {
-            // Compilation error
-            const errors = alloc.alloc(CompileResult.CompileError, 1) catch {
-                return result;
-            };
-            errors[0] = .{
-                .message = @errorName(err),
-                .line = 0,
-                .column = 0,
-            };
-            result.errors = errors;
+            // Extract detailed errors from parser's ErrorList
+            const parse_errors = p.js_parser.errors.getErrors();
+            if (parse_errors.len > 0) {
+                const errors = alloc.alloc(CompileResult.CompileError, parse_errors.len) catch {
+                    return result;
+                };
+                for (parse_errors, 0..) |pe, i| {
+                    errors[i] = .{
+                        .message = pe.message,
+                        .line = pe.location.line,
+                        .column = pe.location.column,
+                    };
+                }
+                result.errors = errors;
+            } else {
+                // Fallback if no detailed errors (shouldn't happen, but defensive)
+                const errors = alloc.alloc(CompileResult.CompileError, 1) catch {
+                    return result;
+                };
+                errors[0] = .{
+                    .message = @errorName(err),
+                    .line = 0,
+                    .column = 0,
+                };
+                result.errors = errors;
+            }
             return result;
         };
 
@@ -294,8 +306,43 @@ pub fn compileWithOptions(
     source: []const u8,
     options: CompileOptions,
 ) !*bytecode.FunctionBytecode {
-    _ = options; // TODO: Pass to parser
-    return compile(allocator, source);
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = parser.Parser.init(allocator, source, &strings, null);
+    defer p.deinit();
+
+    // Apply options
+    if (options.jsx_enabled) {
+        p.enableJsx();
+    }
+    // Note: strict_mode is always true in zts (var keyword rejected)
+
+    const code = try p.parse();
+
+    // Copy code and constants to output allocator (parser memory is freed on deinit)
+    const code_copy = try allocator.dupe(u8, code);
+    errdefer allocator.free(code_copy);
+
+    const constants_copy = try allocator.dupe(value.JSValue, p.constants.items);
+    errdefer allocator.free(constants_copy);
+
+    const func = try allocator.create(bytecode.FunctionBytecode);
+    func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = @intCast(p.max_local_count),
+        .stack_size = @intCast(p.max_local_count + 16),
+        .flags = .{},
+        .upvalue_count = 0,
+        .upvalue_info = &.{},
+        .code = code_copy,
+        .constants = constants_copy,
+        .source_map = null,
+    };
+
+    return func;
 }
 
 // ============================================================================
