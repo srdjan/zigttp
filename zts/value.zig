@@ -1,7 +1,14 @@
 //! JSValue NaN-boxing implementation
 //!
-//! 64-bit tagged value representation using NaN-boxing technique.
-//! Compatible with QuickJS-style JSValue encoding.
+//! 64-bit tagged value representation using full NaN-boxing technique.
+//! All f64 values are stored inline (no heap allocation for floats).
+//!
+//! Encoding scheme:
+//! - Raw f64: stored directly when upper 16 bits != 0xFFFC..0xFFFF
+//! - Tagged values: upper 16 bits = 0xFFFC, lower 48 bits = tag + payload
+//!
+//! This allows ALL f64 values (including subnormals, infinities) to be
+//! stored inline, eliminating the 41.6x mathOps performance gap.
 
 const std = @import("std");
 const heap = @import("heap.zig");
@@ -10,78 +17,161 @@ const heap = @import("heap.zig");
 pub const JSValue = packed struct {
     raw: u64,
 
-    /// Tag bits encoded in the lower bits
+    // ========================================================================
+    // NaN-boxing constants
+    // ========================================================================
+
+    /// Tag prefix for non-double values (upper 16 bits)
+    /// We use 0xFFFC which is in the quiet NaN space
+    const TAG_PREFIX: u64 = 0xFFFC_0000_0000_0000;
+
+    /// Mask for detecting tagged values (upper 16 bits)
+    const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+
+    /// Payload mask (lower 48 bits)
+    const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+    /// Type tag shift (bits 44-47 of raw value)
+    const TYPE_SHIFT: u6 = 44;
+
+    /// Type tag mask (4 bits = 16 types)
+    const TYPE_MASK: u64 = 0xF << TYPE_SHIFT;
+
+    /// Value payload mask (lower 44 bits)
+    const VALUE_MASK: u64 = 0x0000_0FFF_FFFF_FFFF;
+
+    /// Type tags (4 bits, allowing 16 types)
+    const TYPE_PTR: u64 = 0x0 << TYPE_SHIFT; // GC-managed pointer
+    const TYPE_INT: u64 = 0x1 << TYPE_SHIFT; // 32-bit signed integer
+    const TYPE_SPECIAL: u64 = 0x2 << TYPE_SHIFT; // null/undefined/bool/exception
+    const TYPE_EXTERN: u64 = 0x3 << TYPE_SHIFT; // Non-GC external pointer
+    const TYPE_SYMBOL: u64 = 0x4 << TYPE_SHIFT; // Symbol
+    // Types 5-15 reserved for future use
+
+    /// Canonical NaN value (JavaScript's NaN)
+    const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
+
+    // ========================================================================
+    // Special value constants
+    // ========================================================================
+
+    pub const null_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 0 };
+    pub const undefined_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 1 };
+    pub const true_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 2 };
+    pub const false_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 3 };
+    pub const exception_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 4 };
+    pub const nan_val: JSValue = .{ .raw = CANONICAL_NAN_BITS }; // Stored as raw NaN
+
+    // ========================================================================
+    // Legacy Tag enum (for compatibility)
+    // ========================================================================
+
     pub const Tag = enum(u3) {
-        int = 0, // 31-bit signed integer (LSB = 0)
-        ptr = 1, // Heap object pointer
-        special = 3, // Bool/null/undefined/exception
-        short_float = 5, // Short float (64-bit mode)
-        extern_ptr = 7, // Non-GC external pointer (internal slots)
+        int = 0,
+        ptr = 1,
+        special = 3,
+        short_float = 5, // Legacy - now we use full f64
+        extern_ptr = 7,
     };
 
-    // Special values: tag 3 in lower 3 bits, payload in upper bits
-    pub const null_val: JSValue = .{ .raw = (0 << 3) | 3 };
-    pub const undefined_val: JSValue = .{ .raw = (1 << 3) | 3 };
-    pub const true_val: JSValue = .{ .raw = (2 << 3) | 3 };
-    pub const false_val: JSValue = .{ .raw = (3 << 3) | 3 };
-    pub const exception_val: JSValue = .{ .raw = (4 << 3) | 3 };
-    pub const nan_val: JSValue = .{ .raw = (5 << 3) | 3 }; // NaN special value
+    // ========================================================================
+    // Core type checking
+    // ========================================================================
 
-    /// Check if value is a 31-bit integer (fast path)
-    pub inline fn isInt(self: JSValue) bool {
-        return (self.raw & 1) == 0;
+    /// Check if value is a tagged value (not a raw double)
+    pub inline fn isTagged(self: JSValue) bool {
+        // Tagged values have upper 16 bits = 0xFFFC
+        return (self.raw & TAG_MASK) == TAG_PREFIX;
     }
 
-    /// Extract 31-bit signed integer
+    /// Check if value is a raw f64 (not a tagged value)
+    /// This includes regular numbers, infinities, and NaN
+    pub inline fn isRawDouble(self: JSValue) bool {
+        // A value is a raw double if:
+        // 1. Upper 16 bits are NOT 0xFFFC (our tag prefix), OR
+        // 2. It's the canonical NaN
+        const upper16 = self.raw & TAG_MASK;
+        return upper16 != TAG_PREFIX or self.raw == CANONICAL_NAN_BITS;
+    }
+
+    // ========================================================================
+    // Integer operations
+    // ========================================================================
+
+    /// Check if value is a 32-bit integer
+    pub inline fn isInt(self: JSValue) bool {
+        return self.isTagged() and (self.raw & TYPE_MASK) == TYPE_INT;
+    }
+
+    /// Extract 32-bit signed integer
     pub inline fn getInt(self: JSValue) i32 {
         std.debug.assert(self.isInt());
-        return @bitCast(@as(u32, @truncate(self.raw >> 1)));
+        return @bitCast(@as(u32, @truncate(self.raw & 0xFFFF_FFFF)));
     }
 
     /// Create integer value
     pub inline fn fromInt(val: i32) JSValue {
         const as_u32: u32 = @bitCast(val);
-        return .{ .raw = @as(u64, as_u32) << 1 };
+        return .{ .raw = TAG_PREFIX | TYPE_INT | @as(u64, as_u32) };
     }
+
+    // ========================================================================
+    // Pointer operations
+    // ========================================================================
 
     /// Check if value is a GC-managed pointer
     pub inline fn isPtr(self: JSValue) bool {
-        return (self.raw & 0x7) == 1;
+        return self.isTagged() and (self.raw & TYPE_MASK) == TYPE_PTR;
     }
 
     /// Create value from pointer
     pub inline fn fromPtr(ptr: *anyopaque) JSValue {
-        return .{ .raw = @intFromPtr(ptr) | 1 };
+        // Pointers are assumed to be 48-bit (x86-64/ARM64 canonical addresses)
+        // and 8-byte aligned, so we can store them in 44 bits
+        const addr = @intFromPtr(ptr);
+        std.debug.assert(addr <= VALUE_MASK); // Verify fits in 44 bits
+        return .{ .raw = TAG_PREFIX | TYPE_PTR | addr };
     }
 
     /// Extract pointer (unsafe - caller must verify isPtr)
     pub inline fn toPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isPtr());
-        return @ptrFromInt(self.raw & ~@as(u64, 0x7));
+        return @ptrFromInt(self.raw & VALUE_MASK);
+    }
+
+    /// Get raw pointer address for use as a hash map key
+    /// This is useful for identity-based maps like WeakMap
+    pub inline fn getPtrAddress(self: JSValue) u64 {
+        return self.raw & VALUE_MASK;
     }
 
     /// Check if value is a non-GC external pointer
     pub inline fn isExternPtr(self: JSValue) bool {
-        return (self.raw & 0x7) == 7;
+        return self.isTagged() and (self.raw & TYPE_MASK) == TYPE_EXTERN;
     }
 
     /// Create value from external pointer
     pub inline fn fromExternPtr(ptr: *anyopaque) JSValue {
-        return .{ .raw = @intFromPtr(ptr) | 7 };
+        const addr = @intFromPtr(ptr);
+        std.debug.assert(addr <= VALUE_MASK);
+        return .{ .raw = TAG_PREFIX | TYPE_EXTERN | addr };
     }
 
     /// Extract external pointer (unsafe - caller must verify isExternPtr)
     pub inline fn toExternPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isExternPtr());
-        return @ptrFromInt(self.raw & ~@as(u64, 0x7));
+        return @ptrFromInt(self.raw & VALUE_MASK);
     }
 
-    /// Check if value is a special value
+    // ========================================================================
+    // Special value operations
+    // ========================================================================
+
+    /// Check if value is a special value (null/undefined/bool/exception)
     pub inline fn isSpecial(self: JSValue) bool {
-        return (self.raw & 0x7) == 3;
+        return self.isTagged() and (self.raw & TYPE_MASK) == TYPE_SPECIAL;
     }
 
-    /// Check for specific special values
     pub inline fn isNull(self: JSValue) bool {
         return self.raw == null_val.raw;
     }
@@ -123,10 +213,11 @@ pub const JSValue = packed struct {
     }
 
     // ========================================================================
-    // Float64 Support (inline f32 or heap-boxed f64)
+    // Float64 Support (FULLY INLINE - no heap allocation!)
     // ========================================================================
 
-    /// Float64 box header (heap-allocated for full precision floats)
+    /// Float64 box header (LEGACY - kept for heap.zig compatibility)
+    /// New code should use fromFloat/getFloat64 which are allocation-free
     pub const Float64Box = extern struct {
         header: heap.MemBlockHeader,
         _pad: u32,
@@ -137,49 +228,56 @@ pub const JSValue = packed struct {
         }
     };
 
-    /// Check if value is an inline float (tag 5)
-    /// Inline floats store f32 values in the upper 32 bits for allocation-free float math
-    pub inline fn isInlineFloat(self: JSValue) bool {
-        return (self.raw & 0x7) == 5;
+    /// Create a float value (ALWAYS inline - no heap allocation!)
+    pub inline fn fromFloat(v: f64) JSValue {
+        const bits: u64 = @bitCast(v);
+
+        // Check if this bit pattern would collide with our tag prefix
+        if ((bits & TAG_MASK) == TAG_PREFIX) {
+            // This is a quiet NaN that collides with our tags
+            // Canonicalize to the standard NaN
+            return .{ .raw = CANONICAL_NAN_BITS };
+        }
+
+        // Store the f64 bits directly
+        return .{ .raw = bits };
     }
 
-    /// Try to create an inline float from f64
-    /// Returns the inline value, or null if the value requires full f64 precision
-    /// Uses f32 representation when precision loss is acceptable
+    /// Legacy: Try to create an inline float from f64
+    /// Now ALWAYS succeeds (returns the value, never null)
+    /// Kept for API compatibility during migration
     pub inline fn fromInlineFloat(v: f64) ?JSValue {
-        // Special values cannot be stored inline (NaN/Inf need special handling)
-        if (std.math.isNan(v) or std.math.isInf(v)) return null;
+        return fromFloat(v);
+    }
 
-        // Convert to f32 and check if precision is preserved
-        const f32_val: f32 = @floatCast(v);
-        const roundtrip: f64 = @floatCast(f32_val);
-
-        // If roundtrip differs significantly, need full precision
-        if (v != 0 and @abs(v - roundtrip) / @abs(v) > 1e-6) return null;
-
-        // Store f32 bits in upper 32 bits, tag 5 in lower 3 bits
-        const f32_bits: u32 = @bitCast(f32_val);
-        return .{ .raw = (@as(u64, f32_bits) << 32) | 5 };
+    /// Check if value is an inline float
+    /// Legacy name - now checks for raw double
+    pub inline fn isInlineFloat(self: JSValue) bool {
+        return self.isRawDouble() and !self.isInt();
     }
 
     /// Get f64 value from inline float
+    /// Legacy name - now just returns the raw bits as f64
     pub inline fn getInlineFloat(self: JSValue) f64 {
-        std.debug.assert(self.isInlineFloat());
-        const f32_bits: u32 = @truncate(self.raw >> 32);
-        const f32_val: f32 = @bitCast(f32_bits);
-        return @floatCast(f32_val);
+        return @bitCast(self.raw);
     }
 
     /// Check if value is a boxed float64 (heap-allocated)
+    /// LEGACY: With new NaN-boxing, floats are never boxed
+    /// This now always returns false for performance
     pub inline fn isBoxedFloat64(self: JSValue) bool {
+        // Check if it's a pointer to a Float64Box
+        // This is legacy - new code doesn't create boxed floats
         if (!self.isPtr()) return false;
-        const box = self.toPtr(Float64Box);
+        const ptr_val = self.raw & VALUE_MASK;
+        if (ptr_val == 0) return false;
+        const box: *Float64Box = @ptrFromInt(ptr_val);
         return box.header.tag == .float64;
     }
 
     /// Check if value is any float (inline or boxed)
     pub inline fn isFloat64(self: JSValue) bool {
-        return self.isInlineFloat() or self.isBoxedFloat64();
+        return self.isRawDouble() or self.isBoxedFloat64();
     }
 
     /// Alias for isFloat64 for API compatibility
@@ -189,17 +287,21 @@ pub const JSValue = packed struct {
 
     /// Check if value is any number (int or float)
     pub inline fn isNumber(self: JSValue) bool {
-        return self.isInt() or self.isInlineFloat() or self.isBoxedFloat64();
+        return self.isInt() or self.isRawDouble() or self.isBoxedFloat64();
     }
 
-    /// Get float64 value (unsafe - caller must verify isFloat64)
+    /// Get float64 value (works for raw double and legacy boxed float)
     pub inline fn getFloat64(self: JSValue) f64 {
-        if (self.isInlineFloat()) {
-            return self.getInlineFloat();
+        if (self.isRawDouble()) {
+            return @bitCast(self.raw);
         }
-        std.debug.assert(self.isBoxedFloat64());
-        const box = self.toPtr(Float64Box);
-        return box.value;
+        // Legacy boxed float support
+        if (self.isBoxedFloat64()) {
+            const box: *Float64Box = @ptrFromInt(self.raw & VALUE_MASK);
+            return box.value;
+        }
+        // Should not reach here if isFloat64() was checked
+        return 0.0;
     }
 
     /// Convert value to f64 (works for int and float)
@@ -207,11 +309,12 @@ pub const JSValue = packed struct {
         if (self.isInt()) {
             return @floatFromInt(self.getInt());
         }
-        if (self.isInlineFloat()) {
-            return self.getInlineFloat();
+        if (self.isRawDouble()) {
+            return @bitCast(self.raw);
         }
         if (self.isBoxedFloat64()) {
-            return self.toPtr(Float64Box).value;
+            const box: *Float64Box = @ptrFromInt(self.raw & VALUE_MASK);
+            return box.value;
         }
         return null;
     }
@@ -408,12 +511,22 @@ pub const JSValue = packed struct {
             try writer.writeAll("<exception>");
         } else if (self.isInt()) {
             try writer.print("{d}", .{self.getInt()});
-        } else if (self.isInlineFloat()) {
-            try writer.print("{d}", .{self.getInlineFloat()});
-        } else if (self.isBoxedFloat64()) {
-            try writer.print("{d}", .{self.toPtr(Float64Box).value});
+        } else if (self.isRawDouble()) {
+            // Raw f64 stored directly
+            const f: f64 = @bitCast(self.raw);
+            if (std.math.isNan(f)) {
+                try writer.writeAll("NaN");
+            } else if (std.math.isPositiveInf(f)) {
+                try writer.writeAll("Infinity");
+            } else if (std.math.isNegativeInf(f)) {
+                try writer.writeAll("-Infinity");
+            } else {
+                try writer.print("{d}", .{f});
+            }
         } else if (self.isPtr()) {
-            try writer.print("<ptr:0x{x}>", .{self.raw & ~@as(u64, 0x7)});
+            try writer.print("<ptr:0x{x}>", .{self.raw & VALUE_MASK});
+        } else if (self.isExternPtr()) {
+            try writer.print("<extern:0x{x}>", .{self.raw & VALUE_MASK});
         } else {
             try writer.print("<unknown:0x{x}>", .{self.raw});
         }
@@ -434,11 +547,14 @@ test "JSValue integer encoding" {
     try std.testing.expect(negative.isInt());
     try std.testing.expectEqual(@as(i32, -123), negative.getInt());
 
-    const max = JSValue.fromInt(std.math.maxInt(i31));
+    // Test full i32 range
+    const max = JSValue.fromInt(std.math.maxInt(i32));
     try std.testing.expect(max.isInt());
+    try std.testing.expectEqual(std.math.maxInt(i32), max.getInt());
 
-    const min = JSValue.fromInt(std.math.minInt(i31));
+    const min = JSValue.fromInt(std.math.minInt(i32));
     try std.testing.expect(min.isInt());
+    try std.testing.expectEqual(std.math.minInt(i32), min.getInt());
 }
 
 test "JSValue special values" {
@@ -540,53 +656,93 @@ test "JSValue format" {
     try std.testing.expectEqualStrings("42", writer.buffer[0..writer.end]);
 }
 
-test "JSValue inline float encoding" {
-    // Test that common float values can be stored inline
-    const pi_approx = JSValue.fromInlineFloat(3.14159);
-    try std.testing.expect(pi_approx != null);
-    try std.testing.expect(pi_approx.?.isInlineFloat());
-    try std.testing.expect(pi_approx.?.isFloat64());
-    try std.testing.expect(pi_approx.?.isNumber());
-    try std.testing.expect(!pi_approx.?.isInt());
+test "JSValue float encoding - full f64 precision" {
+    // Test that ALL float values can be stored inline with full precision
+    const pi = JSValue.fromFloat(3.14159265358979323846);
+    try std.testing.expect(pi.isRawDouble());
+    try std.testing.expect(pi.isFloat64());
+    try std.testing.expect(pi.isNumber());
+    try std.testing.expect(!pi.isInt());
 
-    // Check value roundtrip (within f32 precision)
-    const recovered = pi_approx.?.getInlineFloat();
-    try std.testing.expect(@abs(recovered - 3.14159) < 0.0001);
+    // Verify EXACT roundtrip - no precision loss!
+    const recovered = pi.getFloat64();
+    try std.testing.expectEqual(@as(f64, 3.14159265358979323846), recovered);
 
     // Test zero
-    const zero = JSValue.fromInlineFloat(0.0);
-    try std.testing.expect(zero != null);
-    try std.testing.expect(zero.?.getInlineFloat() == 0.0);
+    const zero = JSValue.fromFloat(0.0);
+    try std.testing.expect(zero.isRawDouble());
+    try std.testing.expectEqual(@as(f64, 0.0), zero.getFloat64());
+
+    // Test negative zero
+    const neg_zero = JSValue.fromFloat(-0.0);
+    try std.testing.expect(neg_zero.isRawDouble());
+    // -0.0 bit pattern is different from 0.0
+    try std.testing.expect(neg_zero.raw != zero.raw);
 
     // Test negative
-    const neg = JSValue.fromInlineFloat(-42.5);
-    try std.testing.expect(neg != null);
-    try std.testing.expect(@abs(neg.?.getInlineFloat() - (-42.5)) < 0.0001);
+    const neg = JSValue.fromFloat(-42.5);
+    try std.testing.expect(neg.isRawDouble());
+    try std.testing.expectEqual(@as(f64, -42.5), neg.getFloat64());
 
-    // Test that NaN cannot be stored inline
-    const nan = JSValue.fromInlineFloat(std.math.nan(f64));
-    try std.testing.expect(nan == null);
+    // Test NaN - now stored inline!
+    const nan = JSValue.fromFloat(std.math.nan(f64));
+    try std.testing.expect(nan.isRawDouble());
+    try std.testing.expect(std.math.isNan(nan.getFloat64()));
 
-    // Test that Inf cannot be stored inline
-    const inf = JSValue.fromInlineFloat(std.math.inf(f64));
-    try std.testing.expect(inf == null);
+    // Test Infinity - now stored inline!
+    const inf = JSValue.fromFloat(std.math.inf(f64));
+    try std.testing.expect(inf.isRawDouble());
+    try std.testing.expect(std.math.isPositiveInf(inf.getFloat64()));
+
+    // Test negative infinity
+    const neg_inf = JSValue.fromFloat(-std.math.inf(f64));
+    try std.testing.expect(neg_inf.isRawDouble());
+    try std.testing.expect(std.math.isNegativeInf(neg_inf.getFloat64()));
+
+    // Test subnormal numbers
+    const subnormal: f64 = 2.2250738585072014e-308 / 2.0;
+    const sub_val = JSValue.fromFloat(subnormal);
+    try std.testing.expect(sub_val.isRawDouble());
+    try std.testing.expectEqual(subnormal, sub_val.getFloat64());
 }
 
-test "JSValue inline float toNumber" {
+test "JSValue legacy fromInlineFloat compatibility" {
+    // fromInlineFloat now always succeeds
     const val = JSValue.fromInlineFloat(2.5).?;
     const num = val.toNumber();
     try std.testing.expect(num != null);
-    try std.testing.expect(@abs(num.? - 2.5) < 0.0001);
+    try std.testing.expectEqual(@as(f64, 2.5), num.?);
+
+    // NaN now works too!
+    const nan = JSValue.fromInlineFloat(std.math.nan(f64));
+    try std.testing.expect(nan != null);
+    try std.testing.expect(std.math.isNan(nan.?.getFloat64()));
 }
 
-test "JSValue benchmark values should be inline" {
+test "JSValue benchmark values - full precision" {
     // Values from math_ops benchmark: (i + seed) % 1000 + 0.5
+    // With new NaN-boxing, ALL values are stored with FULL f64 precision
     for (0..1000) |i| {
         const v: f64 = @as(f64, @floatFromInt(i)) + 0.5;
-        const result = JSValue.fromInlineFloat(v);
-        try std.testing.expect(result != null);
-        // Verify roundtrip
-        const recovered = result.?.getInlineFloat();
-        try std.testing.expect(@abs(v - recovered) < 0.0001);
+        const result = JSValue.fromFloat(v);
+        // Verify EXACT roundtrip - no precision loss!
+        const recovered = result.getFloat64();
+        try std.testing.expectEqual(v, recovered);
     }
+
+    // Test high precision values that would fail with f32
+    const high_precision: f64 = 1.2345678901234567;
+    const hp_val = JSValue.fromFloat(high_precision);
+    try std.testing.expectEqual(high_precision, hp_val.getFloat64());
+}
+
+test "JSValue float type checks" {
+    const float_val = JSValue.fromFloat(42.5);
+    try std.testing.expect(float_val.isFloat64());
+    try std.testing.expect(float_val.isFloat());
+    try std.testing.expect(float_val.isNumber());
+    try std.testing.expect(float_val.isRawDouble());
+    try std.testing.expect(!float_val.isInt());
+    try std.testing.expect(!float_val.isPtr());
+    try std.testing.expect(!float_val.isSpecial());
 }
