@@ -233,7 +233,7 @@ fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
 
 /// Single entry in a polymorphic inline cache
 /// Stores hidden class index and slot offset for one observed shape
-const PICEntry = struct {
+pub const PICEntry = struct {
     hidden_class_idx: object.HiddenClassIndex,
     slot_offset: u16,
 };

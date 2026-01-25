@@ -29,6 +29,7 @@ const Context = context_mod.Context;
 const JSObject = object.JSObject;
 const Interpreter = interpreter_mod.Interpreter;
 const PolymorphicInlineCache = interpreter_mod.PolymorphicInlineCache;
+const PICEntry = interpreter_mod.PICEntry;
 
 extern fn jitCall(ctx: *Context, argc: u8, is_method: u8) value_mod.JSValue;
 extern fn jitCallBytecode(ctx: *Context, func_bc: *const bytecode.FunctionBytecode, argc: u8, is_method: u8) value_mod.JSValue;
@@ -76,9 +77,12 @@ const INTERP_PIC_CACHE_OFF: i32 = @intCast(@offsetOf(Interpreter, "pic_cache"));
 
 // PIC structure sizes and offsets
 const PIC_SIZE: i32 = @intCast(@sizeOf(PolymorphicInlineCache));
+const PIC_ENTRY_SIZE: i32 = @intCast(@sizeOf(PICEntry));
 // PICEntry layout: hidden_class_idx (u32) + slot_offset (u16)
 const PIC_ENTRY_HIDDEN_CLASS_OFF: i32 = 0;
 const PIC_ENTRY_SLOT_OFF: i32 = @intCast(@sizeOf(object.HiddenClassIndex));
+// Number of PIC entries to check in generated code (balance code size vs hit rate)
+const PIC_CHECK_COUNT: i32 = 4;
 
 // Architecture-specific types selected at compile time
 pub const Arch = builtin.cpu.arch;
@@ -4568,13 +4572,14 @@ pub const BaselineCompiler = struct {
     }
 
     /// Emit code to get an object property via PIC helper (get_field_ic)
-    /// With inline monomorphic cache fast path: checks hidden class match and
-    /// loads directly from inline slots, falling back to helper on cache miss.
+    /// With polymorphic inline cache fast path: checks up to 4 cached shapes,
+    /// loads directly from inline slots on hit, falling back to helper on miss.
     fn emitGetFieldIC(self: *BaselineCompiler, atom_idx: u16, cache_idx: u16) CompileError!void {
         const fn_ptr = @intFromPtr(&jitGetFieldIC);
         if (is_x86_64) {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
+            const use_slot = self.newLocalLabel();
 
             // Pop object value into r8 (preserved for slow path)
             try self.emitPopReg(.r8);
@@ -4609,25 +4614,59 @@ pub const BaselineCompiler = struct {
             self.emitter.testRegReg(.r11, .r11) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, slow);
 
-            // Step 7: Load PIC entry: pic_cache[cache_idx].entries[0].hidden_class_idx
-            const pic_off = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
-            self.emitter.movRegMem32(.rcx, .r11, pic_off) catch return CompileError.OutOfMemory;
-            // rcx = cached hidden_class_idx
+            // Step 7: Polymorphic check - test up to PIC_CHECK_COUNT entries
+            // Base offset of pic_cache[cache_idx].entries array
+            const pic_base = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE;
 
-            // Step 8: Compare hidden class indices
+            // Check entry 0
+            const entry0_hc = pic_base + 0 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .r11, entry0_hc) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg32(.r10, .rcx) catch return CompileError.OutOfMemory;
+            const check1 = self.newLocalLabel();
+            try self.emitJccToLabel(.ne, check1);
+            // Entry 0 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .r11, pic_base + 0 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(use_slot);
+
+            // Check entry 1
+            try self.markLabel(check1);
+            const entry1_hc = pic_base + 1 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .r11, entry1_hc) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg32(.r10, .rcx) catch return CompileError.OutOfMemory;
+            const check2 = self.newLocalLabel();
+            try self.emitJccToLabel(.ne, check2);
+            // Entry 1 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .r11, pic_base + 1 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(use_slot);
+
+            // Check entry 2
+            try self.markLabel(check2);
+            const entry2_hc = pic_base + 2 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .r11, entry2_hc) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg32(.r10, .rcx) catch return CompileError.OutOfMemory;
+            const check3 = self.newLocalLabel();
+            try self.emitJccToLabel(.ne, check3);
+            // Entry 2 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .r11, pic_base + 2 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(use_slot);
+
+            // Check entry 3
+            try self.markLabel(check3);
+            const entry3_hc = pic_base + 3 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .r11, entry3_hc) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg32(.r10, .rcx) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
+            // Entry 3 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .r11, pic_base + 3 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            // Fall through to use_slot
 
-            // Step 9: Load slot_offset from PIC entry
-            const slot_off = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE + PIC_ENTRY_SLOT_OFF;
-            self.emitter.movzxRegMem16(.rcx, .r11, slot_off) catch return CompileError.OutOfMemory;
-            // rcx = slot_offset
-
-            // Step 10: Check if slot < INLINE_SLOT_COUNT (8)
+            // Step 8: Use slot_offset (in rcx) to load from inline_slots
+            try self.markLabel(use_slot);
+            // Check if slot < INLINE_SLOT_COUNT (8)
             self.emitter.cmpRegImm32(.rcx, JSObject.INLINE_SLOT_COUNT) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ae, slow); // slot >= 8, use slow path
 
-            // Step 11: Load from inline_slots: obj + inline_slots_offset + slot * 8
+            // Step 9: Load from inline_slots: obj + inline_slots_offset + slot * 8
             self.emitter.shlRegImm(.rcx, 3) catch return CompileError.OutOfMemory; // slot * 8
             self.emitter.addRegImm32(.rcx, OBJ_INLINE_SLOTS_OFF) catch return CompileError.OutOfMemory;
             self.emitter.addRegReg(.rcx, .r9) catch return CompileError.OutOfMemory; // obj + offset
@@ -4651,6 +4690,7 @@ pub const BaselineCompiler = struct {
         } else if (is_aarch64) {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
+            const use_slot = self.newLocalLabel();
 
             // Pop object value into x12 (preserved for slow path)
             try self.emitPopReg(.x12);
@@ -4687,28 +4727,58 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x11, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, slow);
 
-            // Step 7: Load PIC entry: pic_cache[cache_idx].entries[0].hidden_class_idx
-            const pic_off = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
-            // Check if offset fits in 12 bits (addRegImm12 max is 4095)
-            // If offset fits, do fast path; otherwise fall through to slow path
-            if (pic_off >= 0 and pic_off <= 4095) {
-                self.emitter.addRegImm12(.x13, .x11, @intCast(pic_off)) catch return CompileError.OutOfMemory;
-                self.emitter.ldrImmW(.x14, .x13, 0) catch return CompileError.OutOfMemory;
-                // x14 = cached hidden_class_idx
+            // Step 7: Polymorphic check - test up to 4 entries
+            const pic_base = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE;
+            // Check if base offset fits in 12 bits
+            if (pic_base >= 0 and pic_base <= 4095) {
+                // x13 = base address of PIC entries for this cache slot
+                self.emitter.addRegImm12(.x13, .x11, @intCast(pic_base)) catch return CompileError.OutOfMemory;
 
-                // Step 8: Compare hidden class indices
+                // Check entry 0
+                self.emitter.ldrImmW(.x14, .x13, 0 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x14) catch return CompileError.OutOfMemory;
+                const check1 = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, check1);
+                // Entry 0 matched - load slot_offset
+                self.emitter.ldrhImm(.x14, .x13, 0 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(use_slot);
+
+                // Check entry 1
+                try self.markLabel(check1);
+                self.emitter.ldrImmW(.x14, .x13, 1 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x14) catch return CompileError.OutOfMemory;
+                const check2 = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, check2);
+                // Entry 1 matched - load slot_offset
+                self.emitter.ldrhImm(.x14, .x13, 1 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(use_slot);
+
+                // Check entry 2
+                try self.markLabel(check2);
+                self.emitter.ldrImmW(.x14, .x13, 2 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x14) catch return CompileError.OutOfMemory;
+                const check3 = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, check3);
+                // Entry 2 matched - load slot_offset
+                self.emitter.ldrhImm(.x14, .x13, 2 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(use_slot);
+
+                // Check entry 3
+                try self.markLabel(check3);
+                self.emitter.ldrImmW(.x14, .x13, 3 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
                 self.emitter.cmpRegReg(.x10, .x14) catch return CompileError.OutOfMemory;
                 try self.emitBcondToLabel(.ne, slow);
+                // Entry 3 matched - load slot_offset
+                self.emitter.ldrhImm(.x14, .x13, 3 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                // Fall through to use_slot
 
-                // Step 9: Load slot_offset from PIC entry
-                self.emitter.ldrhImm(.x14, .x13, PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
-                // x14 = slot_offset
-
-                // Step 10: Check if slot < INLINE_SLOT_COUNT (8)
+                // Step 8: Use slot_offset (in x14) to load from inline_slots
+                try self.markLabel(use_slot);
+                // Check if slot < INLINE_SLOT_COUNT (8)
                 self.emitter.cmpRegImm12(.x14, JSObject.INLINE_SLOT_COUNT) catch return CompileError.OutOfMemory;
-                try self.emitBcondToLabel(.hs, slow); // slot >= 8, use slow path (unsigned higher or same)
+                try self.emitBcondToLabel(.hs, slow); // slot >= 8, use slow path
 
-                // Step 11: Load from inline_slots: obj + inline_slots_offset + slot * 8
+                // Step 9: Load from inline_slots: obj + inline_slots_offset + slot * 8
                 self.emitter.lslRegImm(.x14, .x14, 3) catch return CompileError.OutOfMemory; // slot * 8
                 self.emitter.addRegImm12(.x14, .x14, @intCast(@as(u32, @bitCast(OBJ_INLINE_SLOTS_OFF)))) catch return CompileError.OutOfMemory;
                 self.emitter.addRegReg(.x14, .x9, .x14) catch return CompileError.OutOfMemory; // obj + offset
@@ -4769,6 +4839,7 @@ pub const BaselineCompiler = struct {
         if (is_x86_64) {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
+            const use_slot = self.newLocalLabel();
 
             // Pop value into r8, object into r9 (preserved for slow path)
             try self.emitPopReg(.r8); // val
@@ -4803,25 +4874,58 @@ pub const BaselineCompiler = struct {
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, slow);
 
-            // Step 7: Load PIC entry hidden_class_idx
-            const pic_off = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
-            self.emitter.movRegMem32(.rcx, .rax, pic_off) catch return CompileError.OutOfMemory;
-            // rcx = cached hidden_class_idx
+            // Step 7: Polymorphic check - test up to 4 entries
+            const pic_base = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE;
 
-            // Step 8: Compare hidden class indices
+            // Check entry 0
+            const entry0_hc = pic_base + 0 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .rax, entry0_hc) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg32(.r11, .rcx) catch return CompileError.OutOfMemory;
+            const check1 = self.newLocalLabel();
+            try self.emitJccToLabel(.ne, check1);
+            // Entry 0 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .rax, pic_base + 0 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(use_slot);
+
+            // Check entry 1
+            try self.markLabel(check1);
+            const entry1_hc = pic_base + 1 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .rax, entry1_hc) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg32(.r11, .rcx) catch return CompileError.OutOfMemory;
+            const check2 = self.newLocalLabel();
+            try self.emitJccToLabel(.ne, check2);
+            // Entry 1 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .rax, pic_base + 1 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(use_slot);
+
+            // Check entry 2
+            try self.markLabel(check2);
+            const entry2_hc = pic_base + 2 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .rax, entry2_hc) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg32(.r11, .rcx) catch return CompileError.OutOfMemory;
+            const check3 = self.newLocalLabel();
+            try self.emitJccToLabel(.ne, check3);
+            // Entry 2 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .rax, pic_base + 2 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            try self.emitJmpToLabel(use_slot);
+
+            // Check entry 3
+            try self.markLabel(check3);
+            const entry3_hc = pic_base + 3 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
+            self.emitter.movRegMem32(.rcx, .rax, entry3_hc) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg32(.r11, .rcx) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
+            // Entry 3 matched - load slot_offset
+            self.emitter.movzxRegMem16(.rcx, .rax, pic_base + 3 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+            // Fall through to use_slot
 
-            // Step 9: Load slot_offset from PIC entry
-            const slot_off = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE + PIC_ENTRY_SLOT_OFF;
-            self.emitter.movzxRegMem16(.rcx, .rax, slot_off) catch return CompileError.OutOfMemory;
-            // rcx = slot_offset
-
-            // Step 10: Check if slot < INLINE_SLOT_COUNT (8)
+            // Step 8: Use slot_offset (in rcx) to store to inline_slots
+            try self.markLabel(use_slot);
+            // Check if slot < INLINE_SLOT_COUNT (8)
             self.emitter.cmpRegImm32(.rcx, JSObject.INLINE_SLOT_COUNT) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ae, slow); // slot >= 8, use slow path
 
-            // Step 11: Store to inline_slots: obj + inline_slots_offset + slot * 8
+            // Step 9: Store to inline_slots: obj + inline_slots_offset + slot * 8
             self.emitter.shlRegImm(.rcx, 3) catch return CompileError.OutOfMemory; // slot * 8
             self.emitter.addRegImm32(.rcx, OBJ_INLINE_SLOTS_OFF) catch return CompileError.OutOfMemory;
             self.emitter.addRegReg(.rcx, .r10) catch return CompileError.OutOfMemory; // obj + offset
@@ -4844,6 +4948,7 @@ pub const BaselineCompiler = struct {
         } else if (is_aarch64) {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
+            const use_slot = self.newLocalLabel();
 
             // Pop value into x12, object into x13 (preserved for slow path)
             try self.emitPopReg(.x12); // val
@@ -4880,28 +4985,58 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x11, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, slow);
 
-            // Step 7: Load PIC entry hidden_class_idx
-            const pic_off = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF;
-            // Check if offset fits in 12 bits (addRegImm12 max is 4095)
-            // If offset fits, do fast path; otherwise fall through to slow path
-            if (pic_off >= 0 and pic_off <= 4095) {
-                self.emitter.addRegImm12(.x14, .x11, @intCast(pic_off)) catch return CompileError.OutOfMemory;
-                self.emitter.ldrImmW(.x15, .x14, 0) catch return CompileError.OutOfMemory;
-                // x15 = cached hidden_class_idx
+            // Step 7: Polymorphic check - test up to 4 entries
+            const pic_base = INTERP_PIC_CACHE_OFF + @as(i32, cache_idx) * PIC_SIZE;
+            // Check if base offset fits in 12 bits
+            if (pic_base >= 0 and pic_base <= 4095) {
+                // x14 = base address of PIC entries for this cache slot
+                self.emitter.addRegImm12(.x14, .x11, @intCast(pic_base)) catch return CompileError.OutOfMemory;
 
-                // Step 8: Compare hidden class indices
+                // Check entry 0
+                self.emitter.ldrImmW(.x15, .x14, 0 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x15) catch return CompileError.OutOfMemory;
+                const check1 = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, check1);
+                // Entry 0 matched - load slot_offset
+                self.emitter.ldrhImm(.x15, .x14, 0 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(use_slot);
+
+                // Check entry 1
+                try self.markLabel(check1);
+                self.emitter.ldrImmW(.x15, .x14, 1 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x15) catch return CompileError.OutOfMemory;
+                const check2 = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, check2);
+                // Entry 1 matched - load slot_offset
+                self.emitter.ldrhImm(.x15, .x14, 1 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(use_slot);
+
+                // Check entry 2
+                try self.markLabel(check2);
+                self.emitter.ldrImmW(.x15, .x14, 2 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x15) catch return CompileError.OutOfMemory;
+                const check3 = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, check3);
+                // Entry 2 matched - load slot_offset
+                self.emitter.ldrhImm(.x15, .x14, 2 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(use_slot);
+
+                // Check entry 3
+                try self.markLabel(check3);
+                self.emitter.ldrImmW(.x15, .x14, 3 * PIC_ENTRY_SIZE + PIC_ENTRY_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
                 self.emitter.cmpRegReg(.x10, .x15) catch return CompileError.OutOfMemory;
                 try self.emitBcondToLabel(.ne, slow);
+                // Entry 3 matched - load slot_offset
+                self.emitter.ldrhImm(.x15, .x14, 3 * PIC_ENTRY_SIZE + PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
+                // Fall through to use_slot
 
-                // Step 9: Load slot_offset from PIC entry
-                self.emitter.ldrhImm(.x15, .x14, PIC_ENTRY_SLOT_OFF) catch return CompileError.OutOfMemory;
-                // x15 = slot_offset
-
-                // Step 10: Check if slot < INLINE_SLOT_COUNT (8)
+                // Step 8: Use slot_offset (in x15) to store to inline_slots
+                try self.markLabel(use_slot);
+                // Check if slot < INLINE_SLOT_COUNT (8)
                 self.emitter.cmpRegImm12(.x15, JSObject.INLINE_SLOT_COUNT) catch return CompileError.OutOfMemory;
                 try self.emitBcondToLabel(.hs, slow); // slot >= 8, use slow path
 
-                // Step 11: Store to inline_slots: obj + inline_slots_offset + slot * 8
+                // Step 9: Store to inline_slots: obj + inline_slots_offset + slot * 8
                 self.emitter.lslRegImm(.x15, .x15, 3) catch return CompileError.OutOfMemory; // slot * 8
                 self.emitter.addRegImm12(.x15, .x15, @intCast(@as(u32, @bitCast(OBJ_INLINE_SLOTS_OFF)))) catch return CompileError.OutOfMemory;
                 self.emitter.addRegReg(.x15, .x9, .x15) catch return CompileError.OutOfMemory; // obj + offset
