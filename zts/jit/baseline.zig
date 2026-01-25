@@ -68,6 +68,7 @@ const OBJ_HIDDEN_CLASS_OFF: i32 = @intCast(@offsetOf(JSObject, "hidden_class_idx
 const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
 const OBJ_FUNC_DATA_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_DATA)) * 8;
 const OBJ_FUNC_IS_BYTECODE_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_IS_BYTECODE)) * 8;
+const OBJ_FUNC_GUARD_ID_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_GUARD_ID)) * 8;
 const NATIVE_ARGCOUNT_OFF: i32 = @intCast(@offsetOf(object.NativeFunctionData, "arg_count"));
 
 // Interpreter field offsets for inline cache fast path
@@ -3380,11 +3381,17 @@ pub const BaselineCompiler = struct {
 
     /// Emit monomorphic call fast path with callee guard.
     /// Falls back to generic call helper on mismatch.
+    /// Uses streamlined guard_id comparison: single 64-bit compare instead of 5 field checks.
     fn emitMonomorphicCall(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8, is_method: bool) CompileError!void {
         // Use fast helper that skips redundant validation since guards already checked
         const fn_ptr = @intFromPtr(&jitCallBytecodeFast);
         const expected_ptr: u64 = @intFromPtr(callee);
-        const true_raw: u12 = @intCast(value_mod.JSValue.true_val.raw);
+
+        // Ensure callee has a guard_id assigned
+        const callee_mut = @constCast(callee);
+        callee_mut.ensureGuardId();
+        const expected_guard_id: u64 = callee_mut.guard_id;
+
         const slow = self.newLocalLabel();
         const done = self.newLocalLabel();
 
@@ -3398,7 +3405,8 @@ pub const BaselineCompiler = struct {
             self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
             self.emitter.movRegMem(.r8, .r11, 0) catch return CompileError.OutOfMemory;
 
-            // Pointer tag check: (raw & 0x7) == 1
+            // Fast guard: pointer tag check + single guard_id comparison
+            // Pointer tag check: (raw & 0x7) == 1 (needed for safe memory access)
             self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r9, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
@@ -3408,30 +3416,11 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
 
-            // Check MemTag.object in header
-            self.emitter.movRegMem32(.r11, .r9, 0) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r11, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Ensure FUNC_IS_BYTECODE is true
-            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, @intCast(true_raw)) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Load function data pointer and verify it's a pointer
-            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.movRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Extract pointer and load bytecode pointer (first field)
-            self.emitter.andRegImm32(.r11, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
-            self.emitter.movRegMem(.r10, .r11, 0) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.r9, expected_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            // Load guard_id from FUNC_GUARD_ID slot and compare
+            // Single 64-bit comparison replaces 5 sequential checks
+            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_GUARD_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r10, expected_guard_id) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r11, .r10) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
             // Fast path: call jitCallBytecodeFast (guards verified, skip redundant checks)
@@ -3458,7 +3447,8 @@ pub const BaselineCompiler = struct {
             self.emitter.addRegRegShift(.x10, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
             self.emitter.ldrImm(.x12, .x10, 0) catch return CompileError.OutOfMemory;
 
-            // Pointer tag check: (raw & 0x7) == 1
+            // Fast guard: pointer tag check + single guard_id comparison
+            // Pointer tag check: (raw & 0x7) == 1 (needed for safe memory access)
             self.emitter.andRegImm(.x11, .x12, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
@@ -3467,30 +3457,11 @@ pub const BaselineCompiler = struct {
             self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
             self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
 
-            // Check MemTag.object in header
-            self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
-            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x10, .x10, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-
-            // Ensure FUNC_IS_BYTECODE is true
-            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, true_raw) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-
-            // Load function data pointer and verify it's a pointer
-            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x9, .x10, 0x7) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x9, 7) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-
-            // Extract pointer and load bytecode pointer (first field)
-            self.emitter.lsrRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.ldrImm(.x9, .x10, 0) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x13, expected_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            // Load guard_id from FUNC_GUARD_ID slot and compare
+            // Single 64-bit comparison replaces 5 sequential checks
+            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_GUARD_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, expected_guard_id) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
             // Fast path: call jitCallBytecodeFast (guards verified, skip redundant checks)
@@ -3642,84 +3613,59 @@ pub const BaselineCompiler = struct {
         const deopt_label = self.newLocalLabel();
         const done_label = self.newLocalLabel();
 
-        // Guard: verify callee still matches expected
-        const expected_ptr: u64 = @intFromPtr(callee);
-        const true_raw: u12 = @intCast(value_mod.JSValue.true_val.raw);
+        // Streamlined guard: verify callee via guard_id (single 64-bit comparison)
+        const callee_mut = @constCast(callee);
+        callee_mut.ensureGuardId();
+        const expected_guard_id: u64 = callee_mut.guard_id;
 
         if (is_x86_64) {
             const sp = getSpCacheReg();
             const stack_ptr = getStackPtrCacheReg();
 
+            // Load function value from stack
             self.emitter.movRegReg(.r10, sp) catch return CompileError.OutOfMemory;
             self.emitter.subRegImm32(.r10, @intCast(@as(i32, argc) + 1)) catch return CompileError.OutOfMemory;
             self.emitter.leaRegMem(.r11, stack_ptr, .r10, 3, 0) catch return CompileError.OutOfMemory;
             self.emitter.movRegMem(.r8, .r11, 0) catch return CompileError.OutOfMemory;
 
+            // Pointer tag check: (raw & 0x7) == 1 (needed for safe memory access)
             self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r9, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, deopt_label);
 
+            // Extract object pointer (clear low 3 bits)
             self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
             self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
 
-            self.emitter.movRegMem32(.r11, .r9, 0) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r11, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, 1) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, deopt_label);
-
-            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, @intCast(true_raw)) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, deopt_label);
-
-            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.movRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 7) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, deopt_label);
-
-            self.emitter.andRegImm32(.r11, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
-            self.emitter.movRegMem(.r10, .r11, 0) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.r9, expected_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
+            // Load guard_id and compare - single check replaces 5 sequential checks
+            self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_GUARD_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r10, expected_guard_id) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r11, .r10) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, deopt_label);
         } else if (is_aarch64) {
             const sp = getSpCacheReg();
             const stack_ptr = getStackPtrCacheReg();
 
+            // Load function value from stack
             self.emitter.movRegReg(.x9, sp) catch return CompileError.OutOfMemory;
             self.emitter.subRegImm12(.x9, .x9, @intCast(@as(u32, argc) + 1)) catch return CompileError.OutOfMemory;
             self.emitter.addRegRegShift(.x10, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
             self.emitter.ldrImm(.x12, .x10, 0) catch return CompileError.OutOfMemory;
 
+            // Pointer tag check: (raw & 0x7) == 1 (needed for safe memory access)
             self.emitter.andRegImm(.x11, .x12, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, deopt_label);
 
+            // Extract object pointer (clear low 3 bits)
             self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
             self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
 
-            self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
-            self.emitter.lsrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x10, .x10, 0xF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, deopt_label);
-
-            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_IS_BYTECODE_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, true_raw) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, deopt_label);
-
-            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_DATA_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x9, .x10, 0x7) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x9, 7) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, deopt_label);
-
-            self.emitter.lsrRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.ldrImm(.x9, .x10, 0) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x13, expected_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x9, .x13) catch return CompileError.OutOfMemory;
+            // Load guard_id and compare - single check replaces 5 sequential checks
+            self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_GUARD_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, expected_guard_id) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, deopt_label);
         }
 

@@ -1313,6 +1313,9 @@ pub const JSObject = extern struct {
         pub const FUNC_DATA: usize = 0;
         /// Function objects: true_val for bytecode function, undefined for native
         pub const FUNC_IS_BYTECODE: usize = 1;
+        /// Bytecode function objects: guard_id for fast JIT monomorphic call checks
+        /// Stored as raw u64 - single comparison replaces 5-check guard sequence
+        pub const FUNC_GUARD_ID: usize = 2;
         /// Closure objects: true_val marker to identify closures
         pub const FUNC_IS_CLOSURE: usize = 4;
 
@@ -1607,6 +1610,12 @@ pub const JSObject = extern struct {
         // Store bytecode function data and marker
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
+
+        // Store guard_id for fast JIT monomorphic call checks
+        // This enables single 64-bit comparison instead of 5-check guard sequence
+        const bc_mut = @constCast(bytecode_ptr);
+        bc_mut.ensureGuardId();
+        obj.inline_slots[Slots.FUNC_GUARD_ID] = .{ .raw = bc_mut.guard_id };
         return obj;
     }
 
@@ -1669,6 +1678,11 @@ pub const JSObject = extern struct {
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
         obj.inline_slots[Slots.FUNC_IS_CLOSURE] = value.JSValue.true_val;
+
+        // Store guard_id for fast JIT monomorphic call checks
+        const bc_mut = @constCast(bytecode_ptr);
+        bc_mut.ensureGuardId();
+        obj.inline_slots[Slots.FUNC_GUARD_ID] = .{ .raw = bc_mut.guard_id };
         return obj;
     }
 
