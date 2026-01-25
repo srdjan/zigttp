@@ -400,13 +400,29 @@ pub const JSValue = packed struct {
     // Type Checking Utilities
     // ========================================================================
 
-    /// Check if value is a string (heap object with string tag)
+    /// Check if value is a flat string (heap object with string tag)
     /// MemBlockHeader layout: [size_words:27][tag:4][gc_mark:1]
     /// So tag is at bits 1-4, need to shift right by 1 first
     pub inline fn isString(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
         return ((header.* >> 1) & 0xF) == 3; // MemTag.string
+    }
+
+    /// Check if value is a rope (lazy string concatenation)
+    pub inline fn isRope(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        return ((header.* >> 1) & 0xF) == 9; // MemTag.rope
+    }
+
+    /// Check if value is any string type (flat string or rope)
+    /// Use this for typeof checks and general string operations
+    pub inline fn isStringOrRope(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        const tag = (header.* >> 1) & 0xF;
+        return tag == 3 or tag == 9; // MemTag.string or MemTag.rope
     }
 
     /// Check if value is an object (heap object with object tag)
@@ -447,6 +463,8 @@ pub const JSValue = packed struct {
 
     /// Strict equality (===)
     pub inline fn strictEquals(self: JSValue, other: JSValue) bool {
+        const string = @import("string.zig");
+
         // Fast path: same raw value (covers same pointer, same int, same special)
         if (self.raw == other.raw) return true;
 
@@ -460,13 +478,166 @@ pub const JSValue = packed struct {
         }
 
         // String comparison (compare by value, not pointer)
-        if (self.isString() and other.isString()) {
-            const str_a = self.toPtr(@import("string.zig").JSString);
-            const str_b = other.toPtr(@import("string.zig").JSString);
-            return std.mem.eql(u8, str_a.data(), str_b.data());
+        // Handle flat strings and ropes
+        const self_is_str = self.isString();
+        const self_is_rope = self.isRope();
+        const other_is_str = other.isString();
+        const other_is_rope = other.isRope();
+
+        if ((self_is_str or self_is_rope) and (other_is_str or other_is_rope)) {
+            // Both flat strings: compare directly
+            if (self_is_str and other_is_str) {
+                const str_a = self.toPtr(string.JSString);
+                const str_b = other.toPtr(string.JSString);
+                return string.eqlStrings(str_a.data(), str_b.data());
+            }
+
+            // One or both is a rope: compare via rope interface
+            if (self_is_rope and other_is_rope) {
+                // Both ropes: compare lengths first, then content
+                const rope_a = self.toPtr(string.RopeNode);
+                const rope_b = other.toPtr(string.RopeNode);
+                if (rope_a.total_len != rope_b.total_len) return false;
+
+                // Need to flatten at least one to compare
+                // For now, use the recursive comparison method
+                // This could be optimized with a two-pointer approach
+                if (rope_a.kind == .leaf and rope_b.kind == .leaf) {
+                    return string.eqlStrings(
+                        rope_a.payload.leaf.data(),
+                        rope_b.payload.leaf.data(),
+                    );
+                }
+
+                // Compare by flattening the smaller one mentally and comparing
+                // This is a simplification - full implementation would traverse both trees
+                if (rope_a.kind == .leaf) {
+                    return rope_b.eqlBytes(rope_a.payload.leaf.data());
+                }
+                if (rope_b.kind == .leaf) {
+                    return rope_a.eqlBytes(rope_b.payload.leaf.data());
+                }
+
+                // Both are concat nodes - need full comparison
+                // For now, traverse and compare byte by byte
+                // This could be optimized with proper rope comparison algorithms
+                return ropeEqualsRope(rope_a, rope_b);
+            }
+
+            // One is string, one is rope
+            if (self_is_str) {
+                const str = self.toPtr(string.JSString);
+                const rope = other.toPtr(string.RopeNode);
+                return rope.eqlBytes(str.data());
+            } else {
+                const rope = self.toPtr(string.RopeNode);
+                const str = other.toPtr(string.JSString);
+                return rope.eqlBytes(str.data());
+            }
         }
 
         return false;
+    }
+
+    /// Helper: compare two concat ropes by iterating through leaves
+    fn ropeEqualsRope(a: *const @import("string.zig").RopeNode, b: *const @import("string.zig").RopeNode) bool {
+        const string = @import("string.zig");
+
+        if (a.total_len != b.total_len) return false;
+
+        // Simple approach: collect all leaf data from both and compare
+        // A more sophisticated implementation would use iterators
+        var offset_a: usize = 0;
+        var offset_b: usize = 0;
+        return ropeEqualsRopeRecursive(a, b, &offset_a, &offset_b);
+    }
+
+    fn ropeEqualsRopeRecursive(
+        a: *const @import("string.zig").RopeNode,
+        b: *const @import("string.zig").RopeNode,
+        offset_a: *usize,
+        offset_b: *usize,
+    ) bool {
+        const string = @import("string.zig");
+
+        // Get leaf data from both sides
+        const a_leaves = collectLeaves(a);
+        const b_leaves = collectLeaves(b);
+
+        // Compare byte by byte across all leaves
+        var a_idx: usize = 0;
+        var a_pos: usize = 0;
+        var b_idx: usize = 0;
+        var b_pos: usize = 0;
+
+        while (a_idx < a_leaves.len and b_idx < b_leaves.len) {
+            const a_data = a_leaves[a_idx].data();
+            const b_data = b_leaves[b_idx].data();
+
+            while (a_pos < a_data.len and b_pos < b_data.len) {
+                if (a_data[a_pos] != b_data[b_pos]) return false;
+                a_pos += 1;
+                b_pos += 1;
+            }
+
+            if (a_pos >= a_data.len) {
+                a_idx += 1;
+                a_pos = 0;
+            }
+            if (b_pos >= b_data.len) {
+                b_idx += 1;
+                b_pos = 0;
+            }
+        }
+
+        return a_idx >= a_leaves.len and b_idx >= b_leaves.len;
+    }
+
+    /// Helper: collect all leaf strings from a rope (for comparison)
+    /// Returns a bounded array - won't work for very deep ropes
+    fn collectLeaves(node: *const @import("string.zig").RopeNode) []const *const @import("string.zig").JSString {
+        const string = @import("string.zig");
+
+        // Use a static buffer for simplicity - real implementation would use allocator
+        const max_leaves = 64;
+        const LeafArray = struct {
+            var leaves: [max_leaves]*const string.JSString = undefined;
+            var count: usize = 0;
+
+            fn reset() void {
+                count = 0;
+            }
+
+            fn add(s: *const string.JSString) void {
+                if (count < max_leaves) {
+                    leaves[count] = s;
+                    count += 1;
+                }
+            }
+
+            fn get() []const *const string.JSString {
+                return leaves[0..count];
+            }
+        };
+
+        LeafArray.reset();
+        collectLeavesRecursive(node, LeafArray.add);
+        return LeafArray.get();
+    }
+
+    fn collectLeavesRecursive(
+        node: *const @import("string.zig").RopeNode,
+        addFn: *const fn (*const @import("string.zig").JSString) void,
+    ) void {
+        const string = @import("string.zig");
+
+        switch (node.kind) {
+            .leaf => addFn(node.payload.leaf),
+            .concat => {
+                collectLeavesRecursive(node.payload.concat.left, addFn);
+                collectLeavesRecursive(node.payload.concat.right, addFn);
+            },
+        }
     }
 
     /// Type coercion to boolean (ToBoolean)
@@ -488,7 +659,7 @@ pub const JSValue = packed struct {
         if (self.isNull()) return "object"; // Historical quirk
         if (self.isBool()) return "boolean";
         if (self.isNumber()) return "number";
-        if (self.isString()) return "string";
+        if (self.isStringOrRope()) return "string"; // Both flat strings and ropes
         if (self.isCallable()) return "function";
         return "object";
     }

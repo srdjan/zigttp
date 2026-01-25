@@ -1,6 +1,12 @@
-//! SIMD-accelerated string operations with interning
+//! SIMD-accelerated string operations with interning and rope support
 //!
-//! UTF-8 strings with ASCII optimization and hash caching.
+//! UTF-8 strings with ASCII optimization, hash caching, and lazy rope
+//! evaluation for O(1) string concatenation.
+//!
+//! The rope data structure allows efficient string building:
+//! - Concatenation: O(1) - creates a rope node instead of copying
+//! - Flattening: O(n) - only when string content is accessed
+//! - This eliminates the O(n^2) behavior of naive string building
 
 const std = @import("std");
 const heap = @import("heap.zig");
@@ -144,6 +150,314 @@ pub const JSString = extern struct {
         return null;
     }
 };
+
+// ============================================================================
+// Rope Data Structure for O(1) String Concatenation
+// ============================================================================
+
+/// Rope node for efficient string building
+/// Allows O(1) concatenation by creating tree nodes instead of copying data.
+/// Flattening to a flat string is deferred until the content is actually needed.
+pub const RopeNode = struct {
+    header: heap.MemBlockHeader,
+    /// Total length of all strings in this subtree
+    total_len: u32,
+    /// Depth of the rope tree (for balancing heuristics)
+    depth: u16,
+    /// Flags for the rope
+    flags: RopeFlags,
+    /// Union discriminator
+    kind: RopeKind,
+    /// Payload depends on kind
+    payload: RopePayload,
+
+    pub const RopeFlags = packed struct {
+        is_ascii: bool = false,
+        is_flattened: bool = false, // Has been flattened to a JSString
+        _reserved: u6 = 0,
+    };
+
+    pub const RopeKind = enum(u8) {
+        leaf = 0, // Points to a JSString
+        concat = 1, // Points to two child RopeNodes
+    };
+
+    pub const RopePayload = extern union {
+        /// For leaf nodes: pointer to the flat string
+        leaf: *JSString,
+        /// For concat nodes: left and right children
+        concat: extern struct {
+            left: *RopeNode,
+            right: *RopeNode,
+        },
+    };
+
+    /// Get the total length of the rope
+    pub inline fn length(self: *const RopeNode) u32 {
+        return self.total_len;
+    }
+
+    /// Check if the rope is empty
+    pub inline fn isEmpty(self: *const RopeNode) bool {
+        return self.total_len == 0;
+    }
+
+    /// Check if all content is ASCII
+    pub inline fn isAscii(self: *const RopeNode) bool {
+        return self.flags.is_ascii;
+    }
+
+    /// Get the underlying flat string if this is a leaf node
+    pub fn asLeaf(self: *const RopeNode) ?*JSString {
+        if (self.kind == .leaf) {
+            return self.payload.leaf;
+        }
+        return null;
+    }
+
+    /// Flatten the rope to a contiguous string
+    /// This is the only operation that requires O(n) work
+    pub fn flatten(self: *RopeNode, allocator: std.mem.Allocator) !*JSString {
+        // Leaf nodes are already flat
+        if (self.kind == .leaf) {
+            return self.payload.leaf;
+        }
+
+        // Allocate buffer for the flattened string
+        const total_size = @sizeOf(JSString) + self.total_len;
+        const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
+
+        const str: *JSString = @ptrCast(@alignCast(mem.ptr));
+        str.* = .{
+            .header = heap.MemBlockHeader.init(.string, total_size),
+            .flags = .{
+                .is_unique = false,
+                .is_ascii = self.flags.is_ascii,
+                .is_numeric = false,
+                .hash_computed = false,
+            },
+            .len = self.total_len,
+            .hash = 0,
+        };
+
+        // Copy all leaf data into the buffer
+        var offset: usize = 0;
+        self.flattenInto(str.dataMut(), &offset);
+
+        return str;
+    }
+
+    /// Flatten the rope using arena allocation
+    pub fn flattenWithArena(self: *RopeNode, arena: *arena_mod.Arena) ?*JSString {
+        // Leaf nodes are already flat
+        if (self.kind == .leaf) {
+            return self.payload.leaf;
+        }
+
+        // Allocate buffer for the flattened string
+        const total_size = @sizeOf(JSString) + self.total_len;
+        const mem = arena.alloc(total_size) orelse return null;
+
+        const str: *JSString = @ptrCast(@alignCast(mem));
+        str.* = .{
+            .header = heap.MemBlockHeader.init(.string, total_size),
+            .flags = .{
+                .is_unique = false,
+                .is_ascii = self.flags.is_ascii,
+                .is_numeric = false,
+                .hash_computed = false,
+            },
+            .len = self.total_len,
+            .hash = 0,
+        };
+
+        // Copy all leaf data into the buffer
+        var offset: usize = 0;
+        self.flattenInto(str.dataMut(), &offset);
+
+        return str;
+    }
+
+    /// Internal: recursively copy leaf data into a buffer
+    fn flattenInto(self: *const RopeNode, buf: []u8, offset: *usize) void {
+        switch (self.kind) {
+            .leaf => {
+                const data = self.payload.leaf.data();
+                @memcpy(buf[offset.*..][0..data.len], data);
+                offset.* += data.len;
+            },
+            .concat => {
+                self.payload.concat.left.flattenInto(buf, offset);
+                self.payload.concat.right.flattenInto(buf, offset);
+            },
+        }
+    }
+
+    /// Compare rope content with a byte slice (flattens lazily if needed)
+    pub fn eqlBytes(self: *const RopeNode, bytes: []const u8) bool {
+        if (self.total_len != bytes.len) return false;
+
+        // For leaf nodes, compare directly
+        if (self.kind == .leaf) {
+            return eqlStrings(self.payload.leaf.data(), bytes);
+        }
+
+        // For concat nodes, we need to compare piece by piece
+        var offset: usize = 0;
+        return self.eqlBytesRecursive(bytes, &offset);
+    }
+
+    fn eqlBytesRecursive(self: *const RopeNode, bytes: []const u8, offset: *usize) bool {
+        switch (self.kind) {
+            .leaf => {
+                const data = self.payload.leaf.data();
+                if (!eqlStrings(data, bytes[offset.*..][0..data.len])) {
+                    return false;
+                }
+                offset.* += data.len;
+                return true;
+            },
+            .concat => {
+                if (!self.payload.concat.left.eqlBytesRecursive(bytes, offset)) {
+                    return false;
+                }
+                return self.payload.concat.right.eqlBytesRecursive(bytes, offset);
+            },
+        }
+    }
+
+    /// Get the hash of the rope content
+    /// Note: This may require flattening for concat nodes
+    pub fn getHash(self: *RopeNode, allocator: std.mem.Allocator) !u64 {
+        if (self.kind == .leaf) {
+            return self.payload.leaf.getHash();
+        }
+
+        // For concat nodes, we need to compute hash over all content
+        // This could be optimized with incremental hashing, but for now flatten
+        const flat = try self.flatten(allocator);
+        defer {
+            const total_size = @sizeOf(JSString) + flat.len;
+            const ptr: [*]align(@alignOf(JSString)) u8 = @ptrCast(@alignCast(flat));
+            allocator.free(ptr[0..total_size]);
+        }
+        return flat.getHash();
+    }
+};
+
+/// Create a leaf rope node from an existing JSString
+pub fn createRopeLeaf(allocator: std.mem.Allocator, str: *JSString) !*RopeNode {
+    const node = try allocator.create(RopeNode);
+    node.* = .{
+        .header = heap.MemBlockHeader.init(.rope, @sizeOf(RopeNode)), // Reuse string tag
+        .total_len = str.len,
+        .depth = 0,
+        .flags = .{ .is_ascii = str.flags.is_ascii },
+        .kind = .leaf,
+        .payload = .{ .leaf = str },
+    };
+    return node;
+}
+
+/// Create a leaf rope node using arena allocation
+pub fn createRopeLeafWithArena(arena: *arena_mod.Arena, str: *JSString) ?*RopeNode {
+    const node = arena.create(RopeNode) orelse return null;
+    node.* = .{
+        .header = heap.MemBlockHeader.init(.rope, @sizeOf(RopeNode)),
+        .total_len = str.len,
+        .depth = 0,
+        .flags = .{ .is_ascii = str.flags.is_ascii },
+        .kind = .leaf,
+        .payload = .{ .leaf = str },
+    };
+    return node;
+}
+
+/// Concatenate two rope nodes - O(1) operation!
+/// This is the key optimization: instead of copying, we create a new concat node
+pub fn concatRopes(allocator: std.mem.Allocator, left: *RopeNode, right: *RopeNode) !*RopeNode {
+    // Handle empty cases
+    if (left.total_len == 0) return right;
+    if (right.total_len == 0) return left;
+
+    const node = try allocator.create(RopeNode);
+    node.* = .{
+        .header = heap.MemBlockHeader.init(.rope, @sizeOf(RopeNode)),
+        .total_len = left.total_len + right.total_len,
+        .depth = @max(left.depth, right.depth) + 1,
+        .flags = .{ .is_ascii = left.flags.is_ascii and right.flags.is_ascii },
+        .kind = .concat,
+        .payload = .{ .concat = .{ .left = left, .right = right } },
+    };
+
+    // Rebalance if tree is getting too deep (prevents pathological cases)
+    // Threshold of 32 is reasonable - 2^32 leaves would be needed to hit this
+    // with perfectly balanced tree
+    if (node.depth > 32) {
+        // For now, just flatten when too deep
+        // A more sophisticated implementation would use AVL-like rotations
+        const flat = try node.flatten(allocator);
+        allocator.destroy(node);
+        return try createRopeLeaf(allocator, flat);
+    }
+
+    return node;
+}
+
+/// Concatenate two rope nodes using arena allocation - O(1) operation!
+pub fn concatRopesWithArena(arena: *arena_mod.Arena, left: *RopeNode, right: *RopeNode) ?*RopeNode {
+    // Handle empty cases
+    if (left.total_len == 0) return right;
+    if (right.total_len == 0) return left;
+
+    const node = arena.create(RopeNode) orelse return null;
+    node.* = .{
+        .header = heap.MemBlockHeader.init(.rope, @sizeOf(RopeNode)),
+        .total_len = left.total_len + right.total_len,
+        .depth = @max(left.depth, right.depth) + 1,
+        .flags = .{ .is_ascii = left.flags.is_ascii and right.flags.is_ascii },
+        .kind = .concat,
+        .payload = .{ .concat = .{ .left = left, .right = right } },
+    };
+
+    // For arena allocation, we don't rebalance since memory will be freed in bulk
+    return node;
+}
+
+/// Concatenate a rope with a JSString - O(1) operation
+pub fn concatRopeString(allocator: std.mem.Allocator, rope: *RopeNode, str: *JSString) !*RopeNode {
+    const right = try createRopeLeaf(allocator, str);
+    return try concatRopes(allocator, rope, right);
+}
+
+/// Concatenate a rope with a JSString using arena allocation
+pub fn concatRopeStringWithArena(arena: *arena_mod.Arena, rope: *RopeNode, str: *JSString) ?*RopeNode {
+    const right = createRopeLeafWithArena(arena, str) orelse return null;
+    return concatRopesWithArena(arena, rope, right);
+}
+
+/// Concatenate two JSStrings into a rope - O(1) operation
+pub fn createRopeFromStrings(allocator: std.mem.Allocator, a: *JSString, b: *JSString) !*RopeNode {
+    const left = try createRopeLeaf(allocator, a);
+    const right = try createRopeLeaf(allocator, b);
+    return try concatRopes(allocator, left, right);
+}
+
+/// Concatenate two JSStrings into a rope using arena allocation
+pub fn createRopeFromStringsWithArena(arena: *arena_mod.Arena, a: *JSString, b: *JSString) ?*RopeNode {
+    const left = createRopeLeafWithArena(arena, a) orelse return null;
+    const right = createRopeLeafWithArena(arena, b) orelse return null;
+    return concatRopesWithArena(arena, left, right);
+}
+
+/// Free a rope node and all its children (but not the leaf JSStrings)
+pub fn freeRope(allocator: std.mem.Allocator, node: *RopeNode) void {
+    if (node.kind == .concat) {
+        freeRope(allocator, node.payload.concat.left);
+        freeRope(allocator, node.payload.concat.right);
+    }
+    allocator.destroy(node);
+}
 
 // ============================================================================
 // UTF-8 Utilities
@@ -1125,4 +1439,132 @@ test "JSString equality" {
     try std.testing.expect(!str1.eql(str3));
     try std.testing.expect(str1.eqlBytes("test"));
     try std.testing.expect(!str1.eqlBytes("other"));
+}
+
+// ============================================================================
+// Rope Tests
+// ============================================================================
+
+test "RopeNode leaf creation" {
+    const allocator = std.testing.allocator;
+
+    const str = try createString(allocator, "hello");
+    defer freeString(allocator, str);
+
+    const leaf = try createRopeLeaf(allocator, str);
+    defer allocator.destroy(leaf);
+
+    try std.testing.expectEqual(@as(u32, 5), leaf.length());
+    try std.testing.expect(leaf.kind == .leaf);
+    try std.testing.expect(leaf.isAscii());
+    try std.testing.expect(!leaf.isEmpty());
+}
+
+test "RopeNode concat - O(1) concatenation" {
+    const allocator = std.testing.allocator;
+
+    const str_a = try createString(allocator, "hello");
+    defer freeString(allocator, str_a);
+
+    const str_b = try createString(allocator, " world");
+    defer freeString(allocator, str_b);
+
+    const leaf_a = try createRopeLeaf(allocator, str_a);
+    const leaf_b = try createRopeLeaf(allocator, str_b);
+
+    // This should be O(1) - no copying!
+    const concat = try concatRopes(allocator, leaf_a, leaf_b);
+    defer freeRope(allocator, concat);
+
+    try std.testing.expectEqual(@as(u32, 11), concat.length());
+    try std.testing.expect(concat.kind == .concat);
+    try std.testing.expect(concat.isAscii());
+}
+
+test "RopeNode flatten" {
+    const allocator = std.testing.allocator;
+
+    const str_a = try createString(allocator, "hello");
+    defer freeString(allocator, str_a);
+
+    const str_b = try createString(allocator, " world");
+    defer freeString(allocator, str_b);
+
+    const rope = try createRopeFromStrings(allocator, str_a, str_b);
+    defer freeRope(allocator, rope);
+
+    // Flatten the rope
+    const flat = try rope.flatten(allocator);
+    defer freeString(allocator, flat);
+
+    try std.testing.expectEqualStrings("hello world", flat.data());
+}
+
+test "RopeNode eqlBytes" {
+    const allocator = std.testing.allocator;
+
+    const str_a = try createString(allocator, "hello");
+    defer freeString(allocator, str_a);
+
+    const str_b = try createString(allocator, " world");
+    defer freeString(allocator, str_b);
+
+    const rope = try createRopeFromStrings(allocator, str_a, str_b);
+    defer freeRope(allocator, rope);
+
+    // Test equality without flattening
+    try std.testing.expect(rope.eqlBytes("hello world"));
+    try std.testing.expect(!rope.eqlBytes("hello"));
+    try std.testing.expect(!rope.eqlBytes("hello world!"));
+}
+
+test "RopeNode repeated concatenation - O(n) total instead of O(n^2)" {
+    const allocator = std.testing.allocator;
+
+    // Simulate building a string by repeated concatenation
+    // With ropes, this is O(n) total work instead of O(n^2)
+
+    const char_str = try createString(allocator, "x");
+    defer freeString(allocator, char_str);
+
+    var rope = try createRopeLeaf(allocator, char_str);
+
+    // Build "xxxxxxxxxx" (10 x's) by repeated O(1) concatenation
+    for (0..9) |_| {
+        rope = try concatRopeString(allocator, rope, char_str);
+    }
+    defer freeRope(allocator, rope);
+
+    // Verify result
+    try std.testing.expectEqual(@as(u32, 10), rope.length());
+
+    // Flatten and verify content
+    const flat = try rope.flatten(allocator);
+    defer freeString(allocator, flat);
+
+    try std.testing.expectEqualStrings("xxxxxxxxxx", flat.data());
+}
+
+test "RopeNode empty handling" {
+    const allocator = std.testing.allocator;
+
+    const empty = try createString(allocator, "");
+    defer freeString(allocator, empty);
+
+    const hello = try createString(allocator, "hello");
+    defer freeString(allocator, hello);
+
+    const empty_rope = try createRopeLeaf(allocator, empty);
+    const hello_rope = try createRopeLeaf(allocator, hello);
+
+    // Concatenating with empty should return the non-empty rope
+    const result1 = try concatRopes(allocator, empty_rope, hello_rope);
+    try std.testing.expectEqual(hello_rope, result1);
+
+    const result2 = try concatRopes(allocator, hello_rope, empty_rope);
+    try std.testing.expectEqual(hello_rope, result2);
+
+    // Clean up (only need to free the one we actually own)
+    allocator.destroy(empty_rope);
+    freeRope(allocator, hello_rope);
 }

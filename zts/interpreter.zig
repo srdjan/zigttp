@@ -2938,79 +2938,154 @@ pub const Interpreter = struct {
     }
 
     /// Convert value to string and concatenate
+    /// Uses rope data structure for O(1) concatenation instead of O(n) copying
     fn concatToString(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
-        // Fast path: string + number (very common pattern)
+        // Use rope-based concatenation for hybrid mode (arena allocation)
         if (self.ctx.hybrid) |h| {
-            if (a.isString()) {
-                const str_a = a.toPtr(string.JSString);
-                // Check if b is a number we can format directly
-                if (b.isInt()) {
-                    var buf: [32]u8 = undefined;
-                    const n = b.getInt();
-                    // Use cached string for small integers
-                    if (self.ctx.small_int_cache.get(n)) |cached| {
-                        const result = string.concatStringsWithArena(h.arena, str_a, cached) orelse
-                            return error.OutOfMemory;
-                        return value.JSValue.fromPtr(result);
-                    }
-                    const num_slice = string.formatIntToBuf(&buf, n);
-                    const result = string.concatStringNumberWithArena(h.arena, str_a, num_slice) orelse
-                        return error.OutOfMemory;
-                    return value.JSValue.fromPtr(result);
-                }
-                if (b.isFloat64()) {
-                    var buf: [64]u8 = undefined;
-                    const num_slice = string.formatFloatToBuf(&buf, b.getFloat64());
-                    const result = string.concatStringNumberWithArena(h.arena, str_a, num_slice) orelse
-                        return error.OutOfMemory;
-                    return value.JSValue.fromPtr(result);
-                }
-            }
-            // Fast path: number + string
-            if (b.isString()) {
-                const str_b = b.toPtr(string.JSString);
-                if (a.isInt()) {
-                    var buf: [32]u8 = undefined;
-                    const n = a.getInt();
-                    if (self.ctx.small_int_cache.get(n)) |cached| {
-                        const result = string.concatStringsWithArena(h.arena, cached, str_b) orelse
-                            return error.OutOfMemory;
-                        return value.JSValue.fromPtr(result);
-                    }
-                    const num_slice = string.formatIntToBuf(&buf, n);
-                    const result = string.concatNumberStringWithArena(h.arena, num_slice, str_b) orelse
-                        return error.OutOfMemory;
-                    return value.JSValue.fromPtr(result);
-                }
-                if (a.isFloat64()) {
-                    var buf: [64]u8 = undefined;
-                    const num_slice = string.formatFloatToBuf(&buf, a.getFloat64());
-                    const result = string.concatNumberStringWithArena(h.arena, num_slice, str_b) orelse
-                        return error.OutOfMemory;
-                    return value.JSValue.fromPtr(result);
-                }
-            }
+            return self.concatToStringRope(a, b, h.arena);
         }
 
-        // Fallback: Convert both values to strings
+        // Non-hybrid mode: use traditional concatenation
+        // (Rope optimization is most valuable with arena allocation)
+
+        // Fast path: string + number (very common pattern)
         const str_a = try self.valueToString(a);
-        // Only free temp strings in non-hybrid mode (arena handles cleanup in hybrid mode)
-        defer if (self.ctx.hybrid == null and !a.isString()) string.freeString(self.ctx.allocator, str_a);
+        defer if (!a.isString() and !a.isRope()) string.freeString(self.ctx.allocator, str_a);
 
-        // Convert b to string
         const str_b = try self.valueToString(b);
-        defer if (self.ctx.hybrid == null and !b.isString()) string.freeString(self.ctx.allocator, str_b);
+        defer if (!b.isString() and !b.isRope()) string.freeString(self.ctx.allocator, str_b);
 
-        // Use arena when hybrid mode is enabled
-        if (self.ctx.hybrid) |h| {
-            const result = string.concatStringsWithArena(h.arena, str_a, str_b) orelse
+        const result = try string.concatStrings(self.ctx.allocator, str_a, str_b);
+        return value.JSValue.fromPtr(result);
+    }
+
+    /// Rope-based string concatenation - O(1) operation!
+    /// This is the key optimization for stringBuild benchmark
+    fn concatToStringRope(self: *Interpreter, a: value.JSValue, b: value.JSValue, arena: *@import("arena.zig").Arena) !value.JSValue {
+        // Case 1: Both are already ropes - O(1) concat
+        if (a.isRope() and b.isRope()) {
+            const rope_a = a.toPtr(string.RopeNode);
+            const rope_b = b.toPtr(string.RopeNode);
+            const result = string.concatRopesWithArena(arena, rope_a, rope_b) orelse
                 return error.OutOfMemory;
             return value.JSValue.fromPtr(result);
         }
 
-        // Concatenate
-        const result = try string.concatStrings(self.ctx.allocator, str_a, str_b);
+        // Case 2: Left is rope, right is string - O(1) concat
+        if (a.isRope() and b.isString()) {
+            const rope_a = a.toPtr(string.RopeNode);
+            const str_b = b.toPtr(string.JSString);
+            const result = string.concatRopeStringWithArena(arena, rope_a, str_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
+        // Case 3: Left is string, right is rope
+        if (a.isString() and b.isRope()) {
+            const str_a = a.toPtr(string.JSString);
+            const rope_b = b.toPtr(string.RopeNode);
+            const leaf_a = string.createRopeLeafWithArena(arena, str_a) orelse
+                return error.OutOfMemory;
+            const result = string.concatRopesWithArena(arena, leaf_a, rope_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
+        // Case 4: Both are strings - create rope for future O(1) concats
+        if (a.isString() and b.isString()) {
+            const str_a = a.toPtr(string.JSString);
+            const str_b = b.toPtr(string.JSString);
+
+            // Small optimization: for very short strings, flat concat is fine
+            // The rope overhead isn't worth it for tiny strings
+            if (str_a.len + str_b.len < 64) {
+                const result = string.concatStringsWithArena(arena, str_a, str_b) orelse
+                    return error.OutOfMemory;
+                return value.JSValue.fromPtr(result);
+            }
+
+            // Create rope for larger strings
+            const result = string.createRopeFromStringsWithArena(arena, str_a, str_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
+        // Case 5: Left is rope, right needs conversion
+        if (a.isRope()) {
+            const rope_a = a.toPtr(string.RopeNode);
+            const str_b = try self.valueToStringArena(b, arena);
+            const result = string.concatRopeStringWithArena(arena, rope_a, str_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
+        // Case 6: Right is rope, left needs conversion
+        if (b.isRope()) {
+            const rope_b = b.toPtr(string.RopeNode);
+            const str_a = try self.valueToStringArena(a, arena);
+            const leaf_a = string.createRopeLeafWithArena(arena, str_a) orelse
+                return error.OutOfMemory;
+            const result = string.concatRopesWithArena(arena, leaf_a, rope_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
+        // Case 7: Neither is string/rope - convert both
+        const str_a = try self.valueToStringArena(a, arena);
+        const str_b = try self.valueToStringArena(b, arena);
+
+        // For general case, use flat concat (ropes mainly benefit repeated concats)
+        const result = string.concatStringsWithArena(arena, str_a, str_b) orelse
+            return error.OutOfMemory;
         return value.JSValue.fromPtr(result);
+    }
+
+    /// Convert value to string using arena allocation
+    fn valueToStringArena(self: *Interpreter, val: value.JSValue, arena: *@import("arena.zig").Arena) !*string.JSString {
+        // Handle rope: flatten to string
+        if (val.isRope()) {
+            const rope = val.toPtr(string.RopeNode);
+            return rope.flattenWithArena(arena) orelse error.OutOfMemory;
+        }
+
+        // Handle string: return directly
+        if (val.isString()) {
+            return val.toPtr(string.JSString);
+        }
+
+        // Handle number
+        if (val.isInt()) {
+            var buf: [32]u8 = undefined;
+            const n = val.getInt();
+            if (self.ctx.small_int_cache.get(n)) |cached| {
+                return cached;
+            }
+            const slice = string.formatIntToBuf(&buf, n);
+            return string.createStringWithArena(arena, slice) orelse error.OutOfMemory;
+        }
+
+        if (val.isFloat64()) {
+            var buf: [64]u8 = undefined;
+            const slice = string.formatFloatToBuf(&buf, val.getFloat64());
+            return string.createStringWithArena(arena, slice) orelse error.OutOfMemory;
+        }
+
+        // Handle other types
+        if (val.isNull()) {
+            return string.createStringWithArena(arena, "null") orelse error.OutOfMemory;
+        }
+        if (val.isUndefined()) {
+            return string.createStringWithArena(arena, "undefined") orelse error.OutOfMemory;
+        }
+        if (val.isTrue()) {
+            return string.createStringWithArena(arena, "true") orelse error.OutOfMemory;
+        }
+        if (val.isFalse()) {
+            return string.createStringWithArena(arena, "false") orelse error.OutOfMemory;
+        }
+
+        // Object: call toString if available, otherwise return "[object Object]"
+        return string.createStringWithArena(arena, "[object Object]") orelse error.OutOfMemory;
     }
 
     /// Concatenate N values from the stack into a single string.
@@ -3054,6 +3129,11 @@ pub const Interpreter = struct {
     fn valueToString(self: *Interpreter, val: value.JSValue) !*string.JSString {
         if (val.isString()) {
             return val.toPtr(string.JSString);
+        }
+        // Handle rope: flatten to flat string
+        if (val.isRope()) {
+            const rope = val.toPtr(string.RopeNode);
+            return try rope.flatten(self.ctx.allocator);
         }
         if (val.isInt()) {
             const n = val.getInt();
