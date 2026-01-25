@@ -217,8 +217,26 @@ pub const CodeGen = struct {
         }
     }
 
+    /// Pre-reserve capacity based on IR size to reduce reallocations
+    fn reserveCapacity(self: *CodeGen) !void {
+        const node_count = self.ir.nodeCount();
+        if (node_count == 0) return;
+
+        // Heuristics based on typical JS code patterns:
+        // - ~4 bytes of bytecode per IR node
+        // - ~1 constant per 10 nodes
+        // - ~1 label per 20 nodes (for jumps)
+        try self.code.ensureTotalCapacity(self.allocator, node_count * 4);
+        try self.constants.ensureTotalCapacity(self.allocator, @max(16, node_count / 10));
+        try self.labels.ensureTotalCapacity(self.allocator, @max(8, node_count / 20));
+        try self.pending_jumps.ensureTotalCapacity(self.allocator, @max(8, node_count / 20));
+    }
+
     /// Generate bytecode for the entire program
     pub fn generate(self: *CodeGen, root: NodeIndex) !FunctionBytecode {
+        // Pre-allocate based on IR size to reduce reallocations
+        try self.reserveCapacity();
+
         try self.emitNode(root);
         try self.emit(.ret_undefined);
 
@@ -1350,6 +1368,11 @@ pub const CodeGen = struct {
         try self.emitNode(func.body);
         try self.emit(.ret_undefined);
         try self.resolveJumps();
+
+        // Apply peephole optimization to nested function (same as top-level)
+        if (comptime enable_peephole_opt) {
+            try self.applyPeepholeOpt();
+        }
 
         // Get upvalue info from scope
         const scope = self.scopes.getScope(func.scope_id);

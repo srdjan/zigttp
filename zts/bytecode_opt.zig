@@ -44,26 +44,36 @@ pub const OptStats = struct {
 /// Peephole optimizer for bytecode
 pub const BytecodeOptimizer = struct {
     allocator: std.mem.Allocator,
-    /// Jump targets - positions that are targets of jumps (basic block starts)
-    jump_targets: std.AutoHashMapUnmanaged(u32, void),
+    /// Jump targets - dense bool array indexed by bytecode position
+    /// More efficient than hash map for typical function sizes
+    jump_targets: ?[]bool,
 
     pub fn init(allocator: std.mem.Allocator) BytecodeOptimizer {
         return .{
             .allocator = allocator,
-            .jump_targets = .{},
+            .jump_targets = null,
         };
     }
 
     pub fn deinit(self: *BytecodeOptimizer) void {
-        self.jump_targets.deinit(self.allocator);
+        if (self.jump_targets) |targets| {
+            self.allocator.free(targets);
+        }
     }
 
     /// Optimize bytecode in-place, returns statistics
     pub fn optimize(self: *BytecodeOptimizer, code: []u8) !OptStats {
         var stats = OptStats{};
 
+        // Allocate dense bool array for jump targets (more efficient than hash map)
+        if (self.jump_targets) |old| {
+            self.allocator.free(old);
+        }
+        self.jump_targets = try self.allocator.alloc(bool, code.len);
+        @memset(self.jump_targets.?, false);
+
         // First pass: find all jump targets to avoid fusing across basic blocks
-        try self.findJumpTargets(code);
+        self.findJumpTargets(code);
 
         // Second pass: apply peephole optimizations
         var pos: u32 = 0;
@@ -83,8 +93,8 @@ pub const BytecodeOptimizer = struct {
     }
 
     /// Find all positions that are targets of jump instructions
-    fn findJumpTargets(self: *BytecodeOptimizer, code: []const u8) !void {
-        self.jump_targets.clearRetainingCapacity();
+    fn findJumpTargets(self: *BytecodeOptimizer, code: []const u8) void {
+        const targets = self.jump_targets orelse return;
 
         var pos: u32 = 0;
         while (pos < code.len) {
@@ -99,7 +109,7 @@ pub const BytecodeOptimizer = struct {
                     // Calculate absolute target position
                     const target_pos: i32 = @as(i32, @intCast(pos)) + info.size + offset;
                     if (target_pos >= 0 and target_pos < @as(i32, @intCast(code.len))) {
-                        try self.jump_targets.put(self.allocator, @intCast(target_pos), {});
+                        targets[@intCast(target_pos)] = true;
                     }
                 },
                 else => {},
@@ -111,7 +121,8 @@ pub const BytecodeOptimizer = struct {
 
     /// Check if position is a jump target (start of basic block)
     fn isJumpTarget(self: *const BytecodeOptimizer, pos: u32) bool {
-        return self.jump_targets.contains(pos);
+        const targets = self.jump_targets orelse return false;
+        return if (pos < targets.len) targets[pos] else false;
     }
 
     /// Try to fuse instructions starting at pos

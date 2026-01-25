@@ -94,7 +94,27 @@ pub const Scope = struct {
         self.upvalues.deinit(allocator);
     }
 
-    /// Find a binding by name in this scope only
+    /// Find a binding by name_atom in this scope only (O(1) comparison per binding)
+    pub fn findLocalByAtom(self: *const Scope, name_atom: u16) ?*const Binding {
+        for (self.bindings.items) |*binding| {
+            if (binding.name_atom == name_atom) {
+                return binding;
+            }
+        }
+        return null;
+    }
+
+    /// Find a mutable binding by name_atom (O(1) comparison per binding)
+    pub fn findLocalMutByAtom(self: *Scope, name_atom: u16) ?*Binding {
+        for (self.bindings.items) |*binding| {
+            if (binding.name_atom == name_atom) {
+                return binding;
+            }
+        }
+        return null;
+    }
+
+    /// Find a binding by name in this scope only (legacy - O(n) string comparison)
     pub fn findLocal(self: *const Scope, name: []const u8) ?*const Binding {
         for (self.bindings.items) |*binding| {
             if (std.mem.eql(u8, binding.name, name)) {
@@ -104,7 +124,7 @@ pub const Scope = struct {
         return null;
     }
 
-    /// Find a mutable binding by name
+    /// Find a mutable binding by name (legacy - O(n) string comparison)
     pub fn findLocalMut(self: *Scope, name: []const u8) ?*Binding {
         for (self.bindings.items) |*binding| {
             if (std.mem.eql(u8, binding.name, name)) {
@@ -265,8 +285,8 @@ pub const ScopeAnalyzer = struct {
         while (true) {
             const scope = &self.scopes.items[scope_id];
 
-            // Look for binding in current scope
-            if (scope.findLocalMut(name)) |binding| {
+            // Look for binding in current scope (O(1) comparison via atom)
+            if (scope.findLocalMutByAtom(name_atom)) |binding| {
                 // Check if this is a global scope binding
                 if (scope.kind == .global) {
                     return .{
@@ -358,7 +378,13 @@ pub const ScopeAnalyzer = struct {
         return slot;
     }
 
-    /// Check if a name is already declared in current scope
+    /// Check if a name_atom is already declared in current scope (O(1) comparison)
+    pub fn isDeclaredInCurrentScopeByAtom(self: *ScopeAnalyzer, name_atom: u16) bool {
+        const scope = &self.scopes.items[self.current_scope];
+        return scope.findLocalByAtom(name_atom) != null;
+    }
+
+    /// Check if a name is already declared in current scope (legacy - O(n) string comparison)
     pub fn isDeclaredInCurrentScope(self: *ScopeAnalyzer, name: []const u8) bool {
         const scope = &self.scopes.items[self.current_scope];
         return scope.findLocal(name) != null;

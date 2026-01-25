@@ -1541,6 +1541,14 @@ pub const IrView = struct {
         };
     }
 
+    /// Get total node count (useful for capacity pre-allocation)
+    pub fn nodeCount(self: IrView) usize {
+        return switch (self.impl) {
+            .node_list => |nl| nl.nodes.items.len,
+            .ir_store => |ir| ir.tags.items.len,
+        };
+    }
+
     /// Get index from list storage
     pub fn getListIndex(self: IrView, list_start: NodeIndex, offset: u16) NodeIndex {
         return switch (self.impl) {
