@@ -1440,7 +1440,7 @@ pub const OptimizedCompiler = struct {
 
     // Specialized shift and multiply opcodes
     // NaN-boxing integer encoding:
-    // - Tag: 0xFFFD_0000_0000_0000 (TAG_PREFIX | TYPE_INT)
+    // - Tag: 0xFFFD_0000_0000_0000 (TAG_PREFIX | TYPE_INT with TYPE_SHIFT=44)
     // - Value: lower 32 bits (signed i32)
     const INT_TAG: u64 = 0xFFFD_0000_0000_0000;
 

@@ -31,24 +31,26 @@ pub const JSValue = packed struct {
     /// Payload mask (lower 48 bits)
     const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-    /// Type tag shift (bits 45-47 of raw value)
-    /// Using 45-bit values to support full 48-bit addresses on ARM64 Linux
-    const TYPE_SHIFT: u6 = 45;
+    /// Type tag shift for non-pointer types (bits 44-46 of raw value)
+    const TYPE_SHIFT: u6 = 44;
 
-    /// Type tag mask (3 bits = 8 types)
+    /// Type tag mask (3 bits = 8 types) - only used for non-pointer types
     const TYPE_MASK: u64 = 0x7 << TYPE_SHIFT;
 
-    /// Value payload mask (lower 45 bits)
-    /// With pointer compression (>>3), this supports 48-bit canonical addresses
-    const VALUE_MASK: u64 = 0x0000_1FFF_FFFF_FFFF;
+    /// Value payload mask (lower 48 bits) - full 48-bit address support
+    /// JIT uses low 3 bits for quick type checking, remaining 45 bits for values
+    const VALUE_MASK: u64 = PAYLOAD_MASK;
 
-    /// Type tags (3 bits, allowing 8 types)
-    const TYPE_PTR: u64 = 0x0 << TYPE_SHIFT; // GC-managed pointer
+    /// Low-bit tags for JIT compatibility (stored in bits 0-2)
+    /// These allow the JIT to do fast type checks with (raw & 7)
+    const LOW_TAG_PTR: u64 = 1; // Pointer (GC-managed)
+    const LOW_TAG_SPECIAL: u64 = 3; // null/undefined/bool/exception
+    const LOW_TAG_EXTERN: u64 = 7; // External pointer (non-GC)
+
+    /// Type tags for TYPE_MASK position (non-pointer types)
     const TYPE_INT: u64 = 0x1 << TYPE_SHIFT; // 32-bit signed integer
     const TYPE_SPECIAL: u64 = 0x2 << TYPE_SHIFT; // null/undefined/bool/exception
-    const TYPE_EXTERN: u64 = 0x3 << TYPE_SHIFT; // Non-GC external pointer
     const TYPE_SYMBOL: u64 = 0x4 << TYPE_SHIFT; // Symbol
-    // Types 5-7 reserved for future use
 
     /// Canonical NaN value (JavaScript's NaN)
     const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
@@ -57,11 +59,13 @@ pub const JSValue = packed struct {
     // Special value constants
     // ========================================================================
 
-    pub const null_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 0 };
-    pub const undefined_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 1 };
-    pub const true_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 2 };
-    pub const false_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 3 };
-    pub const exception_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | 4 };
+    // Special values: shifted left 3 bits to avoid conflicting with low-bit type tags
+    // Low 3 bits are 0 for all special values (doesn't match PTR=1 or EXTERN=7)
+    pub const null_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | (0 << 3) };
+    pub const undefined_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | (1 << 3) };
+    pub const true_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | (2 << 3) };
+    pub const false_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | (3 << 3) };
+    pub const exception_val: JSValue = .{ .raw = TAG_PREFIX | TYPE_SPECIAL | (4 << 3) };
     pub const nan_val: JSValue = .{ .raw = CANONICAL_NAN_BITS }; // Stored as raw NaN
 
     // ========================================================================
@@ -122,55 +126,67 @@ pub const JSValue = packed struct {
     // ========================================================================
 
     /// Check if value is a GC-managed pointer
+    /// Pointers have low-bit tag == 1, but so can integers if their value ends in 1
+    /// So we must exclude integers and specials first
     pub inline fn isPtr(self: JSValue) bool {
-        return self.isTagged() and (self.raw & TYPE_MASK) == TYPE_PTR;
+        if (!self.isTagged()) return false;
+        // Exclude integers (they have TYPE_INT set)
+        if ((self.raw & TYPE_MASK) == TYPE_INT) return false;
+        // Exclude specials (they have TYPE_SPECIAL set)
+        if ((self.raw & TYPE_MASK) == TYPE_SPECIAL) return false;
+        // Now check low-bit ptr tag
+        return (self.raw & 0x7) == LOW_TAG_PTR;
     }
 
     /// Create value from pointer
+    /// Uses low-bit tagging: stores address with tag in bits 0-2
+    /// Address must be 8-byte aligned (low 3 bits are 0, used for tag)
     pub inline fn fromPtr(ptr: *anyopaque) JSValue {
-        // Pointers are 8-byte aligned, so we can compress by shifting right 3 bits.
-        // This allows 47-bit addresses (128TB) to fit in 44 bits.
         const addr = @intFromPtr(ptr);
         std.debug.assert(addr & 0x7 == 0); // Verify 8-byte aligned
-        const compressed = addr >> 3;
-        std.debug.assert(compressed <= VALUE_MASK); // Verify fits in 44 bits
-        return .{ .raw = TAG_PREFIX | TYPE_PTR | compressed };
+        // Address uses bits 3-47, tag uses bits 0-2
+        return .{ .raw = TAG_PREFIX | addr | LOW_TAG_PTR };
     }
 
     /// Extract pointer (unsafe - caller must verify isPtr)
+    /// Clears low 3 tag bits to recover original address
     pub inline fn toPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isPtr());
-        // Decompress: shift left 3 bits to restore original address
-        return @ptrFromInt((self.raw & VALUE_MASK) << 3);
+        // Clear tag bits and TAG_PREFIX to get raw address
+        return @ptrFromInt(self.raw & PAYLOAD_MASK & ~@as(u64, 0x7));
     }
 
     /// Get raw pointer address for use as a hash map key
     /// This is useful for identity-based maps like WeakMap
     pub inline fn getPtrAddress(self: JSValue) u64 {
-        // Decompress to get actual address for consistent hashing
-        return (self.raw & VALUE_MASK) << 3;
+        return self.raw & PAYLOAD_MASK & ~@as(u64, 0x7);
     }
 
     /// Check if value is a non-GC external pointer
+    /// Exclude integers and specials, then check low-bit tag
     pub inline fn isExternPtr(self: JSValue) bool {
-        return self.isTagged() and (self.raw & TYPE_MASK) == TYPE_EXTERN;
+        if (!self.isTagged()) return false;
+        // Exclude integers
+        if ((self.raw & TYPE_MASK) == TYPE_INT) return false;
+        // Exclude specials
+        if ((self.raw & TYPE_MASK) == TYPE_SPECIAL) return false;
+        // Check low-bit extern tag
+        return (self.raw & 0x7) == LOW_TAG_EXTERN;
     }
 
     /// Create value from external pointer
+    /// Uses low-bit tagging: stores address with tag in bits 0-2
     pub inline fn fromExternPtr(ptr: *anyopaque) JSValue {
-        // Compress pointer by shifting right 3 bits (assumes 8-byte alignment)
         const addr = @intFromPtr(ptr);
         std.debug.assert(addr & 0x7 == 0); // Verify 8-byte aligned
-        const compressed = addr >> 3;
-        std.debug.assert(compressed <= VALUE_MASK);
-        return .{ .raw = TAG_PREFIX | TYPE_EXTERN | compressed };
+        return .{ .raw = TAG_PREFIX | addr | LOW_TAG_EXTERN };
     }
 
     /// Extract external pointer (unsafe - caller must verify isExternPtr)
+    /// Clears low 3 tag bits to recover original address
     pub inline fn toExternPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isExternPtr());
-        // Decompress: shift left 3 bits to restore original address
-        return @ptrFromInt((self.raw & VALUE_MASK) << 3);
+        return @ptrFromInt(self.raw & PAYLOAD_MASK & ~@as(u64, 0x7));
     }
 
     // ========================================================================
@@ -279,9 +295,9 @@ pub const JSValue = packed struct {
         // Check if it's a pointer to a Float64Box
         // This is legacy - new code doesn't create boxed floats
         if (!self.isPtr()) return false;
-        const compressed = self.raw & VALUE_MASK;
-        if (compressed == 0) return false;
-        const box: *Float64Box = @ptrFromInt(compressed << 3);
+        const addr = self.raw & PAYLOAD_MASK & ~@as(u64, 0x7);
+        if (addr == 0) return false;
+        const box: *Float64Box = @ptrFromInt(addr);
         return box.header.tag == .float64;
     }
 
@@ -307,7 +323,8 @@ pub const JSValue = packed struct {
         }
         // Legacy boxed float support
         if (self.isBoxedFloat64()) {
-            const box: *Float64Box = @ptrFromInt((self.raw & VALUE_MASK) << 3);
+            const addr = self.raw & PAYLOAD_MASK & ~@as(u64, 0x7);
+            const box: *Float64Box = @ptrFromInt(addr);
             return box.value;
         }
         // Should not reach here if isFloat64() was checked
@@ -323,7 +340,8 @@ pub const JSValue = packed struct {
             return @bitCast(self.raw);
         }
         if (self.isBoxedFloat64()) {
-            const box: *Float64Box = @ptrFromInt((self.raw & VALUE_MASK) << 3);
+            const addr = self.raw & PAYLOAD_MASK & ~@as(u64, 0x7);
+            const box: *Float64Box = @ptrFromInt(addr);
             return box.value;
         }
         return null;
@@ -698,9 +716,9 @@ pub const JSValue = packed struct {
                 try writer.print("{d}", .{f});
             }
         } else if (self.isPtr()) {
-            try writer.print("<ptr:0x{x}>", .{(self.raw & VALUE_MASK) << 3});
+            try writer.print("<ptr:0x{x}>", .{self.raw & PAYLOAD_MASK & ~@as(u64, 0x7)});
         } else if (self.isExternPtr()) {
-            try writer.print("<extern:0x{x}>", .{(self.raw & VALUE_MASK) << 3});
+            try writer.print("<extern:0x{x}>", .{self.raw & PAYLOAD_MASK & ~@as(u64, 0x7)});
         } else {
             try writer.print("<unknown:0x{x}>", .{self.raw});
         }

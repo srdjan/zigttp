@@ -64,6 +64,11 @@ const ARENA_LIMIT_OFF: i32 = @intCast(@offsetOf(arena_mod.Arena, "limit"));
 const JSOBJECT_SIZE: u32 = @sizeOf(JSObject);
 const JSOBJECT_SIZE_ALIGNED: u32 = (JSOBJECT_SIZE + 7) & ~@as(u32, 7); // 8-byte aligned
 
+// Pointer extraction mask: clears TAG_PREFIX (upper 16 bits) and low 3 tag bits
+// Used to extract actual memory address from JSValue pointer encoding
+// PAYLOAD_MASK & ~7 = 0x0000_FFFF_FFFF_FFF8
+const PTR_EXTRACT_MASK: u64 = 0x0000_FFFF_FFFF_FFF8;
+
 // JSObject field offsets for inline cache fast path
 const OBJ_HIDDEN_CLASS_OFF: i32 = @intCast(@offsetOf(JSObject, "hidden_class_idx"));
 const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
@@ -592,10 +597,31 @@ pub const BaselineCompiler = struct {
         return idx;
     }
 
-    // NaN-boxing integer tag: TAG_PREFIX | TYPE_INT = 0xFFFD_0000_0000_0000
+    // NaN-boxing integer tag: TAG_PREFIX | TYPE_INT
+    // With TYPE_SHIFT=44: 0xFFFC_0000_0000_0000 | (1 << 44) = 0xFFFD_0000_0000_0000
     const INT_TAG: u64 = 0xFFFD_0000_0000_0000;
-    // Mask for checking integer type: upper 20 bits
+    // Mask for checking integer type: upper 20 bits (TAG + TYPE)
     const INT_TYPE_MASK: u64 = 0xFFFF_F000_0000_0000;
+
+    /// Emit code to extract pointer address from JSValue in a register
+    /// Input: src_reg contains JSValue with pointer encoding
+    /// Output: dst_reg contains raw pointer address (TAG_PREFIX and low 3 bits cleared)
+    fn emitExtractPtr(self: *BaselineCompiler, dst_reg: Register, src_reg: Register) CompileError!void {
+        if (is_x86_64) {
+            // Load PTR_EXTRACT_MASK into scratch, AND with src, store to dst
+            if (dst_reg != src_reg) {
+                self.emitter.movRegReg(dst_reg, src_reg) catch return CompileError.OutOfMemory;
+            }
+            // Use r10 as scratch for the mask
+            self.emitter.movRegImm64(.r10, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(dst_reg, .r10) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            // On ARM64, use x9 as scratch for the mask
+            // ARM64 AND requires 3-operand form: dst = src1 AND src2
+            self.emitter.movRegImm64(.x9, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(dst_reg, src_reg, .x9) catch return CompileError.OutOfMemory;
+        }
+    }
 
     /// Emit specialized integer binary operation when type feedback shows both operands are integers.
     /// Guards integer type and deoptimizes on mismatch. On overflow, falls back to slow path helper.
@@ -5208,9 +5234,8 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.rax);
             // Pop object pointer into another register
             try self.emitPopReg(.rcx);
-            // Extract object pointer from JSValue (clear low 3 tag bits)
-            // Pointers are tagged with (raw & 0x7) == 1, so clear with & -8
-            self.emitter.andRegImm32(.rcx, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract pointer: AND with PTR_EXTRACT_MASK to clear TAG_PREFIX and low 3 bits
+            try self.emitExtractPtr(.rcx, .rcx);
             // Store value to obj->inline_slots[slot_idx]
             self.emitter.movMemReg(.rcx, slot_offset, .rax) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
@@ -5218,10 +5243,8 @@ pub const BaselineCompiler = struct {
             try self.emitPopReg(.x0);
             // Pop object into x1
             try self.emitPopReg(.x1);
-            // Extract object pointer from JSValue (clear low 3 tag bits)
-            // Use lsr/lsl pair: shift right 3, then left 3
-            self.emitter.lsrRegImm(.x1, .x1, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x1, .x1, 3) catch return CompileError.OutOfMemory;
+            // Extract pointer: AND with PTR_EXTRACT_MASK
+            try self.emitExtractPtr(.x1, .x1);
             // Store value to obj->inline_slots[slot_idx]
             self.emitter.strImm(.x0, .x1, slot_offset) catch return CompileError.OutOfMemory;
         }
