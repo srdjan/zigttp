@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("zts/root.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // zts tests
@@ -20,6 +21,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("zts/root.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     const run_zts_tests = b.addRunArtifact(zts_tests);
@@ -50,6 +52,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
 
@@ -133,6 +136,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/benchmark.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     bench_exe.root_module.addImport("zts", zts_mod);

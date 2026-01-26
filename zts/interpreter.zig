@@ -248,7 +248,9 @@ pub const PIC_ENTRIES = 8;
 /// Falls back to megamorphic mode when more than 4 shapes are observed
 pub const PolymorphicInlineCache = struct {
     /// Cached entries (only first `count` are valid)
-    entries: [PIC_ENTRIES]PICEntry = undefined,
+    /// Initialize all entries with invalid hidden class to prevent JIT false matches
+    /// on uninitialized memory (JIT checks all 4 entries without checking count)
+    entries: [PIC_ENTRIES]PICEntry = [_]PICEntry{.{ .hidden_class_idx = .none, .slot_offset = 0 }} ** PIC_ENTRIES,
     /// Number of valid entries (0-8)
     count: u8 = 0,
     /// Index of most recently hit entry
@@ -4201,7 +4203,7 @@ test "Interpreter basic arithmetic" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4239,7 +4241,7 @@ test "Interpreter local variables" {
         @intFromEnum(bytecode.Opcode.add),       @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4275,7 +4277,7 @@ test "Interpreter bitwise operations" {
         @intFromEnum(bytecode.Opcode.bit_and), @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4313,7 +4315,7 @@ test "Interpreter shift operations" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4349,7 +4351,7 @@ test "Interpreter comparison" {
         @intFromEnum(bytecode.Opcode.lt),      @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4385,7 +4387,7 @@ test "Interpreter conditional jump" {
         @intFromEnum(bytecode.Opcode.push_0),   @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4423,7 +4425,7 @@ test "Interpreter superinstruction get_loc_get_loc_add" {
         1,                                                 @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4459,7 +4461,7 @@ test "Interpreter division produces float" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4495,7 +4497,7 @@ test "Interpreter modulo" {
         @intFromEnum(bytecode.Opcode.mod),     @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4543,7 +4545,7 @@ test "End-to-end: parse and execute JS" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4603,7 +4605,7 @@ test "Hybrid: reject arena escape to global" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4648,7 +4650,7 @@ test "End-to-end: closure captures local" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4702,7 +4704,7 @@ test "End-to-end: JSX parse, compile, and execute" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4771,7 +4773,7 @@ test "Interpreter property access" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4812,7 +4814,7 @@ test "Interpreter global access" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4863,7 +4865,7 @@ test "Interpreter native function call" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4921,7 +4923,7 @@ test "Interpreter native function with arguments" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -4996,7 +4998,7 @@ test "Interpreter bytecode function call" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5700,7 +5702,7 @@ test "End-to-end: function declaration" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5751,7 +5753,7 @@ test "Interpreter string concatenation" {
         value.JSValue.fromPtr(str2),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5794,7 +5796,7 @@ test "Interpreter typeof" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5840,7 +5842,7 @@ test "End-to-end: default parameters" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5874,7 +5876,7 @@ test "Interpreter unary negation" {
         @intFromEnum(bytecode.Opcode.neg),     @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5908,7 +5910,7 @@ test "Interpreter increment and decrement" {
         @intFromEnum(bytecode.Opcode.inc),     @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5943,7 +5945,7 @@ test "Interpreter logical not" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -5977,7 +5979,7 @@ test "Interpreter bitwise not" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6014,7 +6016,7 @@ test "Interpreter power operator" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6051,7 +6053,7 @@ test "Interpreter new_object" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6086,7 +6088,7 @@ test "Interpreter strict equality edge cases" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6120,7 +6122,7 @@ test "Interpreter local variable get and put" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6156,7 +6158,7 @@ test "Interpreter multiple locals" {
         @intFromEnum(bytecode.Opcode.add),       @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6191,7 +6193,7 @@ test "Interpreter undefined equals undefined" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6226,7 +6228,7 @@ test "Interpreter null vs undefined strict not equal" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6261,7 +6263,7 @@ test "Interpreter typeof operations" {
         @intFromEnum(bytecode.Opcode.typeof),  @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6296,7 +6298,7 @@ test "Interpreter modulo operation" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6330,7 +6332,7 @@ test "Interpreter inc dec roundtrip" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6363,7 +6365,7 @@ test "Interpreter negation" {
         @intFromEnum(bytecode.Opcode.neg),     @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6397,7 +6399,7 @@ test "Interpreter dup operation" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6431,7 +6433,7 @@ test "Interpreter drop operation" {
         @intFromEnum(bytecode.Opcode.drop),    @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6465,7 +6467,7 @@ test "Interpreter swap operation" {
         @intFromEnum(bytecode.Opcode.sub),     @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6500,7 +6502,7 @@ test "Interpreter not operator inverts false" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6535,7 +6537,7 @@ test "Interpreter new_array" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6566,7 +6568,7 @@ test "Interpreter ret_undefined" {
         @intFromEnum(bytecode.Opcode.ret_undefined),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6601,7 +6603,7 @@ test "Interpreter push_i16" {
         @intFromEnum(bytecode.Opcode.ret),
     };
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -6736,7 +6738,7 @@ test "End-to-end: polymorphic property access" {
         try ctx.materializeShapes(shapes);
     }
 
-    const func = bytecode.FunctionBytecode{
+    var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,

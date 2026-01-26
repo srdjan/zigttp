@@ -31,22 +31,24 @@ pub const JSValue = packed struct {
     /// Payload mask (lower 48 bits)
     const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-    /// Type tag shift (bits 44-47 of raw value)
-    const TYPE_SHIFT: u6 = 44;
+    /// Type tag shift (bits 45-47 of raw value)
+    /// Using 45-bit values to support full 48-bit addresses on ARM64 Linux
+    const TYPE_SHIFT: u6 = 45;
 
-    /// Type tag mask (4 bits = 16 types)
-    const TYPE_MASK: u64 = 0xF << TYPE_SHIFT;
+    /// Type tag mask (3 bits = 8 types)
+    const TYPE_MASK: u64 = 0x7 << TYPE_SHIFT;
 
-    /// Value payload mask (lower 44 bits)
-    const VALUE_MASK: u64 = 0x0000_0FFF_FFFF_FFFF;
+    /// Value payload mask (lower 45 bits)
+    /// With pointer compression (>>3), this supports 48-bit canonical addresses
+    const VALUE_MASK: u64 = 0x0000_1FFF_FFFF_FFFF;
 
-    /// Type tags (4 bits, allowing 16 types)
+    /// Type tags (3 bits, allowing 8 types)
     const TYPE_PTR: u64 = 0x0 << TYPE_SHIFT; // GC-managed pointer
     const TYPE_INT: u64 = 0x1 << TYPE_SHIFT; // 32-bit signed integer
     const TYPE_SPECIAL: u64 = 0x2 << TYPE_SHIFT; // null/undefined/bool/exception
     const TYPE_EXTERN: u64 = 0x3 << TYPE_SHIFT; // Non-GC external pointer
     const TYPE_SYMBOL: u64 = 0x4 << TYPE_SHIFT; // Symbol
-    // Types 5-15 reserved for future use
+    // Types 5-7 reserved for future use
 
     /// Canonical NaN value (JavaScript's NaN)
     const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
@@ -126,23 +128,27 @@ pub const JSValue = packed struct {
 
     /// Create value from pointer
     pub inline fn fromPtr(ptr: *anyopaque) JSValue {
-        // Pointers are assumed to be 48-bit (x86-64/ARM64 canonical addresses)
-        // and 8-byte aligned, so we can store them in 44 bits
+        // Pointers are 8-byte aligned, so we can compress by shifting right 3 bits.
+        // This allows 47-bit addresses (128TB) to fit in 44 bits.
         const addr = @intFromPtr(ptr);
-        std.debug.assert(addr <= VALUE_MASK); // Verify fits in 44 bits
-        return .{ .raw = TAG_PREFIX | TYPE_PTR | addr };
+        std.debug.assert(addr & 0x7 == 0); // Verify 8-byte aligned
+        const compressed = addr >> 3;
+        std.debug.assert(compressed <= VALUE_MASK); // Verify fits in 44 bits
+        return .{ .raw = TAG_PREFIX | TYPE_PTR | compressed };
     }
 
     /// Extract pointer (unsafe - caller must verify isPtr)
     pub inline fn toPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isPtr());
-        return @ptrFromInt(self.raw & VALUE_MASK);
+        // Decompress: shift left 3 bits to restore original address
+        return @ptrFromInt((self.raw & VALUE_MASK) << 3);
     }
 
     /// Get raw pointer address for use as a hash map key
     /// This is useful for identity-based maps like WeakMap
     pub inline fn getPtrAddress(self: JSValue) u64 {
-        return self.raw & VALUE_MASK;
+        // Decompress to get actual address for consistent hashing
+        return (self.raw & VALUE_MASK) << 3;
     }
 
     /// Check if value is a non-GC external pointer
@@ -152,15 +158,19 @@ pub const JSValue = packed struct {
 
     /// Create value from external pointer
     pub inline fn fromExternPtr(ptr: *anyopaque) JSValue {
+        // Compress pointer by shifting right 3 bits (assumes 8-byte alignment)
         const addr = @intFromPtr(ptr);
-        std.debug.assert(addr <= VALUE_MASK);
-        return .{ .raw = TAG_PREFIX | TYPE_EXTERN | addr };
+        std.debug.assert(addr & 0x7 == 0); // Verify 8-byte aligned
+        const compressed = addr >> 3;
+        std.debug.assert(compressed <= VALUE_MASK);
+        return .{ .raw = TAG_PREFIX | TYPE_EXTERN | compressed };
     }
 
     /// Extract external pointer (unsafe - caller must verify isExternPtr)
     pub inline fn toExternPtr(self: JSValue, comptime T: type) *T {
         std.debug.assert(self.isExternPtr());
-        return @ptrFromInt(self.raw & VALUE_MASK);
+        // Decompress: shift left 3 bits to restore original address
+        return @ptrFromInt((self.raw & VALUE_MASK) << 3);
     }
 
     // ========================================================================
@@ -269,9 +279,9 @@ pub const JSValue = packed struct {
         // Check if it's a pointer to a Float64Box
         // This is legacy - new code doesn't create boxed floats
         if (!self.isPtr()) return false;
-        const ptr_val = self.raw & VALUE_MASK;
-        if (ptr_val == 0) return false;
-        const box: *Float64Box = @ptrFromInt(ptr_val);
+        const compressed = self.raw & VALUE_MASK;
+        if (compressed == 0) return false;
+        const box: *Float64Box = @ptrFromInt(compressed << 3);
         return box.header.tag == .float64;
     }
 
@@ -297,7 +307,7 @@ pub const JSValue = packed struct {
         }
         // Legacy boxed float support
         if (self.isBoxedFloat64()) {
-            const box: *Float64Box = @ptrFromInt(self.raw & VALUE_MASK);
+            const box: *Float64Box = @ptrFromInt((self.raw & VALUE_MASK) << 3);
             return box.value;
         }
         // Should not reach here if isFloat64() was checked
@@ -313,7 +323,7 @@ pub const JSValue = packed struct {
             return @bitCast(self.raw);
         }
         if (self.isBoxedFloat64()) {
-            const box: *Float64Box = @ptrFromInt(self.raw & VALUE_MASK);
+            const box: *Float64Box = @ptrFromInt((self.raw & VALUE_MASK) << 3);
             return box.value;
         }
         return null;
@@ -688,9 +698,9 @@ pub const JSValue = packed struct {
                 try writer.print("{d}", .{f});
             }
         } else if (self.isPtr()) {
-            try writer.print("<ptr:0x{x}>", .{self.raw & VALUE_MASK});
+            try writer.print("<ptr:0x{x}>", .{(self.raw & VALUE_MASK) << 3});
         } else if (self.isExternPtr()) {
-            try writer.print("<extern:0x{x}>", .{self.raw & VALUE_MASK});
+            try writer.print("<extern:0x{x}>", .{(self.raw & VALUE_MASK) << 3});
         } else {
             try writer.print("<unknown:0x{x}>", .{self.raw});
         }

@@ -123,11 +123,12 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
-    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer std.posix.close(fd);
+    const file = try std.fs.cwd().openFileZ(path_z, .{});
+    defer file.close();
 
-    const stat = try std.posix.fstat(fd);
+    const stat = try file.stat();
     const file_size: usize = @intCast(@max(0, stat.size));
+    const fd = file.handle;
 
     if (file_size > max_size) return error.FileTooBig;
 
