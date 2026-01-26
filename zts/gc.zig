@@ -1023,6 +1023,7 @@ pub const GC = struct {
             .function_bytecode => {}, // Bytecode is static, constants are in constant pool
             .varref => self.scanVarRef(ptr),
             .byte_array => {}, // Raw bytes don't contain pointers
+            .rope => {}, // Rope nodes - children scanned via string traversal
             .free => {}, // Should not encounter free blocks during marking
         }
     }

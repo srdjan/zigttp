@@ -541,8 +541,6 @@ pub const JSValue = packed struct {
 
     /// Helper: compare two concat ropes by iterating through leaves
     fn ropeEqualsRope(a: *const @import("string.zig").RopeNode, b: *const @import("string.zig").RopeNode) bool {
-        const string = @import("string.zig");
-
         if (a.total_len != b.total_len) return false;
 
         // Simple approach: collect all leaf data from both and compare
@@ -555,10 +553,9 @@ pub const JSValue = packed struct {
     fn ropeEqualsRopeRecursive(
         a: *const @import("string.zig").RopeNode,
         b: *const @import("string.zig").RopeNode,
-        offset_a: *usize,
-        offset_b: *usize,
+        _: *usize,
+        _: *usize,
     ) bool {
-        const string = @import("string.zig");
 
         // Get leaf data from both sides
         const a_leaves = collectLeaves(a);
@@ -596,26 +593,24 @@ pub const JSValue = packed struct {
     /// Helper: collect all leaf strings from a rope (for comparison)
     /// Returns a bounded array - won't work for very deep ropes
     fn collectLeaves(node: *const @import("string.zig").RopeNode) []const *const @import("string.zig").JSString {
-        const string = @import("string.zig");
-
         // Use a static buffer for simplicity - real implementation would use allocator
         const max_leaves = 64;
         const LeafArray = struct {
-            var leaves: [max_leaves]*const string.JSString = undefined;
+            var leaves: [max_leaves]*const @import("string.zig").JSString = undefined;
             var count: usize = 0;
 
             fn reset() void {
                 count = 0;
             }
 
-            fn add(s: *const string.JSString) void {
+            fn add(s: *const @import("string.zig").JSString) void {
                 if (count < max_leaves) {
                     leaves[count] = s;
                     count += 1;
                 }
             }
 
-            fn get() []const *const string.JSString {
+            fn get() []const *const @import("string.zig").JSString {
                 return leaves[0..count];
             }
         };
@@ -629,8 +624,6 @@ pub const JSValue = packed struct {
         node: *const @import("string.zig").RopeNode,
         addFn: *const fn (*const @import("string.zig").JSString) void,
     ) void {
-        const string = @import("string.zig");
-
         switch (node.kind) {
             .leaf => addFn(node.payload.leaf),
             .concat => {
