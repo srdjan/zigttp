@@ -492,6 +492,16 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// SXTW Xd, Wn - Sign-extend 32-bit to 64-bit
+    pub fn sxtwRegReg(self: *Arm64Emitter, dst: Register, src: Register) !void {
+        // SBFM Xd, Xn, #0, #31 (SXTW is an alias)
+        // sf=1, opc=00, N=1, immr=0, imms=31
+        const inst: u32 = 0x93407C00 |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     /// LSL Xd, Xn, #imm (logical shift left by immediate)
     pub fn lslRegImm(self: *Arm64Emitter, dst: Register, src: Register, imm: u6) !void {
         // UBFM Xd, Xn, #(-shift MOD 64), #(63-shift) (LSL is an alias)

@@ -592,8 +592,13 @@ pub const BaselineCompiler = struct {
         return idx;
     }
 
-    /// Emit specialized integer binary operation when type feedback shows both operands are SMI.
-    /// Guards SMI tags and deoptimizes on mismatch. On overflow, falls back to slow path helper.
+    // NaN-boxing integer tag: TAG_PREFIX | TYPE_INT = 0xFFFD_0000_0000_0000
+    const INT_TAG: u64 = 0xFFFD_0000_0000_0000;
+    // Mask for checking integer type: upper 20 bits
+    const INT_TYPE_MASK: u64 = 0xFFFF_F000_0000_0000;
+
+    /// Emit specialized integer binary operation when type feedback shows both operands are integers.
+    /// Guards integer type and deoptimizes on mismatch. On overflow, falls back to slow path helper.
     fn emitSpecializedIntBinaryOp(self: *BaselineCompiler, op: BinaryOp, bytecode_offset: u32) CompileError!void {
         _ = bytecode_offset; // Used only for deopt, which we no longer do for type mismatch
         if (is_x86_64) {
@@ -619,19 +624,24 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r8, .rax) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.r9, .rcx) catch return CompileError.OutOfMemory;
 
-            // Guard SMI tags (LSB == 0)
-            self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            // Guard NaN-boxed integer type: (value & INT_TYPE_MASK) == INT_TAG
+            self.emitter.movRegImm64(.r10, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.r11, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.r11, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r10, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r11, .r10) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, try_float);
-            self.emitter.movRegReg(.r10, .rcx) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            // Check b
+            self.emitter.movRegImm64(.r10, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.r11, .rcx) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.r11, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r10, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r11, .r10) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, try_float);
 
-            // Unbox: shift right arithmetic by 1
-            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
-            self.emitter.sarRegImm(.rcx, 1) catch return CompileError.OutOfMemory;
+            // Unbox: sign-extend lower 32 bits (NaN-boxing stores i32 in lower 32 bits)
+            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rcx, .ecx) catch return CompileError.OutOfMemory;
 
             // Perform operation with overflow check
             switch (op) {
@@ -649,8 +659,9 @@ pub const BaselineCompiler = struct {
                 },
             }
 
-            // Rebox: shift left by 1
-            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            // Rebox: OR with INT_TAG (result in lower 32 bits, just add the tag)
+            self.emitter.movRegImm64(.r10, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.orRegReg(.rax, .r10) catch return CompileError.OutOfMemory;
             try self.emitJmpToLabel(store_result);
 
             // Overflow slow path: call helper (integer overflow produces float)
@@ -752,17 +763,20 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x13, .x10) catch return CompileError.OutOfMemory;
 
-            // Guard SMI tags (LSB == 0)
-            self.emitter.andRegImm(.x14, .x9, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x14, 0) catch return CompileError.OutOfMemory;
+            // Guard NaN-boxed integer type: (value & INT_TYPE_MASK) == INT_TAG
+            self.emitter.movRegImm64(.x14, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x11, .x9, .x14) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x11, .x15) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, try_float);
-            self.emitter.andRegImm(.x14, .x10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x14, 0) catch return CompileError.OutOfMemory;
+            // Check b
+            self.emitter.andRegReg(.x11, .x10, .x14) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x11, .x15) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, try_float);
 
-            // Unbox: arithmetic shift right by 1
-            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
-            self.emitter.asrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            // Unbox: sign-extend lower 32 bits (NaN-boxing stores i32 in lower 32 bits)
+            self.emitter.sxtwRegReg(.x9, .x9) catch return CompileError.OutOfMemory;
+            self.emitter.sxtwRegReg(.x10, .x10) catch return CompileError.OutOfMemory;
 
             // Perform operation with overflow check
             switch (op) {
@@ -776,16 +790,16 @@ pub const BaselineCompiler = struct {
                 },
                 .mul => {
                     self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    // Check i31 range: (x9 << 33) >> 33 == x9
-                    self.emitter.lslRegImm(.x11, .x9, 33) catch return CompileError.OutOfMemory;
-                    self.emitter.asrRegImm(.x11, .x11, 33) catch return CompileError.OutOfMemory;
+                    // Check i32 range: sign-extend and compare
+                    self.emitter.sxtwRegReg(.x11, .x9) catch return CompileError.OutOfMemory;
                     self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
                     try self.emitBcondToLabel(.ne, overflow_slow);
                 },
             }
 
-            // Rebox: shift left by 1
-            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            // Rebox: OR with INT_TAG
+            self.emitter.movRegImm64(.x11, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.orrRegReg(.x9, .x9, .x11) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x0, .x9) catch return CompileError.OutOfMemory;
             try self.emitJmpToLabel(store_result);
 
@@ -2475,16 +2489,22 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.r8, .rax) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.r9, .rcx) catch return CompileError.OutOfMemory;
 
-            // Tag guard: both ints (LSB == 0)
+            // Tag guard: both NaN-boxed integers
+            // Check: (value & INT_TYPE_MASK) == INT_TAG for both
+            self.emitter.movRegImm64(.r10, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r11, INT_TAG) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rdx, .rax) catch return CompileError.OutOfMemory;
-            self.emitter.orRegReg(.rdx, .rcx) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.rdx, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.rdx, 0) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.rdx, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rdx, .r11) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.ne, slow);
+            self.emitter.movRegReg(.rdx, .rcx) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.rdx, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rdx, .r11) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Unbox
-            self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory;
-            self.emitter.sarRegImm(.rcx, 1) catch return CompileError.OutOfMemory;
+            // Unbox: sign-extend lower 32 bits
+            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rcx, .ecx) catch return CompileError.OutOfMemory;
 
             switch (op) {
                 .add => {
@@ -2501,8 +2521,9 @@ pub const BaselineCompiler = struct {
                 },
             }
 
-            // Rebox
-            self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory;
+            // Rebox: OR with INT_TAG
+            self.emitter.movRegImm64(.r10, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.orRegReg(.rax, .r10) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.rax);
             try self.emitJmpToLabel(done);
 
@@ -2532,15 +2553,19 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x12, .x9) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.x13, .x10) catch return CompileError.OutOfMemory;
 
-            // Tag guard: both ints
-            self.emitter.orrRegReg(.x11, .x9, .x10) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm(.x11, .x11, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x11, 0) catch return CompileError.OutOfMemory;
+            // Tag guard: both NaN-boxed integers
+            self.emitter.movRegImm64(.x14, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x11, .x9, .x14) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x11, .x15) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+            self.emitter.andRegReg(.x11, .x10, .x14) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x11, .x15) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Unbox
-            self.emitter.asrRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
-            self.emitter.asrRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            // Unbox: sign-extend lower 32 bits
+            self.emitter.sxtwRegReg(.x9, .x9) catch return CompileError.OutOfMemory;
+            self.emitter.sxtwRegReg(.x10, .x10) catch return CompileError.OutOfMemory;
 
             switch (op) {
                 .add => {
@@ -2553,16 +2578,16 @@ pub const BaselineCompiler = struct {
                 },
                 .mul => {
                     self.emitter.mulRegReg(.x9, .x9, .x10) catch return CompileError.OutOfMemory;
-                    // Check i31 range: (x9 << 33) >> 33 == x9
-                    self.emitter.lslRegImm(.x11, .x9, 33) catch return CompileError.OutOfMemory;
-                    self.emitter.asrRegImm(.x11, .x11, 33) catch return CompileError.OutOfMemory;
+                    // Check i32 range
+                    self.emitter.sxtwRegReg(.x11, .x9) catch return CompileError.OutOfMemory;
                     self.emitter.cmpRegReg(.x9, .x11) catch return CompileError.OutOfMemory;
                     try self.emitBcondToLabel(.ne, slow);
                 },
             }
 
-            // Rebox
-            self.emitter.lslRegImm(.x9, .x9, 1) catch return CompileError.OutOfMemory;
+            // Rebox: OR with INT_TAG
+            self.emitter.movRegImm64(.x11, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.orrRegReg(.x9, .x9, .x11) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x9);
             try self.emitJmpToLabel(done);
 
