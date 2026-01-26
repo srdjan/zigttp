@@ -609,17 +609,18 @@ pub const BaselineCompiler = struct {
     fn emitExtractPtr(self: *BaselineCompiler, dst_reg: Register, src_reg: Register) CompileError!void {
         if (is_x86_64) {
             // Load PTR_EXTRACT_MASK into scratch, AND with src, store to dst
+            // Use r11 as scratch when dst is r10, otherwise use r10
+            const scratch: Register = if (dst_reg == .r10) .r11 else .r10;
             if (dst_reg != src_reg) {
                 self.emitter.movRegReg(dst_reg, src_reg) catch return CompileError.OutOfMemory;
             }
-            // Use r10 as scratch for the mask
-            self.emitter.movRegImm64(.r10, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
-            self.emitter.andRegReg(dst_reg, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(scratch, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(dst_reg, scratch) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            // On ARM64, use x9 as scratch for the mask
-            // ARM64 AND requires 3-operand form: dst = src1 AND src2
-            self.emitter.movRegImm64(.x9, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
-            self.emitter.andRegReg(dst_reg, src_reg, .x9) catch return CompileError.OutOfMemory;
+            // On ARM64, use x10 as scratch when dst is x9, otherwise use x9
+            const scratch: Register = if (dst_reg == .x9) .x10 else .x9;
+            self.emitter.movRegImm64(scratch, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(dst_reg, src_reg, scratch) catch return CompileError.OutOfMemory;
         }
     }
 
@@ -921,9 +922,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r9, .r8);
 
             // Check MemTag.object in header
             self.emitter.movRegMem32(.r10, .r9, 0) catch return CompileError.OutOfMemory;
@@ -967,9 +967,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.lsrRegImm(.x9, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x9, .x12);
 
             // Skip MemTag check - pointer tag already confirms object pointer
             // Hidden class check will catch any type mismatches
@@ -1019,9 +1018,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r10, .r9);
 
             // Check MemTag.object in header
             self.emitter.movRegMem32(.r11, .r10, 0) catch return CompileError.OutOfMemory;
@@ -1065,9 +1063,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.lsrRegImm(.x9, .x13, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x9, .x13);
 
             // Skip MemTag check - pointer tag already confirms object pointer
             // Hidden class check will catch any type mismatches
@@ -2742,9 +2739,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r9, .r8);
 
             // Check MemTag.object in header
             self.emitter.movRegMem32(.r11, .r9, 0) catch return CompileError.OutOfMemory;
@@ -2765,8 +2761,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r10, 7) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Extract pointer and load builtin_id (u8) from arg_count/builtin_id word
-            self.emitter.andRegImm32(.r11, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract extern pointer and load builtin_id (u8) from arg_count/builtin_id word
+            try self.emitExtractPtr(.r11, .r11);
             self.emitter.movzxRegMem16(.r10, .r11, NATIVE_ARGCOUNT_OFF) catch return CompileError.OutOfMemory;
             self.emitter.shrRegImm32(.r10, 8) catch return CompileError.OutOfMemory;
 
@@ -3133,9 +3129,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x11, .x12);
 
             // Check MemTag.object in header
             self.emitter.ldrImmW(.x10, .x11, 0) catch return CompileError.OutOfMemory;
@@ -3155,9 +3150,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x9, 7) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Extract pointer and load builtin_id (u8) from arg_count/builtin_id word
-            self.emitter.lsrRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x10, .x10, 3) catch return CompileError.OutOfMemory;
+            // Extract extern pointer and load builtin_id (u8) from arg_count/builtin_id word
+            try self.emitExtractPtr(.x10, .x10);
             self.emitter.ldrImmW(.x9, .x10, NATIVE_ARGCOUNT_OFF) catch return CompileError.OutOfMemory;
             self.emitter.lsrRegImm(.x9, .x9, 8) catch return CompileError.OutOfMemory;
             self.emitter.lslRegImm(.x9, .x9, 56) catch return CompileError.OutOfMemory;
@@ -3467,9 +3461,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r9, .r8);
 
             // Load guard_id from FUNC_GUARD_ID slot and compare
             // Single 64-bit comparison replaces 5 sequential checks
@@ -3508,9 +3501,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x11, .x12);
 
             // Load guard_id from FUNC_GUARD_ID slot and compare
             // Single 64-bit comparison replaces 5 sequential checks
@@ -3689,9 +3681,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, deopt_label);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r9, .r8);
 
             // Load guard_id and compare - single check replaces 5 sequential checks
             self.emitter.movRegMem(.r11, .r9, OBJ_FUNC_GUARD_ID_OFF) catch return CompileError.OutOfMemory;
@@ -3713,9 +3704,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x11, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, deopt_label);
 
-            // Extract object pointer (clear low 3 bits)
-            self.emitter.lsrRegImm(.x11, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x11, .x11, 3) catch return CompileError.OutOfMemory;
+            // Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x11, .x12);
 
             // Load guard_id and compare - single check replaces 5 sequential checks
             self.emitter.ldrImm(.x10, .x11, OBJ_FUNC_GUARD_ID_OFF) catch return CompileError.OutOfMemory;
@@ -4641,9 +4631,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r9, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Step 2: Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r9, .r8) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r9, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory; // ~0x7
+            // Step 2: Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r9, .r8);
             // r9 = object pointer
 
             // Step 3: Check MemTag.object in header
@@ -4752,10 +4741,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Step 2: Extract object pointer (clear low 3 bits)
-            // Use shift right then left to clear low 3 bits: (val >> 3) << 3
-            self.emitter.lsrRegImm(.x9, .x12, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
+            // Step 2: Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x9, .x12);
             // x9 = object pointer
 
             // Step 3: Check MemTag.object in header
@@ -4902,9 +4889,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Step 2: Extract object pointer (clear low 3 bits)
-            self.emitter.movRegReg(.r10, .r9) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, @bitCast(@as(i32, -8))) catch return CompileError.OutOfMemory; // ~0x7
+            // Step 2: Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.r10, .r9);
             // r10 = object pointer
 
             // Step 3: Check MemTag.object in header
@@ -5011,10 +4997,8 @@ pub const BaselineCompiler = struct {
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Step 2: Extract object pointer (clear low 3 bits)
-            // Use shift right then left to clear low 3 bits: (val >> 3) << 3
-            self.emitter.lsrRegImm(.x9, .x13, 3) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x9, .x9, 3) catch return CompileError.OutOfMemory;
+            // Step 2: Extract object pointer (clear TAG_PREFIX and low 3 bits)
+            try self.emitExtractPtr(.x9, .x13);
             // x9 = object pointer
 
             // Step 3: Check MemTag.object in header
