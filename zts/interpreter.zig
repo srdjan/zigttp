@@ -3953,6 +3953,23 @@ pub export fn jitForOfNext(ctx: *context.Context) u64 {
                 return 1; // Continue iteration
             }
         }
+        // Range iterator fast path
+        else if (idx >= 0 and obj.class_id == .range_iterator) {
+            const idx_u: u32 = @intCast(idx);
+            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+            if (idx_u < len) {
+                // Compute element: start + idx * step
+                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                const element = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
+                // Update index on stack
+                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                // Push element
+                ctx.stack[sp] = element;
+                ctx.sp = sp + 1;
+                return 1; // Continue iteration
+            }
+        }
     }
     return 0; // Done (or error)
 }
@@ -3979,6 +3996,22 @@ pub export fn jitForOfNextPutLoc(ctx: *context.Context, local_idx: u8) u64 {
             if (idx_u < len) {
                 // Get element
                 const element = obj.getIndexUnchecked(idx_u);
+                // Update index on stack
+                ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                // Store to local (no push)
+                ctx.stack[fp + local_idx] = element;
+                return 1; // Continue iteration
+            }
+        }
+        // Range iterator fast path
+        else if (idx >= 0 and obj.class_id == .range_iterator) {
+            const idx_u: u32 = @intCast(idx);
+            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+            if (idx_u < len) {
+                // Compute element: start + idx * step
+                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                const element = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
                 // Update index on stack
                 ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
                 // Store to local (no push)

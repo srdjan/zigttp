@@ -1930,18 +1930,27 @@ pub const OptimizedCompiler = struct {
     fn emitForOfNext(self: *OptimizedCompiler, target: u32) CompileError!void {
         const fn_ptr = @intFromPtr(&Context.jitForOfNext);
         if (is_x86_64) {
+            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
+            self.emitter.movMemReg(.rbx, CTX_SP_OFF, getSpCacheReg()) catch return CompileError.OutOfMemory;
             // ctx is in rbx
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            // Reload sp cache after helper call
+            self.emitter.movRegMem(getSpCacheReg(), .rbx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
             // Result in rax: 0 = done, 1 = continue
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
         } else if (is_aarch64) {
+            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
+            const sp_off: i12 = @intCast(@as(u32, @bitCast(CTX_SP_OFF)));
+            self.emitter.strImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
             // ctx is in x19
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            // Reload sp cache after helper call
+            self.emitter.ldrImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
         }
@@ -1950,20 +1959,29 @@ pub const OptimizedCompiler = struct {
     fn emitForOfNextPutLoc(self: *OptimizedCompiler, local_idx: u8, target: u32) CompileError!void {
         const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
         if (is_x86_64) {
+            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
+            self.emitter.movMemReg(.rbx, CTX_SP_OFF, getSpCacheReg()) catch return CompileError.OutOfMemory;
             // ctx is in rbx
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            // Reload sp cache after helper call
+            self.emitter.movRegMem(getSpCacheReg(), .rbx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
             // Result in rax: 0 = done, 1 = continue
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
         } else if (is_aarch64) {
+            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
+            const sp_off: i12 = @intCast(@as(u32, @bitCast(CTX_SP_OFF)));
+            self.emitter.strImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
             // ctx is in x19
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            // Reload sp cache after helper call
+            self.emitter.ldrImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
         }
