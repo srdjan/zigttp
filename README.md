@@ -487,11 +487,11 @@ Run benchmarks with: `./zig-out/bin/zigttp-bench`
 
 ### HTTP Throughput (Deno baseline)
 
-| Endpoint         | Deno (baseline) | zigttp     | Difference |
-| ---------------- | --------------- | ---------- | ---------- |
-| /api/health      | 25,178 RPS      | 25,282 RPS | +0.4%      |
-| /api/echo        | 19,984 RPS      | 25,188 RPS | +26%       |
-| /api/greet/world | 24,907 RPS      | 24,911 RPS | +0.01%     |
+| Endpoint         | zigttp      | Deno (baseline) | Ratio         |
+| ---------------- | ----------- | --------------- | ------------- |
+| /api/health      | 104,147 RPS | 104,672 RPS     | 99.5%         |
+| /api/echo        | 102,539 RPS | 63,699 RPS      | 161% (+60.9%) |
+| /api/greet/world | 67,183 RPS  | 104,963 RPS     | 64%           |
 
 Note: JIT compilation is enabled by default for hot functions (after
 `JIT_THRESHOLD` executions). Optional instrumentation (perf.zig) and parallel
