@@ -107,7 +107,8 @@ const ConnectionPool = struct {
     server: *Server,
     allocator: std.mem.Allocator,
 
-    const QUEUE_SIZE = 256;
+    // Increased from 256 to handle burst traffic without rejecting connections
+    const QUEUE_SIZE = 4096;
 
     const WorkItem = struct {
         stream_fd: std.posix.fd_t,
@@ -158,7 +159,9 @@ const ConnectionPool = struct {
 
             while (self.count.load(.acquire) == 0) {
                 if (!running.load(.acquire)) return null;
-                self.not_full.timedWait(&self.mutex, 100 * std.time.ns_per_ms) catch {};
+                // BUG FIX: Was waiting on not_full, should wait on not_empty
+                // Reduced timeout from 100ms to 1ms for faster wake-up
+                self.not_empty.timedWait(&self.mutex, 1 * std.time.ns_per_ms) catch {};
             }
 
             if (self.count.load(.acquire) == 0) return null;
@@ -227,6 +230,10 @@ const ConnectionPool = struct {
 
     fn handleConnection(self: *ConnectionPool, fd: std.posix.fd_t) void {
         defer std.posix.close(fd);
+
+        // TCP_NODELAY: disable Nagle's algorithm for lower latency
+        // This reduces response latency by sending data immediately
+        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -300,8 +307,15 @@ const ConnectionPool = struct {
     }
 
     fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
-        var buffer: std.ArrayList(u8) = .empty;
-        errdefer buffer.deinit(allocator);
+        // OPTIMIZATION: Use stack buffer for common case (small requests)
+        // Most HTTP requests are under 8KB - avoid heap allocation entirely
+        // 16KB stack buffer handles headers + typical small bodies in single read
+        var stack_buf: [16384]u8 = undefined;
+        var stack_len: usize = 0;
+
+        // For requests larger than stack buffer, fall back to heap
+        var heap_buf: ?[]u8 = null;
+        errdefer if (heap_buf) |h| allocator.free(h);
 
         const max_header_bytes: usize = 32 * 1024;
         var header_end: ?usize = null;
@@ -309,33 +323,79 @@ const ConnectionPool = struct {
         var total_needed: usize = 0;
 
         while (true) {
-            var chunk: [4096]u8 = undefined;
-            const n = std.posix.read(fd, &chunk) catch |err| {
+            // Read directly into appropriate buffer
+            const read_buf = if (heap_buf) |h|
+                h[stack_len..]
+            else if (stack_len < stack_buf.len)
+                stack_buf[stack_len..]
+            else {
+                // Need to switch to heap - allocate and copy
+                const new_size = @max(stack_buf.len * 2, total_needed);
+                heap_buf = try allocator.alloc(u8, new_size);
+                @memcpy(heap_buf.?[0..stack_len], stack_buf[0..stack_len]);
+                continue;
+            };
+
+            if (read_buf.len == 0) {
+                // Need more space - grow heap buffer
+                const old = heap_buf.?;
+                const new_size = old.len * 2;
+                heap_buf = try allocator.alloc(u8, new_size);
+                @memcpy(heap_buf.?[0..stack_len], old[0..stack_len]);
+                allocator.free(old);
+                continue;
+            }
+
+            const n = std.posix.read(fd, read_buf) catch |err| {
                 if (err == error.ConnectionResetByPeer or err == error.WouldBlock) return err;
                 return err;
             };
             if (n == 0) return error.EndOfStream;
-            try buffer.appendSlice(allocator, chunk[0..n]);
+            stack_len += n;
+
+            const current_data = if (heap_buf) |h| h[0..stack_len] else stack_buf[0..stack_len];
 
             if (header_end == null) {
-                if (findHeaderEnd(buffer.items)) |offset| {
+                if (findHeaderEnd(current_data)) |offset| {
                     header_end = offset;
                     const body_start = offset + 4;
-                    content_length = parseContentLength(buffer.items[0..offset]) orelse 0;
+                    content_length = parseContentLength(current_data[0..offset]) orelse 0;
                     if (content_length > self.server.config.max_body_size) {
                         return error.FileTooBig;
                     }
                     total_needed = body_start + content_length;
-                    if (buffer.items.len >= total_needed) break;
-                } else if (buffer.items.len > max_header_bytes) {
+
+                    // Pre-allocate heap if we know we need it
+                    if (total_needed > stack_buf.len and heap_buf == null) {
+                        heap_buf = try allocator.alloc(u8, total_needed);
+                        @memcpy(heap_buf.?[0..stack_len], stack_buf[0..stack_len]);
+                    }
+
+                    if (stack_len >= total_needed) break;
+                } else if (stack_len > max_header_bytes) {
                     return error.InvalidRequest;
                 }
-            } else if (buffer.items.len >= total_needed) {
+            } else if (stack_len >= total_needed) {
                 break;
             }
         }
 
-        return buffer.toOwnedSlice(allocator);
+        // Return data - copy from stack to heap if needed
+        if (heap_buf) |h| {
+            // Shrink to exact size if needed
+            if (stack_len < h.len) {
+                const result = try allocator.alloc(u8, stack_len);
+                @memcpy(result, h[0..stack_len]);
+                allocator.free(h);
+                return result;
+            }
+            return h[0..stack_len];
+        } else {
+            // Copy from stack to heap (caller owns the memory)
+            const result = try allocator.alloc(u8, stack_len);
+            @memcpy(result, stack_buf[0..stack_len]);
+            return result;
+        }
     }
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
@@ -356,9 +416,14 @@ const ConnectionPool = struct {
         var header_buf: [8192]u8 = undefined;
         var pos: usize = 0;
 
-        // Write status line
-        const status_line = std.fmt.bufPrint(header_buf[pos..], "HTTP/1.1 {d} {s}\r\n", .{ response.status, getStatusText(response.status) }) catch return error.BufferOverflow;
-        pos += status_line.len;
+        // Write status line - use pre-computed for common codes (avoids fmt.bufPrint)
+        if (getStatusLine(response.status)) |precomputed| {
+            @memcpy(header_buf[0..precomputed.len], precomputed);
+            pos = precomputed.len;
+        } else {
+            const status_line = std.fmt.bufPrint(header_buf[pos..], "HTTP/1.1 {d} {s}\r\n", .{ response.status, getStatusText(response.status) }) catch return error.BufferOverflow;
+            pos += status_line.len;
+        }
 
         // Write headers
         for (response.headers.items) |h| {
@@ -672,8 +737,10 @@ pub const Server = struct {
         });
 
         // Initialize connection thread pool on macOS (where we use threaded I/O)
+        // Use 2x CPU count for better throughput (workers may block on I/O)
         if (!useEventedBackend()) {
-            const worker_count = std.Thread.getCpuCount() catch 4;
+            const cpu_count = std.Thread.getCpuCount() catch 4;
+            const worker_count = cpu_count * 2;
             self.conn_pool = try ConnectionPool.init(self.allocator, self, worker_count);
             std.log.info("   Connection pool: {d} workers", .{worker_count});
         }
@@ -1771,6 +1838,24 @@ fn getStatusText(status: u16) []const u8 {
     };
 }
 
+/// Pre-computed status lines for common status codes.
+/// Avoids fmt.bufPrint overhead in hot path.
+fn getStatusLine(status: u16) ?[]const u8 {
+    return switch (status) {
+        200 => "HTTP/1.1 200 OK\r\n",
+        201 => "HTTP/1.1 201 Created\r\n",
+        204 => "HTTP/1.1 204 No Content\r\n",
+        301 => "HTTP/1.1 301 Moved Permanently\r\n",
+        302 => "HTTP/1.1 302 Found\r\n",
+        304 => "HTTP/1.1 304 Not Modified\r\n",
+        400 => "HTTP/1.1 400 Bad Request\r\n",
+        404 => "HTTP/1.1 404 Not Found\r\n",
+        500 => "HTTP/1.1 500 Internal Server Error\r\n",
+        503 => "HTTP/1.1 503 Service Unavailable\r\n",
+        else => null,
+    };
+}
+
 /// Validate that a path is safe (no traversal, no absolute paths)
 fn isPathSafe(path: []const u8) bool {
     // Reject empty paths
@@ -1816,9 +1901,10 @@ fn getContentType(path: []const u8) []const u8 {
 
 fn defaultPoolSize() usize {
     const cpu_count = std.Thread.getCpuCount() catch 1;
-    const min_pool: usize = 8;
-    const max_pool: usize = 64;
-    const base = cpu_count * 2;
+    const min_pool: usize = 16;
+    const max_pool: usize = 128;
+    // Pool size = cpu * 4 to handle connection bursts (2x workers, 2x headroom)
+    const base = cpu_count * 4;
     if (base < min_pool) return min_pool;
     if (base > max_pool) return max_pool;
     return base;
