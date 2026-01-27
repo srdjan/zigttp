@@ -528,6 +528,9 @@ pub const HandlerPattern = struct {
     static_body: []const u8, // Pre-serialized JSON body
     status: u16,
     content_type_idx: u8, // 0=json, 1=text, 2=html
+    /// Pre-built complete HTTP response (status line + headers + body)
+    /// When set, can be written directly without any header construction
+    prebuilt_response: ?[]const u8 = null,
 
     pub fn deinit(self: *HandlerPattern, allocator: std.mem.Allocator) void {
         if (self.url_bytes.len > 0) {
@@ -536,8 +539,82 @@ pub const HandlerPattern = struct {
         if (self.static_body.len > 0) {
             allocator.free(self.static_body);
         }
+        if (self.prebuilt_response) |prebuilt| {
+            allocator.free(prebuilt);
+        }
+    }
+
+    /// Build the pre-serialized HTTP response for static patterns.
+    /// Should be called after pattern analysis to enable zero-copy fast path.
+    pub fn buildPrebuiltResponse(self: *HandlerPattern, allocator: std.mem.Allocator) !void {
+        if (self.pattern_type != .exact) return; // Only for exact matches
+
+        const content_type = switch (self.content_type_idx) {
+            0 => "application/json",
+            1 => "text/plain; charset=utf-8",
+            else => "text/html; charset=utf-8",
+        };
+        const status_text = getStatusText(self.status);
+
+        // Calculate total size needed
+        // "HTTP/1.1 XXX STATUS\r\nContent-Type: ...\r\nContent-Length: NNN\r\nConnection: keep-alive\r\n\r\nBODY"
+        var size: usize = 0;
+        size += 9; // "HTTP/1.1 "
+        size += 3; // status code
+        size += 1; // space
+        size += status_text.len;
+        size += 2; // \r\n
+        size += 14 + content_type.len + 2; // "Content-Type: " + value + \r\n
+        size += 16 + 10 + 2; // "Content-Length: " + max 10 digits + \r\n
+        size += 24; // "Connection: keep-alive\r\n"
+        size += 2; // \r\n (end of headers)
+        size += self.static_body.len;
+
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+
+        // Build the response
+        var pos: usize = 0;
+        const response = std.fmt.bufPrint(buf, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: keep-alive\r\n\r\n", .{
+            self.status,
+            status_text,
+            content_type,
+            self.static_body.len,
+        }) catch unreachable;
+        pos = response.len;
+
+        // Append body
+        @memcpy(buf[pos..][0..self.static_body.len], self.static_body);
+        pos += self.static_body.len;
+
+        // Trim to actual size
+        self.prebuilt_response = try allocator.realloc(buf, pos);
     }
 };
+
+/// Get HTTP status text
+fn getStatusText(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        else => "Unknown",
+    };
+}
 
 /// Fast dispatch table for handler
 pub const PatternDispatchTable = struct {

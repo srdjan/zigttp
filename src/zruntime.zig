@@ -118,6 +118,9 @@ pub const HttpResponse = struct {
     body_owned: bool,
     body_owner: ?*zq.JSString,
     allocator: std.mem.Allocator,
+    /// Pre-built raw HTTP response (status line + headers + body).
+    /// When set, sendResponseSync can write this directly without any processing.
+    prebuilt_raw: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) HttpResponse {
         return .{
@@ -127,6 +130,7 @@ pub const HttpResponse = struct {
             .body_owned = false,
             .body_owner = null,
             .allocator = allocator,
+            .prebuilt_raw = null,
         };
     }
 
@@ -688,6 +692,16 @@ pub const Runtime = struct {
         var response = HttpResponse.init(self.allocator);
         response.status = pattern.status;
 
+        // OPTIMIZATION: Use pre-built raw response if available (single write, no header construction)
+        if (pattern.prebuilt_response) |prebuilt| {
+            response.prebuilt_raw = prebuilt;
+            // Still set body for logging/debugging purposes
+            response.body = pattern.static_body;
+            response.body_owned = false;
+            return response;
+        }
+
+        // Fallback: construct response normally
         if (borrow_body) {
             response.body = pattern.static_body;
             response.body_owned = false;

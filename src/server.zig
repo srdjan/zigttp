@@ -255,9 +255,9 @@ const ConnectionPool = struct {
         var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return false;
         defer request.deinit(req_allocator);
 
-        // Check keep-alive
+        // Check keep-alive using fast header slot
         const client_wants_keep_alive = blk: {
-            if (findHeaderValue(request.headers.items, "connection")) |conn| {
+            if (request.connection) |conn| {
                 break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
             }
             break :blk true;
@@ -338,7 +338,20 @@ const ConnectionPool = struct {
 
     fn sendResponseSync(self: *ConnectionPool, fd: std.posix.fd_t, response: *HttpResponse, keep_alive: bool) !void {
         _ = self;
-        var header_buf: [4096]u8 = undefined;
+
+        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction)
+        // Note: prebuilt responses use Connection: keep-alive, which is the common case
+        if (response.prebuilt_raw) |prebuilt| {
+            if (keep_alive) {
+                // Prebuilt response already has keep-alive, write directly
+                try writeAllFd(fd, prebuilt);
+                return;
+            }
+            // For close, we'd need to modify the prebuilt - fall through to normal path
+        }
+
+        // Increased buffer to 8KB to fit headers + most response bodies in single write
+        var header_buf: [8192]u8 = undefined;
         var pos: usize = 0;
 
         // Write status line
@@ -364,12 +377,22 @@ const ConnectionPool = struct {
         @memcpy(header_buf[pos..][0..2], "\r\n");
         pos += 2;
 
-        // Send headers
-        try writeAllFd(fd, header_buf[0..pos]);
-
-        // Send body
-        if (response.body.len > 0) {
-            try writeAllFd(fd, response.body);
+        // OPTIMIZATION: Combine headers + body in single syscall
+        if (response.body.len > 0 and pos + response.body.len <= header_buf.len) {
+            // Body fits in remaining buffer space - single memcpy + write
+            @memcpy(header_buf[pos..][0..response.body.len], response.body);
+            pos += response.body.len;
+            try writeAllFd(fd, header_buf[0..pos]);
+        } else if (response.body.len > 0) {
+            // Body too large - use writev scatter-gather (single syscall, no copy)
+            var iovecs: [2]std.posix.iovec_const = .{
+                .{ .base = &header_buf, .len = pos },
+                .{ .base = response.body.ptr, .len = response.body.len },
+            };
+            try writevAllFd(fd, &iovecs);
+        } else {
+            // Empty body - just headers
+            try writeAllFd(fd, header_buf[0..pos]);
         }
     }
 
@@ -400,6 +423,45 @@ fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
         const n: usize = @intCast(result);
         if (n == 0) return error.WriteFailed;
         remaining = remaining[n..];
+    }
+}
+
+/// Write multiple buffers to fd using writev() scatter-gather I/O.
+/// Avoids copying multiple buffers into one before writing.
+fn writevAllFd(fd: std.posix.fd_t, iovecs: []std.posix.iovec_const) !void {
+    var remaining_iovecs = iovecs;
+    var first_offset: usize = 0;
+
+    while (remaining_iovecs.len > 0) {
+        // Adjust first iovec if we had a partial write
+        var adjusted = remaining_iovecs;
+        if (first_offset > 0) {
+            adjusted[0].base = @ptrCast(@as([*]const u8, @ptrCast(adjusted[0].base)) + first_offset);
+            adjusted[0].len -= first_offset;
+        }
+
+        const result = std.c.writev(fd, adjusted.ptr, @intCast(@min(adjusted.len, std.math.maxInt(c_int))));
+        if (result < 0) return error.WriteFailed;
+        const n: usize = @intCast(result);
+        if (n == 0) return error.WriteFailed;
+
+        // Advance through iovecs based on bytes written
+        var bytes_remaining = n;
+        while (bytes_remaining > 0 and remaining_iovecs.len > 0) {
+            const current_len = if (first_offset > 0)
+                remaining_iovecs[0].len - first_offset
+            else
+                remaining_iovecs[0].len;
+
+            if (bytes_remaining >= current_len) {
+                bytes_remaining -= current_len;
+                remaining_iovecs = remaining_iovecs[1..];
+                first_offset = 0;
+            } else {
+                first_offset += bytes_remaining;
+                bytes_remaining = 0;
+            }
+        }
     }
 }
 
@@ -767,8 +829,9 @@ pub const Server = struct {
         defer request.deinit(req_allocator);
 
         // Determine if client wants keep-alive (HTTP/1.1 defaults to keep-alive)
+        // Uses fast header slot instead of O(n) lookup
         const client_wants_keep_alive = blk: {
-            if (findHeaderValue(request.headers.items, "connection")) |conn| {
+            if (request.connection) |conn| {
                 break :blk std.ascii.eqlIgnoreCase(conn, "keep-alive");
             }
             // HTTP/1.1 defaults to keep-alive
@@ -908,8 +971,11 @@ pub const Server = struct {
         const url = try copyToStorage(string_storage, &storage_offset, url_slice);
 
         // Read headers (with count limit for DOS protection)
+        // OPTIMIZATION: Fast header slots populated during parsing
         var header_count: usize = 0;
         var content_length: ?usize = null;
+        var connection: ?[]const u8 = null;
+        var content_type: ?[]const u8 = null;
         while (true) {
             if (header_count >= self.config.max_headers) return error.TooManyHeaders;
 
@@ -927,8 +993,14 @@ pub const Server = struct {
             const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
             const value_dup = try copyToStorage(string_storage, &storage_offset, value);
             try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
-            if (content_length == null and std.mem.eql(u8, key_lower, "content-length")) {
+
+            // Populate fast header slots during parsing (avoids O(n) lookups later)
+            if (std.mem.eql(u8, key_lower, "content-length")) {
                 content_length = std.fmt.parseInt(usize, value, 10) catch 0;
+            } else if (std.mem.eql(u8, key_lower, "connection")) {
+                connection = value_dup;
+            } else if (std.mem.eql(u8, key_lower, "content-type")) {
+                content_type = value_dup;
             }
             header_count += 1;
         }
@@ -950,6 +1022,9 @@ pub const Server = struct {
             .headers = headers,
             .body = body,
             .string_storage = string_storage,
+            .connection = connection,
+            .content_length = content_length,
+            .content_type = content_type,
         };
     }
 
@@ -992,7 +1067,10 @@ pub const Server = struct {
         const url = try copyToStorage(string_storage, &storage_offset, url_slice);
 
         // Parse headers
+        // OPTIMIZATION: Fast header slots populated during parsing
         var content_length: ?usize = null;
+        var connection: ?[]const u8 = null;
+        var content_type: ?[]const u8 = null;
         var header_count: usize = 0;
         while (lines.next()) |line| {
             if (line.len == 0) break;
@@ -1009,8 +1087,13 @@ pub const Server = struct {
             const value_dup = try copyToStorage(string_storage, &storage_offset, value);
             try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
 
-            if (content_length == null and std.mem.eql(u8, key_lower, "content-length")) {
+            // Populate fast header slots during parsing
+            if (std.mem.eql(u8, key_lower, "content-length")) {
                 content_length = std.fmt.parseInt(usize, value, 10) catch 0;
+            } else if (std.mem.eql(u8, key_lower, "connection")) {
+                connection = value_dup;
+            } else if (std.mem.eql(u8, key_lower, "content-type")) {
+                content_type = value_dup;
             }
             header_count += 1;
         }
@@ -1030,17 +1113,21 @@ pub const Server = struct {
             .headers = headers,
             .body = body,
             .string_storage = string_storage,
+            .connection = connection,
+            .content_length = content_length,
+            .content_type = content_type,
         };
     }
 
     fn sendResponse(self: *Self, stream: *net.Stream, io: Io, response: *HttpResponse, keep_alive: bool) !void {
         _ = self;
-        var out_buf: [4096]u8 = undefined;
+        // Increased buffer to 8KB to fit headers + most response bodies in single flush
+        var out_buf: [8192]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
 
         // Build headers into a single buffer to reduce tiny writes.
-        var header_buf: [2048]u8 = undefined;
+        var header_buf: [4096]u8 = undefined;
         var header_len: usize = 0;
         const status_text = getStatusText(response.status);
 
@@ -1271,6 +1358,10 @@ const ParsedRequest = struct {
     body: ?[]u8,
     /// Batch buffer holding method, url, and header strings (single allocation)
     string_storage: []u8,
+    /// OPTIMIZATION: Fast slots for commonly accessed headers (avoids O(n) lookup)
+    connection: ?[]const u8 = null,
+    content_length: ?usize = null,
+    content_type: ?[]const u8 = null,
 
     pub fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
         if (self.body) |b| allocator.free(b);

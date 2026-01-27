@@ -79,11 +79,13 @@ pub const HandlerAnalyzer = struct {
         // Transfer patterns
         dispatch.patterns = try self.allocator.dupe(HandlerPattern, self.patterns.items);
 
-        // Build exact match hash map
-        for (dispatch.patterns, 0..) |pattern, i| {
+        // Build exact match hash map and pre-built responses for exact matches
+        for (dispatch.patterns, 0..) |*pattern, i| {
             if (pattern.pattern_type == .exact) {
                 const hash = std.hash.Wyhash.hash(0, pattern.url_bytes);
                 try dispatch.exact_match_map.put(self.allocator, hash, @intCast(i));
+                // Build pre-serialized full HTTP response for fast path
+                try pattern.buildPrebuiltResponse(self.allocator);
             }
         }
 
