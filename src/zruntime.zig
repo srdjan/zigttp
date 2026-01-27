@@ -772,6 +772,42 @@ pub const Runtime = struct {
         return response;
     }
 
+    /// Try to parse a query parameter value as a 32-bit signed integer.
+    /// Returns null if the value is not a valid integer (empty, has non-digit chars, overflow).
+    /// Supports optional leading minus sign for negative numbers.
+    fn parseQueryInt(value: []const u8) ?i32 {
+        if (value.len == 0) return null;
+        if (value.len > 11) return null; // -2147483648 is 11 chars max
+
+        var i: usize = 0;
+        var negative = false;
+
+        // Check for leading minus
+        if (value[0] == '-') {
+            negative = true;
+            i = 1;
+            if (value.len == 1) return null; // Just "-" is not valid
+        }
+
+        // Must have at least one digit
+        if (i >= value.len) return null;
+
+        var result: i64 = 0;
+        while (i < value.len) : (i += 1) {
+            const c = value[i];
+            if (c < '0' or c > '9') return null; // Non-digit character
+            result = result * 10 + (c - '0');
+            // Check for overflow (using i64 to detect i32 overflow)
+            if (result > 2147483647 and !negative) return null;
+            if (result > 2147483648 and negative) return null;
+        }
+
+        if (negative) {
+            return @intCast(-result);
+        }
+        return @intCast(result);
+    }
+
     fn createRequestObject(self: *Self, request: HttpRequest) !zq.JSValue {
         // Use pre-shaped request object for faster creation (direct slot access)
         if (self.ctx.http_shapes) |shapes| {
@@ -793,11 +829,15 @@ pub const Runtime = struct {
             req_obj.setSlot(shapes.request.path_slot, path_str);
 
             // Query - create object from parsed query parameters
+            // Numeric values are stored as integers for zero-cost access from JS
             const query_obj = try self.ctx.createObject(null);
             for (request.query_params) |param| {
                 const key_atom = try self.ctx.atoms.intern(param.key);
-                const value_str = try self.ctx.createString(param.value);
-                try self.ctx.setPropertyChecked(query_obj, key_atom, value_str);
+                const param_val = if (parseQueryInt(param.value)) |int_val|
+                    zq.JSValue.fromInt(int_val)
+                else
+                    try self.ctx.createString(param.value);
+                try self.ctx.setPropertyChecked(query_obj, key_atom, param_val);
             }
             req_obj.setSlot(shapes.request.query_slot, query_obj.toValue());
 
@@ -840,11 +880,15 @@ pub const Runtime = struct {
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.path, path_str);
 
         // Query - create object from parsed query parameters
+        // Numeric values are stored as integers for zero-cost access from JS
         const query_obj = try self.ctx.createObject(null);
         for (request.query_params) |param| {
             const key_atom = try self.ctx.atoms.intern(param.key);
-            const value_str = try self.ctx.createString(param.value);
-            try self.ctx.setPropertyChecked(query_obj, key_atom, value_str);
+            const param_val = if (parseQueryInt(param.value)) |int_val|
+                zq.JSValue.fromInt(int_val)
+            else
+                try self.ctx.createString(param.value);
+            try self.ctx.setPropertyChecked(query_obj, key_atom, param_val);
         }
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.query, query_obj.toValue());
 
