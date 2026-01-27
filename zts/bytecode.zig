@@ -532,6 +532,13 @@ pub const HandlerPattern = struct {
     /// When set, can be written directly without any header construction
     prebuilt_response: ?[]const u8 = null,
 
+    // Template fields for prefix patterns with dynamic parameter interpolation
+    // Example: /api/greet/:name -> '{"greeting":"Hello, ' + name + '!"}'
+    // response_template_prefix = '{"greeting":"Hello, '
+    // response_template_suffix = '!"}'
+    response_template_prefix: ?[]const u8 = null,
+    response_template_suffix: ?[]const u8 = null,
+
     pub fn deinit(self: *HandlerPattern, allocator: std.mem.Allocator) void {
         if (self.url_bytes.len > 0) {
             allocator.free(self.url_bytes);
@@ -541,6 +548,12 @@ pub const HandlerPattern = struct {
         }
         if (self.prebuilt_response) |prebuilt| {
             allocator.free(prebuilt);
+        }
+        if (self.response_template_prefix) |prefix| {
+            allocator.free(prefix);
+        }
+        if (self.response_template_suffix) |suffix| {
+            allocator.free(suffix);
         }
     }
 

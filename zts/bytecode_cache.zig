@@ -177,6 +177,20 @@ fn serializePatternDispatch(dispatch: ?*bytecode.PatternDispatchTable, writer: a
             // Status and content type
             try writer.writeInt(u16, pattern.status, .little);
             try writer.writeByte(pattern.content_type_idx);
+            // Template prefix (optional)
+            if (pattern.response_template_prefix) |prefix| {
+                try writer.writeInt(u16, @intCast(prefix.len), .little);
+                try writer.writeAll(prefix);
+            } else {
+                try writer.writeInt(u16, 0, .little);
+            }
+            // Template suffix (optional)
+            if (pattern.response_template_suffix) |suffix| {
+                try writer.writeInt(u16, @intCast(suffix.len), .little);
+                try writer.writeAll(suffix);
+            } else {
+                try writer.writeInt(u16, 0, .little);
+            }
         }
     } else {
         try writer.writeInt(u16, 0, .little);
@@ -368,6 +382,39 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
         // Status and content type
         pattern.status = try reader.readInt(u16, .little);
         pattern.content_type_idx = try reader.readByte();
+
+        // Template prefix (optional)
+        const prefix_len = try reader.readInt(u16, .little);
+        if (prefix_len > 0) {
+            const prefix = try allocator.alloc(u8, prefix_len);
+            const prefix_read = try reader.readAll(prefix);
+            if (prefix_read != prefix_len) {
+                allocator.free(prefix);
+                allocator.free(url_bytes);
+                allocator.free(body);
+                return error.IncompleteRead;
+            }
+            pattern.response_template_prefix = prefix;
+        } else {
+            pattern.response_template_prefix = null;
+        }
+
+        // Template suffix (optional)
+        const suffix_len = try reader.readInt(u16, .little);
+        if (suffix_len > 0) {
+            const suffix = try allocator.alloc(u8, suffix_len);
+            const suffix_read = try reader.readAll(suffix);
+            if (suffix_read != suffix_len) {
+                allocator.free(suffix);
+                if (pattern.response_template_prefix) |p| allocator.free(p);
+                allocator.free(url_bytes);
+                allocator.free(body);
+                return error.IncompleteRead;
+            }
+            pattern.response_template_suffix = suffix;
+        } else {
+            pattern.response_template_suffix = null;
+        }
 
         // Build exact match hash map entry
         if (pattern.pattern_type == .exact) {

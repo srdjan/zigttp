@@ -3062,6 +3062,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const redirect_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseRedirect, redirect_atom, 1);
     try ctx.setPropertyChecked(response_ctor, redirect_atom, redirect_func.toValue());
 
+    const rawjson_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, http.responseRawJson, .rawJson, 1);
+    try ctx.setPropertyChecked(response_ctor, .rawJson, rawjson_func.toValue());
+
     // Register Response on global (predefined atom)
     // Note: constructors are functions on global - destroyed by global_obj.destroyBuiltin
     try ctx.setGlobal(.Response, response_ctor.toValue());

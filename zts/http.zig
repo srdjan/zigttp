@@ -297,6 +297,31 @@ pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     return createResponseFromString(ctx, json_js, status, "application/json");
 }
 
+/// Response.rawJson(jsonString) - Create JSON response from pre-serialized string
+/// Bypasses object serialization for maximum performance when JSON is already built.
+pub fn responseRawJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+
+    if (args.len == 0) {
+        return createResponse(ctx, "{}", 200, "application/json");
+    }
+
+    // Get the pre-serialized JSON string
+    const json_str = try getStringArg(args[0]);
+
+    var status: u16 = 200;
+    if (args.len > 1 and args[1].isObject()) {
+        const init = object.JSObject.fromValue(args[1]);
+        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, json_str, status, "application/json");
+        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, json_str, status, "application/json");
+        if (init.getProperty(pool, status_atom)) |s| {
+            if (s.isInt()) status = @intCast(s.getInt());
+        }
+    }
+
+    return createResponse(ctx, json_str, status, "application/json");
+}
+
 /// Response.text(text) - Create text response
 pub fn responseText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));

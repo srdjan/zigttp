@@ -263,13 +263,14 @@ pub const Atom = enum(u32) {
     expires = 232,
     pragma = 233,
     toJSON = 234,
+    rawJson = 235, // Response.rawJson() for pre-serialized JSON
     // Reserved for more builtins
-    __count__ = 235,
+    __count__ = 236,
 
-    // Dynamic atoms start at 236
+    // Dynamic atoms start at 237
     _,
 
-    pub const FIRST_DYNAMIC: u32 = 236;
+    pub const FIRST_DYNAMIC: u32 = 237;
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
@@ -381,6 +382,7 @@ pub const Atom = enum(u32) {
             .expires => "expires",
             .pragma => "pragma",
             .toJSON => "toJSON",
+            .rawJson => "rawJson",
             else => null,
         };
     }
@@ -610,6 +612,7 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "expires", .expires },
     .{ "pragma", .pragma },
     .{ "toJSON", .toJSON },
+    .{ "rawJson", .rawJson },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map

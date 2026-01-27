@@ -156,7 +156,26 @@ pub const HandlerAnalyzer = struct {
         // Analyze condition for URL pattern
         const url_pattern = self.analyzeCondition(if_stmt.condition) orelse return;
 
-        // Analyze then branch for static response
+        // For prefix patterns, try to detect template responses (Response.rawJson with concatenation)
+        if (url_pattern.pattern_type == .prefix) {
+            const template = try self.analyzeTemplateReturn(if_stmt.then_branch);
+            if (template != null) {
+                const t = template.?;
+                try self.patterns.append(self.allocator, .{
+                    .pattern_type = url_pattern.pattern_type,
+                    .url_atom = url_pattern.url_atom,
+                    .url_bytes = url_pattern.url_bytes,
+                    .static_body = "", // Not used for templates
+                    .status = t.status,
+                    .content_type_idx = t.content_type_idx,
+                    .response_template_prefix = t.prefix,
+                    .response_template_suffix = t.suffix,
+                });
+                return;
+            }
+        }
+
+        // Analyze then branch for static response (exact matches)
         const static_response = try self.analyzeStaticReturn(if_stmt.then_branch);
         if (static_response == null) return;
 
@@ -187,11 +206,14 @@ pub const HandlerAnalyzer = struct {
 
             // Pattern 1: url === '/api/health'
             if (binary.op == .strict_eq) {
-                return self.analyzeExactMatch(binary);
+                const exact = self.analyzeExactMatch(binary);
+                if (exact != null) return exact;
+                // If exact match fails, try prefix match
+                return self.analyzePrefixMatch(binary);
             }
 
             // Pattern 2: url.indexOf('/api/greet/') === 0
-            if (binary.op == .strict_eq or binary.op == .eq) {
+            if (binary.op == .eq) {
                 return self.analyzePrefixMatch(binary);
             }
         }
@@ -289,6 +311,126 @@ pub const HandlerAnalyzer = struct {
         status: u16,
         content_type_idx: u8,
     };
+
+    const TemplateInfo = struct {
+        prefix: []const u8,
+        suffix: []const u8,
+        status: u16,
+        content_type_idx: u8,
+    };
+
+    /// Analyze then branch for template-based Response.rawJson with string concatenation
+    /// Pattern: return Response.rawJson('{"greeting":"Hello, ' + name + '!"}');
+    fn analyzeTemplateReturn(self: *HandlerAnalyzer, then_node: NodeIndex) !?TemplateInfo {
+        const tag = self.ir.getTag(then_node) orelse return null;
+
+        // Could be a block or direct return
+        if (tag == .block) {
+            const block = self.ir.getBlock(then_node) orelse return null;
+            // Look for return statement in block
+            var i: u16 = 0;
+            while (i < block.stmts_count) : (i += 1) {
+                const stmt_idx = self.ir.getListIndex(block.stmts_start, i);
+                const stmt_tag = self.ir.getTag(stmt_idx) orelse continue;
+                if (stmt_tag == .return_stmt) {
+                    return try self.analyzeTemplateReturnStmt(stmt_idx);
+                }
+            }
+        } else if (tag == .return_stmt) {
+            return try self.analyzeTemplateReturnStmt(then_node);
+        }
+
+        return null;
+    }
+
+    fn analyzeTemplateReturnStmt(self: *HandlerAnalyzer, return_node: NodeIndex) !?TemplateInfo {
+        const return_val = self.ir.getOptValue(return_node) orelse return null;
+        if (return_val == null_node) return null;
+
+        return try self.analyzeTemplateCall(return_val);
+    }
+
+    /// Analyze Response.rawJson('prefix' + var + 'suffix') pattern
+    fn analyzeTemplateCall(self: *HandlerAnalyzer, call_node: NodeIndex) !?TemplateInfo {
+        const tag = self.ir.getTag(call_node) orelse return null;
+        if (tag != .call) return null;
+
+        const call = self.ir.getCall(call_node) orelse return null;
+        if (call.args_count < 1) return null;
+
+        // Callee should be Response.rawJson
+        const callee_tag = self.ir.getTag(call.callee) orelse return null;
+        if (callee_tag != .member_access) return null;
+
+        const member = self.ir.getMember(call.callee) orelse return null;
+
+        // Check if object is Response
+        const obj_tag = self.ir.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+
+        const binding = self.ir.getBinding(member.object) orelse return null;
+        if (binding.kind != .global) return null;
+        if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
+
+        // Check method is rawJson
+        if (member.property != @intFromEnum(object.Atom.rawJson)) return null;
+
+        // Get the first argument (should be binary_op concatenation)
+        const arg_idx = self.ir.getListIndex(call.args_start, 0);
+
+        // Extract template parts from concatenation
+        const template = try self.extractTemplateParts(arg_idx);
+        if (template == null) return null;
+
+        return .{
+            .prefix = template.?.prefix,
+            .suffix = template.?.suffix,
+            .status = 200,
+            .content_type_idx = 0, // JSON
+        };
+    }
+
+    /// Extract prefix and suffix from string concatenation pattern
+    /// Handles: 'prefix' + var + 'suffix'
+    fn extractTemplateParts(self: *HandlerAnalyzer, node: NodeIndex) !?struct { prefix: []const u8, suffix: []const u8 } {
+        const tag = self.ir.getTag(node) orelse return null;
+
+        // We're looking for: binary_op(+, binary_op(+, 'prefix', var), 'suffix')
+        // Which represents: ('prefix' + var) + 'suffix'
+        if (tag != .binary_op) return null;
+
+        const outer_binary = self.ir.getBinary(node) orelse return null;
+        if (outer_binary.op != .add) return null;
+
+        // Right side should be the suffix string
+        const right_tag = self.ir.getTag(outer_binary.right) orelse return null;
+        if (right_tag != .lit_string) return null;
+
+        const suffix_str_idx = self.ir.getStringIdx(outer_binary.right) orelse return null;
+        const suffix_str = self.ir.getString(suffix_str_idx) orelse return null;
+
+        // Left side should be another binary addition
+        const left_tag = self.ir.getTag(outer_binary.left) orelse return null;
+        if (left_tag != .binary_op) return null;
+
+        const inner_binary = self.ir.getBinary(outer_binary.left) orelse return null;
+        if (inner_binary.op != .add) return null;
+
+        // Inner left should be the prefix string
+        const prefix_tag = self.ir.getTag(inner_binary.left) orelse return null;
+        if (prefix_tag != .lit_string) return null;
+
+        const prefix_str_idx = self.ir.getStringIdx(inner_binary.left) orelse return null;
+        const prefix_str = self.ir.getString(prefix_str_idx) orelse return null;
+
+        // Inner right should be a variable (we don't need to validate which one)
+        // The runtime will extract the param from URL
+
+        return .{
+            .prefix = try self.allocator.dupe(u8, prefix_str),
+            .suffix = try self.allocator.dupe(u8, suffix_str),
+        };
+    }
 
     /// Analyze then branch for static Response.json({...}) return
     fn analyzeStaticReturn(self: *HandlerAnalyzer, then_node: NodeIndex) !?StaticResponseInfo {
