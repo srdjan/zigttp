@@ -601,6 +601,24 @@ pub const Runtime = struct {
         var reset_after = true;
         defer if (reset_after) self.resetForNextRequest();
 
+        // Get handler function object for fast path check
+        const handler_obj = handler_val.toPtr(zq.JSObject);
+
+        // === FAST PATH: Native dispatch for static routes ===
+        if (handler_obj.getBytecodeFunctionData()) |bc_data| {
+            const func_bc = bc_data.bytecode;
+            if (func_bc.pattern_dispatch) |dispatch| {
+                if (self.tryFastPathDispatch(dispatch, request.url, borrow_body)) |response| {
+                    if (borrow_body) {
+                        reset_after = false;
+                    }
+                    return response;
+                }
+            }
+        }
+
+        // === SLOW PATH: Full bytecode execution ===
+
         // Set thread-local runtime for native function callbacks (e.g., renderToString)
         current_runtime = self;
         defer current_runtime = null;
@@ -614,7 +632,6 @@ pub const Runtime = struct {
 
         // Call handler(request)
         const args = [_]zq.JSValue{request_obj};
-        const handler_obj = handler_val.toPtr(zq.JSObject);
 
         const result = self.callFunction(handler_obj, &args) catch |err| {
             std.log.err("Handler execution failed: {}", .{err});
@@ -630,18 +647,116 @@ pub const Runtime = struct {
         return response;
     }
 
+    /// Try to dispatch request via native fast path.
+    /// Returns response if a static pattern matches, null otherwise.
+    fn tryFastPathDispatch(
+        self: *Self,
+        dispatch: *const zq.bytecode.PatternDispatchTable,
+        url: []const u8,
+        borrow_body: bool,
+    ) ?HttpResponse {
+        // O(1) exact match via hash lookup
+        const url_hash = std.hash.Wyhash.hash(0, url);
+        if (dispatch.exact_match_map.get(url_hash)) |idx| {
+            const pattern = &dispatch.patterns[idx];
+            // Verify match (handle hash collision)
+            if (pattern.pattern_type == .exact and std.mem.eql(u8, url, pattern.url_bytes)) {
+                return self.buildFastResponse(pattern, borrow_body) catch null;
+            }
+        }
+
+        // Linear scan for prefix matches (typically 2-3 patterns)
+        for (dispatch.patterns) |*pattern| {
+            if (pattern.pattern_type == .prefix) {
+                if (std.mem.startsWith(u8, url, pattern.url_bytes)) {
+                    // Prefix match - but these often have dynamic parts, so skip for now
+                    // Future: could handle if response is fully static
+                    continue;
+                }
+            }
+        }
+
+        return null; // Fall back to bytecode execution
+    }
+
+    /// Build a response from a pre-serialized static pattern.
+    fn buildFastResponse(
+        self: *Self,
+        pattern: *const zq.bytecode.HandlerPattern,
+        borrow_body: bool,
+    ) !HttpResponse {
+        var response = HttpResponse.init(self.allocator);
+        response.status = pattern.status;
+
+        if (borrow_body) {
+            response.body = pattern.static_body;
+            response.body_owned = false;
+        } else {
+            const body_copy = try self.allocator.dupe(u8, pattern.static_body);
+            response.body = body_copy;
+            response.body_owned = true;
+        }
+
+        const content_type = switch (pattern.content_type_idx) {
+            0 => "application/json",
+            1 => "text/plain; charset=utf-8",
+            else => "text/html; charset=utf-8",
+        };
+        try response.putHeaderBorrowed("Content-Type", content_type);
+
+        return response;
+    }
+
     fn createRequestObject(self: *Self, request: HttpRequest) !zq.JSValue {
+        // Use pre-shaped request object for faster creation (direct slot access)
+        if (self.ctx.http_shapes) |shapes| {
+            const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, null);
+
+            // URL - always needed
+            const url_str = try self.ctx.createString(request.url);
+            req_obj.setSlot(shapes.request.url_slot, url_str);
+
+            // Method - use cached string if available
+            const method_val: zq.JSValue = if (self.ctx.getCachedMethod(request.method)) |cached|
+                zq.JSValue.fromPtr(cached)
+            else
+                try self.ctx.createString(request.method);
+            req_obj.setSlot(shapes.request.method_slot, method_val);
+
+            // Body - set to null if not present
+            if (request.body) |body| {
+                const body_str = try self.ctx.createString(body);
+                req_obj.setSlot(shapes.request.body_slot, body_str);
+            } else {
+                req_obj.setSlot(shapes.request.body_slot, zq.JSValue.null_val);
+            }
+
+            // Headers - only create if present
+            if (request.headers.items.len > 0) {
+                const headers_obj = try self.ctx.createObject(null);
+                for (request.headers.items) |header| {
+                    const key_atom = try self.ctx.atoms.intern(header.key);
+                    const value_str = try self.ctx.createString(header.value);
+                    try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
+                }
+                req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
+            }
+
+            return req_obj.toValue();
+        }
+
+        // Fallback: build object dynamically (slower)
         const req_obj = try self.ctx.createObject(null);
 
-        // Set URL using predefined atom
         const url_str = try self.ctx.createString(request.url);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.url, url_str);
 
-        // Set method using predefined atom
-        const method_str = try self.ctx.createString(request.method);
-        try self.ctx.setPropertyChecked(req_obj, zq.Atom.method, method_str);
+        const method_val: zq.JSValue = if (self.ctx.getCachedMethod(request.method)) |cached|
+            zq.JSValue.fromPtr(cached)
+        else
+            try self.ctx.createString(request.method);
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.method, method_val);
 
-        // Set body if present using predefined atom
         if (request.body) |body| {
             const body_str = try self.ctx.createString(body);
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
@@ -711,14 +826,58 @@ pub const Runtime = struct {
         const result_obj = result.toPtr(zq.JSObject);
         const pool = self.ctx.hidden_class_pool orelse return response;
 
-        // Extract status using predefined atom
+        // Fast path: use direct slot access if response matches pre-shaped class
+        if (self.ctx.http_shapes) |shapes| {
+            if (result_obj.hidden_class_idx == shapes.response.class_idx) {
+                // Status - direct slot access
+                const status_val = result_obj.getSlot(shapes.response.status_slot);
+                if (status_val.isInt()) {
+                    response.status = @intCast(status_val.getInt());
+                }
+
+                // Body - direct slot access
+                const body_val = result_obj.getSlot(shapes.response.body_slot);
+                if (body_val.isString()) {
+                    const str = body_val.toPtr(zq.JSString);
+                    if (borrow_body) {
+                        response.setBodyBorrowed(str);
+                    } else {
+                        const owned = try self.allocator.dupe(u8, str.data());
+                        response.setBodyOwned(owned);
+                    }
+                }
+
+                // Headers - still need property iteration for custom headers
+                const headers_val = result_obj.getSlot(shapes.response.headers_slot);
+                if (headers_val.isObject()) {
+                    const headers_obj = headers_val.toPtr(zq.JSObject);
+                    const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
+                    defer self.allocator.free(keys);
+                    for (keys) |key_atom| {
+                        const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
+                        const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
+                        if (header_val.isString()) {
+                            const str = header_val.toPtr(zq.JSString);
+                            if (borrow_body) {
+                                try response.putHeaderBorrowed(key_name, str.data());
+                            } else {
+                                try response.putHeader(key_name, str.data());
+                            }
+                        }
+                    }
+                }
+
+                return response;
+            }
+        }
+
+        // Fallback: property-based extraction for non-standard response objects
         if (result_obj.getOwnProperty(pool, zq.Atom.status)) |status_val| {
             if (status_val.isInt()) {
                 response.status = @intCast(status_val.getInt());
             }
         }
 
-        // Extract body using predefined atom
         if (result_obj.getOwnProperty(pool, zq.Atom.body)) |body_val| {
             if (body_val.isString()) {
                 const str = body_val.toPtr(zq.JSString);
@@ -731,7 +890,6 @@ pub const Runtime = struct {
             }
         }
 
-        // Extract headers
         if (result_obj.getOwnProperty(pool, zq.Atom.headers)) |headers_val| {
             if (headers_val.isObject()) {
                 const headers_obj = headers_val.toPtr(zq.JSObject);

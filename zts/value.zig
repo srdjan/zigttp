@@ -444,13 +444,25 @@ pub const JSValue = packed struct {
         return ((header.* >> 1) & 0xF) == 9; // MemTag.rope
     }
 
-    /// Check if value is any string type (flat string or rope)
+    /// Check if value is a string slice (zero-copy substring)
+    pub inline fn isStringSlice(self: JSValue) bool {
+        if (!self.isPtr()) return false;
+        const header = self.toPtr(u32);
+        return ((header.* >> 1) & 0xF) == 10; // MemTag.string_slice
+    }
+
+    /// Check if value is any string type (flat string, rope, or slice)
     /// Use this for typeof checks and general string operations
     pub inline fn isStringOrRope(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
         const tag = (header.* >> 1) & 0xF;
-        return tag == 3 or tag == 9; // MemTag.string or MemTag.rope
+        return tag == 3 or tag == 9 or tag == 10; // MemTag.string, rope, or string_slice
+    }
+
+    /// Alias for isStringOrRope - check any string type
+    pub inline fn isAnyString(self: JSValue) bool {
+        return self.isStringOrRope();
     }
 
     /// Check if value is an object (heap object with object tag)
@@ -506,30 +518,33 @@ pub const JSValue = packed struct {
         }
 
         // String comparison (compare by value, not pointer)
-        // Handle flat strings and ropes
+        // Handle flat strings, ropes, and slices
         const self_is_str = self.isString();
         const self_is_rope = self.isRope();
+        const self_is_slice = self.isStringSlice();
         const other_is_str = other.isString();
         const other_is_rope = other.isRope();
+        const other_is_slice = other.isStringSlice();
 
-        if ((self_is_str or self_is_rope) and (other_is_str or other_is_rope)) {
-            // Both flat strings: compare directly
-            if (self_is_str and other_is_str) {
-                const str_a = self.toPtr(string.JSString);
-                const str_b = other.toPtr(string.JSString);
-                return string.eqlStrings(str_a.data(), str_b.data());
+        const self_is_any_str = self_is_str or self_is_rope or self_is_slice;
+        const other_is_any_str = other_is_str or other_is_rope or other_is_slice;
+
+        if (self_is_any_str and other_is_any_str) {
+            // Get data from each string type
+            const self_data = getStringData(self, self_is_str, self_is_rope, self_is_slice);
+            const other_data = getStringData(other, other_is_str, other_is_rope, other_is_slice);
+
+            // If both have direct data access (flat string or slice), compare directly
+            if (self_data != null and other_data != null) {
+                return string.eqlStrings(self_data.?, other_data.?);
             }
 
-            // One or both is a rope: compare via rope interface
+            // One or both is a rope: need special handling
             if (self_is_rope and other_is_rope) {
-                // Both ropes: compare lengths first, then content
                 const rope_a = self.toPtr(string.RopeNode);
                 const rope_b = other.toPtr(string.RopeNode);
                 if (rope_a.total_len != rope_b.total_len) return false;
 
-                // Need to flatten at least one to compare
-                // For now, use the recursive comparison method
-                // This could be optimized with a two-pointer approach
                 if (rope_a.kind == .leaf and rope_b.kind == .leaf) {
                     return string.eqlStrings(
                         rope_a.payload.leaf.data(),
@@ -537,8 +552,6 @@ pub const JSValue = packed struct {
                     );
                 }
 
-                // Compare by flattening the smaller one mentally and comparing
-                // This is a simplification - full implementation would traverse both trees
                 if (rope_a.kind == .leaf) {
                     return rope_b.eqlBytes(rope_a.payload.leaf.data());
                 }
@@ -546,25 +559,40 @@ pub const JSValue = packed struct {
                     return rope_a.eqlBytes(rope_b.payload.leaf.data());
                 }
 
-                // Both are concat nodes - need full comparison
-                // For now, traverse and compare byte by byte
-                // This could be optimized with proper rope comparison algorithms
                 return ropeEqualsRope(rope_a, rope_b);
             }
 
-            // One is string, one is rope
-            if (self_is_str) {
-                const str = self.toPtr(string.JSString);
-                const rope = other.toPtr(string.RopeNode);
-                return rope.eqlBytes(str.data());
-            } else {
+            // One is rope, other has data
+            if (self_is_rope) {
                 const rope = self.toPtr(string.RopeNode);
-                const str = other.toPtr(string.JSString);
-                return rope.eqlBytes(str.data());
+                return rope.eqlBytes(other_data.?);
+            }
+            if (other_is_rope) {
+                const rope = other.toPtr(string.RopeNode);
+                return rope.eqlBytes(self_data.?);
             }
         }
 
         return false;
+    }
+
+    /// Helper: get string data directly if possible (flat string or slice)
+    /// Returns null for ropes which need special traversal
+    fn getStringData(val: JSValue, is_str: bool, is_rope: bool, is_slice: bool) ?[]const u8 {
+        const string = @import("string.zig");
+        if (is_str) {
+            return val.toPtr(string.JSString).data();
+        }
+        if (is_slice) {
+            return val.toPtr(string.SliceString).data();
+        }
+        if (is_rope) {
+            const rope = val.toPtr(string.RopeNode);
+            if (rope.kind == .leaf) {
+                return rope.payload.leaf.data();
+            }
+        }
+        return null;
     }
 
     /// Helper: compare two concat ropes by iterating through leaves

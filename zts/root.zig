@@ -46,6 +46,7 @@ pub const intern_pool = @import("intern_pool.zig");
 pub const bytecode_cache = @import("bytecode_cache.zig");
 pub const bytecode_opt = @import("bytecode_opt.zig");
 pub const arena = @import("arena.zig");
+pub const handler_analyzer = @import("handler_analyzer.zig");
 // Optional/experimental modules (not wired into runtime by default)
 // These are kept in zts/ for future development but not exported publicly.
 // To use: @import("zts/perf.zig") directly, or uncomment below.
@@ -95,6 +96,10 @@ pub const BytecodeCache = bytecode_cache.BytecodeCache;
 pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
 pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
 pub const OptStats = bytecode_opt.OptStats;
+pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
+pub const PatternDispatchTable = bytecode.PatternDispatchTable;
+pub const HandlerPattern = bytecode.HandlerPattern;
+pub const HandlerFlags = bytecode.HandlerFlags;
 
 /// Version information
 pub const version = struct {

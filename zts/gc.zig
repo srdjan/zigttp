@@ -1024,6 +1024,7 @@ pub const GC = struct {
             .varref => self.scanVarRef(ptr),
             .byte_array => {}, // Raw bytes don't contain pointers
             .rope => {}, // Rope nodes - children scanned via string traversal
+            .string_slice => self.scanStringSlice(ptr), // Slices reference parent string
             .free => {}, // Should not encounter free blocks during marking
         }
     }
@@ -1077,6 +1078,14 @@ pub const GC = struct {
             },
             .open => {}, // Open upvalues point to stack, not heap
         }
+    }
+
+    /// Scan a string slice (marks the parent string)
+    fn scanStringSlice(self: *GC, ptr: *anyopaque) void {
+        const string = @import("string.zig");
+        const slice: *string.SliceString = @ptrCast(@alignCast(ptr));
+        // Mark the parent string to keep it alive
+        self.markPtr(@ptrCast(slice.parent));
     }
 
     /// Write barrier for cross-generation pointers

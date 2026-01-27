@@ -18,7 +18,8 @@ pub const MemTag = enum(u4) {
     varref = 7,
     symbol = 8,
     rope = 9, // Rope node for O(1) string concatenation
-    // 10-15 reserved for future use
+    string_slice = 10, // Zero-copy slice referencing parent string
+    // 11-15 reserved for future use
 };
 
 /// Memory block header (packed for minimal overhead)

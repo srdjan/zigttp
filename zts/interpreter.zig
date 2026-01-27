@@ -2867,8 +2867,8 @@ pub const Interpreter = struct {
     /// Slow path for addition - handles strings and floats
     fn addValuesSlow(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         @branchHint(.cold);
-        // String concatenation - if either operand is a string
-        if (a.isString() or b.isString()) {
+        // String concatenation - if either operand is any string type (flat, rope, or slice)
+        if (a.isAnyString() or b.isAnyString()) {
             return try self.concatToString(a, b);
         }
         // Float path
@@ -2952,10 +2952,10 @@ pub const Interpreter = struct {
 
         // Fast path: string + number (very common pattern)
         const str_a = try self.valueToString(a);
-        defer if (!a.isString() and !a.isRope()) string.freeString(self.ctx.allocator, str_a);
+        defer if (!a.isAnyString()) string.freeString(self.ctx.allocator, str_a);
 
         const str_b = try self.valueToString(b);
-        defer if (!b.isString() and !b.isRope()) string.freeString(self.ctx.allocator, str_b);
+        defer if (!b.isAnyString()) string.freeString(self.ctx.allocator, str_b);
 
         const result = try string.concatStrings(self.ctx.allocator, str_a, str_b);
         return value.JSValue.fromPtr(result);
@@ -3012,6 +3012,23 @@ pub const Interpreter = struct {
             return value.JSValue.fromPtr(result);
         }
 
+        // Case 4b: Handle string slices - flatten and concat
+        // SliceString on either side: flatten to flat string and use string path
+        if (a.isStringSlice() or b.isStringSlice()) {
+            const str_a = try self.valueToStringArena(a, arena);
+            const str_b = try self.valueToStringArena(b, arena);
+
+            if (str_a.len + str_b.len < 64) {
+                const result = string.concatStringsWithArena(arena, str_a, str_b) orelse
+                    return error.OutOfMemory;
+                return value.JSValue.fromPtr(result);
+            }
+
+            const result = string.createRopeFromStringsWithArena(arena, str_a, str_b) orelse
+                return error.OutOfMemory;
+            return value.JSValue.fromPtr(result);
+        }
+
         // Case 5: Left is rope, right needs conversion
         if (a.isRope()) {
             const rope_a = a.toPtr(string.RopeNode);
@@ -3053,6 +3070,12 @@ pub const Interpreter = struct {
         // Handle string: return directly
         if (val.isString()) {
             return val.toPtr(string.JSString);
+        }
+
+        // Handle string slice: flatten to string
+        if (val.isStringSlice()) {
+            const slice = val.toPtr(string.SliceString);
+            return slice.flattenWithArena(arena) orelse error.OutOfMemory;
         }
 
         // Handle number
@@ -3136,6 +3159,11 @@ pub const Interpreter = struct {
         if (val.isRope()) {
             const rope = val.toPtr(string.RopeNode);
             return try rope.flatten(self.ctx.allocator);
+        }
+        // Handle string slice: flatten to flat string
+        if (val.isStringSlice()) {
+            const slice = val.toPtr(string.SliceString);
+            return try slice.flatten(self.ctx.allocator);
         }
         if (val.isInt()) {
             const n = val.getInt();

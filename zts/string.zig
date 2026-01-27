@@ -460,6 +460,131 @@ pub fn freeRope(allocator: std.mem.Allocator, node: *RopeNode) void {
 }
 
 // ============================================================================
+// SliceString - Zero-Copy String Slices
+// ============================================================================
+
+/// SliceString - a zero-copy view into a parent string
+/// Instead of allocating and copying data, this references the parent string
+/// with an offset and length. The parent is kept alive via GC tracing.
+///
+/// Use for substrings >= 16 bytes where the copy overhead exceeds the
+/// indirection cost. For smaller slices, direct copy is more efficient.
+pub const SliceString = extern struct {
+    header: heap.MemBlockHeader, // tag = .string_slice
+    flags: JSString.Flags, // Inherited from parent (especially is_ascii)
+    len: u32, // Slice length in bytes
+    hash: u64, // Computed on demand (0 = not computed)
+    parent: *JSString, // Keeps parent alive via GC
+    offset: u32, // Byte offset into parent's data
+    _pad: u32 = 0, // Padding for alignment
+
+    /// Minimum slice size to use SliceString instead of copying.
+    /// SliceString header is ~40 bytes, so for tiny strings copying is cheaper.
+    pub const MIN_SLICE_LEN: u32 = 16;
+
+    /// Get the slice data (zero-copy view into parent)
+    pub inline fn data(self: *const SliceString) []const u8 {
+        return self.parent.data()[self.offset..][0..self.len];
+    }
+
+    /// Get string length in bytes
+    pub inline fn length(self: *const SliceString) u32 {
+        return self.len;
+    }
+
+    /// Check if string is empty
+    pub inline fn isEmpty(self: *const SliceString) bool {
+        return self.len == 0;
+    }
+
+    /// Get cached hash (compute on first use)
+    pub fn getHash(self: *SliceString) u64 {
+        if (self.hash == 0) {
+            self.hash = hashString(self.data());
+        }
+        return self.hash;
+    }
+
+    /// Get hash (const version, may compute)
+    pub fn getHashConst(self: *const SliceString) u64 {
+        return @constCast(self).getHash();
+    }
+
+    /// Flatten slice to a new flat JSString (for operations that need mutable data)
+    pub fn flatten(self: *const SliceString, allocator: std.mem.Allocator) !*JSString {
+        return try createString(allocator, self.data());
+    }
+
+    /// Flatten using arena allocation
+    pub fn flattenWithArena(self: *const SliceString, arena: *arena_mod.Arena) ?*JSString {
+        return createStringWithArena(arena, self.data());
+    }
+
+    /// Check equality with a byte slice
+    pub fn eqlBytes(self: *const SliceString, bytes: []const u8) bool {
+        if (self.len != bytes.len) return false;
+        return eqlStrings(self.data(), bytes);
+    }
+
+    /// Check if string starts with prefix
+    pub fn startsWith(self: *const SliceString, prefix: []const u8) bool {
+        if (prefix.len > self.len) return false;
+        return eqlStrings(self.data()[0..prefix.len], prefix);
+    }
+
+    /// Check if string ends with suffix
+    pub fn endsWith(self: *const SliceString, suffix: []const u8) bool {
+        if (suffix.len > self.len) return false;
+        const start = self.len - @as(u32, @intCast(suffix.len));
+        return eqlStrings(self.data()[start..], suffix);
+    }
+};
+
+/// Create a SliceString referencing a portion of a parent JSString.
+/// For slices < MIN_SLICE_LEN bytes, prefer createString() for a direct copy.
+pub fn createSlice(allocator: std.mem.Allocator, parent: *JSString, offset: u32, len: u32) !*SliceString {
+    const slice = try allocator.create(SliceString);
+    slice.* = .{
+        .header = heap.MemBlockHeader.init(.string_slice, @sizeOf(SliceString)),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = parent.flags.is_ascii, // Inherit from parent
+            .is_numeric = false, // Slices are rarely valid indices
+            .hash_computed = false,
+        },
+        .len = len,
+        .hash = 0,
+        .parent = parent,
+        .offset = offset,
+    };
+    return slice;
+}
+
+/// Create a SliceString using arena allocation
+pub fn createSliceWithArena(arena: *arena_mod.Arena, parent: *JSString, offset: u32, len: u32) ?*SliceString {
+    const slice = arena.create(SliceString) orelse return null;
+    slice.* = .{
+        .header = heap.MemBlockHeader.init(.string_slice, @sizeOf(SliceString)),
+        .flags = .{
+            .is_unique = false,
+            .is_ascii = parent.flags.is_ascii,
+            .is_numeric = false,
+            .hash_computed = false,
+        },
+        .len = len,
+        .hash = 0,
+        .parent = parent,
+        .offset = offset,
+    };
+    return slice;
+}
+
+/// Free a SliceString (does not free the parent)
+pub fn freeSlice(allocator: std.mem.Allocator, slice: *SliceString) void {
+    allocator.destroy(slice);
+}
+
+// ============================================================================
 // UTF-8 Utilities
 // ============================================================================
 
@@ -1567,4 +1692,85 @@ test "RopeNode empty handling" {
     // Clean up (only need to free the one we actually own)
     allocator.destroy(empty_rope);
     freeRope(allocator, hello_rope);
+}
+
+// ============================================================================
+// SliceString Tests
+// ============================================================================
+
+test "SliceString creation and data access" {
+    const allocator = std.testing.allocator;
+
+    const parent = try createString(allocator, "hello world, this is a test string");
+    defer freeString(allocator, parent);
+
+    // Create a slice of "world"
+    const slice = try createSlice(allocator, parent, 6, 5);
+    defer freeSlice(allocator, slice);
+
+    try std.testing.expectEqualStrings("world", slice.data());
+    try std.testing.expectEqual(@as(u32, 5), slice.length());
+    try std.testing.expect(!slice.isEmpty());
+}
+
+test "SliceString inherits ASCII flag" {
+    const allocator = std.testing.allocator;
+
+    const ascii_parent = try createString(allocator, "hello world, this is ASCII");
+    defer freeString(allocator, ascii_parent);
+
+    const slice = try createSlice(allocator, ascii_parent, 0, 5);
+    defer freeSlice(allocator, slice);
+
+    try std.testing.expect(slice.flags.is_ascii);
+}
+
+test "SliceString flatten" {
+    const allocator = std.testing.allocator;
+
+    const parent = try createString(allocator, "the quick brown fox");
+    defer freeString(allocator, parent);
+
+    const slice = try createSlice(allocator, parent, 4, 5); // "quick"
+    defer freeSlice(allocator, slice);
+
+    const flat = try slice.flatten(allocator);
+    defer freeString(allocator, flat);
+
+    try std.testing.expectEqualStrings("quick", flat.data());
+    try std.testing.expectEqual(@as(u32, 5), flat.len);
+}
+
+test "SliceString eqlBytes" {
+    const allocator = std.testing.allocator;
+
+    const parent = try createString(allocator, "hello world");
+    defer freeString(allocator, parent);
+
+    const slice = try createSlice(allocator, parent, 0, 5); // "hello"
+    defer freeSlice(allocator, slice);
+
+    try std.testing.expect(slice.eqlBytes("hello"));
+    try std.testing.expect(!slice.eqlBytes("world"));
+    try std.testing.expect(!slice.eqlBytes("hello world"));
+}
+
+test "SliceString startsWith and endsWith" {
+    const allocator = std.testing.allocator;
+
+    const parent = try createString(allocator, "hello world, hello universe");
+    defer freeString(allocator, parent);
+
+    const slice = try createSlice(allocator, parent, 0, 11); // "hello world"
+    defer freeSlice(allocator, slice);
+
+    try std.testing.expect(slice.startsWith("hello"));
+    try std.testing.expect(!slice.startsWith("world"));
+    try std.testing.expect(slice.endsWith("world"));
+    try std.testing.expect(!slice.endsWith("hello"));
+}
+
+test "SliceString MIN_SLICE_LEN threshold" {
+    // Verify the minimum slice length constant
+    try std.testing.expectEqual(@as(u32, 16), SliceString.MIN_SLICE_LEN);
 }

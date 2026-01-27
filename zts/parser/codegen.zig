@@ -14,6 +14,7 @@ const heap = @import("../heap.zig");
 const string = @import("../string.zig");
 const js_object = @import("../object.zig");
 const context = @import("../context.zig");
+const handler_analyzer = @import("../handler_analyzer.zig");
 
 // Re-export types used by this module
 const JSValue = value.JSValue;
@@ -1338,7 +1339,6 @@ pub const CodeGen = struct {
     }
 
     fn emitFunctionExpr(self: *CodeGen, node_idx: NodeIndex, func: Node.FunctionExpr) !void {
-        _ = node_idx;
 
         // Save current codegen state
         const saved_code = self.code;
@@ -1413,6 +1413,15 @@ pub const CodeGen = struct {
             .constants = consts_copy,
             .source_map = null,
         };
+
+        // Check if this is a handler function candidate and analyze for fast path
+        if (self.isHandlerCandidate(func)) {
+            if (self.analyzeHandlerPatterns(node_idx, func_bc)) |dispatch| {
+                func_bc.pattern_dispatch = dispatch;
+                func_bc.handler_flags.is_http_handler = true;
+                func_bc.handler_flags.has_static_routes = dispatch.patterns.len > 0;
+            }
+        }
 
         // Clean up function-local state (code/constants are now owned by func_bc copies)
         self.code.deinit(self.allocator);
@@ -2100,6 +2109,44 @@ pub const CodeGen = struct {
             const js_str = try string.createString(self.allocator, str);
             return try self.addConstant(JSValue.fromPtr(js_str));
         }
+    }
+
+    // ============ Handler Analysis ============
+
+    /// Check if a function is a candidate for HTTP handler optimization.
+    /// Candidates are functions named "handler" with exactly 1 parameter.
+    fn isHandlerCandidate(self: *const CodeGen, func: Node.FunctionExpr) bool {
+        // Must have exactly 1 parameter (request)
+        if (func.params_count != 1) return false;
+
+        // Check if name is "handler" atom (159)
+        if (func.name_atom == @intFromEnum(js_object.Atom.handler)) return true;
+
+        // Also check by string lookup if atoms table is available
+        if (self.atoms) |atoms| {
+            const name = atoms.getName(@enumFromInt(func.name_atom));
+            if (name != null and std.mem.eql(u8, name.?, "handler")) return true;
+        }
+
+        return false;
+    }
+
+    /// Analyze a handler function for static patterns and build a dispatch table.
+    fn analyzeHandlerPatterns(
+        self: *CodeGen,
+        func_node: NodeIndex,
+        func_bc: *FunctionBytecode,
+    ) ?*bytecode.PatternDispatchTable {
+        _ = func_bc;
+
+        var analyzer = handler_analyzer.HandlerAnalyzer.init(
+            self.allocator,
+            self.ir,
+            self.atoms,
+        );
+        defer analyzer.deinit();
+
+        return analyzer.analyze(func_node) catch null;
     }
 
     // ============ Stack Tracking ============

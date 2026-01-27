@@ -109,6 +109,14 @@ pub const HttpStringCache = struct {
     content_type_json: *string.JSString,
     content_type_text: *string.JSString,
     content_type_html: *string.JSString,
+    // HTTP method strings (common methods to avoid per-request allocation)
+    method_get: *string.JSString,
+    method_post: *string.JSString,
+    method_put: *string.JSString,
+    method_delete: *string.JSString,
+    method_patch: *string.JSString,
+    method_options: *string.JSString,
+    method_head: *string.JSString,
     status_text_atom: object.Atom,
     content_type_atom: object.Atom,
 };
@@ -425,6 +433,22 @@ pub const Context = struct {
         const content_type_html = try string.createString(self.allocator, "text/html; charset=utf-8");
         errdefer string.freeString(self.allocator, content_type_html);
 
+        // HTTP method strings
+        const method_get = try string.createString(self.allocator, "GET");
+        errdefer string.freeString(self.allocator, method_get);
+        const method_post = try string.createString(self.allocator, "POST");
+        errdefer string.freeString(self.allocator, method_post);
+        const method_put = try string.createString(self.allocator, "PUT");
+        errdefer string.freeString(self.allocator, method_put);
+        const method_delete = try string.createString(self.allocator, "DELETE");
+        errdefer string.freeString(self.allocator, method_delete);
+        const method_patch = try string.createString(self.allocator, "PATCH");
+        errdefer string.freeString(self.allocator, method_patch);
+        const method_options = try string.createString(self.allocator, "OPTIONS");
+        errdefer string.freeString(self.allocator, method_options);
+        const method_head = try string.createString(self.allocator, "HEAD");
+        errdefer string.freeString(self.allocator, method_head);
+
         self.http_strings = .{
             .status_ok = status_ok,
             .status_created = status_created,
@@ -439,6 +463,13 @@ pub const Context = struct {
             .content_type_json = content_type_json,
             .content_type_text = content_type_text,
             .content_type_html = content_type_html,
+            .method_get = method_get,
+            .method_post = method_post,
+            .method_put = method_put,
+            .method_delete = method_delete,
+            .method_patch = method_patch,
+            .method_options = method_options,
+            .method_head = method_head,
             .status_text_atom = status_text_atom,
             .content_type_atom = content_type_atom,
         };
@@ -498,6 +529,21 @@ pub const Context = struct {
         }
         return null;
     }
+
+    /// Get a cached HTTP method string or null if not cached
+    pub fn getCachedMethod(self: *const Context, method: []const u8) ?*string.JSString {
+        if (self.http_strings) |cache| {
+            if (std.mem.eql(u8, method, "GET")) return cache.method_get;
+            if (std.mem.eql(u8, method, "POST")) return cache.method_post;
+            if (std.mem.eql(u8, method, "PUT")) return cache.method_put;
+            if (std.mem.eql(u8, method, "DELETE")) return cache.method_delete;
+            if (std.mem.eql(u8, method, "PATCH")) return cache.method_patch;
+            if (std.mem.eql(u8, method, "OPTIONS")) return cache.method_options;
+            if (std.mem.eql(u8, method, "HEAD")) return cache.method_head;
+        }
+        return null;
+    }
+
     pub fn recordJitCompile(self: *Context, time_ns: u64, code_size: usize, bytecode_size: usize) void {
         if (!enable_jit_metrics) return;
         self.jit_metrics.compile_count +%= 1;
@@ -696,6 +742,13 @@ pub const Context = struct {
             string.freeString(self.allocator, cache.content_type_json);
             string.freeString(self.allocator, cache.content_type_text);
             string.freeString(self.allocator, cache.content_type_html);
+            string.freeString(self.allocator, cache.method_get);
+            string.freeString(self.allocator, cache.method_post);
+            string.freeString(self.allocator, cache.method_put);
+            string.freeString(self.allocator, cache.method_delete);
+            string.freeString(self.allocator, cache.method_patch);
+            string.freeString(self.allocator, cache.method_options);
+            string.freeString(self.allocator, cache.method_head);
         }
         self.small_int_cache.deinit(self.allocator);
         if (self.root_class) |root| root.deinitRecursive(self.allocator);

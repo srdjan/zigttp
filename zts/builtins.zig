@@ -1985,18 +1985,55 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
 // ============================================================================
 
 /// Get JSString from value (if it's a string pointer)
+/// Get a flat JSString from a value.
+/// Returns the string directly for flat strings.
+/// For slices, returns a pointer to the parent (caller uses data() which works on slice too).
+/// Returns null for non-string types.
 fn getJSString(val: value.JSValue) ?*string.JSString {
-    if (!val.isPtr()) return null;
-    // In full implementation, would check header type
-    return val.toPtr(string.JSString);
+    if (val.isString()) {
+        return val.toPtr(string.JSString);
+    }
+    // Slices are not JSStrings - they have different layout
+    // Callers need to use getStringData() instead
+    return null;
+}
+
+/// Get string data from any string type (flat string, slice, or rope leaf).
+/// Returns null for ropes that need flattening.
+fn getStringData(val: value.JSValue) ?[]const u8 {
+    if (val.isString()) {
+        return val.toPtr(string.JSString).data();
+    }
+    if (val.isStringSlice()) {
+        return val.toPtr(string.SliceString).data();
+    }
+    if (val.isRope()) {
+        const rope = val.toPtr(string.RopeNode);
+        if (rope.kind == .leaf) {
+            return rope.payload.leaf.data();
+        }
+    }
+    return null;
+}
+
+/// Get the parent JSString, handling both flat strings and slices.
+/// For slices, returns the parent so substring operations work correctly.
+fn getStringParent(val: value.JSValue) ?*string.JSString {
+    if (val.isString()) {
+        return val.toPtr(string.JSString);
+    }
+    if (val.isStringSlice()) {
+        return val.toPtr(string.SliceString).parent;
+    }
+    return null;
 }
 
 /// String.prototype.length - Get string length
 pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = args;
-    if (getJSString(this)) |str| {
-        return value.JSValue.fromInt(@intCast(str.len));
+    if (getStringData(this)) |data| {
+        return value.JSValue.fromInt(@intCast(data.len));
     }
     return value.JSValue.fromInt(0);
 }
@@ -2004,33 +2041,31 @@ pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const va
 /// String.prototype.charAt(index) - Get character at index
 pub fn stringCharAt(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
-    if (getJSString(this)) |str| {
-        var idx: u32 = 0;
-        if (args.len > 0 and args[0].isInt()) {
-            const i = args[0].getInt();
-            if (i < 0) return value.JSValue.undefined_val;
-            idx = @intCast(i);
-        }
-        if (str.charAt(idx)) |_| {
-            // Return single char (in full impl would return string)
-            return value.JSValue.fromInt(@intCast(idx));
-        }
+    const data = getStringData(this) orelse return value.JSValue.undefined_val;
+    var idx: u32 = 0;
+    if (args.len > 0 and args[0].isInt()) {
+        const i = args[0].getInt();
+        if (i < 0) return value.JSValue.undefined_val;
+        idx = @intCast(i);
+    }
+    if (idx < data.len) {
+        // Return single char (in full impl would return string)
+        return value.JSValue.fromInt(@intCast(idx));
     }
     return value.JSValue.undefined_val;
 }
 
 /// String.prototype.charCodeAt(index) - Get char code at index
 pub fn stringCharCodeAt(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (getJSString(this)) |str| {
-        var idx: u32 = 0;
-        if (args.len > 0 and args[0].isInt()) {
-            const i = args[0].getInt();
-            if (i < 0) return allocFloat(ctx, std.math.nan(f64));
-            idx = @intCast(i);
-        }
-        if (str.charAt(idx)) |c| {
-            return value.JSValue.fromInt(@intCast(c));
-        }
+    const data = getStringData(this) orelse return allocFloat(ctx, std.math.nan(f64));
+    var idx: u32 = 0;
+    if (args.len > 0 and args[0].isInt()) {
+        const i = args[0].getInt();
+        if (i < 0) return allocFloat(ctx, std.math.nan(f64));
+        idx = @intCast(i);
+    }
+    if (idx < data.len) {
+        return value.JSValue.fromInt(@intCast(data[idx]));
     }
     return allocFloat(ctx, std.math.nan(f64));
 }
@@ -2040,42 +2075,38 @@ pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const v
     _ = ctx;
     if (args.len == 0) return value.JSValue.fromInt(-1);
 
-    if (getJSString(this)) |str| {
-        if (getJSString(args[0])) |needle| {
-            const data = str.data();
-            const needle_data = needle.data();
+    const data = getStringData(this) orelse return value.JSValue.fromInt(-1);
+    const needle_data = getStringData(args[0]) orelse return value.JSValue.fromInt(-1);
 
-            // Get start position (default 0)
-            var start: usize = 0;
-            if (args.len > 1) {
-                if (args[1].isInt()) {
-                    const pos = args[1].getInt();
-                    if (pos >= 0) {
-                        start = @intCast(pos);
-                    }
-                } else if (args[1].toNumber()) |n| {
-                    if (n >= 0) {
-                        const floored = @floor(n);
-                        if (floored < @as(f64, @floatFromInt(data.len))) {
-                            start = @intFromFloat(floored);
-                        }
-                    }
+    // Get start position (default 0)
+    var start: usize = 0;
+    if (args.len > 1) {
+        if (args[1].isInt()) {
+            const pos = args[1].getInt();
+            if (pos >= 0) {
+                start = @intCast(pos);
+            }
+        } else if (args[1].toNumber()) |n| {
+            if (n >= 0) {
+                const floored = @floor(n);
+                if (floored < @as(f64, @floatFromInt(data.len))) {
+                    start = @intFromFloat(floored);
                 }
             }
-
-            // Clamp start to string length
-            if (start >= data.len) return value.JSValue.fromInt(-1);
-
-            // Search in substring from start position
-            if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(start));
-            if (needle_data.len > data.len - start) return value.JSValue.fromInt(-1);
-
-            // Search manually from start position
-            const search_area = data[start..];
-            if (std.mem.indexOf(u8, search_area, needle_data)) |rel_idx| {
-                return value.JSValue.fromInt(@intCast(start + rel_idx));
-            }
         }
+    }
+
+    // Clamp start to string length
+    if (start >= data.len) return value.JSValue.fromInt(-1);
+
+    // Search in substring from start position
+    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(start));
+    if (needle_data.len > data.len - start) return value.JSValue.fromInt(-1);
+
+    // Search manually from start position
+    const search_area = data[start..];
+    if (std.mem.indexOf(u8, search_area, needle_data)) |rel_idx| {
+        return value.JSValue.fromInt(@intCast(start + rel_idx));
     }
     return value.JSValue.fromInt(-1);
 }
@@ -2085,12 +2116,14 @@ pub fn stringLastIndexOf(ctx: *context.Context, this: value.JSValue, args: []con
     _ = ctx;
     if (args.len == 0) return value.JSValue.fromInt(-1);
 
-    if (getJSString(this)) |str| {
-        if (getJSString(args[0])) |needle| {
-            if (str.lastIndexOf(needle.data())) |idx| {
-                return value.JSValue.fromInt(@intCast(idx));
-            }
-        }
+    const data = getStringData(this) orelse return value.JSValue.fromInt(-1);
+    const needle_data = getStringData(args[0]) orelse return value.JSValue.fromInt(-1);
+
+    if (needle_data.len == 0) return value.JSValue.fromInt(@intCast(data.len));
+    if (needle_data.len > data.len) return value.JSValue.fromInt(-1);
+
+    if (std.mem.lastIndexOf(u8, data, needle_data)) |idx| {
+        return value.JSValue.fromInt(@intCast(idx));
     }
     return value.JSValue.fromInt(-1);
 }
@@ -2100,12 +2133,11 @@ pub fn stringStartsWith(ctx: *context.Context, this: value.JSValue, args: []cons
     _ = ctx;
     if (args.len == 0) return value.JSValue.false_val;
 
-    if (getJSString(this)) |str| {
-        if (getJSString(args[0])) |prefix| {
-            return if (str.startsWith(prefix.data())) value.JSValue.true_val else value.JSValue.false_val;
-        }
-    }
-    return value.JSValue.false_val;
+    const data = getStringData(this) orelse return value.JSValue.false_val;
+    const prefix_data = getStringData(args[0]) orelse return value.JSValue.false_val;
+
+    if (prefix_data.len > data.len) return value.JSValue.false_val;
+    return if (string.eqlStrings(data[0..prefix_data.len], prefix_data)) value.JSValue.true_val else value.JSValue.false_val;
 }
 
 /// String.prototype.endsWith(searchString, length?) - Check suffix
@@ -2113,12 +2145,12 @@ pub fn stringEndsWith(ctx: *context.Context, this: value.JSValue, args: []const 
     _ = ctx;
     if (args.len == 0) return value.JSValue.false_val;
 
-    if (getJSString(this)) |str| {
-        if (getJSString(args[0])) |suffix| {
-            return if (str.endsWith(suffix.data())) value.JSValue.true_val else value.JSValue.false_val;
-        }
-    }
-    return value.JSValue.false_val;
+    const data = getStringData(this) orelse return value.JSValue.false_val;
+    const suffix_data = getStringData(args[0]) orelse return value.JSValue.false_val;
+
+    if (suffix_data.len > data.len) return value.JSValue.false_val;
+    const start = data.len - suffix_data.len;
+    return if (string.eqlStrings(data[start..], suffix_data)) value.JSValue.true_val else value.JSValue.false_val;
 }
 
 /// String.prototype.includes(searchString, position?) - Check if contains
@@ -2131,59 +2163,109 @@ pub fn stringIncludes(ctx: *context.Context, this: value.JSValue, args: []const 
 }
 
 /// String.prototype.slice(start, end?) - Extract substring
+/// Uses zero-copy SliceString for substrings >= 16 bytes
 pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (getJSString(this)) |str| {
-        const data = str.data();
-        var start: i32 = 0;
-        var end: i32 = @intCast(data.len);
+    // Get data from any string type
+    const data = getStringData(this) orelse return value.JSValue.undefined_val;
 
-        if (args.len > 0 and args[0].isInt()) {
-            start = args[0].getInt();
-            if (start < 0) start = @max(0, @as(i32, @intCast(data.len)) + start);
-        }
-        if (args.len > 1 and args[1].isInt()) {
-            end = args[1].getInt();
-            if (end < 0) end = @max(0, @as(i32, @intCast(data.len)) + end);
-        }
+    var start: i32 = 0;
+    var end: i32 = @intCast(data.len);
 
-        if (start < 0) start = 0;
-        if (end < 0) end = 0;
-        if (start > @as(i32, @intCast(data.len))) start = @intCast(data.len);
-        if (end > @as(i32, @intCast(data.len))) end = @intCast(data.len);
-        if (end < start) end = start;
+    if (args.len > 0 and args[0].isInt()) {
+        start = args[0].getInt();
+        if (start < 0) start = @max(0, @as(i32, @intCast(data.len)) + start);
+    }
+    if (args.len > 1 and args[1].isInt()) {
+        end = args[1].getInt();
+        if (end < 0) end = @max(0, @as(i32, @intCast(data.len)) + end);
+    }
 
+    if (start < 0) start = 0;
+    if (end < 0) end = 0;
+    if (start > @as(i32, @intCast(data.len))) start = @intCast(data.len);
+    if (end > @as(i32, @intCast(data.len))) end = @intCast(data.len);
+    if (end < start) end = start;
+
+    const slice_len = @as(u32, @intCast(end - start));
+
+    // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
+    if (slice_len < string.SliceString.MIN_SLICE_LEN) {
         const slice = data[@intCast(start)..@intCast(end)];
         const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(result);
     }
-    return value.JSValue.undefined_val;
+
+    // Zero-copy slice for larger substrings - need the flat parent string
+    if (this.isString()) {
+        const str = this.toPtr(string.JSString);
+        const slice_str = string.createSlice(ctx.allocator, str, @intCast(start), slice_len) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(slice_str);
+    }
+
+    // For SliceString: adjust offset relative to parent
+    if (this.isStringSlice()) {
+        const existing_slice = this.toPtr(string.SliceString);
+        const new_offset = existing_slice.offset + @as(u32, @intCast(start));
+        const slice_str = string.createSlice(ctx.allocator, existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(slice_str);
+    }
+
+    // For other string types, copy
+    const slice = data[@intCast(start)..@intCast(end)];
+    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.substring(start, end?) - Extract substring
+/// Uses zero-copy SliceString for substrings >= 16 bytes
 pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (getJSString(this)) |str| {
-        const data = str.data();
-        var start: i32 = 0;
-        var end: i32 = @intCast(data.len);
+    // Get data from any string type
+    const data = getStringData(this) orelse return value.JSValue.undefined_val;
 
-        if (args.len > 0 and args[0].isInt()) start = args[0].getInt();
-        if (args.len > 1 and args[1].isInt()) end = args[1].getInt();
+    var start: i32 = 0;
+    var end: i32 = @intCast(data.len);
 
-        if (start < 0) start = 0;
-        if (end < 0) end = 0;
-        if (start > @as(i32, @intCast(data.len))) start = @intCast(data.len);
-        if (end > @as(i32, @intCast(data.len))) end = @intCast(data.len);
-        if (start > end) {
-            const tmp = start;
-            start = end;
-            end = tmp;
-        }
+    if (args.len > 0 and args[0].isInt()) start = args[0].getInt();
+    if (args.len > 1 and args[1].isInt()) end = args[1].getInt();
 
+    if (start < 0) start = 0;
+    if (end < 0) end = 0;
+    if (start > @as(i32, @intCast(data.len))) start = @intCast(data.len);
+    if (end > @as(i32, @intCast(data.len))) end = @intCast(data.len);
+    if (start > end) {
+        const tmp = start;
+        start = end;
+        end = tmp;
+    }
+
+    const slice_len = @as(u32, @intCast(end - start));
+
+    // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
+    if (slice_len < string.SliceString.MIN_SLICE_LEN) {
         const slice = data[@intCast(start)..@intCast(end)];
         const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(result);
     }
-    return value.JSValue.undefined_val;
+
+    // Zero-copy slice for larger substrings - need the flat parent string
+    if (this.isString()) {
+        const str = this.toPtr(string.JSString);
+        const slice_str = string.createSlice(ctx.allocator, str, @intCast(start), slice_len) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(slice_str);
+    }
+
+    // For SliceString: adjust offset relative to parent
+    if (this.isStringSlice()) {
+        const existing_slice = this.toPtr(string.SliceString);
+        const new_offset = existing_slice.offset + @as(u32, @intCast(start));
+        const slice_str = string.createSlice(ctx.allocator, existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(slice_str);
+    }
+
+    // For other string types, copy
+    const slice = data[@intCast(start)..@intCast(end)];
+    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.toLowerCase() - Convert to lowercase
@@ -2205,52 +2287,41 @@ pub fn stringToUpperCase(ctx: *context.Context, this: value.JSValue, args: []con
 /// String.prototype.trim() - Remove whitespace from both ends
 pub fn stringTrim(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
-    if (getJSString(this)) |str| {
-        const data = str.data();
-        var start: usize = 0;
-        var end: usize = data.len;
-        while (start < end and std.ascii.isWhitespace(data[start])) : (start += 1) {}
-        while (end > start and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
-        const slice = data[start..end];
-        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(result);
-    }
-    return this;
+    const data = getStringData(this) orelse return this;
+    var start: usize = 0;
+    var end: usize = data.len;
+    while (start < end and std.ascii.isWhitespace(data[start])) : (start += 1) {}
+    while (end > start and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
+    const slice = data[start..end];
+    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.trimStart() - Remove whitespace from start
 pub fn stringTrimStart(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
-    if (getJSString(this)) |str| {
-        const data = str.data();
-        var start: usize = 0;
-        while (start < data.len and std.ascii.isWhitespace(data[start])) : (start += 1) {}
-        const slice = data[start..];
-        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(result);
-    }
-    return this;
+    const data = getStringData(this) orelse return this;
+    var start: usize = 0;
+    while (start < data.len and std.ascii.isWhitespace(data[start])) : (start += 1) {}
+    const slice = data[start..];
+    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.trimEnd() - Remove whitespace from end
 pub fn stringTrimEnd(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
-    if (getJSString(this)) |str| {
-        const data = str.data();
-        var end: usize = data.len;
-        while (end > 0 and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
-        const slice = data[0..end];
-        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(result);
-    }
-    return this;
+    const data = getStringData(this) orelse return this;
+    var end: usize = data.len;
+    while (end > 0 and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
+    const slice = data[0..end];
+    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.split(separator, limit?) - Split into array
 pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    if (!this.isString()) return value.JSValue.undefined_val;
-    const str = this.toPtr(string.JSString);
-    const data = str.data();
+    const data = getStringData(this) orelse return value.JSValue.undefined_val;
 
     const result = ctx.createArray() catch return value.JSValue.undefined_val;
     result.prototype = ctx.array_prototype;
@@ -2272,11 +2343,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
         return result.toValue();
     }
 
-    const sep_val = args[0];
-    const sep_str = getJSString(sep_val) orelse {
-        return value.JSValue.undefined_val;
-    };
-    const sep = sep_str.data();
+    const sep = getStringData(args[0]) orelse return value.JSValue.undefined_val;
     if (sep.len == 0) {
         // Simple fallback: return whole string
         const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
@@ -2302,42 +2369,36 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
 /// String.prototype.repeat(count) - Repeat string
 pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
-    if (getJSString(this)) |str| {
-        var count: i32 = 0;
-        if (args.len > 0 and args[0].isInt()) {
-            count = args[0].getInt();
-            if (count < 0) return value.JSValue.undefined_val;
-        }
-        // Return new length (proper string creation in full impl)
-        return value.JSValue.fromInt(@as(i32, @intCast(str.len)) * count);
+    const data = getStringData(this) orelse return value.JSValue.undefined_val;
+    var count: i32 = 0;
+    if (args.len > 0 and args[0].isInt()) {
+        count = args[0].getInt();
+        if (count < 0) return value.JSValue.undefined_val;
     }
-    return value.JSValue.undefined_val;
+    // Return new length (proper string creation in full impl)
+    return value.JSValue.fromInt(@as(i32, @intCast(data.len)) * count);
 }
 
 /// String.prototype.padStart(targetLength, padString?) - Pad at start
 pub fn stringPadStart(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
-    if (getJSString(this)) |str| {
-        var target_len: i32 = @intCast(str.len);
-        if (args.len > 0 and args[0].isInt()) {
-            target_len = @max(target_len, args[0].getInt());
-        }
-        return value.JSValue.fromInt(target_len);
+    const data = getStringData(this) orelse return this;
+    var target_len: i32 = @intCast(data.len);
+    if (args.len > 0 and args[0].isInt()) {
+        target_len = @max(target_len, args[0].getInt());
     }
-    return this;
+    return value.JSValue.fromInt(target_len);
 }
 
 /// String.prototype.padEnd(targetLength, padString?) - Pad at end
 pub fn stringPadEnd(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
-    if (getJSString(this)) |str| {
-        var target_len: i32 = @intCast(str.len);
-        if (args.len > 0 and args[0].isInt()) {
-            target_len = @max(target_len, args[0].getInt());
-        }
-        return value.JSValue.fromInt(target_len);
+    const data = getStringData(this) orelse return this;
+    var target_len: i32 = @intCast(data.len);
+    if (args.len > 0 and args[0].isInt()) {
+        target_len = @max(target_len, args[0].getInt());
     }
-    return this;
+    return value.JSValue.fromInt(target_len);
 }
 
 /// String.prototype.concat(...strings) - Concatenate strings
@@ -2348,8 +2409,15 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
     // Fast path: no args, return this
     if (args.len == 0) return this;
 
-    // Get this as string
-    const this_str = getJSString(this) orelse return this;
+    // Get this as string (handle all string types)
+    const this_str: *const string.JSString = blk: {
+        if (this.isString()) break :blk this.toPtr(string.JSString);
+        if (this.isStringSlice()) {
+            const slice = this.toPtr(string.SliceString);
+            break :blk slice.flatten(allocator) catch return this;
+        }
+        return this;
+    };
 
     // Collect all strings to concatenate
     var strings: std.ArrayListUnmanaged(*const string.JSString) = .{};
@@ -2358,8 +2426,12 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
     strings.append(allocator, this_str) catch return this;
 
     for (args) |arg| {
-        if (getJSString(arg)) |str| {
-            strings.append(allocator, str) catch return this;
+        if (arg.isString()) {
+            strings.append(allocator, arg.toPtr(string.JSString)) catch return this;
+        } else if (arg.isStringSlice()) {
+            const slice = arg.toPtr(string.SliceString);
+            const flat = slice.flatten(allocator) catch return this;
+            strings.append(allocator, flat) catch return this;
         }
     }
 
@@ -2372,24 +2444,19 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
 pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const allocator = ctx.allocator;
 
-    if (!this.isString() or args.len < 2) return this;
-    const str = this.toPtr(string.JSString);
-    const input = str.data();
+    if (args.len < 2) return this;
+    const input = getStringData(this) orelse return this;
+    const replacement = getStringData(args[1]) orelse "";
+    const search = getStringData(args[0]) orelse return this;
 
-    const replacement = if (args[1].isString()) args[1].toPtr(string.JSString).data() else "";
-
-    // String search only - RegExp not supported
-    if (args[0].isString()) {
-        const search = args[0].toPtr(string.JSString).data();
-        if (std.mem.indexOf(u8, input, search)) |idx| {
-            var result = std.ArrayList(u8).empty;
-            defer result.deinit(allocator);
-            result.appendSlice(allocator, input[0..idx]) catch return this;
-            result.appendSlice(allocator, replacement) catch return this;
-            result.appendSlice(allocator, input[idx + search.len ..]) catch return this;
-            const new_str = string.createString(allocator, result.items) catch return this;
-            return value.JSValue.fromPtr(new_str);
-        }
+    if (std.mem.indexOf(u8, input, search)) |idx| {
+        var result = std.ArrayList(u8).empty;
+        defer result.deinit(allocator);
+        result.appendSlice(allocator, input[0..idx]) catch return this;
+        result.appendSlice(allocator, replacement) catch return this;
+        result.appendSlice(allocator, input[idx + search.len ..]) catch return this;
+        const new_str = string.createString(allocator, result.items) catch return this;
+        return value.JSValue.fromPtr(new_str);
     }
 
     return this;

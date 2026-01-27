@@ -5,6 +5,7 @@
 const std = @import("std");
 const value = @import("value.zig");
 const type_feedback = @import("type_feedback.zig");
+const object = @import("object.zig");
 
 /// Bytecode file magic number ("ZQJS")
 pub const MAGIC: u32 = 0x5A514A53;
@@ -469,6 +470,10 @@ pub const FunctionBytecode = struct {
     type_feedback_ptr: ?*type_feedback.TypeFeedback = null,
     feedback_site_map: ?[]u16 = null, // bytecode_offset -> site_index
 
+    // HTTP handler fast path (native dispatch)
+    pattern_dispatch: ?*PatternDispatchTable = null,
+    handler_flags: HandlerFlags = .{},
+
     /// Get the type feedback vector if allocated
     pub fn getTypeFeedback(self: *const FunctionBytecode) ?*type_feedback.TypeFeedback {
         return self.type_feedback_ptr;
@@ -494,6 +499,70 @@ pub const FunctionFlags = packed struct {
     has_arguments: bool = false,
     has_rest: bool = false,
     _reserved: u3 = 0,
+};
+
+// ============================================================================
+// HTTP Handler Fast Path Structures
+// ============================================================================
+
+/// Handler flags for fast path optimization
+pub const HandlerFlags = packed struct {
+    is_http_handler: bool = false,
+    has_static_routes: bool = false,
+    pure_dispatch: bool = false, // All routes are static (no dynamic fallback needed)
+    _reserved: u5 = 0,
+};
+
+/// Pattern type for URL matching
+pub const PatternType = enum(u2) {
+    exact, // url === '/api/health'
+    prefix, // url.indexOf('/api/greet/') === 0
+    dynamic, // Dynamic routing (not optimizable)
+};
+
+/// Pre-analyzed URL pattern with static response
+pub const HandlerPattern = struct {
+    pattern_type: PatternType,
+    url_atom: object.Atom, // For exact match
+    url_bytes: []const u8, // URL string bytes for comparison
+    static_body: []const u8, // Pre-serialized JSON body
+    status: u16,
+    content_type_idx: u8, // 0=json, 1=text, 2=html
+
+    pub fn deinit(self: *HandlerPattern, allocator: std.mem.Allocator) void {
+        if (self.url_bytes.len > 0) {
+            allocator.free(self.url_bytes);
+        }
+        if (self.static_body.len > 0) {
+            allocator.free(self.static_body);
+        }
+    }
+};
+
+/// Fast dispatch table for handler
+pub const PatternDispatchTable = struct {
+    patterns: []HandlerPattern,
+    exact_match_map: std.AutoHashMapUnmanaged(u64, u16), // hash -> pattern idx
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator) PatternDispatchTable {
+        return .{
+            .patterns = &.{},
+            .exact_match_map = .{},
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *PatternDispatchTable) void {
+        for (self.patterns) |*pattern| {
+            var p = pattern;
+            p.deinit(self.allocator);
+        }
+        if (self.patterns.len > 0) {
+            self.allocator.free(self.patterns);
+        }
+        self.exact_match_map.deinit(self.allocator);
+    }
 };
 
 // ============================================================================

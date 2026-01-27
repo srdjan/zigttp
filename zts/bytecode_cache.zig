@@ -155,6 +155,32 @@ pub fn serializeFunctionBytecode(func: *const bytecode.FunctionBytecode, writer:
 
     // Recursively serialize constants
     try serializeConstants(func.constants, writer, allocator);
+
+    // Serialize handler flags and pattern dispatch table
+    try writer.writeByte(@as(u8, @bitCast(func.handler_flags)));
+    try serializePatternDispatch(func.pattern_dispatch, writer);
+}
+
+/// Serialize pattern dispatch table for handler fast path
+fn serializePatternDispatch(dispatch: ?*bytecode.PatternDispatchTable, writer: anytype) SerializeError!void {
+    if (dispatch) |d| {
+        try writer.writeInt(u16, @intCast(d.patterns.len), .little);
+        for (d.patterns) |pattern| {
+            // Pattern type
+            try writer.writeByte(@intFromEnum(pattern.pattern_type));
+            // URL bytes
+            try writer.writeInt(u16, @intCast(pattern.url_bytes.len), .little);
+            try writer.writeAll(pattern.url_bytes);
+            // Static body
+            try writer.writeInt(u32, @intCast(pattern.static_body.len), .little);
+            try writer.writeAll(pattern.static_body);
+            // Status and content type
+            try writer.writeInt(u16, pattern.status, .little);
+            try writer.writeByte(pattern.content_type_idx);
+        }
+    } else {
+        try writer.writeInt(u16, 0, .little);
+    }
 }
 
 /// Error type for deserialization operations
@@ -276,6 +302,10 @@ pub fn deserializeFunctionBytecode(
     const constants = try deserializeConstants(reader, allocator, strings_table);
     errdefer allocator.free(constants);
 
+    // Deserialize handler flags and pattern dispatch
+    const handler_flags: bytecode.HandlerFlags = @bitCast(try reader.readByte());
+    const pattern_dispatch = try deserializePatternDispatch(reader, allocator);
+
     // Allocate and populate FunctionBytecode
     const func = try allocator.create(bytecode.FunctionBytecode);
     func.* = .{
@@ -290,9 +320,64 @@ pub fn deserializeFunctionBytecode(
         .code = code,
         .constants = constants,
         .source_map = null,
+        .handler_flags = handler_flags,
+        .pattern_dispatch = pattern_dispatch,
     };
 
     return func;
+}
+
+/// Deserialize pattern dispatch table for handler fast path
+fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) DeserializeError!?*bytecode.PatternDispatchTable {
+    const pattern_count = try reader.readInt(u16, .little);
+    if (pattern_count == 0) return null;
+
+    const dispatch = try allocator.create(bytecode.PatternDispatchTable);
+    dispatch.* = bytecode.PatternDispatchTable.init(allocator);
+
+    const patterns = try allocator.alloc(bytecode.HandlerPattern, pattern_count);
+    errdefer allocator.free(patterns);
+
+    for (patterns, 0..) |*pattern, i| {
+        // Pattern type
+        pattern.pattern_type = @enumFromInt(try reader.readByte());
+        // URL atom (not used - will be set below based on pattern type)
+        pattern.url_atom = .url;
+
+        // URL bytes
+        const url_len = try reader.readInt(u16, .little);
+        const url_bytes = try allocator.alloc(u8, url_len);
+        const url_read = try reader.readAll(url_bytes);
+        if (url_read != url_len) {
+            allocator.free(url_bytes);
+            return error.IncompleteRead;
+        }
+        pattern.url_bytes = url_bytes;
+
+        // Static body
+        const body_len = try reader.readInt(u32, .little);
+        const body = try allocator.alloc(u8, body_len);
+        const body_read = try reader.readAll(body);
+        if (body_read != body_len) {
+            allocator.free(url_bytes);
+            allocator.free(body);
+            return error.IncompleteRead;
+        }
+        pattern.static_body = body;
+
+        // Status and content type
+        pattern.status = try reader.readInt(u16, .little);
+        pattern.content_type_idx = try reader.readByte();
+
+        // Build exact match hash map entry
+        if (pattern.pattern_type == .exact) {
+            const hash = std.hash.Wyhash.hash(0, url_bytes);
+            try dispatch.exact_match_map.put(allocator, hash, @intCast(i));
+        }
+    }
+
+    dispatch.patterns = patterns;
+    return dispatch;
 }
 
 /// Bytecode serialization format version
