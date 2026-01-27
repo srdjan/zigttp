@@ -2191,14 +2191,14 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
     // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
     if (slice_len < string.SliceString.MIN_SLICE_LEN) {
         const slice = data[@intCast(start)..@intCast(end)];
-        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(result);
     }
 
     // Zero-copy slice for larger substrings - need the flat parent string
     if (this.isString()) {
         const str = this.toPtr(string.JSString);
-        const slice_str = string.createSlice(ctx.allocator, str, @intCast(start), slice_len) catch return value.JSValue.undefined_val;
+        const slice_str = ctx.createSlicePtr(str, @intCast(start), slice_len) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(slice_str);
     }
 
@@ -2206,13 +2206,13 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
     if (this.isStringSlice()) {
         const existing_slice = this.toPtr(string.SliceString);
         const new_offset = existing_slice.offset + @as(u32, @intCast(start));
-        const slice_str = string.createSlice(ctx.allocator, existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
+        const slice_str = ctx.createSlicePtr(existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(slice_str);
     }
 
     // For other string types, copy
     const slice = data[@intCast(start)..@intCast(end)];
-    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 
@@ -2243,14 +2243,14 @@ pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const
     // Fast path: copy if slice < 16 bytes (SliceString overhead exceeds copy cost)
     if (slice_len < string.SliceString.MIN_SLICE_LEN) {
         const slice = data[@intCast(start)..@intCast(end)];
-        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(result);
     }
 
     // Zero-copy slice for larger substrings - need the flat parent string
     if (this.isString()) {
         const str = this.toPtr(string.JSString);
-        const slice_str = string.createSlice(ctx.allocator, str, @intCast(start), slice_len) catch return value.JSValue.undefined_val;
+        const slice_str = ctx.createSlicePtr(str, @intCast(start), slice_len) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(slice_str);
     }
 
@@ -2258,13 +2258,13 @@ pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const
     if (this.isStringSlice()) {
         const existing_slice = this.toPtr(string.SliceString);
         const new_offset = existing_slice.offset + @as(u32, @intCast(start));
-        const slice_str = string.createSlice(ctx.allocator, existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
+        const slice_str = ctx.createSlicePtr(existing_slice.parent, new_offset, slice_len) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(slice_str);
     }
 
     // For other string types, copy
     const slice = data[@intCast(start)..@intCast(end)];
-    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 

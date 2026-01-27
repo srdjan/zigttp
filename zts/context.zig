@@ -656,6 +656,14 @@ pub const Context = struct {
         return value.JSValue.fromPtr(str);
     }
 
+    /// Create a JS string slice, using arena when hybrid mode is enabled
+    pub fn createSlicePtr(self: *Context, parent: *string.JSString, offset: u32, len: u32) !*string.SliceString {
+        if (self.hybrid) |h| {
+            return string.createSliceWithArena(h.arena, parent, offset, len) orelse return error.OutOfMemory;
+        }
+        return try string.createSlice(self.allocator, parent, offset, len);
+    }
+
     /// Extract a string slice from a JSValue if it is a string
     pub fn getString(self: *const Context, val: value.JSValue) ?[]const u8 {
         _ = self;
