@@ -81,9 +81,19 @@ pub const RuntimeConfig = struct {
 // HTTP Types (Native Zig)
 // ============================================================================
 
+/// A single query parameter key-value pair (references into string_storage)
+pub const QueryParam = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
 pub const HttpRequest = struct {
     method: []const u8,
     url: []const u8,
+    /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
+    path: []const u8 = "",
+    /// Parsed query parameters (references into string_storage)
+    query_params: []const QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
 
@@ -778,6 +788,19 @@ pub const Runtime = struct {
                 try self.ctx.createString(request.method);
             req_obj.setSlot(shapes.request.method_slot, method_val);
 
+            // Path - URL without query string (falls back to url if not set)
+            const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
+            req_obj.setSlot(shapes.request.path_slot, path_str);
+
+            // Query - create object from parsed query parameters
+            const query_obj = try self.ctx.createObject(null);
+            for (request.query_params) |param| {
+                const key_atom = try self.ctx.atoms.intern(param.key);
+                const value_str = try self.ctx.createString(param.value);
+                try self.ctx.setPropertyChecked(query_obj, key_atom, value_str);
+            }
+            req_obj.setSlot(shapes.request.query_slot, query_obj.toValue());
+
             // Body - set to null if not present
             if (request.body) |body| {
                 const body_str = try self.ctx.createString(body);
@@ -811,6 +834,19 @@ pub const Runtime = struct {
         else
             try self.ctx.createString(request.method);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.method, method_val);
+
+        // Path - URL without query string
+        const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.path, path_str);
+
+        // Query - create object from parsed query parameters
+        const query_obj = try self.ctx.createObject(null);
+        for (request.query_params) |param| {
+            const key_atom = try self.ctx.atoms.intern(param.key);
+            const value_str = try self.ctx.createString(param.value);
+            try self.ctx.setPropertyChecked(query_obj, key_atom, value_str);
+        }
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.query, query_obj.toValue());
 
         if (request.body) |body| {
             const body_str = try self.ctx.createString(body);

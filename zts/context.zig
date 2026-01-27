@@ -61,6 +61,8 @@ pub const HttpRequestShape = struct {
     class_idx: object.HiddenClassIndex,
     method_slot: u16,
     url_slot: u16,
+    path_slot: u16,
+    query_slot: u16,
     body_slot: u16,
     headers_slot: u16,
 };
@@ -348,6 +350,8 @@ pub const Context = struct {
         var req_class = pool.getEmptyClass();
         const method_slot = try addProp(pool, &req_class, .method);
         const url_slot = try addProp(pool, &req_class, .url);
+        const path_slot = try addProp(pool, &req_class, .path);
+        const query_slot = try addProp(pool, &req_class, .query);
         const body_slot = try addProp(pool, &req_class, .body);
         const headers_slot = try addProp(pool, &req_class, .headers);
 
@@ -374,6 +378,8 @@ pub const Context = struct {
                 .class_idx = req_class,
                 .method_slot = method_slot,
                 .url_slot = url_slot,
+                .path_slot = path_slot,
+                .query_slot = query_slot,
                 .body_slot = body_slot,
                 .headers_slot = headers_slot,
             },

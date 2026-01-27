@@ -277,6 +277,8 @@ const ConnectionPool = struct {
             var handle = pool.executeHandlerBorrowed(HttpRequest{
                 .url = request.url,
                 .method = request.method,
+                .path = request.path,
+                .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
             }) catch |err| {
@@ -854,6 +856,8 @@ pub const Server = struct {
             var handle = pool.executeHandlerBorrowed(HttpRequest{
                 .url = request.url,
                 .method = request.method,
+                .path = request.path,
+                .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
             }) catch |err| {
@@ -970,6 +974,40 @@ pub const Server = struct {
         const url_slice = parts.next() orelse return error.InvalidRequest;
         const url = try copyToStorage(string_storage, &storage_offset, url_slice);
 
+        // Split URL into path and query string, parse query parameters
+        const query_start = std.mem.indexOf(u8, url, "?");
+        const path = if (query_start) |idx| url[0..idx] else url;
+        const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
+
+        // Parse query parameters into storage
+        var query_params_storage: ?[]zruntime.QueryParam = null;
+        var query_params: []const zruntime.QueryParam = &.{};
+        if (query_string.len > 0) {
+            // Count parameters first
+            var param_count: usize = 1;
+            for (query_string) |c| {
+                if (c == '&') param_count += 1;
+            }
+
+            // Allocate storage for query params
+            const qps = try allocator.alloc(zruntime.QueryParam, param_count);
+            errdefer allocator.free(qps);
+
+            var qp_idx: usize = 0;
+            var pairs = std.mem.splitScalar(u8, query_string, '&');
+            while (pairs.next()) |pair| {
+                if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
+                    qps[qp_idx] = .{
+                        .key = pair[0..eq_idx],
+                        .value = pair[eq_idx + 1 ..],
+                    };
+                    qp_idx += 1;
+                }
+            }
+            query_params_storage = qps;
+            query_params = qps[0..qp_idx];
+        }
+
         // Read headers (with count limit for DOS protection)
         // OPTIMIZATION: Fast header slots populated during parsing
         var header_count: usize = 0;
@@ -1019,9 +1057,12 @@ pub const Server = struct {
         return ParsedRequest{
             .method = method,
             .url = url,
+            .path = path,
+            .query_params = query_params,
             .headers = headers,
             .body = body,
             .string_storage = string_storage,
+            .query_params_storage = query_params_storage,
             .connection = connection,
             .content_length = content_length,
             .content_type = content_type,
@@ -1065,6 +1106,40 @@ pub const Server = struct {
 
         const url_slice = parts.next() orelse return error.InvalidRequest;
         const url = try copyToStorage(string_storage, &storage_offset, url_slice);
+
+        // Split URL into path and query string, parse query parameters
+        const query_start = std.mem.indexOf(u8, url, "?");
+        const path = if (query_start) |idx| url[0..idx] else url;
+        const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
+
+        // Parse query parameters into storage
+        var query_params_storage: ?[]zruntime.QueryParam = null;
+        var query_params: []const zruntime.QueryParam = &.{};
+        if (query_string.len > 0) {
+            // Count parameters first
+            var param_count: usize = 1;
+            for (query_string) |c| {
+                if (c == '&') param_count += 1;
+            }
+
+            // Allocate storage for query params
+            const qps = try allocator.alloc(zruntime.QueryParam, param_count);
+            errdefer allocator.free(qps);
+
+            var qp_idx: usize = 0;
+            var pairs = std.mem.splitScalar(u8, query_string, '&');
+            while (pairs.next()) |pair| {
+                if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
+                    qps[qp_idx] = .{
+                        .key = pair[0..eq_idx],
+                        .value = pair[eq_idx + 1 ..],
+                    };
+                    qp_idx += 1;
+                }
+            }
+            query_params_storage = qps;
+            query_params = qps[0..qp_idx];
+        }
 
         // Parse headers
         // OPTIMIZATION: Fast header slots populated during parsing
@@ -1110,9 +1185,12 @@ pub const Server = struct {
         return ParsedRequest{
             .method = method,
             .url = url,
+            .path = path,
+            .query_params = query_params,
             .headers = headers,
             .body = body,
             .string_storage = string_storage,
+            .query_params_storage = query_params_storage,
             .connection = connection,
             .content_length = content_length,
             .content_type = content_type,
@@ -1354,10 +1432,16 @@ pub const Server = struct {
 const ParsedRequest = struct {
     method: []const u8,
     url: []const u8,
+    /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
+    path: []const u8 = "",
+    /// Parsed query parameters (references into string_storage)
+    query_params: []const zruntime.QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]u8,
     /// Batch buffer holding method, url, and header strings (single allocation)
     string_storage: []u8,
+    /// Backing storage for query_params array
+    query_params_storage: ?[]zruntime.QueryParam = null,
     /// OPTIMIZATION: Fast slots for commonly accessed headers (avoids O(n) lookup)
     connection: ?[]const u8 = null,
     content_length: ?usize = null,
@@ -1367,6 +1451,8 @@ const ParsedRequest = struct {
         if (self.body) |b| allocator.free(b);
         // Free single batch allocation instead of individual strings
         allocator.free(self.string_storage);
+        // Free query params storage if allocated
+        if (self.query_params_storage) |qps| allocator.free(qps);
         // Headers list only - strings are in string_storage
         self.headers.deinit(allocator);
     }

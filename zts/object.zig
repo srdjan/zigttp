@@ -264,13 +264,16 @@ pub const Atom = enum(u32) {
     pragma = 233,
     toJSON = 234,
     rawJson = 235, // Response.rawJson() for pre-serialized JSON
+    // Query parameter support
+    path = 236, // URL path without query string
+    query = 237, // Query parameters object
     // Reserved for more builtins
-    __count__ = 236,
+    __count__ = 238,
 
-    // Dynamic atoms start at 237
+    // Dynamic atoms start at 239
     _,
 
-    pub const FIRST_DYNAMIC: u32 = 237;
+    pub const FIRST_DYNAMIC: u32 = 239;
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
@@ -383,6 +386,8 @@ pub const Atom = enum(u32) {
             .pragma => "pragma",
             .toJSON => "toJSON",
             .rawJson => "rawJson",
+            .path => "path",
+            .query => "query",
             else => null,
         };
     }
@@ -613,6 +618,9 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "pragma", .pragma },
     .{ "toJSON", .toJSON },
     .{ "rawJson", .rawJson },
+    // Query parameter support
+    .{ "path", .path },
+    .{ "query", .query },
 });
 
 /// Lookup predefined atom by name - O(1) using compile-time hash map
