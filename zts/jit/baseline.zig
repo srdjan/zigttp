@@ -144,7 +144,7 @@ pub const LocalAllocRegs = if (is_aarch64) [_]arm64.Register{
     .x28,
 } else [_]void{};
 
-pub const MAX_REG_LOCALS: u8 = if (is_aarch64) 2 else 0;
+pub const MAX_REG_LOCALS: u8 = if (is_aarch64) 6 else 0;
 
 /// Allocation info for a single local variable
 pub const LocalAlloc = struct {
