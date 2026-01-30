@@ -25,7 +25,7 @@ function TodoItem(props) {
 function TodoList(props) {
     var items = [];
     for (var i = 0; i < props.todos.length; i++) {
-        items.push(<TodoItem todo={props.todos[i]} />);
+        items = [...items, <TodoItem todo={props.todos[i]} />];
     }
     return <ul class="todo-list">{items}</ul>;
 }

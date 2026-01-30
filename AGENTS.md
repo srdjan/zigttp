@@ -12,7 +12,7 @@
 - `zig build` — debug build.
 - `zig build -Doptimize=ReleaseFast` — optimized release build.
 - `zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"` — run with inline handler.
-- `zig build run -- examples/handler.js -p 3000` — run a file-based handler.
+- `zig build run -- examples/handler.jsx -p 3000` — run a file-based handler.
 - `zig build test` — unit tests for the main runtime.
 - `zig build test-zts` — unit tests for the JS engine.
 - `zig build test-zruntime` — unit tests for `src/zruntime.zig`.

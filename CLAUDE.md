@@ -18,11 +18,11 @@ Requires Zig 0.16.0+ (nightly).
 # Build
 zig build                           # Debug build
 zig build -Doptimize=ReleaseFast   # Optimized build
-zig build -Dhandler=handler.js     # Precompile handler at build time
+zig build -Dhandler=handler.jsx    # Precompile handler at build time
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
-zig build run -- examples/handler.js -p 3000
+zig build run -- examples/handler.jsx -p 3000
 zig build run -- examples/handler.ts       # TypeScript handler
 zig build run -- examples/handler.tsx      # TSX handler
 

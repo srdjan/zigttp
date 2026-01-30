@@ -73,7 +73,7 @@ function TodoList() {
 
     let items = [];
     for (let todo of todos) {
-        items.push(<TodoItem todo={todo} />);
+        items = [...items, <TodoItem todo={todo} />];
     }
     return <>{items}</>;
 }
@@ -156,7 +156,7 @@ function addTodo(request) {
         text: text.trim(),
         done: false
     };
-    todos.push(todo);
+    todos = [...todos, todo];
 
     return Response.html(renderToString(<TodoItem todo={todo} />));
 }
@@ -175,7 +175,13 @@ function toggleTodo(id) {
 function deleteTodo(id) {
     for (let i of range(todos.length)) {
         if (todos[i].id === id) {
-            todos.splice(i, 1);
+            let newTodos = [];
+            for (let j of range(todos.length)) {
+                if (todos[j].id !== todos[i].id) {
+                    newTodos = [...newTodos, todos[j]];
+                }
+            }
+            todos = newTodos;
             return Response.html('');
         }
     }

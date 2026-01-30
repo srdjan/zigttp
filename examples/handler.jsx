@@ -110,7 +110,7 @@ function handler(request) {
     if (url.indexOf("/api/greet/") === 0) {
         const name = url.substring("/api/greet/".length);
         return Response.json({
-            greeting: "Hello, " + decodeURIComponent(name) + "!",
+            greeting: "Hello, " + name + "!",
         });
     }
 

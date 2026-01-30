@@ -72,7 +72,7 @@ A high-performance serverless JavaScript runtime for FaaS (Function-as-a-Service
 zig build -Doptimize=ReleaseFast
 
 # Or with build-time handler precompilation (fastest cold starts)
-zig build -Doptimize=ReleaseFast -Dhandler=handler.js
+zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
 ```
 
 ### 2. Run
@@ -82,7 +82,7 @@ zig build -Doptimize=ReleaseFast -Dhandler=handler.js
 ./zig-out/bin/zigttp-server -e "function handler(r) { return Response.json({hello:'world'}) }"
 
 # Or with a handler file
-./zig-out/bin/zigttp-server examples/handler.js
+./zig-out/bin/zigttp-server examples/handler.ts
 
 # Test it
 curl http://localhost:8080/
@@ -436,7 +436,7 @@ zig build
 zig build -Doptimize=ReleaseFast
 
 # Release build with precompiled handler (production)
-zig build -Doptimize=ReleaseFast -Dhandler=handler.js
+zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
 
 # Run tests
 zig build test              # Main runtime tests
