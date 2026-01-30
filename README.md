@@ -99,7 +99,7 @@ Options:
   -h, --host <HOST>     Host to bind to (default: 127.0.0.1)
   -e, --eval <CODE>     Evaluate inline JavaScript handler
   -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
-  -n, --pool <N>        Runtime pool size (default: 8)
+  -n, --pool <N>        Runtime pool size (default: auto = 2 * cpu, min 8)
   -q, --quiet           Disable request logging
   --cors                Enable CORS headers
   --static <DIR>        Serve static files from directory

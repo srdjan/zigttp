@@ -719,6 +719,7 @@ pub const Server = struct {
         const io = self.io_backend.io();
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
+        var pool_timer = std.time.Timer.start() catch null;
         self.pool = try HandlerPool.initWithEmbedded(
             self.allocator,
             self.config.runtime_config,
@@ -728,6 +729,13 @@ pub const Server = struct {
             self.config.pool_wait_timeout_ms,
             self.embedded_bytecode,
         );
+        if (pool_timer) |*t| {
+            const elapsed_ms = t.read() / std.time.ns_per_ms;
+            const prewarm_count = @min(@as(usize, 2), self.config.pool_size);
+            std.log.info("Pool ready: {d} slots, {d} prewarmed, {d}ms", .{
+                self.config.pool_size, prewarm_count, elapsed_ms,
+            });
+        }
 
         // Parse address and create listener
         const address = try net.IpAddress.parseIp4(self.config.host, self.config.port);
@@ -1901,10 +1909,9 @@ fn getContentType(path: []const u8) []const u8 {
 
 fn defaultPoolSize() usize {
     const cpu_count = std.Thread.getCpuCount() catch 1;
-    const min_pool: usize = 16;
+    const min_pool: usize = 8;
     const max_pool: usize = 128;
-    // Pool size = cpu * 4 to handle connection bursts (2x workers, 2x headroom)
-    const base = cpu_count * 4;
+    const base = cpu_count * 2;
     if (base < min_pool) return min_pool;
     if (base > max_pool) return max_pool;
     return base;

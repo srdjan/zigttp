@@ -390,18 +390,20 @@ The goal is to create a performant, light functional TypeScript runtime. This re
 | **Access modifiers** (public/private/protected) | stripper.zig | 2 | Encapsulation is OOP; use module-level privacy |
 | **static members** | stripper.zig, parser | 2 | Class-level state |
 
-### 6.3 Must Remove: Mutating Array Methods
+### 6.3 Mutating Array Methods (Restored)
 
-| Method | Complexity | Rationale |
-|--------|------------|-----------|
-| push() | 2 | In-place mutation; use spread `[...arr, item]` |
-| pop() | 2 | In-place mutation; use `slice(0, -1)` + last element |
-| shift() | 2 | In-place mutation; use `slice(1)` |
-| unshift() | 2 | In-place mutation; use spread `[item, ...arr]` |
-| splice() | 3 | In-place mutation; use slice + spread |
-| sort() (mutating) | 3 | In-place mutation; provide `toSorted()` instead |
-| reverse() (mutating) | 2 | In-place mutation; provide `toReversed()` instead |
-| fill() | 2 | In-place mutation; use Array.from or map |
+Mutating array methods were previously removed for a functional paradigm but have been restored to support standard JavaScript patterns (e.g., REST API handlers using `push`, `splice`). Non-mutating alternatives (`toSorted`, `toReversed`, spread) remain available.
+
+| Method | Complexity | Status |
+|--------|------------|--------|
+| push() | 2 | Implemented |
+| pop() | 2 | Implemented |
+| shift() | 2 | Implemented |
+| unshift() | 2 | Implemented |
+| splice() | 3 | Implemented |
+| sort() (mutating) | 3 | Not implemented; use `toSorted()` |
+| reverse() (mutating) | 2 | Not implemented; use `toReversed()` |
+| fill() | 2 | Not implemented; use Array.from or map |
 
 ### 6.4 Must Remove: Other OOP/Mutation Features
 
@@ -420,7 +422,7 @@ The goal is to create a performant, light functional TypeScript runtime. This re
 | Classes (parser + codegen + runtime) | ~500 | High |
 | RegExp engine | ~200 | Very High |
 | new/this/instanceof | ~300 | Medium |
-| Mutating array methods | ~150 | Low |
+| Mutating array methods | ~150 | Restored (push/pop/shift/unshift/splice) |
 | Prototype manipulation | ~100 | Low |
 | TypeScript OOP syntax | ~200 | Medium |
 | Promise | ~100 | Medium |
@@ -456,7 +458,7 @@ The goal is to create a performant, light functional TypeScript runtime. This re
 | this.method() | Pure functions with explicit data parameter |
 | instanceof | Discriminated unions with tag field |
 | RegExp | String methods (includes, startsWith, endsWith, indexOf) or simple pattern DSL |
-| push/pop/etc | Spread operator, slice, concat |
+| push/pop/etc | Available; spread operator, slice, concat also supported |
 | Promise | Result<T, E> with explicit error handling |
 | Object.assign | Spread: `{...obj, newProp: value}` |
 | Prototype inheritance | Composition with factory functions |
@@ -471,7 +473,7 @@ The goal is to create a performant, light functional TypeScript runtime. This re
 |---------|------------|---------------|----------------|
 | Promise | 4 | Low (no async) | Remove - use Result types |
 | Full RegExp engine | 5 | Low | Remove - use string methods |
-| Array shift/unshift | 2 | Low | Remove - mutating methods |
+| Array shift/unshift | 2 | Medium | Restored - standard JS compatibility |
 
 ### 7.2 Candidates for Simplification
 
@@ -530,7 +532,7 @@ The removal plan targets ~1,550 LOC of OOP-related code, transforming zts into a
 - Classes, new operator, this binding, instanceof
 - Prototype chain manipulation
 - RegExp engine (high complexity, stateful)
-- Mutating array methods (push, pop, shift, unshift, splice, sort, reverse, fill)
+- Mutating array methods: sort, reverse, fill (push/pop/shift/unshift/splice restored)
 - Promise (callback-based async)
 - delete operator, Object.assign (mutations)
 - TypeScript OOP syntax (access modifiers, abstract, implements)
@@ -538,6 +540,7 @@ The removal plan targets ~1,550 LOC of OOP-related code, transforming zts into a
 **Keep**:
 - Pure functions, closures, arrow functions
 - Non-mutating transformations (map, filter, reduce, slice, concat, spread)
+- Restored mutating methods (push, pop, shift, unshift, splice) for standard JS compatibility
 - Destructuring, optional chaining, nullish coalescing
 - Result type for functional error handling
 - Type annotations, generics, type/interface declarations

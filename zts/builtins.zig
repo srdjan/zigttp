@@ -1754,8 +1754,133 @@ pub fn arrayOf(ctx: *context.Context, _: value.JSValue, args: []const value.JSVa
     return result.toValue();
 }
 
-// Mutating array methods (push, pop, shift, unshift, splice) removed for functional paradigm.
-// Use spread operator [...arr, item] or slice() for immutable operations.
+/// Array.prototype.push(...items) - Append elements, return new length
+pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+
+    for (args) |arg| {
+        obj.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
+    }
+    return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
+}
+
+/// Array.prototype.pop() - Remove and return last element
+pub fn arrayPop(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = ctx;
+    _ = args;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+
+    const len = obj.getArrayLength();
+    if (len == 0) return value.JSValue.undefined_val;
+
+    const last = obj.getIndex(len - 1) orelse value.JSValue.undefined_val;
+    obj.setArrayLength(len - 1);
+    return last;
+}
+
+/// Array.prototype.shift() - Remove and return first element
+pub fn arrayShift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = args;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+
+    const len = obj.getArrayLength();
+    if (len == 0) return value.JSValue.undefined_val;
+
+    const first = obj.getIndex(0) orelse value.JSValue.undefined_val;
+
+    // Shift all elements down by 1
+    var i: u32 = 1;
+    while (i < len) : (i += 1) {
+        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        obj.setIndex(ctx.allocator, i - 1, val) catch return first;
+    }
+    obj.setArrayLength(len - 1);
+    return first;
+}
+
+/// Array.prototype.unshift(...items) - Insert elements at front, return new length
+pub fn arrayUnshift(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+    if (args.len == 0) return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
+
+    const len = obj.getArrayLength();
+    const shift: u32 = @intCast(args.len);
+
+    // Shift existing elements up by args.len (iterate from end to avoid overwriting)
+    var i: u32 = len;
+    while (i > 0) {
+        i -= 1;
+        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        obj.setIndex(ctx.allocator, i + shift, val) catch return value.JSValue.undefined_val;
+    }
+
+    // Insert new elements at the front
+    for (args, 0..) |arg, idx| {
+        obj.setIndex(ctx.allocator, @intCast(idx), arg) catch return value.JSValue.undefined_val;
+    }
+
+    return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
+}
+
+/// Array.prototype.splice(start, deleteCount?, ...items) - Remove/insert elements, return deleted
+pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    if (obj.class_id != .array) return value.JSValue.undefined_val;
+
+    const len: i32 = @intCast(obj.getArrayLength());
+
+    // Parse start index
+    var start: i32 = if (args.len > 0 and args[0].isInt()) args[0].getInt() else 0;
+    if (start < 0) start = @max(len + start, 0);
+    if (start > len) start = len;
+
+    // Parse delete count
+    var delete_count: i32 = if (args.len > 1 and args[1].isInt()) args[1].getInt() else len - start;
+    if (delete_count < 0) delete_count = 0;
+    if (delete_count > len - start) delete_count = len - start;
+
+    // Build array of deleted elements
+    const deleted = ctx.createArray() catch return value.JSValue.undefined_val;
+    deleted.prototype = ctx.array_prototype;
+    var d: i32 = 0;
+    while (d < delete_count) : (d += 1) {
+        const val = obj.getIndex(@intCast(start + d)) orelse value.JSValue.undefined_val;
+        ctx.setIndexChecked(deleted, @intCast(d), val) catch return value.JSValue.undefined_val;
+    }
+
+    const insert_items = if (args.len > 2) args[2..] else &[_]value.JSValue{};
+    const insert_count: i32 = @intCast(insert_items.len);
+    const shift = insert_count - delete_count;
+
+    if (shift > 0) {
+        // Inserting more than deleting: shift tail elements right (from end)
+        var i: i32 = len - 1;
+        while (i >= start + delete_count) : (i -= 1) {
+            const val = obj.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
+            obj.setIndex(ctx.allocator, @intCast(i + shift), val) catch return deleted.toValue();
+        }
+    } else if (shift < 0) {
+        // Deleting more than inserting: shift tail elements left
+        var i: i32 = start + delete_count;
+        while (i < len) : (i += 1) {
+            const val = obj.getIndex(@intCast(i)) orelse value.JSValue.undefined_val;
+            obj.setIndex(ctx.allocator, @intCast(i + shift), val) catch return deleted.toValue();
+        }
+    }
+
+    // Insert new items at start position
+    for (insert_items, 0..) |item, idx| {
+        obj.setIndex(ctx.allocator, @intCast(start + @as(i32, @intCast(idx))), item) catch return deleted.toValue();
+    }
+
+    // Update length
+    obj.setArrayLength(@intCast(len + shift));
+    return deleted.toValue();
+}
 
 /// Array.prototype.indexOf(searchElement, fromIndex?) - Find first index of element
 pub fn arrayIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
@@ -3142,11 +3267,14 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setGlobal(performance_atom, performance_obj.toValue());
 
     // ========================================================================
-    // Array.prototype (functional - no mutating methods)
+    // Array.prototype
     // ========================================================================
     const array_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
-    // Removed mutating methods: push, pop, shift, unshift, splice, reverse, fill, sort
-    // Use spread operator [...arr, item] or slice() for immutable operations
+    try addMethodDynamic(ctx, array_proto, "push", wrap(arrayPush), 1);
+    try addMethodDynamic(ctx, array_proto, "pop", wrap(arrayPop), 0);
+    try addMethodDynamic(ctx, array_proto, "shift", wrap(arrayShift), 0);
+    try addMethodDynamic(ctx, array_proto, "unshift", wrap(arrayUnshift), 1);
+    try addMethodDynamic(ctx, array_proto, "splice", wrap(arraySplice), 2);
     try addMethodDynamic(ctx, array_proto, "indexOf", wrap(arrayIndexOf), 1);
     try addMethodDynamic(ctx, array_proto, "includes", wrap(arrayIncludes), 1);
     try addMethodDynamic(ctx, array_proto, "join", wrap(arrayJoin), 1);
@@ -4675,9 +4803,195 @@ test "String.concat multiple strings" {
 }
 
 // ============================================================================
-// Array Method Tests (non-mutating methods only)
-// Mutating tests removed: push, pop, shift, unshift, splice, reverse
+// Array Method Tests
 // ============================================================================
+
+test "Array.push single and multiple args" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    arr.prototype = ctx.array_prototype;
+    arr.setArrayLength(0);
+
+    // push(10) returns 1
+    const r1 = arrayPush(ctx, arr.toValue(), &[_]value.JSValue{value.JSValue.fromInt(10)});
+    try std.testing.expectEqual(@as(i32, 1), r1.getInt());
+    try std.testing.expectEqual(@as(u32, 1), arr.getArrayLength());
+
+    // push(20, 30) returns 3
+    const r2 = arrayPush(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(20),
+        value.JSValue.fromInt(30),
+    });
+    try std.testing.expectEqual(@as(i32, 3), r2.getInt());
+    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 30), (arr.getIndex(2) orelse value.JSValue.undefined_val).getInt());
+}
+
+test "Array.pop returns last element" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    arr.setArrayLength(2);
+
+    const popped = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, 20), popped.getInt());
+    try std.testing.expectEqual(@as(u32, 1), arr.getArrayLength());
+
+    // Pop from empty
+    _ = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
+    const empty_pop = arrayPop(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expect(empty_pop.isUndefined());
+}
+
+test "Array.shift removes first element" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
+    arr.setArrayLength(3);
+
+    const shifted = arrayShift(ctx, arr.toValue(), &[_]value.JSValue{});
+    try std.testing.expectEqual(@as(i32, 10), shifted.getInt());
+    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
+    // Remaining: [20, 30]
+    try std.testing.expectEqual(@as(i32, 20), (arr.getIndex(0) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 30), (arr.getIndex(1) orelse value.JSValue.undefined_val).getInt());
+}
+
+test "Array.unshift inserts at front" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(30));
+    arr.setArrayLength(1);
+
+    // unshift(10, 20) -> [10, 20, 30], returns 3
+    const result = arrayUnshift(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(10),
+        value.JSValue.fromInt(20),
+    });
+    try std.testing.expectEqual(@as(i32, 3), result.getInt());
+    try std.testing.expectEqual(@as(i32, 10), (arr.getIndex(0) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 20), (arr.getIndex(1) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 30), (arr.getIndex(2) orelse value.JSValue.undefined_val).getInt());
+}
+
+test "Array.splice delete and insert" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // [10, 20, 30, 40]
+    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
+    try ctx.setIndexChecked(arr, 3, value.JSValue.fromInt(40));
+    arr.setArrayLength(4);
+
+    // splice(1, 2, 99) -> removes [20, 30], inserts 99 -> [10, 99, 40]
+    const deleted = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(1),  // start
+        value.JSValue.fromInt(2),  // deleteCount
+        value.JSValue.fromInt(99), // insert item
+    });
+
+    // Check deleted array: [20, 30]
+    const del_obj = object.JSObject.fromValue(deleted);
+    try std.testing.expectEqual(@as(u32, 2), del_obj.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 20), (del_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 30), (del_obj.getIndex(1) orelse value.JSValue.undefined_val).getInt());
+
+    // Check resulting array: [10, 99, 40]
+    try std.testing.expectEqual(@as(u32, 3), arr.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 10), (arr.getIndex(0) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 99), (arr.getIndex(1) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(i32, 40), (arr.getIndex(2) orelse value.JSValue.undefined_val).getInt());
+}
+
+test "Array.splice with negative start" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // [10, 20, 30]
+    const arr = try object.JSObject.createArray(allocator, ctx.root_class_idx);
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(10));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(20));
+    try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(30));
+    arr.setArrayLength(3);
+
+    // splice(-1, 1) -> removes last element -> [10, 20]
+    const deleted = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
+        value.JSValue.fromInt(-1), // start = -1 -> index 2
+        value.JSValue.fromInt(1),  // deleteCount
+    });
+
+    const del_obj = object.JSObject.fromValue(deleted);
+    try std.testing.expectEqual(@as(u32, 1), del_obj.getArrayLength());
+    try std.testing.expectEqual(@as(i32, 30), (del_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
+    try std.testing.expectEqual(@as(u32, 2), arr.getArrayLength());
+}
 
 test "Array.indexOf finds element" {
     const gc = @import("gc.zig");

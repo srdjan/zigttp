@@ -999,6 +999,12 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
                     const prop_count = pool.property_counts.items[idx];
                     if (prop_count > 0) {
                         const start = pool.properties_starts.items[idx];
+                        if (start + prop_count > pool.property_names.items.len or
+                            start + prop_count > pool.property_offsets.items.len)
+                        {
+                            try writer.writeByte('}');
+                            return;
+                        }
                         const names = pool.property_names.items[start..][0..prop_count];
                         const offsets = pool.property_offsets.items[start..][0..prop_count];
 
@@ -1105,6 +1111,41 @@ test "valueToJson basic" {
         defer allocator.free(json);
         try std.testing.expectEqualStrings("null", json);
     }
+}
+
+test "valueToJson object with properties" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Create object with two properties: {hello: "world", count: 42}
+    const pool = ctx.hidden_class_pool.?;
+    const obj = try object.JSObject.create(allocator, ctx.root_class_idx, null, pool);
+
+    const hello_atom = try ctx.atoms.intern("hello");
+    const hello_str = try string.createString(allocator, "world");
+    try ctx.setPropertyChecked(obj, hello_atom, value.JSValue.fromPtr(hello_str));
+
+    const count_atom = try ctx.atoms.intern("count");
+    try ctx.setPropertyChecked(obj, count_atom, value.JSValue.fromInt(42));
+
+    const json = try valueToJson(ctx, obj.toValue());
+    defer allocator.free(json);
+
+    // Must contain both properties
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"hello\":\"world\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"count\":42") != null);
+    // Must start and end with braces
+    try std.testing.expect(json.len >= 2);
+    try std.testing.expectEqual(@as(u8, '{'), json[0]);
+    try std.testing.expectEqual(@as(u8, '}'), json[json.len - 1]);
 }
 
 test "renderToString with attributes and nested elements" {

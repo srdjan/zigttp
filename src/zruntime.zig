@@ -1352,7 +1352,7 @@ pub const HandlerPool = struct {
     };
 
     fn prewarm(self: *Self) !void {
-        const prewarm_count = @min(@as(usize, 4), self.max_size);
+        const prewarm_count = @min(@as(usize, 2), self.max_size);
 
         // Single runtime or test mode - sequential prewarm
         // (test allocators aren't thread-safe)
@@ -1367,8 +1367,8 @@ pub const HandlerPool = struct {
         }
 
         // Parallel prewarm for multiple runtimes (production only)
-        var contexts: [4]PrewarmCtx = undefined;
-        var threads: [4]?std.Thread = [_]?std.Thread{null} ** 4;
+        var contexts: [2]PrewarmCtx = undefined;
+        var threads: [2]?std.Thread = [_]?std.Thread{null} ** 2;
 
         // Spawn workers
         for (0..prewarm_count) |i| {

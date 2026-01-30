@@ -921,6 +921,9 @@ pub const HiddenClassPool = struct {
         if (prop_count >= BINARY_SEARCH_THRESHOLD) {
             const sorted_start = self.sorted_starts.items[i];
             if (sorted_start != SORTED_START_INVALID) {
+                if (sorted_start + prop_count > self.sorted_property_names.items.len or
+                    sorted_start + prop_count > self.sorted_property_offsets.items.len)
+                    return null;
                 const names = self.sorted_property_names.items[sorted_start..][0..prop_count];
                 const offsets = self.sorted_property_offsets.items[sorted_start..][0..prop_count];
                 var lo: usize = 0;
@@ -941,6 +944,9 @@ pub const HiddenClassPool = struct {
         }
 
         const start = self.properties_starts.items[i];
+        if (start + prop_count > self.property_names.items.len or
+            start + prop_count > self.property_offsets.items.len)
+            return null;
         const names = self.property_names.items[start..][0..prop_count];
 
         // Linear scan over contiguous name array (cache-friendly)
@@ -1057,6 +1063,9 @@ pub const HiddenClassPool = struct {
         if (prop_count == 0) return null;
 
         const start = self.properties_starts.items[i];
+        if (start + prop_count > self.property_names.items.len or
+            start + prop_count > self.property_flags.items.len)
+            return null;
         const names = self.property_names.items[start..][0..prop_count];
 
         for (names, 0..) |n, slot_idx| {
@@ -1077,6 +1086,7 @@ pub const HiddenClassPool = struct {
         if (prop_count == 0) return &.{};
 
         const start = self.properties_starts.items[i];
+        if (start + prop_count > self.property_names.items.len) return &.{};
         return self.property_names.items[start..][0..prop_count];
     }
 

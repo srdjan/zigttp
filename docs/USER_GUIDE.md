@@ -124,6 +124,9 @@ OPTIONS:
                         Supports: k/kb, m/mb, g/gb suffixes
                         Example: -m 512k, -m 1m
 
+  -n, --pool <N>        Runtime pool size
+                        Default: auto (2 * cpu count, min 8)
+
   -q, --quiet           Disable request logging
                         Useful for production/benchmarks
 

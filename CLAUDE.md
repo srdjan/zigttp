@@ -167,7 +167,7 @@ See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for ful
 -h, --host <HOST>      Host (default: 127.0.0.1)
 -e, --eval <CODE>      Inline JavaScript code
 -m, --memory <SIZE>    JS runtime memory limit (default: 0 = no limit)
--n, --pool <N>         Runtime pool size (default: 8)
+-n, --pool <N>         Runtime pool size (default: auto = 2 * cpu, min 8)
 --cors                 Enable CORS headers
 --static <DIR>         Serve static files
 ```
