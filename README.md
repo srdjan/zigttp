@@ -1,6 +1,6 @@
 # zigttp - Serverless JavaScript Runtime
 
-> **Note**: THIS PROJECT IS EXPERIMENTAL UNDER ACTIVE DEVELOPMENT AND NOT READY FOR USE.
+> **Note**: THIS PROJECT IS EXPERIMENTAL AND UNDER ACTIVE DEVELOPMENT.
 
 A high-performance serverless JavaScript runtime for FaaS deployments, powered by **zts** - a pure Zig JavaScript engine. Designed for AWS Lambda, Azure Functions, Cloudflare Workers, and edge computing.
 
