@@ -494,6 +494,19 @@ pub const Interpreter = struct {
 
     /// Allocate type feedback vector for a function
     /// Scans bytecode to count and map feedback sites
+    ///
+    /// CRITICAL: This function performs heap allocations that may trigger
+    /// arena growth. It MUST only be called at safe boundaries when no
+    /// active stack frames rely on stable memory addresses.
+    ///
+    /// Safe to call:
+    /// - After function returns (in defer block)
+    /// - Before function first executes
+    ///
+    /// NOT safe to call:
+    /// - During function execution
+    /// - Mid-bytecode dispatch
+    /// - When registers hold active computation state
     fn allocateTypeFeedback(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
         if (func.type_feedback_ptr != null) return; // Already allocated
 
@@ -579,6 +592,19 @@ pub const Interpreter = struct {
         // Store in function
         func.type_feedback_ptr = tf;
         func.feedback_site_map = site_map;
+    }
+
+    /// Allocate type feedback for a function after it completes execution.
+    /// This ensures stack and register state remain stable during execution.
+    ///
+    /// CRITICAL: Only call at safe boundaries when no active stack frames
+    /// rely on stable memory addresses.
+    fn allocateTypeFeedbackDeferred(self: *Interpreter, func: *bytecode.FunctionBytecode) !void {
+        if (func.type_feedback_ptr != null) return; // Already allocated
+        if (func.tier != .baseline_candidate) return; // Not a candidate
+        if (func.execution_count < 3) return; // Wait for warmup
+
+        try self.allocateTypeFeedback(func);
     }
 
     /// Get the size of an opcode's operands (not including the opcode byte itself)
@@ -951,15 +977,10 @@ pub const Interpreter = struct {
         }
 
         // Hot loop path: functions promoted via hot loop need type feedback warmup
-        // Step 1: Allocate type feedback early
-        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.type_feedback_ptr == null) {
-            const tf_alloc_threshold: u32 = 3;
-            if (func_bc_mut.execution_count >= tf_alloc_threshold) {
-                self.allocateTypeFeedback(func_bc_mut) catch {};
-            }
-        }
+        // Type feedback allocation now happens post-execution to avoid corrupting
+        // register state. See allocateTypeFeedbackDeferred() calls below.
 
-        // Step 2: After warmup with type feedback, compile to baseline
+        // After warmup with type feedback, compile to baseline
         if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate and func_bc_mut.execution_count < getJitThreshold()) {
             if (func_bc_mut.type_feedback_ptr) |tf| {
                 const baseline_warmup: u32 = 50;
@@ -1029,6 +1050,12 @@ pub const Interpreter = struct {
 
                 self.closeUpvaluesAbove(0);
                 _ = self.ctx.popFrame();
+
+                // Allocate type feedback after function completes (safe boundary)
+                if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
+                    self.allocateTypeFeedbackDeferred(func_bc_mut) catch {};
+                }
+
                 return result;
             }
         }
@@ -1046,6 +1073,12 @@ pub const Interpreter = struct {
 
         self.closeUpvaluesAbove(0);
         _ = self.ctx.popFrame();
+
+        // Allocate type feedback after function completes (safe boundary)
+        if (!jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
+            self.allocateTypeFeedbackDeferred(func_bc_mut) catch {};
+        }
+
         return result;
     }
 
