@@ -148,6 +148,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         bench_cmd.addArgs(args);
     }
+
+    // Release build step (with handler precompilation if provided)
+    const release_step = b.step("release", "Build optimized release binary (use -Dhandler=<path> for embedded bytecode)");
+    release_step.dependOn(b.getInstallStep());
+    if (handler_path) |_| {
+        const release_note = b.addSystemCommand(&.{
+            "echo",
+            "Release build with embedded bytecode: zig-out/bin/zigttp-server",
+        });
+        release_note.step.dependOn(release_step);
+    } else {
+        const release_note = b.addSystemCommand(&.{
+            "echo",
+            "Release build: zig-out/bin/zigttp-server (use -Dhandler=<path> for 16% faster cold starts)",
+        });
+        release_note.step.dependOn(release_step);
+    }
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
 }

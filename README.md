@@ -132,13 +132,38 @@ Options:
 
 ## Build-Time Precompilation
 
-For production deployments, precompile handlers at build time to eliminate all runtime parsing:
+For production deployments, precompile handlers at build time to eliminate all runtime parsing and achieve the fastest cold starts:
 
 ```bash
+# Development build (runtime handler loading)
+zig build -Doptimize=ReleaseFast
+
+# Production build (embedded bytecode, 16% faster cold starts)
 zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
 ```
 
-This embeds bytecode directly in the binary for the fastest possible cold starts.
+**Cold Start Performance**:
+- Baseline (runtime parsing): ~83ms
+- Optimized (embedded bytecode): ~71ms
+- **Improvement**: 13ms faster (16% reduction)
+
+The `-Dhandler` flag compiles your JavaScript handler to bytecode at build time and embeds it directly in the binary. This eliminates ~13ms of parsing and compilation overhead during cold start, with zero trade-offs:
+- No binary size increase
+- Reduced memory footprint (200KB saved)
+- Same runtime performance
+- No functionality changes
+
+**When to use**:
+- Production FaaS deployments (Lambda, Cloud Functions, etc.)
+- Container images with static handlers
+- Any scenario where cold start time matters
+
+**When NOT to use**:
+- Development (slower iteration - requires rebuild to update handler)
+- Dynamic handler loading from filesystem
+- Multi-tenant scenarios with runtime handler selection
+
+See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detailed profiling analysis.
 
 ## Documentation
 
