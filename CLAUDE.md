@@ -148,6 +148,29 @@ const etag = comptime(hash("content-v1"));     // -> const etag = "a1b2c3d4";
 
 See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for full specification.
 
+## Unsupported Feature Detection
+
+zigttp uses a two-layer fail-fast validation system to detect unsupported JavaScript and TypeScript features as early as possible:
+
+1. **TypeScript Stripper** ([zts/stripper.zig](zts/stripper.zig)): Catches TypeScript-specific syntax before parsing
+   - enum, namespace, implements, decorators, access modifiers
+   - Only runs for .ts/.tsx files
+   - Logs helpful error messages with source location and suggested alternatives
+
+2. **Parser** ([zts/parser/parse.zig](zts/parser/parse.zig)): Catches unsupported JavaScript features
+   - 46 features including class, while, throw, try/catch, var, ==, ++, compound assignments, etc.
+   - Runs for all files (after stripping for TS files)
+   - Provides consistent error messages regardless of file type
+
+See [zts/FEATURE_DETECTION.md](zts/FEATURE_DETECTION.md) for the complete matrix of detected features.
+
+All error messages follow the pattern: "'feature' is not supported; use X instead"
+
+**Example errors:**
+- `'class' is not supported; use plain objects and functions instead`
+- `'enum' is not supported; use object literals or discriminated unions instead`
+- `'while' is not supported; use 'for-of' with a finite collection instead`
+
 ## JavaScript Runtime
 
 **Supported**: ES5 + `for...of` (arrays), typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions.

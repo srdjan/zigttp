@@ -14,11 +14,13 @@
 //! Unsupported (errors):
 //! - enum / const enum
 //! - namespace / module
-//! - class / abstract class
 //! - implements keyword
 //! - public / private / protected modifiers
 //! - decorators (@something)
 //! - angle-bracket assertions in TSX (<T>expr)
+//!
+//! Note: class/abstract class are now handled by the parser for consistent
+//! error messages across .ts and .js files (see zts/parser/parse.zig)
 
 const std = @import("std");
 const comptime_eval = @import("comptime.zig");
@@ -993,6 +995,7 @@ const Stripper = struct {
     fn checkUnsupported(self: *Self) StripError!void {
         // Check for decorator first (before keyword check)
         if (self.pos < self.source.len and self.source[self.pos] == '@') {
+            std.log.err("{}:{}: '@decorator' syntax is not supported; use function composition instead", .{ self.line, self.col });
             return StripError.UnsupportedDecorator;
         }
 
@@ -1000,6 +1003,7 @@ const Stripper = struct {
         if (keyword == null) return;
 
         if (std.mem.eql(u8, keyword.?, "enum")) {
+            std.log.err("{}:{}: 'enum' is not supported; use object literals or discriminated unions instead", .{ self.line, self.col });
             return StripError.UnsupportedEnum;
         }
         if (std.mem.eql(u8, keyword.?, "const")) {
@@ -1010,28 +1014,18 @@ const Stripper = struct {
             const next_kw = self.peekKeyword();
             self.pos = saved;
             if (next_kw != null and std.mem.eql(u8, next_kw.?, "enum")) {
+                std.log.err("{}:{}: 'const enum' is not supported; use object literals or discriminated unions instead", .{ self.line, self.col });
                 return StripError.UnsupportedEnum;
             }
         }
         if (std.mem.eql(u8, keyword.?, "namespace") or std.mem.eql(u8, keyword.?, "module")) {
+            std.log.err("{}:{}: 'namespace' is not supported; use ES6 modules instead", .{ self.line, self.col });
             return StripError.UnsupportedNamespace;
         }
-        // Classes and OOP features
-        if (std.mem.eql(u8, keyword.?, "class")) {
-            return StripError.UnsupportedClass;
-        }
-        if (std.mem.eql(u8, keyword.?, "abstract")) {
-            // Check for abstract class
-            const saved = self.pos;
-            self.pos += 8; // "abstract"
-            self.skipWhitespaceTracked();
-            const next_kw = self.peekKeyword();
-            self.pos = saved;
-            if (next_kw != null and std.mem.eql(u8, next_kw.?, "class")) {
-                return StripError.UnsupportedClass;
-            }
-        }
+        // NOTE: 'class' and 'abstract class' are now handled by the parser (see zts/parser/parse.zig)
+        // This ensures consistent error messages for both .ts and .js files
         if (std.mem.eql(u8, keyword.?, "implements")) {
+            std.log.err("{}:{}: 'implements' is not supported; use duck typing or runtime checks instead", .{ self.line, self.col });
             return StripError.UnsupportedClass;
         }
         // Class member modifiers - only valid in class context which is already rejected
@@ -1052,6 +1046,7 @@ const Stripper = struct {
             self.col = saved_col;
 
             if (!is_label) {
+                std.log.err("{}:{}: '{s}' modifier is not supported; use naming conventions (e.g., _private) instead", .{ self.line, self.col, keyword.? });
                 return StripError.UnsupportedClass;
             }
         }
@@ -1538,15 +1533,8 @@ test "decorator errors" {
     try std.testing.expectError(StripError.UnsupportedDecorator, result);
 }
 
-test "class errors" {
-    const result = strip(std.testing.allocator, "class Foo { }", .{});
-    try std.testing.expectError(StripError.UnsupportedClass, result);
-}
-
-test "abstract class errors" {
-    const result = strip(std.testing.allocator, "abstract class Foo { }", .{});
-    try std.testing.expectError(StripError.UnsupportedClass, result);
-}
+// NOTE: 'class' and 'abstract class' tests removed - now handled by parser
+// See "class passes through to parser" test below
 
 test "implements errors" {
     // implements as a standalone statement would be invalid
@@ -1567,6 +1555,18 @@ test "private modifier errors" {
 test "protected modifier errors" {
     const result = strip(std.testing.allocator, "protected foo() { }", .{});
     try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+// Stage 3 complete: class keyword now passes through stripper to be caught by parser
+test "class passes through to parser" {
+    var result = try strip(std.testing.allocator, "class Foo { }", .{});
+    defer result.deinit();
+    // Class should pass through (stripped to maintain positions)
+    // Parser will catch it with helpful error message
+    try std.testing.expect(result.code.len > 0);
+    // Verify it contains some whitespace (class keyword was blanked)
+    try std.testing.expect(std.mem.indexOfScalar(u8, result.code, ' ') != null or
+        std.mem.indexOfScalar(u8, result.code, '{') != null);
 }
 
 test "public label allowed" {

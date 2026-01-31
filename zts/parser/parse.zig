@@ -194,6 +194,8 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             .kw_switch => self.parseSwitchStatement(),
+            // class keyword in statement context: class Foo { }
+            // Catches class declarations (both .js and .ts files after stripping)
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
                 return error.ParseError;
@@ -1268,6 +1270,8 @@ pub const Parser = struct {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "function expressions are not supported; use arrow functions '(x) => x * 2' or function declarations 'function name() { }' instead");
                 return error.ParseError;
             },
+            // class keyword in expression context: const X = class { }
+            // Catches class expressions (both .js and .ts files after stripping)
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
                 return error.ParseError;
@@ -3165,4 +3169,323 @@ test "parse array destructuring" {
 
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+// ============================================================================
+// Unsupported Feature Detection Tests
+// ============================================================================
+
+test "unsupported: class statement" {
+    const allocator = std.testing.allocator;
+    const source = "class Foo { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "class") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "plain objects") != null);
+        return;
+    };
+
+    // Should have errored
+    try std.testing.expect(false);
+}
+
+test "unsupported: class expression" {
+    const allocator = std.testing.allocator;
+    const source = "const X = class Foo { };";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "class") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "plain objects") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: while loop" {
+    const allocator = std.testing.allocator;
+    const source = "while (true) { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "while") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "for-of") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: do-while loop" {
+    const allocator = std.testing.allocator;
+    const source = "do { } while (true);";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "do-while") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: break statement" {
+    const allocator = std.testing.allocator;
+    const source = "for (const x of arr) { break; }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "break") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "filter") != null or std.mem.indexOf(u8, err.message, "return") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: continue statement" {
+    const allocator = std.testing.allocator;
+    const source = "for (const x of arr) { continue; }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "continue") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "filter") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: throw statement" {
+    const allocator = std.testing.allocator;
+    const source = "throw new Error('test');";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "throw") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "Result") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: try-catch" {
+    const allocator = std.testing.allocator;
+    const source = "try { foo(); } catch (e) { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "try") != null or std.mem.indexOf(u8, err.message, "catch") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "Result") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: var declaration" {
+    const allocator = std.testing.allocator;
+    const source = "var x = 42;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "var") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "let") != null or std.mem.indexOf(u8, err.message, "const") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: loose equality ==" {
+    const allocator = std.testing.allocator;
+    const source = "if (x == y) { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "==") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "===") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: prefix increment ++" {
+    const allocator = std.testing.allocator;
+    const source = "++x;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "++") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "x + 1") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: compound assignment +=" {
+    const allocator = std.testing.allocator;
+    const source = "x += 5;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "+=") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "x + value") != null or std.mem.indexOf(u8, err.message, "=") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: instanceof operator" {
+    const allocator = std.testing.allocator;
+    const source = "if (x instanceof Foo) { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "instanceof") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "discriminated") != null or std.mem.indexOf(u8, err.message, "union") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: new operator" {
+    const allocator = std.testing.allocator;
+    const source = "const obj = new Foo();";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "new") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "factory") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: delete operator" {
+    const allocator = std.testing.allocator;
+    const source = "delete obj.prop;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "delete") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "spread") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
 }
