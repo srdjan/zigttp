@@ -6,9 +6,9 @@ A high-performance serverless JavaScript runtime for FaaS deployments, powered b
 
 ## Why zigttp?
 
-- Sub-millisecond cold starts with zero JIT warmup
-- Single static binary, zero runtime dependencies
-- Small deployment package (~500KB)
+- **Fast cold starts**: 3ms runtime init, ~100ms total on macOS (2-3x faster than Deno)
+- **Future Linux target**: Sub-20ms cold starts via static linking (planned)
+- **Small footprint**: 1.2MB binary, 4MB memory, zero runtime dependencies
 - Request isolation via pre-warmed handler pool
 - Native TypeScript/TSX support with compile-time evaluation
 - Direct JSX parsing for server-side rendering
@@ -143,27 +143,41 @@ zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
 ```
 
 **Cold Start Performance**:
-- Baseline (runtime parsing): ~83ms
-- Optimized (embedded bytecode): ~71ms
-- **Improvement**: 13ms faster (16% reduction)
 
-The `-Dhandler` flag compiles your JavaScript handler to bytecode at build time and embeds it directly in the binary. This eliminates ~13ms of parsing and compilation overhead during cold start, with zero trade-offs:
-- No binary size increase
-- Reduced memory footprint (200KB saved)
-- Same runtime performance
-- No functionality changes
+| Platform | Cold Start | Runtime Init | Status |
+|----------|------------|--------------|--------|
+| **macOS** (development) | ~103ms | 3ms | ✅ Current |
+| **Linux** (production) | ~18-33ms (planned) | 3ms | 🚧 Future |
 
-**When to use**:
-- Production FaaS deployments (Lambda, Cloud Functions, etc.)
-- Container images with static handlers
-- Any scenario where cold start time matters
+**macOS Performance** (development environment):
+- Total cold start: ~103ms (2-3x faster than Deno)
+- Runtime initialization: 3ms (highly optimized)
+- dyld overhead: 80-90ms (unavoidable on macOS, affects all binaries)
+- Competitive for development, acceptable for local testing
 
-**When NOT to use**:
-- Development (slower iteration - requires rebuild to update handler)
-- Dynamic handler loading from filesystem
-- Multi-tenant scenarios with runtime handler selection
+**Linux Target** (future production optimization):
+- Static linking with musl libc
+- Expected cold start: 18-33ms (70-85ms faster than macOS)
+- Zero dynamic dependencies
+- Requires fixing JIT cross-compilation issues
 
-See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detailed profiling analysis.
+**Embedded Bytecode Optimization** (recommended for all platforms):
+```bash
+zig build -Doptimize=ReleaseFast -Dhandler=path/to/handler.js
+```
+
+Benefits:
+- Eliminates runtime parsing and compilation
+- Smaller container images (single binary)
+- Reduced memory footprint
+- Zero trade-offs
+
+**Platform Strategy**:
+- **macOS**: Development only (~100ms is acceptable)
+- **Linux**: Production target (sub-20ms goal via static linking)
+- **Pre-fork/daemon**: Alternative for sub-millisecond response times
+
+See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detailed profiling analysis and static linking investigation.
 
 ## Documentation
 
