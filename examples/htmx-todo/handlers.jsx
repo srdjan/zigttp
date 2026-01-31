@@ -1,18 +1,17 @@
 // HTMX Todo App Example for zigttp-server (JSX version)
 // Demonstrates JSX templating with HTMX partial updates
 //
-// Run: zig build run -- examples/htmx-todo/handlers.jsx
-// Open: http://localhost:8080
+// Run: zig build run -- examples/htmx-todo/handlers.jsx -p 3000
+// Open: http://localhost:3000
 
-// In-memory store (per-runtime instance)
-let todos = [];
-let nextId = 1;
+const TODO_TEXT = 0;
+const TODO_DONE = 1;
 
 // ============================================================================
-// Components
+// JSX Rendering Helpers
 // ============================================================================
 
-function Layout(props) {
+function renderLayout(children) {
     return (
         <html lang="en">
             <head>
@@ -24,58 +23,53 @@ function Layout(props) {
             </head>
             <body>
                 <h1>Todo App</h1>
-                {props.children}
+                {children}
             </body>
         </html>
     );
 }
 
-function TodoForm() {
+function renderTodoForm() {
     return (
-        <form hx-post="/todos" hx-target="#todo-list" hx-swap="beforeend" hx-on--after-request="this.reset()">
-            <input type="text" name="text" placeholder="What needs to be done?" required autocomplete="off" />
+        <form hx-get="/todos" hx-target="#todo-list" hx-swap="beforeend" hx-on--after-request="this.reset()">
+            <input type="text" name="text" autocomplete="off" required="required" />
             <button type="submit">Add</button>
         </form>
     );
 }
 
-function TodoItem(props) {
-    let todo = props.todo;
-    let doneClass = todo.done ? 'todo-item done' : 'todo-item';
-    let toggleClass = todo.done ? 'btn-toggle undo' : 'btn-toggle';
-    let toggleText = todo.done ? 'Undo' : 'Done';
+function renderTodoItem(todo) {
+    let done = todo[TODO_DONE];
+    let doneClass = done ? 'todo-item done' : 'todo-item';
+    let toggleClass = done ? 'btn-toggle undo' : 'btn-toggle';
+    let toggleText = done ? 'Undo' : 'Done';
+    let togglePath = [
+        '/todos/toggle?text=',
+        encodeFormValue(todo[TODO_TEXT]),
+        '&done=',
+        done ? '1' : '0'
+    ].join('');
+    let deletePath = '/todos/delete';
 
     return (
-        <div id={'todo-' + todo.id} class={doneClass}>
-            <span>{todo.text}</span>
+        <div class={doneClass}>
+            <span>{todo[TODO_TEXT]}</span>
             <button
                 class={toggleClass}
-                hx-post={'/todos/' + todo.id + '/toggle'}
-                hx-target={'#todo-' + todo.id}
+                hx-post={togglePath}
+                hx-target="closest .todo-item"
                 hx-swap="outerHTML">
                 {toggleText}
             </button>
             <button
                 class="btn-delete"
-                hx-delete={'/todos/' + todo.id}
-                hx-target={'#todo-' + todo.id}
+                hx-delete={deletePath}
+                hx-target="closest .todo-item"
                 hx-swap="outerHTML">
                 Delete
             </button>
         </div>
     );
-}
-
-function TodoList() {
-    if (todos.length === 0) {
-        return <div class="empty-state">No todos yet. Add one above!</div>;
-    }
-
-    let items = [];
-    for (let todo of todos) {
-        items = [...items, <TodoItem todo={todo} />];
-    }
-    return <>{items}</>;
 }
 
 // ============================================================================
@@ -108,91 +102,135 @@ let styles = [
     '.btn-toggle.undo:hover { background: #545b62; }',
     '.btn-delete { background: #dc3545; color: white; }',
     '.btn-delete:hover { background: #c82333; }',
-    '.empty-state { padding: 40px; text-align: center; color: #888; }',
+    '#todo-list:empty::before { content: "No todos yet. Add one above!"; display: block;',
+    '    padding: 40px; text-align: center; color: #888; }',
     '.htmx-request { opacity: 0.5; }'
 ].join('\n');
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function encodeFormValue(value) {
+    if (typeof value !== 'string') {
+        if (value === null) {
+            return '';
+        }
+        if (value === undefined) {
+            return '';
+        }
+        value = [value].join('');
+    }
+
+    let encoded = value;
+    encoded = encoded.split('%').join('%25');
+    encoded = encoded.split('&').join('%26');
+    encoded = encoded.split('=').join('%3D');
+    encoded = encoded.split('?').join('%3F');
+    encoded = encoded.split('#').join('%23');
+    encoded = encoded.split('+').join('%2B');
+    encoded = encoded.split(' ').join('+');
+    return encoded;
+}
+
+function decodeFormValue(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+    if (value.length === 0) {
+        return '';
+    }
+
+    let decoded = value;
+    decoded = decoded.split('+').join(' ');
+    decoded = decoded.split('%20').join(' ');
+    decoded = decoded.split('%2B').join('+');
+    decoded = decoded.split('%23').join('#');
+    decoded = decoded.split('%3F').join('?');
+    decoded = decoded.split('%3D').join('=');
+    decoded = decoded.split('%26').join('&');
+    decoded = decoded.split('%25').join('%');
+    return decoded;
+}
+
+function getQueryValue(request, key) {
+    let json = JSON.stringify(request.query);
+    if (typeof json !== 'string') {
+        return '';
+    }
+    if (json.length === 0) {
+        return '';
+    }
+    if (json === 'null') {
+        return '';
+    }
+
+    let marker = ['"', key, '":'].join('');
+    let parts = json.split(marker);
+    if (parts.length < 2) {
+        return '';
+    }
+
+    let rest = parts[1];
+    if (rest.length === 0) {
+        return '';
+    }
+
+    if (rest.indexOf('"') === 0) {
+        let quoteParts = rest.split('"');
+        if (quoteParts.length < 2) {
+            return '';
+        }
+        return decodeFormValue(quoteParts[1]);
+    }
+
+    let commaParts = rest.split(',');
+    let first = commaParts[0];
+    let braceParts = first.split('}');
+    return braceParts[0];
+}
 
 // ============================================================================
 // Route Handlers
 // ============================================================================
 
 function index() {
-    return Response.html(renderToString(
-        <Layout>
-            <TodoForm />
-            <div id="todo-list" class="todo-list">
-                <TodoList />
-            </div>
-        </Layout>
-    ));
+    let page = renderLayout(
+        <div>
+            {renderTodoForm()}
+            <div id="todo-list" class="todo-list"></div>
+        </div>
+    );
+
+    return Response.html(renderToString(page));
 }
 
 function addTodo(request) {
-    let text = '';
-
-    // Parse form-encoded body: text=hello+world
-    if (typeof request.body === 'string' && request.body.length > 0) {
-        let parts = request.body.split('&');
-        for (let part of parts) {
-            let eqIdx = part.indexOf('=');
-            if (eqIdx > 0) {
-                let key = part.substring(0, eqIdx);
-                let val = part.substring(eqIdx + 1);
-                if (key === 'text' && val.length > 0) {
-                    text = val.split('+').join(' ');
-                }
-            }
-        }
-    }
-
+    let text = getQueryValue(request, 'text');
     if (text.length === 0) {
         return Response.html(renderToString(<div class="error">Text is required</div>));
     }
 
-    let todoId = nextId;
-    nextId = nextId + 1;
-    let todo = {
-        id: todoId,
-        text: text.trim(),
-        done: false
-    };
-    todos = [...todos, todo];
+    let todo = [text, false];
 
-    return Response.html(renderToString(<TodoItem todo={todo} />));
+    return Response.html(renderToString(renderTodoItem(todo)));
 }
 
-function toggleTodo(id) {
-    for (let i of range(todos.length)) {
-        if (todos[i].id === id) {
-            todos[i].done = !todos[i].done;
-            return Response.html(renderToString(<TodoItem todo={todos[i]} />));
-        }
+function toggleTodo(request) {
+    let text = getQueryValue(request, 'text');
+    let doneParam = getQueryValue(request, 'done');
+
+    if (text.length === 0) {
+        return Response.text('Todo not found', { status: 404 });
     }
 
-    return Response.text('Todo not found', { status: 404 });
+    let done = doneParam === '1';
+    let todo = [text, !done];
+    return Response.html(renderToString(renderTodoItem(todo)));
 }
 
-function deleteTodo(id) {
-    for (let i of range(todos.length)) {
-        if (todos[i].id === id) {
-            let newTodos = [];
-            for (let j of range(todos.length)) {
-                if (todos[j].id !== todos[i].id) {
-                    newTodos = [...newTodos, todos[j]];
-                }
-            }
-            todos = newTodos;
-            return Response.html('');
-        }
-    }
-
-    return Response.text('Todo not found', { status: 404 });
-}
-
-function extractId(url, prefix, suffix) {
-    let start = prefix.length;
-    let end = suffix ? url.indexOf(suffix) : url.length;
-    return parseInt(url.substring(start, end), 10);
+function deleteTodo() {
+    return Response.html('');
 }
 
 // ============================================================================
@@ -201,28 +239,31 @@ function extractId(url, prefix, suffix) {
 
 function handler(request) {
     let method = request.method;
-    let url = request.url;
+    let path = request.path || request.url;
+
+    let queryIdx = path.indexOf('?');
+    if (queryIdx >= 0) {
+        path = path.substring(0, queryIdx);
+    }
 
     // GET /
-    if (method === 'GET' && url === '/') {
+    if (method === 'GET' && path === '/') {
         return index();
     }
 
-    // POST /todos
-    if (method === 'POST' && url === '/todos') {
+    // GET/POST /todos
+    if ((method === 'POST' || method === 'GET') && path === '/todos') {
         return addTodo(request);
     }
 
-    // POST /todos/:id/toggle
-    if (method === 'POST' && url.indexOf('/todos/') === 0 && url.indexOf('/toggle') > 0) {
-        let id = extractId(url, '/todos/', '/toggle');
-        return toggleTodo(id);
+    // POST /todos/toggle
+    if (method === 'POST' && path === '/todos/toggle') {
+        return toggleTodo(request);
     }
 
-    // DELETE /todos/:id
-    if (method === 'DELETE' && url.indexOf('/todos/') === 0) {
-        let id = extractId(url, '/todos/', null);
-        return deleteTodo(id);
+    // DELETE /todos/delete
+    if (method === 'DELETE' && path === '/todos/delete') {
+        return deleteTodo();
     }
 
     // 404 Not Found
