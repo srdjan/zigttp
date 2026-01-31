@@ -338,8 +338,10 @@ pub const Runtime = struct {
         };
         errdefer self.strings.deinit();
 
-        // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
-        try zq.builtins.initBuiltins(pool_rt.ctx);
+        // Install core JS builtins if the pooled runtime hasn't already done so.
+        if (pool_rt.ctx.builtin_objects.items.len == 0) {
+            try zq.builtins.initBuiltins(pool_rt.ctx);
+        }
         try self.installBindings();
 
         return self;
@@ -489,7 +491,13 @@ pub const Runtime = struct {
         var serialized: ?[]const u8 = null;
         if (cache_buffer) |buffer| {
             var writer = bytecode_cache.SliceWriter{ .buffer = buffer };
-            bytecode_cache.serializeBytecodeWithAtoms(&func, &self.ctx.atoms, &writer, self.allocator) catch {
+            bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+                &func,
+                &self.ctx.atoms,
+                shapes,
+                &writer,
+                self.allocator,
+            ) catch {
                 // Serialization failed (buffer too small), continue without caching
             };
             if (writer.pos > 0) {

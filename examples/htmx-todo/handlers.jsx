@@ -4,8 +4,9 @@
 // Run: zig build run -- examples/htmx-todo/handlers.jsx -p 3000
 // Open: http://localhost:3000
 
-const TODO_TEXT = 0;
-const TODO_DONE = 1;
+const TODO_ID = 0;
+const TODO_TEXT = 1;
+const TODO_DONE = 2;
 
 // ============================================================================
 // JSX Rendering Helpers
@@ -31,7 +32,13 @@ function renderLayout(children) {
 
 function renderTodoForm() {
     return (
-        <form hx-get="/todos" hx-target="#todo-list" hx-swap="beforeend" hx-on--after-request="this.reset()">
+        <form
+            hx-get="/todos"
+            hx-target="#todo-list"
+            hx-swap="beforeend"
+            hx-on--before-request="this.querySelector('input[name=id]').value = 'todo-' + ((window.__todoSeq = (window.__todoSeq || 0) + 1));"
+            hx-on--after-request="this.reset()">
+            <input type="hidden" name="id" value="" />
             <input type="text" name="text" autocomplete="off" required="required" />
             <button type="submit">Add</button>
         </form>
@@ -43,28 +50,32 @@ function renderTodoItem(todo) {
     let doneClass = done ? 'todo-item done' : 'todo-item';
     let toggleClass = done ? 'btn-toggle undo' : 'btn-toggle';
     let toggleText = done ? 'Undo' : 'Done';
+    let id = todo[TODO_ID];
+    let domId = id && id.length > 0 ? id : 'todo';
     let togglePath = [
-        '/todos/toggle?text=',
+        '/todos/toggle?id=',
+        encodeFormValue(domId),
+        '&text=',
         encodeFormValue(todo[TODO_TEXT]),
         '&done=',
         done ? '1' : '0'
     ].join('');
-    let deletePath = '/todos/delete';
+    let deletePath = ['/todos/delete?id=', encodeFormValue(domId)].join('');
 
     return (
-        <div class={doneClass}>
+        <div id={domId} class={doneClass}>
             <span>{todo[TODO_TEXT]}</span>
             <button
                 class={toggleClass}
                 hx-post={togglePath}
-                hx-target="closest .todo-item"
+                hx-target={['#', domId].join('')}
                 hx-swap="outerHTML">
                 {toggleText}
             </button>
             <button
                 class="btn-delete"
                 hx-delete={deletePath}
-                hx-target="closest .todo-item"
+                hx-target={['#', domId].join('')}
                 hx-swap="outerHTML">
                 Delete
             </button>
@@ -133,61 +144,31 @@ function encodeFormValue(value) {
     return encoded;
 }
 
-function decodeFormValue(value) {
-    if (typeof value !== 'string') {
-        return '';
+function fallbackId() {
+    // Prefer stable IDs when runtime exposes Date.now()/Math.random.
+    if (typeof Date !== 'undefined' && typeof Date.now === 'function') {
+        let now = Date.now();
+        if (typeof now === 'number' && !isNaN(now)) {
+            return ['todo-', JSON.stringify(now)].join('');
+        }
     }
-    if (value.length === 0) {
-        return '';
+    if (typeof Math !== 'undefined' && typeof Math.random === 'function') {
+        let rnd = Math.random();
+        if (typeof rnd === 'number' && !isNaN(rnd)) {
+            return ['todo-', JSON.stringify(rnd)].join('');
+        }
     }
-
-    let decoded = value;
-    decoded = decoded.split('+').join(' ');
-    decoded = decoded.split('%20').join(' ');
-    decoded = decoded.split('%2B').join('+');
-    decoded = decoded.split('%23').join('#');
-    decoded = decoded.split('%3F').join('?');
-    decoded = decoded.split('%3D').join('=');
-    decoded = decoded.split('%26').join('&');
-    decoded = decoded.split('%25').join('%');
-    return decoded;
+    return 'todo';
 }
 
-function getQueryValue(request, key) {
-    let json = JSON.stringify(request.query);
-    if (typeof json !== 'string') {
+function normalizeQueryValue(value) {
+    if (value === null || value === undefined) {
         return '';
     }
-    if (json.length === 0) {
-        return '';
+    if (typeof value === 'string') {
+        return value;
     }
-    if (json === 'null') {
-        return '';
-    }
-
-    let marker = ['"', key, '":'].join('');
-    let parts = json.split(marker);
-    if (parts.length < 2) {
-        return '';
-    }
-
-    let rest = parts[1];
-    if (rest.length === 0) {
-        return '';
-    }
-
-    if (rest.indexOf('"') === 0) {
-        let quoteParts = rest.split('"');
-        if (quoteParts.length < 2) {
-            return '';
-        }
-        return decodeFormValue(quoteParts[1]);
-    }
-
-    let commaParts = rest.split(',');
-    let first = commaParts[0];
-    let braceParts = first.split('}');
-    return braceParts[0];
+    return [value].join('');
 }
 
 // ============================================================================
@@ -206,26 +187,43 @@ function index() {
 }
 
 function addTodo(request) {
-    let text = getQueryValue(request, 'text');
+    let id = '';
+    let text = '';
+    if (request.query) {
+        id = normalizeQueryValue(request.query.id);
+        text = normalizeQueryValue(request.query.text);
+    }
     if (text.length === 0) {
         return Response.html(renderToString(<div class="error">Text is required</div>));
     }
 
-    let todo = [text, false];
+    if (id.length === 0) {
+        id = fallbackId();
+    }
+    let todo = [id, text, false];
 
     return Response.html(renderToString(renderTodoItem(todo)));
 }
 
 function toggleTodo(request) {
-    let text = getQueryValue(request, 'text');
-    let doneParam = getQueryValue(request, 'done');
+    let id = '';
+    let text = '';
+    let doneParam = '';
+    if (request.query) {
+        id = normalizeQueryValue(request.query.id);
+        text = normalizeQueryValue(request.query.text);
+        doneParam = request.query.done;
+    }
 
     if (text.length === 0) {
         return Response.text('Todo not found', { status: 404 });
     }
 
-    let done = doneParam === '1';
-    let todo = [text, !done];
+    if (id.length === 0) {
+        id = fallbackId();
+    }
+    let done = doneParam === 1 || doneParam === '1';
+    let todo = [id, text, !done];
     return Response.html(renderToString(renderTodoItem(todo)));
 }
 

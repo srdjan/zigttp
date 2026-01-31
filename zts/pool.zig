@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const context = @import("context.zig");
+const builtins = @import("builtins.zig");
 const gc = @import("gc.zig");
 const heap = @import("heap.zig");
 const arena_mod = @import("arena.zig");
@@ -89,6 +90,9 @@ pub const LockFreePool = struct {
             }
 
             const ctx = try context.Context.init(allocator, gc_state, config.ctx_config);
+
+            // Install builtins before hybrid allocator is attached so they persist across arena resets.
+            try builtins.initBuiltins(ctx);
 
             rt.* = .{
                 .ctx = ctx,
