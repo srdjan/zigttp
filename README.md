@@ -35,10 +35,24 @@ curl http://localhost:8080/
 
 ## Handler Example
 
-```javascript
+```jsx
+function HomePage() {
+    return (
+        <html>
+            <head>
+                <title>Hello World</title>
+            </head>
+            <body>
+                <h1>Hello World</h1>
+                <p>Welcome to zigttp-server!</p>
+            </body>
+        </html>
+    );
+}
+
 function handler(request) {
     if (request.url === "/") {
-        return Response.html("<h1>Hello World</h1>");
+        return Response.html(renderToString(<HomePage />));
     }
 
     if (request.url === "/api/echo") {
@@ -52,6 +66,42 @@ function handler(request) {
     return Response.text("Not Found", { status: 404 });
 }
 ```
+
+## HTMX Example
+
+zigttp includes native support for HTMX attributes in JSX:
+
+```jsx
+function TodoForm() {
+    return (
+        <form
+            hx-post="/todos"
+            hx-target="#todo-list"
+            hx-swap="beforeend">
+            <input type="text" name="text" required />
+            <button type="submit">Add Todo</button>
+        </form>
+    );
+}
+
+function handler(request) {
+    if (request.url === "/" && request.method === "GET") {
+        return Response.html(renderToString(<TodoForm />));
+    }
+
+    if (request.url === "/todos" && request.method === "POST") {
+        // Parse form data, create todo item
+        const todoHtml = renderToString(
+            <div class="todo-item">New todo item</div>
+        );
+        return Response.html(todoHtml);
+    }
+
+    return Response.text("Not Found", { status: 404 });
+}
+```
+
+See [examples/htmx-todo/](examples/htmx-todo/) for a complete HTMX application.
 
 ## CLI Options
 

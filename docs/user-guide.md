@@ -289,9 +289,21 @@ Response.text("Error occurred", { status: 500 });
 Create an HTML response. Sets `Content-Type: text/html`.
 
 ```javascript
-Response.html("<h1>Hello World</h1>");
-Response.html("<html><body>Page</body></html>");
+// Simple JSX component
+const page = <h1>Hello World</h1>;
+Response.html(renderToString(page));
+
+// Full HTML document
+const doc = (
+    <html>
+        <head><title>My Page</title></head>
+        <body>Page content</body>
+    </html>
+);
+Response.html(renderToString(doc));
 ```
+
+**Note**: For HTML responses, prefer using JSX/TSX with `renderToString()` rather than string concatenation. See [JSX Guide](jsx-guide.md) for complete documentation.
 
 ### HTTP Status Codes
 
@@ -437,7 +449,7 @@ function handleAdmin(request) {
 }
 
 function handleStatic(request) {
-    return Response.html("<h1>Welcome</h1>");
+    return Response.html(renderToString(<h1>Welcome</h1>));
 }
 ```
 
@@ -480,7 +492,7 @@ function createRouter() {
 let router = createRouter();
 
 router.get("/", function (req) {
-    return Response.html("<h1>Home</h1>");
+    return Response.html(renderToString(<h1>Home</h1>));
 });
 
 router.get("/api/users", function (req) {
@@ -1095,129 +1107,127 @@ function findUserIndex(id) {
 
 ### HTML Web Application
 
-```javascript
+```jsx
+function Layout(props) {
+    return (
+        <html lang="en">
+            <head>
+                <meta charset="UTF-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+                <title>{props.title} | My Site</title>
+                <style>{`
+                    body {
+                        font-family: -apple-system, "San Francisco", "Roboto", "Segoe UI", sans-serif;
+                        max-width: 800px;
+                        margin: 0 auto;
+                        padding: 20px;
+                    }
+                    nav { margin-bottom: 20px; }
+                    nav a { margin-right: 15px; }
+                    .success { color: green; }
+                    .error { color: red; }
+                `}</style>
+            </head>
+            <body>
+                <nav>
+                    <a href="/">Home</a>
+                    <a href="/about">About</a>
+                    <a href="/contact">Contact</a>
+                </nav>
+                <main>{props.children}</main>
+            </body>
+        </html>
+    );
+}
+
+function HomePage() {
+    return (
+        <Layout title="Home">
+            <h1>Welcome to My Site</h1>
+            <p>This is a simple web application powered by zigttp-server.</p>
+            <p>Built with Zig and zts for serverless deployments.</p>
+        </Layout>
+    );
+}
+
+function AboutPage() {
+    return (
+        <Layout title="About">
+            <h1>About</h1>
+            <p>zigttp-server is a serverless JavaScript runtime powered by zts.</p>
+            <h2>Features</h2>
+            <ul>
+                <li>Instant cold starts</li>
+                <li>Zero dependencies</li>
+                <li>ES5 JavaScript with select ES6+ features</li>
+            </ul>
+        </Layout>
+    );
+}
+
+function ContactPage() {
+    return (
+        <Layout title="Contact">
+            <h1>Contact Us</h1>
+            <form method="POST" action="/contact">
+                <p>
+                    <label>Name:<br /><input type="text" name="name" required /></label>
+                </p>
+                <p>
+                    <label>Email:<br /><input type="email" name="email" required /></label>
+                </p>
+                <p>
+                    <label>Message:<br /><textarea name="message" rows="5" required></textarea></label>
+                </p>
+                <p><button type="submit">Send Message</button></p>
+            </form>
+        </Layout>
+    );
+}
+
+function ThankYouPage() {
+    return (
+        <Layout title="Thank You">
+            <h1>Thank You!</h1>
+            <p class="success">Your message has been received.</p>
+            <p><a href="/">Return to Home</a></p>
+        </Layout>
+    );
+}
+
+function NotFoundPage() {
+    return (
+        <Layout title="Not Found">
+            <h1>404 - Page Not Found</h1>
+            <p>The page you requested does not exist.</p>
+            <p><a href="/">Return to Home</a></p>
+        </Layout>
+    );
+}
+
 function handler(request) {
-    let path = request.url;
+    const path = request.url;
+    const method = request.method;
 
-    if (path === "/") {
-        return Response.html(renderHomePage());
+    if (path === "/" && method === "GET") {
+        return Response.html(renderToString(<HomePage />));
     }
 
-    if (path === "/about") {
-        return Response.html(renderAboutPage());
+    if (path === "/about" && method === "GET") {
+        return Response.html(renderToString(<AboutPage />));
     }
 
-    if (path === "/contact" && request.method === "GET") {
-        return Response.html(renderContactPage());
+    if (path === "/contact" && method === "GET") {
+        return Response.html(renderToString(<ContactPage />));
     }
 
-    if (path === "/contact" && request.method === "POST") {
-        return handleContactForm(request);
+    if (path === "/contact" && method === "POST") {
+        // Log form submission (simplified)
+        console.log("Contact form submitted:", request.body);
+        return Response.html(renderToString(<ThankYouPage />));
     }
 
-    return Response.html(render404Page(), { status: 404 });
-}
-
-function layout(title, content) {
-    return [
-        "<!DOCTYPE html>",
-        '<html lang="en">',
-        "<head>",
-        '  <meta charset="UTF-8">',
-        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-        "  <title>" + title + " | My Site</title>",
-        "  <style>",
-        '    body { font-family: -apple-system, ".SFNSText-Regular", "San Francisco", "Roboto", "Segoe UI", "Helvetica Neue", sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }',
-        "    nav { margin-bottom: 20px; }",
-        "    nav a { margin-right: 15px; }",
-        "    .success { color: green; }",
-        "    .error { color: red; }",
-        "  </style>",
-        "</head>",
-        "<body>",
-        "  <nav>",
-        '    <a href="/">Home</a>',
-        '    <a href="/about">About</a>',
-        '    <a href="/contact">Contact</a>',
-        "  </nav>",
-        "  <main>" + content + "</main>",
-        "</body>",
-        "</html>",
-    ].join("\n");
-}
-
-function renderHomePage() {
-    return layout(
-        "Home",
-        [
-            "<h1>Welcome to My Site</h1>",
-            "<p>This is a simple web application powered by zigttp-server.</p>",
-            "<p>Built with Zig and zts for serverless deployments.</p>",
-        ].join("\n"),
-    );
-}
-
-function renderAboutPage() {
-    return layout(
-        "About",
-        [
-            "<h1>About</h1>",
-            "<p>zigttp-server is a serverless JavaScript runtime powered by zts.</p>",
-            "<h2>Features</h2>",
-            "<ul>",
-            "  <li>Instant cold starts</li>",
-            "  <li>Zero dependencies</li>",
-            "  <li>ES5 JavaScript with select ES6+ features</li>",
-            "</ul>",
-        ].join("\n"),
-    );
-}
-
-function renderContactPage() {
-    return layout(
-        "Contact",
-        [
-            "<h1>Contact Us</h1>",
-            '<form method="POST" action="/contact">',
-            "  <p>",
-            '    <label>Name:<br><input type="text" name="name" required></label>',
-            "  </p>",
-            "  <p>",
-            '    <label>Email:<br><input type="email" name="email" required></label>',
-            "  </p>",
-            "  <p>",
-            '    <label>Message:<br><textarea name="message" rows="5" required></textarea></label>',
-            "  </p>",
-            '  <p><button type="submit">Send Message</button></p>',
-            "</form>",
-        ].join("\n"),
-    );
-}
-
-function handleContactForm(request) {
-    // Parse form data (simplified - assumes URL-encoded)
-    let body = request.body || "";
-    console.log("Contact form submitted:", body);
-
-    return layout(
-        "Thank You",
-        [
-            "<h1>Thank You!</h1>",
-            '<p class="success">Your message has been received.</p>',
-            '<p><a href="/">Return to Home</a></p>',
-        ].join("\n"),
-    );
-}
-
-function render404Page() {
-    return layout(
-        "Not Found",
-        [
-            "<h1>404 - Page Not Found</h1>",
-            "<p>The page you requested does not exist.</p>",
-            '<p><a href="/">Return to Home</a></p>',
-        ].join("\n"),
-    );
+    return Response.html(renderToString(<NotFoundPage />), { status: 404 });
 }
 ```
 
