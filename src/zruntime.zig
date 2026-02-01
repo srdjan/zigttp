@@ -9,6 +9,7 @@ const ascii = std.ascii;
 
 // Import zts module
 const zq = @import("zts");
+const embedded_handler = @import("embedded_handler");
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
@@ -207,6 +208,15 @@ pub const HttpResponse = struct {
 /// Thread-local reference to current runtime for use in native function callbacks
 /// (e.g., renderToString needs to call component functions)
 threadlocal var current_runtime: ?*Runtime = null;
+
+const AotOverrideFn = *const fn (ctx: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue;
+threadlocal var aot_override: ?AotOverrideFn = null;
+
+fn setAotOverrideForTest(callback: ?AotOverrideFn) void {
+    if (builtin.is_test) {
+        aot_override = callback;
+    }
+}
 
 // ============================================================================
 // Runtime Instance
@@ -639,6 +649,42 @@ pub const Runtime = struct {
             }
         }
 
+        // Create Request object from HttpRequest (shared between AOT and interpreter)
+        const request_obj = try self.createRequestObject(request);
+        const args = [_]zq.JSValue{request_obj};
+
+        // === AOT PATH: Native Zig handler ===
+        aot_attempt: {
+            if (builtin.is_test) {
+                if (aot_override) |override_fn| {
+                    const override_result = override_fn(self.ctx, &args) catch |err| {
+                        if (err == error.AotBail) break :aot_attempt;
+                        std.log.err("AOT override failed: {}", .{err});
+                        return error.HandlerError;
+                    };
+
+                    const response = try self.extractResponseInternal(override_result, borrow_body);
+                    if (borrow_body) {
+                        reset_after = false;
+                    }
+                    return response;
+                }
+            }
+            if (!embedded_handler.has_aot) break :aot_attempt;
+
+            const aot_result = embedded_handler.aotHandler(self.ctx, &args) catch |err| {
+                if (err == error.AotBail) break :aot_attempt;
+                std.log.err("AOT handler failed: {}", .{err});
+                return error.HandlerError;
+            };
+
+            const response = try self.extractResponseInternal(aot_result, borrow_body);
+            if (borrow_body) {
+                reset_after = false;
+            }
+            return response;
+        }
+
         // === SLOW PATH: Full bytecode execution ===
 
         // Set thread-local runtime for native function callbacks (e.g., renderToString)
@@ -648,12 +694,6 @@ pub const Runtime = struct {
         // Set callback for JSX function component rendering
         zq.http.setCallFunctionCallback(callFunctionWrapper);
         defer zq.http.clearCallFunctionCallback();
-
-        // Create Request object from HttpRequest
-        const request_obj = try self.createRequestObject(request);
-
-        // Call handler(request)
-        const args = [_]zq.JSValue{request_obj};
 
         const result = self.callFunction(handler_obj, &args) catch |err| {
             std.log.err("Handler execution failed: {}", .{err});
@@ -1733,6 +1773,50 @@ test "HandlerPool handler remains callable across resets" {
 
     // Flush main thread cache (if any).
     zq.pool.releaseThreadLocal(&pool.pool);
+}
+
+test "AOT override fallback and success" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const handler_code = "function handler(req) { return Response.json({ok:false}); }";
+    var rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler(handler_code, "<handler>");
+
+    var request = HttpRequest{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    const aot_ok: AotOverrideFn = struct {
+        fn call(ctx: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue {
+            _ = args;
+            return zq.http.createResponse(ctx, "{\"ok\":true}", 200, "application/json");
+        }
+    }.call;
+
+    const aot_bail: AotOverrideFn = struct {
+        fn call(_: *zq.Context, _: []const zq.JSValue) anyerror!zq.JSValue {
+            return error.AotBail;
+        }
+    }.call;
+
+    setAotOverrideForTest(aot_bail);
+    defer setAotOverrideForTest(null);
+
+    var fallback_response = try rt.executeHandler(request);
+    defer fallback_response.deinit();
+    try std.testing.expectEqualStrings("{\"ok\":false}", fallback_response.body);
+
+    setAotOverrideForTest(aot_ok);
+    var aot_response = try rt.executeHandler(request);
+    defer aot_response.deinit();
+    try std.testing.expectEqualStrings("{\"ok\":true}", aot_response.body);
 }
 
 test "HandlerPool concurrent stress" {

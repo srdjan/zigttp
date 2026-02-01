@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // Handler path option (required for main build)
     const handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)");
+    const aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false;
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -63,6 +64,9 @@ pub fn build(b: *std.Build) void {
     if (handler_path) |path| {
         // Run precompile tool to generate embedded handler
         const run_precompile = b.addRunArtifact(precompile_exe);
+        if (aot_enabled) {
+            run_precompile.addArg("--aot");
+        }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");
 
@@ -125,6 +129,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     zruntime_tests.root_module.addImport("zts", zts_mod);
+    zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
+        .root_source_file = b.path("src/embedded_handler_stub.zig"),
+    });
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
@@ -153,7 +160,10 @@ pub fn build(b: *std.Build) void {
     const release_step = b.step("release", "Build optimized release binary (use -Dhandler=<path> for embedded bytecode)");
     release_step.dependOn(b.getInstallStep());
     if (handler_path) |_| {
-        const release_note = b.addSystemCommand(&.{
+        const release_note = b.addSystemCommand(if (aot_enabled) &.{
+            "echo",
+            "Release build with embedded bytecode + AOT: zig-out/bin/zigttp-server",
+        } else &.{
             "echo",
             "Release build with embedded bytecode: zig-out/bin/zigttp-server",
         });

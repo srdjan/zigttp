@@ -306,7 +306,7 @@ pub const HandlerAnalyzer = struct {
         };
     }
 
-    const StaticResponseInfo = struct {
+    pub const StaticResponseInfo = struct {
         body: []const u8,
         status: u16,
         content_type_idx: u8,
@@ -453,6 +453,13 @@ pub const HandlerAnalyzer = struct {
         }
 
         return null;
+    }
+
+    /// Analyze handler body for a direct static return (no if-chain)
+    /// Returns null if the body is not a static Response.* return.
+    pub fn analyzeDirectReturn(self: *HandlerAnalyzer, func_node: NodeIndex) !?StaticResponseInfo {
+        const func = self.ir.getFunction(func_node) orelse return null;
+        return try self.analyzeStaticReturn(func.body);
     }
 
     fn analyzeReturnStmt(self: *HandlerAnalyzer, return_node: NodeIndex) !?StaticResponseInfo {
