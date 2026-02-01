@@ -6,12 +6,18 @@ A high-performance serverless JavaScript runtime for FaaS deployments, powered b
 
 ## Why zigttp?
 
+### Langugage Goals: Light Functional TypeScript subset
+- Support 'light functional programming style' with the strict subset of TypeScript
+- make JSX first class citizen in zts.
+- Native TypeScript "comptime" support, a-la Zig
+- Support asynchronous I/O with async/await and Promises
+
+### Runtime Goals:
+- Experimient with AOT compilation for TypeScript/JavaScript handlers in zigttp, while preserving the JIT/interpreter for strictly dynamic runtime scenarios.
 - **Fast cold starts**: 3ms runtime init, ~100ms total on macOS (2-3x faster than Deno)
 - **Future Linux target**: Sub-20ms cold starts via static linking (planned)
 - **Small footprint**: 1.2MB binary, 4MB memory, zero runtime dependencies
 - Request isolation via pre-warmed handler pool
-- Native TypeScript/TSX support with compile-time evaluation
-- Direct JSX parsing for server-side rendering
 
 ## Quick Start
 
