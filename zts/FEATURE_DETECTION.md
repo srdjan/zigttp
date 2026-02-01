@@ -24,6 +24,7 @@ These features are TypeScript-specific and have no JavaScript equivalent. They a
 | `implements` | 1034-1035 | UnsupportedClass | Use duck typing or runtime checks |
 | `@decorator` syntax | 995-996 | UnsupportedDecorator | Use function composition |
 | Access modifiers (`public`, `private`, `protected`) | 1038-1057 | UnsupportedClass | Use naming conventions (e.g., `_private`) |
+| `any` type (all positions: annotations, assertions, nested) | 1057-1072 | UnsupportedAnyType | Use specific types (string, number, object) or union types |
 
 **Note**: After Stage 3 implementation, `class` and `abstract class` will be handled by the parser to ensure consistent error messages for both .ts and .js files.
 

@@ -19,6 +19,7 @@ Status: **Implemented** (see `zts/stripper.zig`).
 - `namespace` / `module`
 - decorators
 - `abstract`, `implements`, parameter properties, access modifiers on class fields
+- `any` type (in all positions: annotations, assertions, generics)
 - overload merging or declaration merging semantics
 - TSX angle‑bracket assertions (`<T>expr`)
 - full TS type system or inference
@@ -122,6 +123,7 @@ On unsupported constructs, emit a clear error and abort stripping:
 - `enum` / `const enum`
 - `namespace`
 - decorators (`@something`)
+- `any` type (annotations, assertions, nested in generics)
 - angle‑bracket assertions in TSX
 - class features not supported by zts (if encountered in TS input)
 
@@ -230,7 +232,15 @@ Errors should include the **original line/column** of the problematic construct.
 
 - **TSX angle‑bracket assertion**
   - Input: `const x = <Foo>bar;`
-  - Expected: error “angle‑bracket assertions not supported in TSX”
+  - Expected: error "angle‑bracket assertions not supported in TSX"
+
+- **any type annotation**
+  - Input: `const x: any = 5;`
+  - Expected: error "any type not supported"
+
+- **any in generic**
+  - Input: `const x: Record<string, any> = {};`
+  - Expected: error "any type not supported"
 
 ### H) Line/Column Preservation
 

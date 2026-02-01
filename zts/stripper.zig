@@ -31,6 +31,7 @@ pub const StripError = error{
     UnsupportedDecorator,
     UnsupportedAngleBracketAssertion,
     UnsupportedClass,
+    UnsupportedAnyType,
     UnclosedTypeAnnotation,
     UnclosedGeneric,
     UnterminatedString,
@@ -70,6 +71,7 @@ pub const StripOptions = struct {
 /// Strip TypeScript types from source code
 pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOptions) StripError!StripResult {
     var stripper = Stripper.init(allocator, source, options);
+    errdefer stripper.output.deinit(allocator);
     return stripper.strip();
 }
 
@@ -349,7 +351,7 @@ const Stripper = struct {
             self.skipWhitespaceTracked();
 
             if (self.looksLikeTypeStart()) {
-                self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' });
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' });
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
                 // Blank the return type annotation (but preserve final whitespace)
@@ -399,8 +401,10 @@ const Stripper = struct {
                 self.skipWhitespaceTracked();
 
                 if (self.looksLikeTypeStart()) {
+                    // Check for banned 'any' type
+                    try self.checkForAnyType();
                     // Skip to , or ) at depth 1
-                    self.skipParamType();
+                    try self.skipParamType();
                     self.blankSpan(colon_pos, self.pos);
                     continue;
                 } else {
@@ -454,7 +458,7 @@ const Stripper = struct {
 
             if (self.looksLikeTypeStart()) {
                 // Skip to => or {
-                self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{' });
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{' });
                 // Check for =>
                 self.skipWhitespaceTracked();
                 if (self.pos + 1 < self.source.len and
@@ -543,7 +547,7 @@ const Stripper = struct {
         return self.pos < self.source.len and self.source[self.pos] == '(';
     }
 
-    fn skipParamType(self: *Self) void {
+    fn skipParamType(self: *Self) StripError!void {
         // Skip type expression in parameter until , or )
         var paren_depth: u16 = 0;
         var angle_depth: u16 = 0;
@@ -556,6 +560,11 @@ const Stripper = struct {
             if (c == '"' or c == '\'' or c == '`') {
                 self.skipString(c) catch {};
                 continue;
+            }
+
+            // Check identifiers for banned types
+            if (isIdentifierStart(c)) {
+                try self.checkForAnyType();
             }
 
             if (c == '(') {
@@ -645,7 +654,7 @@ const Stripper = struct {
                 self.col += 7;
                 self.skipWhitespaceTracked();
                 // Skip base type(s)
-                self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' });
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' });
                 self.skipWhitespaceTracked();
             }
         }
@@ -655,7 +664,7 @@ const Stripper = struct {
             self.pos += 1;
             self.col += 1;
             self.skipWhitespaceTracked();
-            self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' });
+            try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' });
         }
 
         // For interface: skip the { ... } body
@@ -759,8 +768,11 @@ const Stripper = struct {
             return false;
         }
 
+        // Check for banned 'any' type
+        try self.checkForAnyType();
+
         // This looks like a type annotation - skip the type
-        self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '=', '{', '}' });
+        try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '=', '{', '}' });
 
         // Check for arrow function
         self.skipWhitespaceTracked();
@@ -799,8 +811,11 @@ const Stripper = struct {
             return false;
         }
 
+        // Check for banned 'any' type
+        try self.checkForAnyType();
+
         // Skip the type
-        self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '}', ']' });
+        try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '}', ']' });
 
         // Blank from 'as' to current position
         self.blankSpan(keyword_start, self.pos);
@@ -815,8 +830,11 @@ const Stripper = struct {
             return false;
         }
 
+        // Check for banned 'any' type
+        try self.checkForAnyType();
+
         // Skip the type
-        self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '}' });
+        try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '}' });
 
         // Blank from 'satisfies' to current position
         self.blankSpan(keyword_start, self.pos);
@@ -1053,6 +1071,25 @@ const Stripper = struct {
     }
 
     // ========================================================================
+    // Banned Type Detection
+    // ========================================================================
+
+    fn checkForAnyType(self: *Self) StripError!void {
+        if (self.pos >= self.source.len) return;
+        if (!isIdentifierStart(self.source[self.pos])) return;
+
+        const kw = self.peekKeyword();
+        if (kw != null and std.mem.eql(u8, kw.?, "any")) {
+            // Word boundary: next char after "any" must not continue the identifier
+            const after = self.pos + 3;
+            if (after >= self.source.len or !isIdentifierContinue(self.source[after])) {
+                std.log.err("{}:{}: 'any' type is not supported; use specific types (string, number, object) or union types instead", .{ self.line, self.col });
+                return StripError.UnsupportedAnyType;
+            }
+        }
+    }
+
+    // ========================================================================
     // Helper Functions
     // ========================================================================
 
@@ -1112,7 +1149,7 @@ const Stripper = struct {
         }
     }
 
-    fn skipTypeExpressionUntilDelimiter(self: *Self, delimiters: []const u8) void {
+    fn skipTypeExpressionUntilDelimiter(self: *Self, delimiters: []const u8) StripError!void {
         var paren_depth: u16 = 0;
         var bracket_depth: u16 = 0;
         var angle_depth: u16 = 0;
@@ -1125,6 +1162,11 @@ const Stripper = struct {
             if (c == '"' or c == '\'' or c == '`') {
                 self.skipString(c) catch {};
                 continue;
+            }
+
+            // Check identifiers for banned types (catches nested 'any' in Record<string, any> etc.)
+            if (isIdentifierStart(c)) {
+                try self.checkForAnyType();
             }
 
             // Check delimiters at depth 0 FIRST (before tracking)
@@ -1555,6 +1597,47 @@ test "private modifier errors" {
 test "protected modifier errors" {
     const result = strip(std.testing.allocator, "protected foo() { }", .{});
     try std.testing.expectError(StripError.UnsupportedClass, result);
+}
+
+test "any type annotation errors" {
+    const result = strip(std.testing.allocator, "const x: any = 5;", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any function param errors" {
+    const result = strip(std.testing.allocator, "function f(x: any) { return x; }", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any return type errors" {
+    const result = strip(std.testing.allocator, "function f(): any { return 1; }", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any as assertion errors" {
+    const result = strip(std.testing.allocator, "const x = value as any;", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any in generic errors" {
+    const result = strip(std.testing.allocator, "const x: Record<string, any> = {};", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any array errors" {
+    const result = strip(std.testing.allocator, "const x: any[] = [];", .{});
+    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+}
+
+test "any variable name allowed" {
+    var result = try strip(std.testing.allocator, "const any = 5;", .{});
+    defer result.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "const any") != null);
+}
+
+test "anything identifier allowed" {
+    var result = try strip(std.testing.allocator, "let x: anything = 5;", .{});
+    defer result.deinit();
 }
 
 // Stage 3 complete: class keyword now passes through stripper to be caught by parser
