@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const ir = @import("zts/parser/ir.zig");
+const ir = zts.parser;
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -333,7 +333,9 @@ fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
     for (dispatch.patterns) |pattern| {
         switch (pattern.pattern_type) {
             .exact => count += 1,
-            .prefix => if (pattern.response_template_prefix != null) count += 1,
+            .prefix => {
+                if (pattern.response_template_prefix != null) count += 1;
+            },
             else => {},
         }
     }
@@ -371,9 +373,10 @@ fn writeZigFile(
     handler_path: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
-    var output = std.ArrayList(u8).init(allocator);
-    defer output.deinit();
-    const writer = output.writer();
+    var output = std.ArrayList(u8).empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    const writer = &aw.writer;
 
     const has_aot = if (compiled.aot) |analysis| blk: {
         if (analysis.default_response != null) break :blk true;
@@ -518,6 +521,7 @@ fn writeZigFile(
     try writeBytecodeArray(writer, compiled.bytecode);
     try writer.writeAll("};\n");
 
+    output = aw.toArrayList();
     try writeFilePosix(path, output.items, allocator);
 }
 
@@ -551,7 +555,7 @@ fn writeZigStringLiteral(writer: anytype, value: []const u8) !void {
             '\n' => try writer.writeAll("\\n"),
             '\r' => try writer.writeAll("\\r"),
             '\t' => try writer.writeAll("\\t"),
-            0x00...0x1F, 0x7F => {
+            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f, 0x7f => {
                 var buf: [4]u8 = undefined;
                 buf[0] = '\\';
                 buf[1] = 'x';

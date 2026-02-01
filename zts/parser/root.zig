@@ -46,6 +46,7 @@ pub const UnaryOp = @import("ir.zig").UnaryOp;
 
 // Phase 3: Optimized IR storage (SoA pattern)
 pub const IRStore = @import("ir.zig").IRStore;
+pub const IrView = @import("ir.zig").IrView;
 pub const DataPayload = @import("ir.zig").DataPayload;
 
 pub const ScopeAnalyzer = @import("scope.zig").ScopeAnalyzer;
