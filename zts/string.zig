@@ -158,7 +158,7 @@ pub const JSString = extern struct {
 /// Rope node for efficient string building
 /// Allows O(1) concatenation by creating tree nodes instead of copying data.
 /// Flattening to a flat string is deferred until the content is actually needed.
-pub const RopeNode = struct {
+pub const RopeNode = extern struct {
     header: heap.MemBlockHeader,
     /// Total length of all strings in this subtree
     total_len: u32,
@@ -1773,4 +1773,55 @@ test "SliceString startsWith and endsWith" {
 test "SliceString MIN_SLICE_LEN threshold" {
     // Verify the minimum slice length constant
     try std.testing.expectEqual(@as(u32, 16), SliceString.MIN_SLICE_LEN);
+}
+
+test "regression: RopeNode header at offset 0 for type detection" {
+    // RopeNode must be extern struct so the header field is at offset 0.
+    // The value type system reads the header via toPtr(u32) and checks the tag.
+    // If the header is not at offset 0, isRope() returns false and ropes are
+    // treated as generic objects, breaking .length, typeof, and method dispatch.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(RopeNode, "header"));
+    // Also verify JSString has header at offset 0 (it's extern struct)
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(JSString, "header"));
+    // And SliceString
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(SliceString, "header"));
+}
+
+test "regression: rope concat preserves total_len" {
+    const allocator = std.testing.allocator;
+
+    const str_a = try createString(allocator, "hello");
+    defer freeString(allocator, str_a);
+    const str_b = try createString(allocator, " world");
+    defer freeString(allocator, str_b);
+
+    const rope = try createRopeFromStrings(allocator, str_a, str_b);
+    defer freeRope(allocator, rope);
+
+    try std.testing.expectEqual(@as(u32, 11), rope.total_len);
+    try std.testing.expectEqual(RopeNode.RopeKind.concat, rope.kind);
+
+    // Flatten and verify content
+    const flat = try rope.flatten(allocator);
+    defer freeString(allocator, flat);
+    try std.testing.expectEqualStrings("hello world", flat.data());
+}
+
+test "regression: rope type tag is correct" {
+    const allocator = std.testing.allocator;
+
+    const str_a = try createString(allocator, "abc");
+    defer freeString(allocator, str_a);
+
+    const leaf = try createRopeLeaf(allocator, str_a);
+    defer allocator.destroy(leaf);
+
+    // Verify the rope header tag is .rope
+    try std.testing.expectEqual(heap.MemTag.rope, leaf.header.tag);
+
+    // Verify via the value system's isRope check
+    const val = @import("value.zig").JSValue.fromPtr(leaf);
+    try std.testing.expect(val.isRope());
+    try std.testing.expect(val.isAnyString());
+    try std.testing.expect(!val.isString()); // Not a flat string
 }

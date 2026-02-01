@@ -2160,9 +2160,19 @@ fn getJSString(val: value.JSValue) ?*string.JSString {
     return null;
 }
 
-/// Get string data from any string type (flat string, slice, or rope leaf).
-/// Returns null for ropes that need flattening.
+/// Get string data from any string type (flat string, slice, or rope).
+/// For concat ropes, flattens using the context's arena (if available) or heap allocator.
+/// The flattened result is cached in the rope node for subsequent accesses.
 fn getStringData(val: value.JSValue) ?[]const u8 {
+    return getStringDataImpl(val, null);
+}
+
+/// Context-aware variant that uses the arena for flattening concat ropes.
+fn getStringDataCtx(val: value.JSValue, ctx: *context.Context) ?[]const u8 {
+    return getStringDataImpl(val, ctx);
+}
+
+fn getStringDataImpl(val: value.JSValue, ctx: ?*context.Context) ?[]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();
     }
@@ -2174,6 +2184,19 @@ fn getStringData(val: value.JSValue) ?[]const u8 {
         if (rope.kind == .leaf) {
             return rope.payload.leaf.data();
         }
+        // Concat rope: flatten and cache by converting to leaf
+        if (ctx) |c| {
+            if (c.hybrid) |h| {
+                const flat = rope.flattenWithArena(h.arena) orelse return null;
+                rope.kind = .leaf;
+                rope.payload = .{ .leaf = flat };
+                return flat.data();
+            }
+        }
+        const flat = rope.flatten(std.heap.c_allocator) catch return null;
+        rope.kind = .leaf;
+        rope.payload = .{ .leaf = flat };
+        return flat.data();
     }
     return null;
 }
@@ -2192,10 +2215,14 @@ fn getStringParent(val: value.JSValue) ?*string.JSString {
 
 /// String.prototype.length - Get string length
 pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
     _ = args;
-    if (getStringData(this)) |data| {
+    if (getStringDataCtx(this, ctx)) |data| {
         return value.JSValue.fromInt(@intCast(data.len));
+    }
+    // For ropes, use total_len directly without flattening
+    if (this.isRope()) {
+        const rope = this.toPtr(string.RopeNode);
+        return value.JSValue.fromInt(@intCast(rope.total_len));
     }
     return value.JSValue.fromInt(0);
 }
@@ -2234,11 +2261,10 @@ pub fn stringCharCodeAt(ctx: *context.Context, this: value.JSValue, args: []cons
 
 /// String.prototype.indexOf(searchString, position?) - Find substring
 pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
     if (args.len == 0) return value.JSValue.fromInt(-1);
 
-    const data = getStringData(this) orelse return value.JSValue.fromInt(-1);
-    const needle_data = getStringData(args[0]) orelse return value.JSValue.fromInt(-1);
+    const data = getStringDataCtx(this, ctx) orelse return value.JSValue.fromInt(-1);
+    const needle_data = getStringDataCtx(args[0], ctx) orelse return value.JSValue.fromInt(-1);
 
     // Get start position (default 0)
     var start: usize = 0;
@@ -2327,8 +2353,8 @@ pub fn stringIncludes(ctx: *context.Context, this: value.JSValue, args: []const 
 /// String.prototype.slice(start, end?) - Extract substring
 /// Uses zero-copy SliceString for substrings >= 16 bytes
 pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // Get data from any string type
-    const data = getStringData(this) orelse return value.JSValue.undefined_val;
+    // Get data from any string type (flatten ropes if needed)
+    const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
 
     var start: i32 = 0;
     var end: i32 = @intCast(data.len);
@@ -5956,4 +5982,55 @@ test "Set.clear empties set" {
     const has2 = setHas(ctx, set, &[_]value.JSValue{value.JSValue.fromInt(2)});
     try std.testing.expect(has1.getBool() == false);
     try std.testing.expect(has2.getBool() == false);
+}
+
+test "regression: getStringData handles concat ropes" {
+    const allocator = std.testing.allocator;
+
+    // Flat string
+    const flat = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, flat);
+    const flat_data = getStringData(value.JSValue.fromPtr(flat));
+    try std.testing.expectEqualStrings("hello", flat_data.?);
+
+    // Rope leaf
+    const leaf = try string.createRopeLeaf(allocator, flat);
+    defer allocator.destroy(leaf);
+    const leaf_data = getStringData(value.JSValue.fromPtr(leaf));
+    try std.testing.expectEqualStrings("hello", leaf_data.?);
+
+    // Concat rope - this was previously returning null
+    const str2 = try string.createString(allocator, " world");
+    defer string.freeString(allocator, str2);
+    const rope = try string.createRopeFromStrings(allocator, flat, str2);
+
+    // Save child nodes before getStringData mutates the rope to a leaf
+    const left_child = rope.payload.concat.left;
+    const right_child = rope.payload.concat.right;
+
+    const rope_data = getStringData(value.JSValue.fromPtr(rope));
+    try std.testing.expect(rope_data != null);
+    try std.testing.expectEqualStrings("hello world", rope_data.?);
+
+    // After flattening, rope should now be a leaf (cached)
+    try std.testing.expectEqual(string.RopeNode.RopeKind.leaf, rope.kind);
+
+    // Free the flattened string (allocated with c_allocator), the child nodes, and the rope
+    string.freeString(std.heap.c_allocator, rope.payload.leaf);
+    allocator.destroy(left_child);
+    allocator.destroy(right_child);
+    allocator.destroy(rope);
+}
+
+test "regression: getStringData handles string slices" {
+    const allocator = std.testing.allocator;
+
+    const parent = try string.createString(allocator, "hello world");
+    defer string.freeString(allocator, parent);
+
+    const slice = try string.createSlice(allocator, parent, 6, 5);
+    defer string.freeSlice(allocator, slice);
+
+    const data = getStringData(value.JSValue.fromPtr(slice));
+    try std.testing.expectEqualStrings("world", data.?);
 }

@@ -826,10 +826,24 @@ fn renderRawChildren(children: value.JSValue, writer: anytype) !void {
 // Helpers
 // ============================================================================
 
-/// Get string data from a JSValue
+/// Get string data from a JSValue (handles flat strings, ropes, and slices)
 fn getStringArg(val: value.JSValue) ![]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();
+    }
+    if (val.isStringSlice()) {
+        return val.toPtr(string.SliceString).data();
+    }
+    if (val.isRope()) {
+        const rope = val.toPtr(string.RopeNode);
+        if (rope.kind == .leaf) {
+            return rope.payload.leaf.data();
+        }
+        // Flatten concat rope and cache result
+        const flat = try rope.flatten(std.heap.c_allocator);
+        rope.kind = .leaf;
+        rope.payload = .{ .leaf = flat };
+        return flat.data();
     }
     return "";
 }

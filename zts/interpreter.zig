@@ -180,6 +180,23 @@ fn traceCall(self: *Interpreter, label: []const u8, argc: u8, is_method: bool) v
     );
 }
 
+/// Get length of any string type: flat JSString, RopeNode, or SliceString
+fn getAnyStringLength(val: value.JSValue) value.JSValue {
+    if (val.isString()) {
+        const str = val.toPtr(string.JSString);
+        return value.JSValue.fromInt(@intCast(str.len));
+    }
+    if (val.isRope()) {
+        const rope = val.toPtr(string.RopeNode);
+        return value.JSValue.fromInt(@intCast(rope.total_len));
+    }
+    if (val.isStringSlice()) {
+        const slice = val.toPtr(string.SliceString);
+        return value.JSValue.fromInt(@intCast(slice.len));
+    }
+    return value.JSValue.fromInt(0);
+}
+
 fn traceTypeError(self: *Interpreter, label: []const u8, a: value.JSValue, b: value.JSValue) void {
     if (!callTraceEnabled()) return;
     std.debug.print(
@@ -1207,9 +1224,8 @@ pub const Interpreter = struct {
                             }
                             continue :dispatch;
                         }
-                    } else if (obj_val.isString()) {
-                        const str = obj_val.toPtr(string.JSString);
-                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intCast(str.len));
+                    } else if (obj_val.isAnyString()) {
+                        self.ctx.stack[sp - 1] = getAnyStringLength(obj_val);
                     } else {
                         self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
                     }
@@ -1852,11 +1868,10 @@ pub const Interpreter = struct {
                         } else {
                             try self.ctx.push(value.JSValue.undefined_val);
                         }
-                    } else if (obj_val.isString()) {
-                        // Primitive string property access
+                    } else if (obj_val.isAnyString()) {
+                        // Primitive string property access (flat, rope, or slice)
                         if (atom == .length) {
-                            const str = obj_val.toPtr(string.JSString);
-                            try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
+                            try self.ctx.push(getAnyStringLength(obj_val));
                         } else if (self.ctx.string_prototype) |proto| {
                             // Look up method on String.prototype
                             const pool = self.ctx.hidden_class_pool orelse {
@@ -1943,11 +1958,10 @@ pub const Interpreter = struct {
                         } else {
                             try self.ctx.push(value.JSValue.undefined_val);
                         }
-                    } else if (obj_val.isString()) {
-                        // Primitive string property access (same as get_field)
+                    } else if (obj_val.isAnyString()) {
+                        // Primitive string property access (flat, rope, or slice)
                         if (atom == .length) {
-                            const str = obj_val.toPtr(string.JSString);
-                            try self.ctx.push(value.JSValue.fromInt(@intCast(str.len)));
+                            try self.ctx.push(getAnyStringLength(obj_val));
                         } else if (self.ctx.string_prototype) |proto| {
                             const pool = self.ctx.hidden_class_pool orelse {
                                 try self.ctx.push(value.JSValue.undefined_val);
@@ -2369,6 +2383,20 @@ pub const Interpreter = struct {
                             // Call as method (will use obj as 'this')
                             try self.doCall(argc, true);
                             continue :dispatch;
+                        }
+                    } else if (obj.isAnyString()) {
+                        // String method call (flat, rope, or slice)
+                        if (self.ctx.string_prototype) |proto| {
+                            const pool = self.ctx.hidden_class_pool orelse {
+                                try self.ctx.push(value.JSValue.undefined_val);
+                                try self.doCall(argc, true);
+                                continue :dispatch;
+                            };
+                            if (proto.getProperty(pool, atom)) |method| {
+                                try self.ctx.push(method);
+                                try self.doCall(argc, true);
+                                continue :dispatch;
+                            }
                         }
                     }
                     // Fallback: property not found, push undefined and call
@@ -3938,10 +3966,9 @@ pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
             return prop_val;
         }
         return value.JSValue.undefined_val;
-    } else if (obj_val.isString()) {
+    } else if (obj_val.isAnyString()) {
         if (atom == .length) {
-            const str = obj_val.toPtr(string.JSString);
-            return value.JSValue.fromInt(@intCast(str.len));
+            return getAnyStringLength(obj_val);
         }
         if (ctx.string_prototype) |proto| {
             const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
@@ -7025,4 +7052,34 @@ test "JIT integration: unsupported opcodes stay interpreted" {
     // Should stay interpreted (not baseline)
     try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
     try std.testing.expect(func.compiled_code == null);
+}
+
+test "regression: getAnyStringLength handles all string types" {
+    const allocator = std.testing.allocator;
+
+    // Flat string
+    const flat = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, flat);
+    const flat_val = value.JSValue.fromPtr(flat);
+    try std.testing.expectEqual(value.JSValue.fromInt(5), getAnyStringLength(flat_val));
+
+    // Rope (leaf)
+    const leaf = try string.createRopeLeaf(allocator, flat);
+    defer allocator.destroy(leaf);
+    const leaf_val = value.JSValue.fromPtr(leaf);
+    try std.testing.expectEqual(value.JSValue.fromInt(5), getAnyStringLength(leaf_val));
+
+    // Rope (concat)
+    const str2 = try string.createString(allocator, " world");
+    defer string.freeString(allocator, str2);
+    const rope = try string.createRopeFromStrings(allocator, flat, str2);
+    defer string.freeRope(allocator, rope);
+    const rope_val = value.JSValue.fromPtr(rope);
+    try std.testing.expectEqual(value.JSValue.fromInt(11), getAnyStringLength(rope_val));
+
+    // SliceString
+    const slice = try string.createSlice(allocator, flat, 1, 3);
+    defer string.freeSlice(allocator, slice);
+    const slice_val = value.JSValue.fromPtr(slice);
+    try std.testing.expectEqual(value.JSValue.fromInt(3), getAnyStringLength(slice_val));
 }
