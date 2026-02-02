@@ -304,11 +304,11 @@ pub const LockFreePool = struct {
 
 /// Thread-local runtime cache depth for reduced pool contention.
 /// OPTIMIZATION: Increased from 1 to 2 to reduce pool access frequency.
-const THREAD_LOCAL_CACHE_SIZE = 2;
+const THREAD_LOCAL_CACHE_SIZE = 4;
 
 /// Thread-local runtime cache for reduced pool contention.
 /// Uses LIFO order: index 0 is the most recently used (hottest).
-pub threadlocal var thread_local_cache: [THREAD_LOCAL_CACHE_SIZE]?*LockFreePool.Runtime = .{ null, null };
+pub threadlocal var thread_local_cache: [THREAD_LOCAL_CACHE_SIZE]?*LockFreePool.Runtime = [_]?*LockFreePool.Runtime{null} ** THREAD_LOCAL_CACHE_SIZE;
 
 /// Check if thread-local cache can satisfy an acquire (no pool access needed)
 pub fn hasAvailableThreadLocal() bool {

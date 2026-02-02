@@ -114,64 +114,65 @@ const ConnectionPool = struct {
         stream_fd: std.posix.fd_t,
     };
 
+    /// Lock-free SPMC bounded queue.
+    /// Single producer (accept thread) pushes without CAS.
+    /// Multiple consumers (worker threads) compete via CAS on count.
+    /// Blocking wait uses Futex on the count atomic.
     const BoundedQueue = struct {
         items: [QUEUE_SIZE]WorkItem,
+        /// Consumer head position - advanced via fetchAdd by workers
         head: std.atomic.Value(usize),
-        tail: std.atomic.Value(usize),
-        count: std.atomic.Value(usize),
-        mutex: std.Thread.Mutex,
-        not_empty: std.Thread.Condition,
-        not_full: std.Thread.Condition,
+        /// Producer tail position - only written by accept thread, no contention
+        tail: usize,
+        /// Item count - doubles as Futex wait target (u32 required by Futex API)
+        count: std.atomic.Value(u32),
 
         fn init() BoundedQueue {
             return .{
                 .items = undefined,
                 .head = std.atomic.Value(usize).init(0),
-                .tail = std.atomic.Value(usize).init(0),
-                .count = std.atomic.Value(usize).init(0),
-                .mutex = .{},
-                .not_empty = .{},
-                .not_full = .{},
+                .tail = 0,
+                .count = std.atomic.Value(u32).init(0),
             };
         }
 
+        /// Push item (single producer - accept thread only, no CAS needed)
         fn push(self: *BoundedQueue, item: WorkItem) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            if (self.count.load(.monotonic) >= QUEUE_SIZE) return false;
 
-            // Wait for space (with timeout to check running)
-            while (self.count.load(.acquire) >= QUEUE_SIZE) {
-                self.not_full.timedWait(&self.mutex, 10 * std.time.ns_per_ms) catch {};
-                return false; // Queue full, reject connection
+            self.items[self.tail % QUEUE_SIZE] = item;
+            self.tail +%= 1;
+
+            // Release ensures item write is visible before count increment
+            const old_count = self.count.fetchAdd(1, .release);
+            if (old_count == 0) {
+                // Queue was empty - wake one sleeping worker
+                std.Thread.Futex.wake(&self.count, 1);
             }
-
-            const tail = self.tail.load(.acquire);
-            self.items[tail] = item;
-            self.tail.store((tail + 1) % QUEUE_SIZE, .release);
-            _ = self.count.fetchAdd(1, .release);
-            self.not_empty.signal();
             return true;
         }
 
+        /// Pop item (multiple consumers - CAS on count, Futex wait when empty)
         fn pop(self: *BoundedQueue, running: *std.atomic.Value(bool)) ?WorkItem {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            while (true) {
+                // Try to claim an item by decrementing count
+                var count = self.count.load(.acquire);
+                while (count > 0) {
+                    if (self.count.cmpxchgWeak(count, count - 1, .acquire, .monotonic)) |actual| {
+                        count = actual;
+                        continue;
+                    }
+                    // Won the item - claim a unique head position
+                    const pos = self.head.fetchAdd(1, .monotonic) % QUEUE_SIZE;
+                    return self.items[pos];
+                }
 
-            while (self.count.load(.acquire) == 0) {
+                // Queue empty - check for shutdown
                 if (!running.load(.acquire)) return null;
-                // BUG FIX: Was waiting on not_full, should wait on not_empty
-                // Reduced timeout from 100ms to 1ms for faster wake-up
-                self.not_empty.timedWait(&self.mutex, 1 * std.time.ns_per_ms) catch {};
+
+                // Block until count changes from 0 (1ms timeout for shutdown check)
+                std.Thread.Futex.timedWait(&self.count, 0, 1_000_000) catch {};
             }
-
-            if (self.count.load(.acquire) == 0) return null;
-
-            const head = self.head.load(.acquire);
-            const item = self.items[head];
-            self.head.store((head + 1) % QUEUE_SIZE, .release);
-            _ = self.count.fetchSub(1, .release);
-            self.not_full.signal();
-            return item;
         }
     };
 
@@ -206,11 +207,8 @@ const ConnectionPool = struct {
 
     fn deinit(self: *ConnectionPool) void {
         self.running.store(false, .release);
-        // Wake all workers
-        self.queue.mutex.lock();
-        self.queue.not_empty.broadcast();
-        self.queue.not_full.broadcast();
-        self.queue.mutex.unlock();
+        // Wake all workers so they observe running=false and exit
+        std.Thread.Futex.wake(&self.queue.count, std.math.maxInt(u32));
 
         for (self.workers) |w| w.join();
         self.allocator.free(self.workers);
@@ -1942,12 +1940,12 @@ fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
 }
 
 fn useEventedBackend() bool {
-    // macOS kqueue has stdlib bugs in Zig 0.16.0 nightly - use threaded backend
-    // TODO: Re-enable evented backend when Zig stdlib kqueue is fixed
-    return switch (builtin.os.tag) {
-        .macos, .ios, .tvos, .watchos, .visionos => false,
-        else => true,
-    };
+    // Zig 0.16.0 nightly: both kqueue and io_uring backends have stdlib bugs
+    // - macOS kqueue: ~40 @panic("TODO") stubs (netListenIp, netAccept, netWrite, etc.)
+    // - Linux io_uring: VTable.cancelRequested missing, Mutex.State type mismatch
+    // TODO: Re-enable when Zig stdlib Io backends stabilize
+    _ = builtin.os.tag;
+    return false;
 }
 
 // ============================================================================

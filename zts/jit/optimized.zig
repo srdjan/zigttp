@@ -930,8 +930,8 @@ pub const OptimizedCompiler = struct {
             self.emitter.movRegMem(.rax, .r11, 0) catch return CompileError.OutOfMemory; // a
 
             // Unbox: sign-extend lower 32 bits (NaN-boxing stores i32 in lower 32 bits)
-            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.rcx, .ecx) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rcx, .rcx) catch return CompileError.OutOfMemory;
 
             // Perform operation with overflow check
             switch (op) {
@@ -1450,8 +1450,8 @@ pub const OptimizedCompiler = struct {
         if (is_x86_64) {
             try self.emitPopReg(.rax);
             // Extract to 32-bit (eax), sign-extend back, shift, re-tag
-            self.emitter.movRegImm32(.ecx, 0) catch return CompileError.OutOfMemory; // clear upper bits
-            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory; // sign-extend i32 to i64
+            self.emitter.movRegImm32(.rcx, 0) catch return CompileError.OutOfMemory; // clear upper bits
+            self.emitter.movsxdRegReg(.rax, .rax) catch return CompileError.OutOfMemory; // sign-extend i32 to i64
             self.emitter.sarRegImm(.rax, 1) catch return CompileError.OutOfMemory; // arithmetic shift right
             self.emitter.movRegImm64(.rcx, INT_TAG) catch return CompileError.OutOfMemory;
             self.emitter.orRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;
@@ -1473,7 +1473,7 @@ pub const OptimizedCompiler = struct {
         if (is_x86_64) {
             try self.emitPopReg(.rax);
             // Mask to 32-bit, multiply, re-tag
-            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory; // sign-extend
+            self.emitter.movsxdRegReg(.rax, .rax) catch return CompileError.OutOfMemory; // sign-extend
             self.emitter.shlRegImm(.rax, 1) catch return CompileError.OutOfMemory; // multiply by 2
             self.emitter.movRegImm64(.rcx, INT_TAG) catch return CompileError.OutOfMemory;
             self.emitter.orRegReg(.rax, .rcx) catch return CompileError.OutOfMemory;

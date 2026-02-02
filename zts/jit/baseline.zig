@@ -667,8 +667,9 @@ pub const BaselineCompiler = struct {
             try self.emitJccToLabel(.ne, try_float);
 
             // Unbox: sign-extend lower 32 bits (NaN-boxing stores i32 in lower 32 bits)
-            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.rcx, .ecx) catch return CompileError.OutOfMemory;
+            // Register encoding for movsxd src is identical for rax/eax (same reg number)
+            self.emitter.movsxdRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rcx, .rcx) catch return CompileError.OutOfMemory;
 
             // Perform operation with overflow check
             switch (op) {
@@ -934,7 +935,7 @@ pub const BaselineCompiler = struct {
 
             // Check hidden class matches expected (hardcoded from type feedback)
             self.emitter.movRegMem32(.r10, .r9, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r10, @bitCast(@intFromEnum(hc_idx))) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
             // Fast path: load directly from inline slot (hardcoded offset)
@@ -1030,7 +1031,7 @@ pub const BaselineCompiler = struct {
 
             // Check hidden class matches expected
             self.emitter.movRegMem32(.r11, .r10, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r11, @intFromEnum(hc_idx)) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm32(.r11, @bitCast(@intFromEnum(hc_idx))) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
             // Fast path: store directly to inline slot
@@ -2121,7 +2122,7 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    fn emitJccToLabel(self: *BaselineCompiler, cond: x86.X86Emitter.Condition, target: u32) CompileError!void {
+    fn emitJccToLabel(self: *BaselineCompiler, cond: x86.Condition, target: u32) CompileError!void {
         if (!is_x86_64) return;
         if (self.labels.get(target)) |native_offset| {
             const current = @as(i32, @intCast(self.emitter.buffer.items.len));
@@ -2526,8 +2527,8 @@ pub const BaselineCompiler = struct {
             try self.emitJccToLabel(.ne, slow);
 
             // Unbox: sign-extend lower 32 bits
-            self.emitter.movsxdRegReg(.rax, .eax) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.rcx, .ecx) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.rcx, .rcx) catch return CompileError.OutOfMemory;
 
             switch (op) {
                 .add => {
@@ -5356,7 +5357,7 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(.rax, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rdx, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
 
-            const cond: x86.X86Emitter.Condition = switch (op) {
+            const cond: x86.Condition = switch (op) {
                 .lt => .l,
                 .lte => .le,
                 .gt => .g,
@@ -6176,7 +6177,7 @@ pub const BaselineCompiler = struct {
             try self.emitCallHelperReg(.rax);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
 
-            const cond: x86.X86Emitter.Condition = if (jump_if_true) .ne else .e;
+            const cond: x86.Condition = if (jump_if_true) .ne else .e;
 
             if (self.labels.get(target)) |native_offset| {
                 const current = @as(i32, @intCast(self.emitter.buffer.items.len));

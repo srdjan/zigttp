@@ -95,6 +95,26 @@ pub const Regs = struct {
     pub const tmp4 = Register.r9;
 };
 
+/// Conditional jump opcodes (x86 condition codes)
+pub const Condition = enum(u4) {
+    o = 0, // overflow
+    no = 1, // not overflow
+    b = 2, // below (unsigned <)
+    ae = 3, // above or equal (unsigned >=)
+    e = 4, // equal
+    ne = 5, // not equal
+    be = 6, // below or equal (unsigned <=)
+    a = 7, // above (unsigned >)
+    s = 8, // sign
+    ns = 9, // not sign
+    p = 10, // parity
+    np = 11, // not parity
+    l = 12, // less (signed <)
+    ge = 13, // greater or equal (signed >=)
+    le = 14, // less or equal (signed <=)
+    g = 15, // greater (signed >)
+};
+
 /// x86-64 instruction emitter
 pub const X86Emitter = struct {
     buffer: std.ArrayListUnmanaged(u8),
@@ -516,6 +536,26 @@ pub const X86Emitter = struct {
         try self.emitModRM(0b11, b.low3(), a.low3());
     }
 
+    /// TEST r64, imm32 (sign-extended to 64 bits)
+    pub fn testRegImm32(self: *X86Emitter, reg: Register, imm: u32) !void {
+        try self.emitRex(true, false, false, reg.isExtended());
+        if (reg == .rax) {
+            // Special short encoding: TEST rax, imm32
+            try self.buffer.append(self.allocator, 0xA9);
+        } else {
+            try self.buffer.append(self.allocator, 0xF7); // TEST r/m64, imm32
+            try self.emitModRM(0b11, 0, reg.low3());
+        }
+        try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(imm)));
+    }
+
+    /// CMP r64, imm64 (load into r11 scratch, then CMP)
+    pub fn cmpRegImm64(self: *X86Emitter, reg: Register, imm: u64) !void {
+        // No CMP r64, imm64 encoding exists; use MOV r11, imm64 + CMP reg, r11
+        try self.movRegImm64(.r11, imm);
+        try self.cmpRegReg(reg, .r11);
+    }
+
     // ========================================
     // Bitwise operations
     // ========================================
@@ -646,31 +686,14 @@ pub const X86Emitter = struct {
         try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(target)));
     }
 
+    /// JMP rel32 (alias for jmp)
+    pub const jmpRel32 = jmp;
+
     /// JMP rel8 (short jump)
     pub fn jmpShort(self: *X86Emitter, target: i8) !void {
         try self.buffer.append(self.allocator, 0xEB);
         try self.buffer.append(self.allocator, @bitCast(target));
     }
-
-    /// Conditional jump opcodes
-    pub const Condition = enum(u4) {
-        o = 0, // overflow
-        no = 1, // not overflow
-        b = 2, // below (unsigned <)
-        ae = 3, // above or equal (unsigned >=)
-        e = 4, // equal
-        ne = 5, // not equal
-        be = 6, // below or equal (unsigned <=)
-        a = 7, // above (unsigned >)
-        s = 8, // sign
-        ns = 9, // not sign
-        p = 10, // parity
-        np = 11, // not parity
-        l = 12, // less (signed <)
-        ge = 13, // greater or equal (signed >=)
-        le = 14, // less or equal (signed <=)
-        g = 15, // greater (signed >)
-    };
 
     /// Jcc rel32 (conditional jump)
     pub fn jcc(self: *X86Emitter, cond: Condition, target: i32) !void {
@@ -678,6 +701,9 @@ pub const X86Emitter = struct {
         try self.buffer.append(self.allocator, 0x80 + @as(u8, @intFromEnum(cond)));
         try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(target)));
     }
+
+    /// Jcc rel32 (alias for jcc)
+    pub const jccRel32 = jcc;
 
     /// Jcc rel8 (short conditional jump)
     pub fn jccShort(self: *X86Emitter, cond: Condition, target: i8) !void {
