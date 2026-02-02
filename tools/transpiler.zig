@@ -25,6 +25,7 @@ pub const ZigType = enum {
     f64_type,
     bool_type,
     string_type,
+    optional_string_type,
     jsvalue_type,
     void_type,
 };
@@ -87,6 +88,9 @@ pub const IrTranspiler = struct {
     // Track whether current expression context needs a value
     in_expr_context: bool,
 
+    // Current function body for mutability analysis
+    current_function_body: NodeIndex,
+
     // Name allocations to free
     name_allocs: std.ArrayList([]const u8),
 
@@ -106,6 +110,7 @@ pub const IrTranspiler = struct {
             .functions_transpiled = 0,
             .functions_bailed = 0,
             .in_expr_context = false,
+            .current_function_body = null_node,
             .name_allocs = .empty,
         };
     }
@@ -292,8 +297,61 @@ pub const IrTranspiler = struct {
                     else => break :blk .jsvalue_type,
                 }
             },
-            .call, .method_call => .jsvalue_type,
-            .member_access => .jsvalue_type,
+            .call, .method_call => blk: {
+                const call_data = self.ir.getCall(idx) orelse break :blk .jsvalue_type;
+                const callee_tag = self.ir.getTag(call_data.callee) orelse break :blk .jsvalue_type;
+
+                // Method call on an object: obj.method(args)
+                if (callee_tag == .member_access) {
+                    const member = self.ir.getMember(call_data.callee) orelse break :blk .jsvalue_type;
+                    const obj_type = self.inferExprType(member.object);
+                    // string.substring() -> string
+                    if (obj_type == .string_type and member.property == @intFromEnum(Atom.substring)) {
+                        break :blk .string_type;
+                    }
+                    break :blk .jsvalue_type;
+                }
+
+                // Direct function call: check if calling a known pure-integer function
+                if (callee_tag != .identifier) break :blk .jsvalue_type;
+                const callee_binding = self.ir.getBinding(call_data.callee) orelse break :blk .jsvalue_type;
+                if (callee_binding.kind != .global) break :blk .jsvalue_type;
+                const func_name = self.atomName(callee_binding.slot) orelse break :blk .jsvalue_type;
+                for (self.functions.items) |func_info| {
+                    if (std.mem.eql(u8, func_info.name, func_name)) {
+                        if (func_info.sig) |sig| {
+                            if (sig.is_pure_integer) break :blk .i32_type;
+                        }
+                    }
+                }
+                break :blk .jsvalue_type;
+            },
+            .member_access => blk: {
+                const member = self.ir.getMember(idx) orelse break :blk .jsvalue_type;
+                // string.length -> i32
+                if (member.property == @intFromEnum(Atom.length)) {
+                    const obj_type = self.inferExprType(member.object);
+                    if (obj_type == .string_type) break :blk .i32_type;
+                }
+                // request.url / request.method -> string, request.body -> optional_string
+                if (self.has_request_param) {
+                    const obj_tag2 = self.ir.getTag(member.object) orelse break :blk .jsvalue_type;
+                    if (obj_tag2 == .identifier) {
+                        const obj_binding = self.ir.getBinding(member.object) orelse break :blk .jsvalue_type;
+                        if (obj_binding.kind == .argument and obj_binding.slot == 0) {
+                            if (member.property == @intFromEnum(Atom.url) or
+                                member.property == @intFromEnum(Atom.method))
+                            {
+                                break :blk .string_type;
+                            }
+                            if (member.property == @intFromEnum(Atom.body)) {
+                                break :blk .optional_string_type;
+                            }
+                        }
+                    }
+                }
+                break :blk .jsvalue_type;
+            },
             .ternary => blk: {
                 const t = self.ir.getTernary(idx) orelse break :blk .jsvalue_type;
                 break :blk self.inferExprType(t.then_branch);
@@ -309,8 +367,26 @@ pub const IrTranspiler = struct {
         const func = self.ir.getFunction(func_node) orelse return null;
         const body_idx = func.body;
 
+        // Temporarily register parameters as i32 so inferExprType can resolve them.
+        // Body references use kind=argument with the function's scope_id, not the
+        // declaration binding from the parameter list node.
+        var p: u8 = 0;
+        while (p < func.params_count) : (p += 1) {
+            const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
+            const key = bindingKey(arg_binding);
+            self.type_env.put(key, .i32_type) catch {};
+        }
+
         // Walk body to check operations on parameters
         const is_pure_int = self.checkPureIntegerBody(body_idx, func.scope_id, func.params_count);
+
+        // Clean up temporary parameter registrations
+        p = 0;
+        while (p < func.params_count) : (p += 1) {
+            const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
+            const key = bindingKey(arg_binding);
+            _ = self.type_env.remove(key);
+        }
 
         if (is_pure_int) {
             const result = self.allocator.alloc(ZigType, func.params_count) catch return null;
@@ -332,7 +408,7 @@ pub const IrTranspiler = struct {
     /// Check if a function body only uses integer operations
     fn checkPureIntegerBody(self: *IrTranspiler, idx: NodeIndex, scope_id: u16, param_count: u8) bool {
         const tag = self.ir.getTag(idx) orelse return false;
-        return switch (tag) {
+        const result: bool = switch (tag) {
             .block => blk: {
                 const block = self.ir.getBlock(idx) orelse break :blk false;
                 var i: u16 = 0;
@@ -355,11 +431,15 @@ pub const IrTranspiler = struct {
                 }
                 break :blk true;
             },
-            .var_decl => blk: {
+            .var_decl, .function_decl => blk: {
                 const decl = self.ir.getVarDecl(idx) orelse break :blk false;
                 if (decl.init == null_node) break :blk true;
                 const t = self.inferExprType(decl.init);
-                break :blk t == .i32_type;
+                if (t != .i32_type) break :blk false;
+                // Register this local as i32 so subsequent references resolve correctly
+                const var_key = bindingKey(decl.binding);
+                self.type_env.put(var_key, .i32_type) catch {};
+                break :blk true;
             },
             .expr_stmt => blk: {
                 const val = self.ir.getOptValue(idx) orelse break :blk true;
@@ -367,7 +447,22 @@ pub const IrTranspiler = struct {
                 _ = t;
                 break :blk true; // Expression statements can be anything
             },
-            .for_of_stmt => false, // Conservatively bail
+            .for_of_stmt => blk: {
+                // Allow for-of with range() if the body is pure integer
+                const for_iter = self.ir.getForIter(idx) orelse break :blk false;
+                // Check if iterable is a call to range()
+                const iter_tag = self.ir.getTag(for_iter.iterable) orelse break :blk false;
+                if (iter_tag != .call and iter_tag != .method_call) break :blk false;
+                const call = self.ir.getCall(for_iter.iterable) orelse break :blk false;
+                const callee_tag = self.ir.getTag(call.callee) orelse break :blk false;
+                if (callee_tag != .identifier) break :blk false;
+                const callee_binding = self.ir.getBinding(call.callee) orelse break :blk false;
+                if (callee_binding.kind != .global) break :blk false;
+                const callee_name = self.atomName(callee_binding.slot) orelse break :blk false;
+                if (!std.mem.eql(u8, callee_name, "range")) break :blk false;
+                // range() is valid - check body
+                break :blk self.checkPureIntegerBody(for_iter.body, scope_id, param_count);
+            },
             .assignment => blk: {
                 const a = self.ir.getAssignment(idx) orelse break :blk false;
                 const t = self.inferExprType(a.value);
@@ -375,6 +470,7 @@ pub const IrTranspiler = struct {
             },
             else => true, // Unknown nodes treated as pure for now
         };
+        return result;
     }
 
     // ============ Main Entry Point ============
@@ -577,6 +673,48 @@ pub const IrTranspiler = struct {
         self.functions_transpiled += 1;
     }
 
+    /// Check if a binding is the target of any assignment in a block (recursive scan)
+    fn isBindingMutated(self: *IrTranspiler, binding_key: u32, block_idx: NodeIndex) bool {
+        const tag = self.ir.getTag(block_idx) orelse return false;
+        switch (tag) {
+            .block => {
+                const block = self.ir.getBlock(block_idx) orelse return false;
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    const stmt = self.ir.getListIndex(block.stmts_start, i);
+                    if (self.isBindingMutated(binding_key, stmt)) return true;
+                }
+                return false;
+            },
+            .assignment => {
+                const a = self.ir.getAssignment(block_idx) orelse return false;
+                const target_tag = self.ir.getTag(a.target) orelse return false;
+                if (target_tag == .identifier) {
+                    const target_binding = self.ir.getBinding(a.target) orelse return false;
+                    if (bindingKey(target_binding) == binding_key) return true;
+                }
+                return false;
+            },
+            .expr_stmt => {
+                const val = self.ir.getOptValue(block_idx) orelse return false;
+                return self.isBindingMutated(binding_key, val);
+            },
+            .if_stmt => {
+                const if_s = self.ir.getIfStmt(block_idx) orelse return false;
+                if (self.isBindingMutated(binding_key, if_s.then_branch)) return true;
+                if (if_s.else_branch != null_node) {
+                    if (self.isBindingMutated(binding_key, if_s.else_branch)) return true;
+                }
+                return false;
+            },
+            .for_of_stmt => {
+                const for_iter = self.ir.getForIter(block_idx) orelse return false;
+                return self.isBindingMutated(binding_key, for_iter.body);
+            },
+            else => return false,
+        }
+    }
+
     fn emitIntegerFunction(self: *IrTranspiler, func_info: *FunctionInfo, func: *const ir.Node.FunctionExpr, _: *const FunctionSig) void {
         // fn aot_fibonacci(n: i32) i32 {
         self.emitFmt("fn aot_{s}(", .{func_info.name});
@@ -587,16 +725,24 @@ pub const IrTranspiler = struct {
             const param_name = self.getParamName(param_idx, p);
             self.emitFmt("{s}: i32", .{param_name});
 
-            // Register parameter binding
-            const binding = self.ir.getBinding(param_idx) orelse continue;
-            self.registerLocal(binding, param_name, .i32_type, false);
+            // Register parameter binding for both declaration and body references.
+            // Declaration uses (kind=local, scope=0), body uses (kind=argument, scope=func.scope_id).
+            if (self.ir.getBinding(param_idx)) |binding| {
+                self.registerLocal(binding, param_name, .i32_type, false);
+            }
+            const arg_binding = BindingRef{ .kind = .argument, .scope_id = func.scope_id, .slot = p };
+            self.registerLocal(arg_binding, param_name, .i32_type, false);
         }
         self.emit(") i32 {\n");
         self.pushIndent();
 
+        // Set current function body for mutability analysis
+        self.current_function_body = func.body;
+
         // Transpile body
         self.transpileBlock(func.body);
 
+        self.current_function_body = null_node;
         self.popIndent();
         self.emit("}\n\n");
     }
@@ -771,15 +917,53 @@ pub const IrTranspiler = struct {
             // Allocate name and track it
             const name = std.fmt.allocPrint(self.allocator, "aot_{s}", .{field_name}) catch return true;
             self.name_allocs.append(self.allocator, name) catch return true;
-            self.registerLocal(decl.binding, name, .string_type, decl.kind != .@"const");
 
-            self.emitIndent();
-            self.emitFmt("const {s} = extractRequestField(ctx, req_obj, .{s}) orelse return error.AotBail;\n", .{ name, field_name });
+            // request.body is optional (can be null), other fields bail on null
+            if (field_atom == @intFromEnum(Atom.body)) {
+                self.registerLocal(decl.binding, name, .optional_string_type, decl.kind != .@"const");
+                self.emitIndent();
+                self.emitFmt("const {s}: ?[]const u8 = extractRequestField(ctx, req_obj, .{s});\n", .{ name, field_name });
+            } else {
+                self.registerLocal(decl.binding, name, .string_type, decl.kind != .@"const");
+                self.emitIndent();
+                self.emitFmt("const {s} = extractRequestField(ctx, req_obj, .{s}) orelse return error.AotBail;\n", .{ name, field_name });
+            }
             return false; // Not terminal - variable was successfully declared
         }
 
-        // General var decl - bail since we can't transpile it and the variable
-        // may be used in subsequent code
+        // General var decl - try to infer type and transpile
+        const inferred = self.inferExprType(decl.init);
+        const key = bindingKey(decl.binding);
+        const name = self.resolveHandlerVarName(decl) orelse {
+            self.emitIndent();
+            self.emit("return error.AotBail;\n");
+            return true;
+        };
+
+        if (inferred == .i32_type) {
+            self.registerLocal(decl.binding, name, .i32_type, decl.kind != .@"const");
+            self.emitIndent();
+            if (decl.kind == .@"const") {
+                self.emitFmt("const {s}: i32 = ", .{name});
+            } else {
+                self.emitFmt("var {s}: i32 = ", .{name});
+            }
+            self.transpileIntExpr(decl.init);
+            self.emit(";\n");
+            return false;
+        }
+
+        if (inferred == .string_type) {
+            self.registerLocal(decl.binding, name, .string_type, decl.kind != .@"const");
+            self.emitIndent();
+            self.emitFmt("const {s} = ", .{name});
+            self.transpileStringExpr(decl.init);
+            self.emit(";\n");
+            return false;
+        }
+
+        _ = key;
+        // Cannot infer type - bail
         self.emitIndent();
         self.emit("return error.AotBail;\n");
         return true;
@@ -791,6 +975,17 @@ pub const IrTranspiler = struct {
             if (self.atomName(decl.binding.slot)) |name| return name;
         }
         return self.localName(decl.binding);
+    }
+
+    /// Resolve a handler-context variable name with aot_ prefix
+    fn resolveHandlerVarName(self: *IrTranspiler, decl: ir.Node.VarDecl) ?[]const u8 {
+        const base_name = if (decl.binding.kind == .global)
+            self.atomName(decl.binding.slot) orelse return null
+        else
+            self.localName(decl.binding);
+        const name = std.fmt.allocPrint(self.allocator, "aot_{s}", .{base_name}) catch return null;
+        self.name_allocs.append(self.allocator, name) catch return null;
+        return name;
     }
 
     fn isRequestFieldExtract(self: *IrTranspiler, init_idx: NodeIndex) ?u16 {
@@ -936,17 +1131,13 @@ pub const IrTranspiler = struct {
             const prop_idx = self.ir.getListIndex(obj.properties_start, i);
             const prop = self.ir.getProperty(prop_idx) orelse continue;
 
-            // Check if key is "status"
-            const key_tag = self.ir.getTag(prop.key) orelse continue;
-            if (key_tag == .identifier) {
-                const key_binding = self.ir.getBinding(prop.key) orelse continue;
-                if (key_binding.kind == .global and key_binding.slot == @intFromEnum(Atom.status)) {
-                    // Get value
-                    const val_tag = self.ir.getTag(prop.value) orelse continue;
-                    if (val_tag == .lit_int) {
-                        const val = self.ir.getIntValue(prop.value) orelse continue;
-                        return @intCast(val);
-                    }
+            // Check if key is "status" - parser stores property keys as lit_string
+            const key_name = self.getPropertyKeyName(prop.key) orelse continue;
+            if (std.mem.eql(u8, key_name, "status")) {
+                const val_tag = self.ir.getTag(prop.value) orelse continue;
+                if (val_tag == .lit_int) {
+                    const val = self.ir.getIntValue(prop.value) orelse continue;
+                    return @intCast(val);
                 }
             }
         }
@@ -1002,6 +1193,74 @@ pub const IrTranspiler = struct {
             return true;
         }
 
+        // String concatenation - build buffer at runtime
+        if (tag == .binary_op) {
+            const bin = self.ir.getBinary(body_arg) orelse return false;
+            if (bin.op == .add) {
+                const lt = self.inferExprType(bin.left);
+                const rt = self.inferExprType(bin.right);
+                if (lt == .string_type or rt == .string_type) {
+                    self.emitIndent();
+                    self.emit("{\n");
+                    self.pushIndent();
+                    self.emitIndent();
+                    self.emit("var body_buf: [4096]u8 = undefined;\n");
+                    self.emitIndent();
+                    self.emit("var body_pos: usize = 0;\n");
+
+                    if (!self.emitResponseConcatParts(body_arg)) {
+                        self.popIndent();
+                        self.emitIndent();
+                        self.emit("}\n");
+                        return false;
+                    }
+
+                    self.emitIndent();
+                    self.emitFmt("return zq.http.createResponse(ctx, body_buf[0..body_pos], {d}, ", .{status});
+                    self.emitZigString(content_type);
+                    self.emit(");\n");
+                    self.popIndent();
+                    self.emitIndent();
+                    self.emit("}\n");
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// Emit concatenation parts into body_buf/body_pos variables
+    fn emitResponseConcatParts(self: *IrTranspiler, idx: NodeIndex) bool {
+        const tag = self.ir.getTag(idx) orelse return false;
+        if (tag == .binary_op) {
+            const bin = self.ir.getBinary(idx) orelse return false;
+            if (bin.op == .add) {
+                if (!self.emitResponseConcatParts(bin.left)) return false;
+                if (!self.emitResponseConcatParts(bin.right)) return false;
+                return true;
+            }
+        }
+        if (tag == .lit_string) {
+            const str_idx = self.ir.getStringIdx(idx) orelse return false;
+            const str = self.ir.getString(str_idx) orelse return false;
+            self.emitIndent();
+            self.emitFmt("@memcpy(body_buf[body_pos..][0..{d}], ", .{str.len});
+            self.emitZigString(str);
+            self.emit(");\n");
+            self.emitIndent();
+            self.emitFmt("body_pos += {d};\n", .{str.len});
+            return true;
+        }
+        if (tag == .identifier) {
+            const binding = self.ir.getBinding(idx) orelse return false;
+            const name = self.localName(binding);
+            self.emitIndent();
+            self.emitFmt("@memcpy(body_buf[body_pos..][0..{s}.len], {s});\n", .{ name, name });
+            self.emitIndent();
+            self.emitFmt("body_pos += {s}.len;\n", .{name});
+            return true;
+        }
         return false;
     }
 
@@ -1270,11 +1529,17 @@ pub const IrTranspiler = struct {
                     self.emit("json_pos += 1;\n");
                     return true;
                 } else if (inferred == .i32_type) {
-                    // Integer variable - format as number
+                    // Integer variable - format as number (in block scope to avoid redeclaration)
                     self.emitIndent();
-                    self.emitFmt("const int_str = std.fmt.bufPrint(json_buf[json_pos..], \"{{d}}\", .{{{s}}}) catch return error.AotBail;\n", .{name});
+                    self.emit("{\n");
+                    self.pushIndent();
                     self.emitIndent();
-                    self.emit("json_pos += int_str.len;\n");
+                    self.emitFmt("const s = std.fmt.bufPrint(json_buf[json_pos..], \"{{d}}\", .{{{s}}}) catch return error.AotBail;\n", .{name});
+                    self.emitIndent();
+                    self.emit("json_pos += s.len;\n");
+                    self.popIndent();
+                    self.emitIndent();
+                    self.emit("}\n");
                     return true;
                 }
                 return false; // Can't serialize unknown type
@@ -1286,6 +1551,32 @@ pub const IrTranspiler = struct {
             .binary_op => {
                 // String concatenation in JSON value
                 return self.emitDynamicJsonBinaryOp(idx);
+            },
+            .member_access => {
+                // string.length in JSON value context
+                const member = self.ir.getMember(idx) orelse return false;
+                if (member.property == @intFromEnum(Atom.length)) {
+                    const obj_type = self.inferExprType(member.object);
+                    if (obj_type == .string_type) {
+                        const obj_tag2 = self.ir.getTag(member.object) orelse return false;
+                        if (obj_tag2 == .identifier) {
+                            const obj_binding = self.ir.getBinding(member.object) orelse return false;
+                            const obj_name = self.localName(obj_binding);
+                            self.emitIndent();
+                            self.emit("{\n");
+                            self.pushIndent();
+                            self.emitIndent();
+                            self.emitFmt("const s = std.fmt.bufPrint(json_buf[json_pos..], \"{{d}}\", .{{@as(i32, @intCast({s}.len))}}) catch return error.AotBail;\n", .{obj_name});
+                            self.emitIndent();
+                            self.emit("json_pos += s.len;\n");
+                            self.popIndent();
+                            self.emitIndent();
+                            self.emit("}\n");
+                            return true;
+                        }
+                    }
+                }
+                return false;
             },
             else => return false,
         }
@@ -1312,9 +1603,12 @@ pub const IrTranspiler = struct {
             if (std.mem.eql(u8, func_info.name, func_name)) {
                 if (func_info.sig) |sig| {
                     if (sig.is_pure_integer) {
-                        // Call the native function and format result
+                        // Call the native function and format result (block-scoped)
                         self.emitIndent();
-                        self.emitFmt("const call_result = aot_{s}(", .{func_name});
+                        self.emit("{\n");
+                        self.pushIndent();
+                        self.emitIndent();
+                        self.emitFmt("const v = aot_{s}(", .{func_name});
                         var a: u8 = 0;
                         while (a < call.args_count) : (a += 1) {
                             if (a > 0) self.emit(", ");
@@ -1323,9 +1617,12 @@ pub const IrTranspiler = struct {
                         }
                         self.emit(");\n");
                         self.emitIndent();
-                        self.emit("const call_str = std.fmt.bufPrint(json_buf[json_pos..], \"{d}\", .{call_result}) catch return error.AotBail;\n");
+                        self.emit("const s = std.fmt.bufPrint(json_buf[json_pos..], \"{d}\", .{v}) catch return error.AotBail;\n");
                         self.emitIndent();
-                        self.emit("json_pos += call_str.len;\n");
+                        self.emit("json_pos += s.len;\n");
+                        self.popIndent();
+                        self.emitIndent();
+                        self.emit("}\n");
                         return true;
                     }
                 }
@@ -1423,8 +1720,24 @@ pub const IrTranspiler = struct {
         const bin = self.ir.getBinary(idx) orelse return false;
         if (bin.op != .add) return false;
 
-        // String concatenation chain - flatten and emit each part
-        return self.emitDynamicJsonConcat(idx);
+        // Determine if this is string concatenation
+        const lt = self.inferExprType(bin.left);
+        const rt = self.inferExprType(bin.right);
+        if (lt != .string_type and rt != .string_type) return false;
+
+        // String concatenation in JSON value - wrap with quotes
+        self.emitIndent();
+        self.emit("json_buf[json_pos] = '\"';\n");
+        self.emitIndent();
+        self.emit("json_pos += 1;\n");
+
+        if (!self.emitDynamicJsonConcat(idx)) return false;
+
+        self.emitIndent();
+        self.emit("json_buf[json_pos] = '\"';\n");
+        self.emitIndent();
+        self.emit("json_pos += 1;\n");
+        return true;
     }
 
     fn emitDynamicJsonConcat(self: *IrTranspiler, idx: NodeIndex) bool {
@@ -1437,7 +1750,7 @@ pub const IrTranspiler = struct {
                 return true;
             }
         }
-        // Base case: emit as string part (unquoted since we're building the string)
+        // Base case: emit as string part
         if (tag == .lit_string) {
             const str_idx = self.ir.getStringIdx(idx) orelse return false;
             const str = self.ir.getString(str_idx) orelse return false;
@@ -1452,6 +1765,27 @@ pub const IrTranspiler = struct {
         if (tag == .identifier) {
             const binding = self.ir.getBinding(idx) orelse return false;
             const name = self.localName(binding);
+            const inferred = self.inferExprType(idx);
+            if (inferred == .string_type) {
+                // String variable - needs JSON escaping
+                self.emitIndent();
+                self.emitFmt("json_pos += jsonEscapeInto(json_buf[json_pos..], {s});\n", .{name});
+                return true;
+            } else if (inferred == .i32_type) {
+                // Integer variable - format inline
+                self.emitIndent();
+                self.emit("{\n");
+                self.pushIndent();
+                self.emitIndent();
+                self.emitFmt("const s = std.fmt.bufPrint(json_buf[json_pos..], \"{{d}}\", .{{{s}}}) catch return error.AotBail;\n", .{name});
+                self.emitIndent();
+                self.emit("json_pos += s.len;\n");
+                self.popIndent();
+                self.emitIndent();
+                self.emit("}\n");
+                return true;
+            }
+            // Unknown type - direct copy (assume string-like)
             self.emitIndent();
             self.emitFmt("@memcpy(json_buf[json_pos..][0..{s}.len], {s});\n", .{ name, name });
             self.emitIndent();
@@ -1505,6 +1839,23 @@ pub const IrTranspiler = struct {
                     return;
                 };
                 if (un.op == .not) {
+                    // Optimize !optional_string -> (name == null)
+                    const operand_tag = self.ir.getTag(un.operand) orelse {
+                        self.emit("false");
+                        return;
+                    };
+                    if (operand_tag == .identifier) {
+                        const operand_type = self.inferExprType(un.operand);
+                        if (operand_type == .optional_string_type) {
+                            const binding = self.ir.getBinding(un.operand) orelse {
+                                self.emit("false");
+                                return;
+                            };
+                            const name = self.localName(binding);
+                            self.emitFmt("({s} == null)", .{name});
+                            return;
+                        }
+                    }
                     self.emit("!");
                     self.transpileCondition(un.operand);
                 } else {
@@ -1519,7 +1870,9 @@ pub const IrTranspiler = struct {
                 };
                 const name = self.localName(binding);
                 const inferred = self.inferExprType(idx);
-                if (inferred == .string_type) {
+                if (inferred == .optional_string_type) {
+                    self.emitFmt("({s} != null)", .{name});
+                } else if (inferred == .string_type) {
                     self.emitFmt("({s}.len > 0)", .{name});
                 } else if (inferred == .bool_type) {
                     self.emit(name);
@@ -1692,8 +2045,70 @@ pub const IrTranspiler = struct {
                 const binding = self.ir.getBinding(idx) orelse return;
                 self.emit(self.localName(binding));
             },
+            .call, .method_call => {
+                // Handle string method calls like url.substring(offset)
+                if (self.tryTranspileSubstringExpr(idx)) return;
+                self.emit("\"\"");
+            },
             else => self.emit("\"\""),
         }
+    }
+
+    /// Transpile url.substring(offset) -> url_name[offset..]
+    fn tryTranspileSubstringExpr(self: *IrTranspiler, idx: NodeIndex) bool {
+        const call = self.ir.getCall(idx) orelse return false;
+        const callee_tag = self.ir.getTag(call.callee) orelse return false;
+        if (callee_tag != .member_access) return false;
+
+        const member = self.ir.getMember(call.callee) orelse return false;
+        if (member.property != @intFromEnum(Atom.substring)) return false;
+
+        // Object must be a known string
+        const obj_type = self.inferExprType(member.object);
+        if (obj_type != .string_type) return false;
+
+        const obj_tag = self.ir.getTag(member.object) orelse return false;
+        if (obj_tag != .identifier) return false;
+        const obj_binding = self.ir.getBinding(member.object) orelse return false;
+        const obj_name = self.localName(obj_binding);
+
+        // Get the offset argument
+        if (call.args_count < 1) return false;
+        const offset_arg = self.ir.getListIndex(call.args_start, 0);
+
+        // Try to resolve offset as a compile-time constant
+        if (self.resolveCompileTimeInt(offset_arg)) |offset| {
+            self.emitFmt("{s}[@intCast({d})..]", .{ obj_name, offset });
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Resolve an expression to a compile-time integer constant.
+    /// Handles: lit_int, "string".length, member_access(lit_string, length)
+    fn resolveCompileTimeInt(self: *IrTranspiler, idx: NodeIndex) ?i32 {
+        const tag = self.ir.getTag(idx) orelse return null;
+
+        if (tag == .lit_int) {
+            return self.ir.getIntValue(idx);
+        }
+
+        // member_access: check for lit_string.length or identifier.length
+        if (tag == .member_access) {
+            const member = self.ir.getMember(idx) orelse return null;
+            if (member.property != @intFromEnum(Atom.length)) return null;
+
+            // lit_string.length -> compile-time constant
+            const obj_tag = self.ir.getTag(member.object) orelse return null;
+            if (obj_tag == .lit_string) {
+                const str_idx = self.ir.getStringIdx(member.object) orelse return null;
+                const str = self.ir.getString(str_idx) orelse return null;
+                return @intCast(str.len);
+            }
+        }
+
+        return null;
     }
 
     fn transpileIntExpr(self: *IrTranspiler, idx: NodeIndex) void {
@@ -1720,6 +2135,32 @@ pub const IrTranspiler = struct {
             .call, .method_call => {
                 // Check if calling a known integer function
                 self.transpileIntCallExpr(idx);
+            },
+            .member_access => {
+                // string.length -> @as(i32, @intCast(name.len))
+                const member = self.ir.getMember(idx) orelse {
+                    self.emit("0");
+                    return;
+                };
+                if (member.property == @intFromEnum(Atom.length)) {
+                    const obj_type = self.inferExprType(member.object);
+                    if (obj_type == .string_type) {
+                        const obj_tag2 = self.ir.getTag(member.object) orelse {
+                            self.emit("0");
+                            return;
+                        };
+                        if (obj_tag2 == .identifier) {
+                            const obj_binding = self.ir.getBinding(member.object) orelse {
+                                self.emit("0");
+                                return;
+                            };
+                            const obj_name = self.localName(obj_binding);
+                            self.emitFmt("@as(i32, @intCast({s}.len))", .{obj_name});
+                            return;
+                        }
+                    }
+                }
+                self.emit("0");
             },
             else => self.emit("0"),
         }
@@ -1868,13 +2309,17 @@ pub const IrTranspiler = struct {
         const decl = self.ir.getVarDecl(idx) orelse return;
         const name = self.resolveVarDeclName(decl);
         const inferred = if (decl.init != null_node) self.inferExprType(decl.init) else .jsvalue_type;
-        self.registerLocal(decl.binding, name, inferred, decl.kind != .@"const");
+        // Check if variable is actually mutated (Zig requires const for non-mutated locals)
+        const is_mutable = decl.kind != .@"const" and
+            self.current_function_body != null_node and
+            self.isBindingMutated(bindingKey(decl.binding), self.current_function_body);
+        self.registerLocal(decl.binding, name, inferred, is_mutable);
 
         self.emitIndent();
-        if (decl.kind == .@"const") {
-            self.emitFmt("const {s} = ", .{name});
-        } else {
+        if (is_mutable) {
             self.emitFmt("var {s}: i32 = ", .{name});
+        } else {
+            self.emitFmt("const {s} = ", .{name});
         }
         if (decl.init != null_node) {
             self.transpileIntExpr(decl.init);
