@@ -994,6 +994,17 @@ pub const Server = struct {
                             metrics.max_exec_ns / std.time.ns_per_us,
                         },
                     );
+                    std.log.info(
+                        "  Wait latency: p50={d}us p95={d}us p99={d}us | Exec latency: p50={d}us p95={d}us p99={d}us",
+                        .{
+                            metrics.wait_p50_ns / std.time.ns_per_us,
+                            metrics.wait_p95_ns / std.time.ns_per_us,
+                            metrics.wait_p99_ns / std.time.ns_per_us,
+                            metrics.exec_p50_ns / std.time.ns_per_us,
+                            metrics.exec_p95_ns / std.time.ns_per_us,
+                            metrics.exec_p99_ns / std.time.ns_per_us,
+                        },
+                    );
                 }
             }
 

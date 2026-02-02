@@ -1215,6 +1215,53 @@ fn printValue(val: zq.JSValue, fd: std.c.fd_t) void {
 }
 
 // ============================================================================
+// Percentile Tracker for Latency Metrics
+// ============================================================================
+
+/// Lock-free ring buffer that records nanosecond-resolution latency samples.
+/// Provides approximate percentile calculations for diagnostic metrics.
+/// Writers (record) are lock-free via atomic index. Readers (getPercentile)
+/// copy and sort the buffer, tolerating slightly stale data.
+pub const PercentileTracker = struct {
+    samples: [SAMPLE_SIZE]u64 = [_]u64{0} ** SAMPLE_SIZE,
+    total: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+
+    const SAMPLE_SIZE = 1024;
+
+    pub fn record(self: *PercentileTracker, ns: u64) void {
+        const i = self.total.fetchAdd(1, .monotonic) % SAMPLE_SIZE;
+        self.samples[i] = ns;
+    }
+
+    /// Returns the approximate p-th percentile (0-100) in nanoseconds.
+    /// Copies the ring buffer to a stack array and sorts via insertion sort.
+    pub fn getPercentile(self: *const PercentileTracker, p: f64) u64 {
+        const n = self.total.load(.acquire);
+        if (n == 0) return 0;
+        const active = @min(n, SAMPLE_SIZE);
+
+        var sorted: [SAMPLE_SIZE]u64 = undefined;
+        for (0..active) |i| {
+            sorted[i] = self.samples[i];
+        }
+
+        // Insertion sort: fast enough for <= 1024 samples, no stdlib dependency
+        for (1..active) |i| {
+            const key = sorted[i];
+            var j: usize = i;
+            while (j > 0 and sorted[j - 1] > key) {
+                sorted[j] = sorted[j - 1];
+                j -= 1;
+            }
+            sorted[j] = key;
+        }
+
+        const rank = @as(usize, @intFromFloat(p / 100.0 * @as(f64, @floatFromInt(active - 1))));
+        return sorted[@min(rank, active - 1)];
+    }
+};
+
+// ============================================================================
 // Handler Pool (Lock-Free)
 // ============================================================================
 
@@ -1234,6 +1281,8 @@ pub const HandlerPool = struct {
     total_exec_ns: std.atomic.Value(u64),
     max_exec_ns: std.atomic.Value(u64),
     exhausted_count: std.atomic.Value(u64),
+    wait_percentiles: PercentileTracker,
+    exec_percentiles: PercentileTracker,
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
     cache_mutex: std.Thread.Mutex,
@@ -1297,6 +1346,8 @@ pub const HandlerPool = struct {
             .total_exec_ns = std.atomic.Value(u64).init(0),
             .max_exec_ns = std.atomic.Value(u64).init(0),
             .exhausted_count = std.atomic.Value(u64).init(0),
+            .wait_percentiles = .{},
+            .exec_percentiles = .{},
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
             .cache_mutex = .{},
@@ -1556,6 +1607,12 @@ pub const HandlerPool = struct {
         max_wait_ns: u64,
         avg_exec_ns: u64,
         max_exec_ns: u64,
+        wait_p50_ns: u64,
+        wait_p95_ns: u64,
+        wait_p99_ns: u64,
+        exec_p50_ns: u64,
+        exec_p95_ns: u64,
+        exec_p99_ns: u64,
     } {
         const requests = self.request_seq.load(.acquire);
         const wait_total = self.total_wait_ns.load(.acquire);
@@ -1567,17 +1624,25 @@ pub const HandlerPool = struct {
             .max_wait_ns = self.max_wait_ns.load(.acquire),
             .avg_exec_ns = if (requests > 0) exec_total / requests else 0,
             .max_exec_ns = self.max_exec_ns.load(.acquire),
+            .wait_p50_ns = self.wait_percentiles.getPercentile(50.0),
+            .wait_p95_ns = self.wait_percentiles.getPercentile(95.0),
+            .wait_p99_ns = self.wait_percentiles.getPercentile(99.0),
+            .exec_p50_ns = self.exec_percentiles.getPercentile(50.0),
+            .exec_p95_ns = self.exec_percentiles.getPercentile(95.0),
+            .exec_p99_ns = self.exec_percentiles.getPercentile(99.0),
         };
     }
 
     fn recordWait(self: *Self, ns: u64) void {
         _ = self.total_wait_ns.fetchAdd(ns, .acq_rel);
         updateMax(&self.max_wait_ns, ns);
+        self.wait_percentiles.record(ns);
     }
 
     fn recordExec(self: *Self, ns: u64) void {
         _ = self.total_exec_ns.fetchAdd(ns, .acq_rel);
         updateMax(&self.max_exec_ns, ns);
+        self.exec_percentiles.record(ns);
     }
 
     fn isHandlerInvalid(err: anyerror) bool {

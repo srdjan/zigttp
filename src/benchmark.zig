@@ -19,6 +19,8 @@ const BenchmarkResult = struct {
     iterations: u32,
     time_ms: f64,
     ops_per_sec: u64,
+    pic_hits: u64 = 0,
+    pic_misses: u64 = 0,
 };
 
 const Options = struct {
@@ -476,6 +478,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 elapsed_ms,
                 ops_per_sec,
             });
+            const pic_total = @as(u64, runtime.interpreter.pic_hits) + @as(u64, runtime.interpreter.pic_misses);
+            if (pic_total > 0) {
+                const hit_rate = @as(f64, @floatFromInt(runtime.interpreter.pic_hits)) * 100.0 /
+                    @as(f64, @floatFromInt(pic_total));
+                printFmt("  IC: {} hits / {} total ({d:.1}%)", .{
+                    runtime.interpreter.pic_hits, pic_total, hit_rate,
+                });
+            }
             return;
         }
         return;
@@ -520,10 +530,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
             .iterations = bench.iterations,
             .time_ms = elapsed_ms,
             .ops_per_sec = ops_per_sec,
+            .pic_hits = runtime.interpreter.pic_hits,
+            .pic_misses = runtime.interpreter.pic_misses,
         };
 
         if (!options.quiet and !options.json) {
             printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, elapsed_ms, ops_per_sec });
+            const pic_total = results[i].pic_hits + results[i].pic_misses;
+            if (pic_total > 0) {
+                const hit_rate = @as(f64, @floatFromInt(results[i].pic_hits)) * 100.0 /
+                    @as(f64, @floatFromInt(pic_total));
+                printFmt("  IC: {} hits / {} total ({d:.1}%)", .{
+                    results[i].pic_hits, pic_total, hit_rate,
+                });
+            }
         }
     }
 
@@ -533,8 +553,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
             var line_buf: [512]u8 = undefined;
             const line = std.fmt.bufPrint(
                 &line_buf,
-                "    {{\"name\":\"{s}\",\"iterations\":{},\"time_ms\":{d:.3},\"ops_per_sec\":{}}}",
-                .{ result.name, result.iterations, result.time_ms, result.ops_per_sec },
+                "    {{\"name\":\"{s}\",\"iterations\":{},\"time_ms\":{d:.3},\"ops_per_sec\":{},\"pic_hits\":{},\"pic_misses\":{}}}",
+                .{ result.name, result.iterations, result.time_ms, result.ops_per_sec, result.pic_hits, result.pic_misses },
             ) catch continue;
             writeStdout(line);
             if (i + 1 < results.len) {
