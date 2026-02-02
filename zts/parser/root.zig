@@ -43,6 +43,8 @@ pub const NodeList = @import("ir.zig").NodeList;
 pub const ConstantPool = @import("ir.zig").ConstantPool;
 pub const BinaryOp = @import("ir.zig").BinaryOp;
 pub const UnaryOp = @import("ir.zig").UnaryOp;
+pub const BindingRef = @import("ir.zig").BindingRef;
+pub const null_node = @import("ir.zig").null_node;
 
 // Phase 3: Optimized IR storage (SoA pattern)
 pub const IRStore = @import("ir.zig").IRStore;

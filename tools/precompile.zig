@@ -9,6 +9,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const ir = zts.parser;
+const IrTranspiler = @import("transpiler.zig").IrTranspiler;
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -31,6 +32,7 @@ const AotAnalysis = struct {
 const CompiledHandler = struct {
     bytecode: []const u8,
     aot: ?AotAnalysis = null,
+    transpiled_source: ?[]const u8 = null,
 
     fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.aot) |*analysis| {
@@ -39,6 +41,7 @@ const CompiledHandler = struct {
         if (self.bytecode.len > 0) {
             allocator.free(self.bytecode);
         }
+        // Note: transpiled_source is owned by the transpiler, not freed here
     }
 };
 
@@ -275,13 +278,41 @@ fn compileHandler(
     const bytecode = try allocator.dupe(u8, serialized);
 
     var aot: ?AotAnalysis = null;
+    var transpiled_source: ?[]const u8 = null;
+
     if (emit_aot) {
-        aot = try analyzeAot(allocator, &js_parser, &atoms, root);
+        // Try transpiler first (general-purpose IR-to-Zig)
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        var transpiler = IrTranspiler.init(allocator, ir_view, &atoms);
+        // Note: transpiler is NOT deferred deinit - its output is borrowed
+
+        const result = transpiler.transpileHandler(root) catch |err| {
+            std.debug.print("Transpiler error: {}, falling back to pattern matcher\n", .{err});
+            transpiler.deinit();
+            aot = try analyzeAot(allocator, &js_parser, &atoms, root);
+            return .{
+                .bytecode = bytecode,
+                .aot = aot,
+            };
+        };
+
+        if (result.handler_name != null and result.functions_transpiled > 0) {
+            std.debug.print("Transpiler: {d} functions transpiled, {d} bailed\n", .{
+                result.functions_transpiled, result.functions_bailed,
+            });
+            transpiled_source = try allocator.dupe(u8, result.source);
+            transpiler.deinit();
+        } else {
+            std.debug.print("Transpiler produced no output, falling back to pattern matcher\n", .{});
+            transpiler.deinit();
+            aot = try analyzeAot(allocator, &js_parser, &atoms, root);
+        }
     }
 
     return .{
         .bytecode = bytecode,
         .aot = aot,
+        .transpiled_source = transpiled_source,
     };
 }
 
@@ -373,6 +404,28 @@ fn writeZigFile(
     handler_path: []const u8,
     allocator: std.mem.Allocator,
 ) !void {
+    // If the transpiler produced output, use it directly
+    if (compiled.transpiled_source) |transpiled| {
+        var output = std.ArrayList(u8).empty;
+        defer output.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+        const writer = &aw.writer;
+
+        // Write the transpiled source (already contains header, helpers, handler)
+        try writer.writeAll(transpiled);
+
+        // Append bytecode for interpreter fallback
+        try writer.writeAll("\npub const bytecode = [_]u8{\n");
+        try writeBytecodeArray(writer, compiled.bytecode);
+        try writer.writeAll("};\n");
+
+        output = aw.toArrayList();
+        try writeFilePosix(path, output.items, allocator);
+        std.debug.print("Wrote transpiled handler to: {s}\n", .{path});
+        return;
+    }
+
+    // Fall back to pattern-matching AOT code generation
     var output = std.ArrayList(u8).empty;
     defer output.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);

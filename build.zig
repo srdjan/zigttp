@@ -77,9 +77,12 @@ pub fn build(b: *std.Build) void {
         // Main exe depends on precompile completing
         exe.step.dependOn(&run_precompile.step);
 
-        // Add the generated module
+        // Add the generated module (with zts dependency for transpiled handlers)
         exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("src/generated/embedded_handler.zig"),
+            .imports = &.{
+                .{ .name = "zts", .module = zts_mod },
+            },
         });
     } else {
         // No handler specified - create a stub module
