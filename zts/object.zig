@@ -1011,6 +1011,14 @@ pub const HiddenClassPool = struct {
             .count = 0,
         };
 
+        // Clean up internal arrays if allocClass fails
+        errdefer {
+            pool.property_counts.deinit(allocator);
+            pool.properties_starts.deinit(allocator);
+            pool.prototype_indices.deinit(allocator);
+            pool.sorted_starts.deinit(allocator);
+        }
+
         // Allocate the empty root class at index 0
         _ = try pool.allocClass(0, .none);
 

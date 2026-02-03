@@ -280,24 +280,24 @@ fn createErrorObject(ctx: *context.Context, this: value.JSValue, args: []const v
         break :blk ctx.createObject(ctx.object_prototype) catch return value.JSValue.undefined_val;
     };
 
-    // Set the 'name' property
+    // Set the 'name' property (return undefined on allocation failure)
     const name_val = ctx.createString(error_name) catch return value.JSValue.undefined_val;
-    ctx.setPropertyChecked(obj, .name, name_val) catch {};
+    ctx.setPropertyChecked(obj, .name, name_val) catch return value.JSValue.undefined_val;
 
     // Set the 'message' property
     if (args.len > 0 and args[0].isString()) {
-        ctx.setPropertyChecked(obj, .message, args[0]) catch {};
+        ctx.setPropertyChecked(obj, .message, args[0]) catch return value.JSValue.undefined_val;
     } else if (args.len > 0) {
         // Convert to string
         const msg_str = valueToStringSimple(ctx.allocator, args[0]) catch {
             const empty_val = ctx.createString("") catch return value.JSValue.undefined_val;
-            ctx.setPropertyChecked(obj, .message, empty_val) catch {};
+            ctx.setPropertyChecked(obj, .message, empty_val) catch return value.JSValue.undefined_val;
             return obj.toValue();
         };
-        ctx.setPropertyChecked(obj, .message, value.JSValue.fromPtr(msg_str)) catch {};
+        ctx.setPropertyChecked(obj, .message, value.JSValue.fromPtr(msg_str)) catch return value.JSValue.undefined_val;
     } else {
         const empty_val = ctx.createString("") catch return value.JSValue.undefined_val;
-        ctx.setPropertyChecked(obj, .message, empty_val) catch {};
+        ctx.setPropertyChecked(obj, .message, empty_val) catch return value.JSValue.undefined_val;
     }
 
     obj.class_id = .@"error";

@@ -582,7 +582,9 @@ pub const GC = struct {
         self.gray_stack.deinit();
         self.root_set.deinit();
         self.upvalue_pool.deinit();
-        self.allocator.free(self.nursery.base[0..self.nursery.size]);
+        if (self.nursery.size > 0) {
+            self.allocator.free(self.nursery.base[0..self.nursery.size]);
+        }
         if (self.heap_ptr) |h| {
             for (self.tenured.objects.items) |obj_opt| {
                 if (obj_opt) |obj_ptr| {
@@ -1507,10 +1509,10 @@ test "TenuredHeap grows mark bitvector" {
         value: u64,
     };
 
-    var objects = std.ArrayList(*DummyObj).init(allocator);
+    var objects: std.ArrayList(*DummyObj) = .empty;
     defer {
         for (objects.items) |obj| allocator.destroy(obj);
-        objects.deinit();
+        objects.deinit(allocator);
     }
 
     const target_count: usize = 70;
@@ -1521,7 +1523,7 @@ test "TenuredHeap grows mark bitvector" {
             .header = heap.MemBlockHeader.init(.object, @sizeOf(DummyObj)),
             .value = @intCast(i),
         };
-        try objects.append(obj);
+        try objects.append(allocator, obj);
         last_idx = try tenured.registerObject(obj);
     }
 

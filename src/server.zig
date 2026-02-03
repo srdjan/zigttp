@@ -77,9 +77,9 @@ fn findHeaderEnd(buf: []const u8) ?usize {
     const lf: Vec = @splat('\n');
     var i: usize = 0;
 
-    // SIMD path: scan 16 bytes at a time
+    // SIMD path: scan 16 bytes at a time (use align(1) for unaligned loads)
     while (i + 16 <= buf.len) : (i += 16) {
-        const chunk: Vec = @as(*const [16]u8, @ptrCast(buf.ptr + i)).*;
+        const chunk: Vec = @as(*align(1) const [16]u8, @ptrCast(buf.ptr + i)).*;
         // Quick check: any CR or LF in this chunk?
         if (@reduce(.Or, chunk == cr) or @reduce(.Or, chunk == lf)) {
             // Found potential match - do precise search
@@ -277,7 +277,10 @@ const ConnectionPool = struct {
         // Handle static files
         if (self.server.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.url, "/static/")) {
-                self.serveStaticFileSync(fd, static_dir, request.url[7..], keep_alive) catch {};
+                self.serveStaticFileSync(fd, static_dir, request.url[7..], keep_alive) catch |err| {
+                    std.log.warn("static file error for {s}: {}", .{ request.url, err });
+                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                };
                 return keep_alive;
             }
         }
@@ -297,7 +300,9 @@ const ConnectionPool = struct {
                     "Service Unavailable"
                 else
                     "Internal Server Error";
-                self.sendErrorSync(fd, status, message) catch {};
+                self.sendErrorSync(fd, status, message) catch |send_err| {
+                    std.log.warn("failed to send error response: {}", .{send_err});
+                };
                 return false;
             };
             defer handle.deinit();
@@ -1773,14 +1778,18 @@ const StaticFileCache = struct {
         try self.entries.put(self.allocator, key_dup, entry);
         self.total_bytes += entry.data.len;
 
-        // Create and insert LRU node at head (most recently used)
+        // Create LRU node and add to hash map first (can fail)
         const node = try self.allocator.create(LruNode);
         errdefer self.allocator.destroy(node);
         node.* = .{
             .path = key_dup,
             .prev = null,
-            .next = self.lru_head,
+            .next = null,
         };
+        try self.lru_nodes.put(self.allocator, key_dup, node);
+
+        // Link into LRU list at head (cannot fail, so do after hash map)
+        node.next = self.lru_head;
         if (self.lru_head) |head| {
             head.prev = node;
         }
@@ -1788,7 +1797,6 @@ const StaticFileCache = struct {
         if (self.lru_tail == null) {
             self.lru_tail = node;
         }
-        try self.lru_nodes.put(self.allocator, key_dup, node);
     }
 
     fn release(self: *StaticFileCache, path: []const u8) void {

@@ -884,10 +884,11 @@ pub const Runtime = struct {
         // Fast path: use direct slot access if response matches pre-shaped class
         if (self.ctx.http_shapes) |shapes| {
             if (result_obj.hidden_class_idx == shapes.response.class_idx) {
-                // Status - direct slot access
+                // Status - direct slot access with bounds validation
                 const status_val = result_obj.getSlot(shapes.response.status_slot);
                 if (status_val.isInt()) {
-                    response.status = @intCast(status_val.getInt());
+                    const raw = status_val.getInt();
+                    response.status = if (raw < 100 or raw > 599) 500 else @intCast(raw);
                 }
 
                 // Body - direct slot access
@@ -929,7 +930,8 @@ pub const Runtime = struct {
         // Fallback: property-based extraction for non-standard response objects
         if (result_obj.getOwnProperty(pool, zq.Atom.status)) |status_val| {
             if (status_val.isInt()) {
-                response.status = @intCast(status_val.getInt());
+                const raw = status_val.getInt();
+                response.status = if (raw < 100 or raw > 599) 500 else @intCast(raw);
             }
         }
 

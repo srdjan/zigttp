@@ -141,6 +141,8 @@ pub const ErrorList = struct {
     source: []const u8,
     max_errors: usize,
     panic_mode: bool,
+    /// Set when errors could not be recorded due to allocation failure
+    errors_truncated: bool,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) ErrorList {
         return .{
@@ -149,6 +151,7 @@ pub const ErrorList = struct {
             .source = source,
             .max_errors = 20, // Stop after 20 errors
             .panic_mode = false,
+            .errors_truncated = false,
         };
     }
 
@@ -172,7 +175,9 @@ pub const ErrorList = struct {
             .message = message,
             .token_text = null,
             .expected = null,
-        }) catch {};
+        }) catch {
+            self.errors_truncated = true;
+        };
     }
 
     /// Add an error with token context
@@ -196,7 +201,9 @@ pub const ErrorList = struct {
             .message = message,
             .token_text = token_text,
             .expected = null,
-        }) catch {};
+        }) catch {
+            self.errors_truncated = true;
+        };
     }
 
     /// Add an "expected X, found Y" error
@@ -219,7 +226,9 @@ pub const ErrorList = struct {
             .message = "unexpected token",
             .token_text = token_text,
             .expected = expected,
-        }) catch {};
+        }) catch {
+            self.errors_truncated = true;
+        };
     }
 
     /// Enter panic mode (suppress further errors until synchronization)

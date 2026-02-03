@@ -914,7 +914,10 @@ pub const Context = struct {
                     if (idx_u < len) {
                         const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                         const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                        return value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
+                        // Use checked arithmetic to prevent overflow
+                        const offset = std.math.mul(i32, @intCast(idx_u), step) catch return value.JSValue.undefined_val;
+                        const result = std.math.add(i32, start, offset) catch return value.JSValue.undefined_val;
+                        return value.JSValue.fromInt(result);
                     }
                     return value.JSValue.undefined_val;
                 } else {
@@ -979,7 +982,16 @@ pub const Context = struct {
                     if (idx_u < len) {
                         const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                         const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                        self.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step)) catch {
+                        // Use checked arithmetic to prevent overflow
+                        const offset = std.math.mul(i32, @intCast(idx_u), step) catch {
+                            _ = self.jitThrow();
+                            return false;
+                        };
+                        const result = std.math.add(i32, start, offset) catch {
+                            _ = self.jitThrow();
+                            return false;
+                        };
+                        self.push(value.JSValue.fromInt(result)) catch {
                             _ = self.jitThrow();
                             return false;
                         };
@@ -1020,7 +1032,16 @@ pub const Context = struct {
                     if (idx_u < len) {
                         const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
                         const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                        self.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                        // Use checked arithmetic to prevent overflow
+                        const offset = std.math.mul(i32, @intCast(idx_u), step) catch {
+                            _ = self.jitThrow();
+                            return false;
+                        };
+                        const result = std.math.add(i32, start, offset) catch {
+                            _ = self.jitThrow();
+                            return false;
+                        };
+                        self.setLocal(local_idx, value.JSValue.fromInt(result));
                         self.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
                         return true;
                     }
