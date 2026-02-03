@@ -55,7 +55,7 @@ pub const RuntimeConfig = struct {
     jit_threshold: ?u32 = null,
 };
 
-fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, config: RuntimeConfig) void {
+fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.Heap, config: RuntimeConfig) void {
     // Configure arena escape checking (disabled for scripts/benchmarks)
     ctx.enforce_arena_escape = config.enforce_arena_escape;
 
@@ -63,6 +63,14 @@ fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, config: RuntimeConfig)
     // Default 10,000 triggers too frequently during request handling.
     // Higher threshold reduces GC pause frequency at cost of memory.
     gc_state.setMajorGCThreshold(50_000);
+
+    if (config.memory_limit > 0) {
+        gc_state.setMemoryLimit(config.memory_limit);
+        heap_state.setMemoryLimit(config.memory_limit);
+        if (ctx.hybrid) |h| {
+            h.setMemoryLimit(config.memory_limit);
+        }
+    }
 
     // Apply JIT policy from config (global settings)
     if (config.jit_policy) |policy| {
@@ -134,7 +142,7 @@ pub const Runtime = struct {
         const ctx = try zq.Context.init(allocator, gc_state, .{});
         errdefer ctx.deinit();
 
-        applyRuntimeConfig(ctx, gc_state, config);
+        applyRuntimeConfig(ctx, gc_state, heap_state, config);
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(ctx);
@@ -156,6 +164,9 @@ pub const Runtime = struct {
                 .arena = arena_state.?,
             };
             ctx.setHybridAllocator(hybrid_state.?);
+            if (config.memory_limit > 0) {
+                hybrid_state.?.setMemoryLimit(config.memory_limit);
+            }
         }
 
         self.* = .{
@@ -206,7 +217,7 @@ pub const Runtime = struct {
         };
         errdefer self.strings.deinit();
 
-        applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, config);
+        applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
 
         // Install core JS builtins if the pooled runtime hasn't already done so.
         if (pool_rt.ctx.builtin_objects.items.len == 0) {
@@ -501,9 +512,9 @@ pub const Runtime = struct {
             const func_bc = bc_data.bytecode;
             if (func_bc.pattern_dispatch) |dispatch| {
                 if (self.tryFastPathDispatch(dispatch, request.url, borrow_body)) |response| {
-                    if (borrow_body) {
-                        reset_after = false;
-                    }
+                if (borrow_body and response.requires_runtime) {
+                    reset_after = false;
+                }
                     return response;
                 }
             }
@@ -524,7 +535,7 @@ pub const Runtime = struct {
                     };
 
                     const response = try self.extractResponseInternal(override_result, borrow_body);
-                    if (borrow_body) {
+                    if (borrow_body and response.requires_runtime) {
                         reset_after = false;
                     }
                     return response;
@@ -539,7 +550,7 @@ pub const Runtime = struct {
             };
 
             const response = try self.extractResponseInternal(aot_result, borrow_body);
-            if (borrow_body) {
+            if (borrow_body and response.requires_runtime) {
                 reset_after = false;
             }
             return response;
@@ -562,7 +573,7 @@ pub const Runtime = struct {
 
         // Convert result to HttpResponse
         const response = try self.extractResponseInternal(result, borrow_body);
-        if (borrow_body) {
+        if (borrow_body and response.requires_runtime) {
             reset_after = false;
         }
 
@@ -903,7 +914,7 @@ pub const Runtime = struct {
                         if (header_val.isString()) {
                             const str = header_val.toPtr(zq.JSString);
                             if (borrow_body) {
-                                try response.putHeaderBorrowed(key_name, str.data());
+                                try response.putHeaderBorrowedRuntime(key_name, str.data());
                             } else {
                                 try response.putHeader(key_name, str.data());
                             }
@@ -945,7 +956,7 @@ pub const Runtime = struct {
                     if (header_val.isString()) {
                         const str = header_val.toPtr(zq.JSString);
                         if (borrow_body) {
-                            try response.putHeaderBorrowed(key_name, str.data());
+                            try response.putHeaderBorrowedRuntime(key_name, str.data());
                         } else {
                             try response.putHeader(key_name, str.data());
                         }
@@ -1230,6 +1241,12 @@ pub const HandlerPool = struct {
     pub fn deinit(self: *Self) void {
         self.pool.deinit();
         self.cache.deinit();
+    }
+
+    /// Release any thread-local cached runtimes back to the pool.
+    /// Call this before a worker thread exits.
+    pub fn releaseThreadLocal(self: *Self) void {
+        zq.pool.releaseThreadLocal(&self.pool);
     }
 
     /// Execute handler with a request (acquire, run, release)
@@ -1586,7 +1603,9 @@ pub const HandlerPool = struct {
         // Store in cache for future hits
         if (serialized) |data| {
             if (!self.cache.contains(key)) {
-                self.cache.putRaw(key, data) catch {};
+                self.cache.putRaw(key, data) catch |err| {
+                    std.log.warn("Bytecode cache insert failed: {}", .{err});
+                };
             }
         }
     }

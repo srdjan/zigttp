@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const heap = @import("heap.zig");
+const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const string = @import("string.zig");
 const arena_mod = @import("arena.zig");
@@ -1633,6 +1634,57 @@ pub const JSObject = extern struct {
         allocator.destroy(self);
     }
 
+    fn destroyConstant(allocator: std.mem.Allocator, constant: value.JSValue) void {
+        if (constant.isExternPtr()) {
+            const magic = constant.toExternPtr(u32);
+            if (magic.* == bytecode.MAGIC) {
+                const nested = constant.toExternPtr(bytecode.FunctionBytecode);
+                destroyFunctionBytecode(allocator, nested);
+            }
+            return;
+        }
+        if (constant.isBoxedFloat64()) {
+            const box = constant.toPtr(value.JSValue.Float64Box);
+            allocator.destroy(box);
+            return;
+        }
+        if (constant.isString()) {
+            const str = constant.toPtr(string.JSString);
+            if (!str.flags.is_unique) {
+                string.freeString(allocator, str);
+            }
+        }
+    }
+
+    fn destroyFunctionBytecode(allocator: std.mem.Allocator, func: *bytecode.FunctionBytecode) void {
+        const jit = @import("jit/alloc.zig");
+
+        if (func.compiled_code) |cc| {
+            const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
+            allocator.destroy(compiled);
+        }
+        if (func.type_feedback_ptr) |tf| {
+            tf.deinit();
+        }
+        if (func.feedback_site_map) |site_map| {
+            allocator.free(site_map);
+        }
+        if (func.pattern_dispatch) |dispatch| {
+            dispatch.deinit();
+            allocator.destroy(dispatch);
+        }
+
+        for (func.constants) |constant| {
+            destroyConstant(allocator, constant);
+        }
+
+        if (func.code.len > 0) allocator.free(@constCast(func.code));
+        if (func.constants.len > 0) allocator.free(@constCast(func.constants));
+        if (func.upvalue_info.len > 0) allocator.free(@constCast(func.upvalue_info));
+        if (func.source_map) |sm| allocator.free(@constCast(sm));
+        allocator.destroy(func);
+    }
+
     /// Destroy object including internal data (e.g., NativeFunctionData, BytecodeFunctionData)
     /// Use this for builtin objects that won't be GC'd
     pub fn destroyFull(self: *JSObject, allocator: std.mem.Allocator) void {
@@ -1648,21 +1700,8 @@ pub const JSObject = extern struct {
                 }
             } else if (data_val.isExternPtr()) {
                 // Bytecode function - free the BytecodeFunctionData and FunctionBytecode internals
-                const jit = @import("jit/alloc.zig");
                 const bc_data = data_val.toExternPtr(BytecodeFunctionData);
-                const bc = bc_data.bytecode;
-                // Free JIT compiled code struct if present (code slice is freed by CodeAllocator)
-                if (bc.compiled_code) |cc| {
-                    const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
-                    allocator.destroy(compiled);
-                }
-                // Free bytecode internal allocations
-                if (bc.code.len > 0) allocator.free(@constCast(bc.code));
-                if (bc.constants.len > 0) allocator.free(@constCast(bc.constants));
-                if (bc.upvalue_info.len > 0) allocator.free(@constCast(bc.upvalue_info));
-                if (bc.source_map) |sm| allocator.free(@constCast(sm));
-                // Free the FunctionBytecode struct
-                allocator.destroy(@constCast(bc));
+                destroyFunctionBytecode(allocator, @constCast(bc_data.bytecode));
                 // Free the BytecodeFunctionData
                 allocator.destroy(bc_data);
             }

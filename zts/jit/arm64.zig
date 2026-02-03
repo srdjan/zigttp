@@ -696,12 +696,12 @@ pub const Arm64Emitter = struct {
     /// Push a single register (SUB sp, sp, #16; STR Xn, [sp])
     pub fn pushReg(self: *Arm64Emitter, reg: Register) !void {
         // STR Xn, [sp, #-16]!
-        try self.strPreIndex(reg, Register.x29, -16);
+        try self.strPreIndex(reg, Register.sp, -16);
     }
 
     /// Pop a single register (LDR Xn, [sp], #16)
     pub fn popReg(self: *Arm64Emitter, reg: Register) !void {
-        try self.ldrPostIndex(reg, Register.x29, 16);
+        try self.ldrPostIndex(reg, Register.sp, 16);
     }
 
     // ========================================

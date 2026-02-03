@@ -314,6 +314,10 @@ pub const HybridAllocator = struct {
     persistent: std.mem.Allocator,
     /// Arena for ephemeral request-scoped objects
     arena: *Arena,
+    /// Memory limit (0 = no limit)
+    memory_limit: usize = 0,
+    /// Tracked persistent bytes (ephemeral usage tracked via arena stats)
+    persistent_used: usize = 0,
 
     pub const Kind = enum {
         /// Lives forever - bytecode, prototypes, hidden classes
@@ -326,10 +330,16 @@ pub const HybridAllocator = struct {
     pub fn alloc(self: *HybridAllocator, kind: Kind, size: usize) ?*anyopaque {
         return switch (kind) {
             .persistent => blk: {
+                if (!self.withinBudget(size)) return null;
                 const mem = self.persistent.alignedAlloc(u8, .@"8", size) catch return null;
+                self.persistent_used += size;
                 break :blk @ptrCast(mem.ptr);
             },
-            .ephemeral => self.arena.alloc(size),
+            .ephemeral => blk: {
+                const aligned_size = std.mem.alignForward(usize, size, self.arena.config.alignment);
+                if (!self.withinBudget(aligned_size)) return null;
+                break :blk self.arena.alloc(size);
+            },
         };
     }
 
@@ -345,13 +355,25 @@ pub const HybridAllocator = struct {
             .persistent => blk: {
                 const header_size = @sizeOf(heap.MemBlockHeader);
                 const total = header_size + size;
+                if (!self.withinBudget(total)) return null;
                 const mem = self.persistent.alignedAlloc(u8, .@"8", total) catch return null;
                 const header: *heap.MemBlockHeader = @ptrCast(@alignCast(mem.ptr));
                 header.* = heap.MemBlockHeader.init(tag, total);
+                self.persistent_used += total;
                 break :blk mem.ptr + header_size;
             },
-            .ephemeral => self.arena.allocTagged(tag, size),
+            .ephemeral => blk: {
+                const header_size = @sizeOf(heap.MemBlockHeader);
+                const total = header_size + size;
+                const aligned_total = std.mem.alignForward(usize, total, self.arena.config.alignment);
+                if (!self.withinBudget(aligned_total)) return null;
+                break :blk self.arena.allocTagged(tag, size);
+            },
         };
+    }
+
+    pub fn setMemoryLimit(self: *HybridAllocator, limit: usize) void {
+        self.memory_limit = limit;
     }
 
     /// Reset ephemeral allocations (O(1) arena reset)
@@ -363,6 +385,12 @@ pub const HybridAllocator = struct {
     /// Get arena statistics
     pub fn getArenaStats(self: *const HybridAllocator) ArenaStats {
         return self.arena.getStats();
+    }
+
+    fn withinBudget(self: *const HybridAllocator, size: usize) bool {
+        if (self.memory_limit == 0) return true;
+        const arena_used = self.arena.usedBytes() + self.arena.overflow_bytes;
+        return self.persistent_used + arena_used + size <= self.memory_limit;
     }
 };
 

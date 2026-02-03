@@ -450,6 +450,32 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
 /// Fragment marker for JSX
 pub const FRAGMENT_MARKER = "__fragment__";
 
+fn appendChild(
+    ctx: *context.Context,
+    children_arr: *object.JSObject,
+    child_count: *u32,
+    child: value.JSValue,
+) !void {
+    if (child.isNull() or child.isUndefined()) return;
+
+    if (child.isObject()) {
+        const obj = object.JSObject.fromValue(child);
+        if (obj.class_id == .array) {
+            const len = obj.getArrayLength();
+            var i: u32 = 0;
+            while (i < len) : (i += 1) {
+                if (obj.getIndex(i)) |nested| {
+                    try appendChild(ctx, children_arr, child_count, nested);
+                }
+            }
+            return;
+        }
+    }
+
+    try ctx.setIndexChecked(children_arr, child_count.*, child);
+    child_count.* += 1;
+}
+
 /// h(tag, props, ...children) - Create virtual DOM node
 pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
@@ -500,12 +526,7 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
 
     var child_count: u32 = 0;
     for (args[2..]) |child| {
-        // Skip null/undefined
-        if (child.isNull() or child.isUndefined()) continue;
-
-        // TODO: Flatten arrays of children
-        try ctx.setIndexChecked(children_arr, child_count, child);
-        child_count += 1;
+        try appendChild(ctx, children_arr, &child_count, child);
     }
     children_arr.setArrayLength(child_count);
     try ctx.setPropertyChecked(node, children_atom, children_arr.toValue());
@@ -531,17 +552,17 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
 }
 
-const RenderError = std.Io.Writer.Error || error{OutOfMemory};
+const RenderError = std.Io.Writer.Error || error{OutOfMemory, ArenaObjectEscape, NoHiddenClassPool};
 
 /// Render a single node to the writer
 fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer) RenderError!void {
     // Handle null/undefined
     if (node.isNull() or node.isUndefined()) return;
 
-    // Handle string
-    if (node.isString()) {
-        const str = node.toPtr(string.JSString);
-        try escapeHtml(str.data(), writer);
+    // Handle string-like values (flat, rope, slice)
+    if (node.isStringOrRope()) {
+        const text = try getStringArg(node);
+        try escapeHtml(text, writer);
         return;
     }
 
@@ -570,7 +591,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             return;
         }
 
-        const pool = ctx.hidden_class_pool orelse return;
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         // Check for tag property (vnode)
         const tag_val = obj.getProperty(pool, .tag) orelse return;
@@ -588,11 +609,11 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
                 if (props_val.isObject()) {
                     // Add children to existing props
                     const props_obj = object.JSObject.fromValue(props_val);
-                    ctx.setPropertyChecked(props_obj, .children, cv) catch {};
+                    try ctx.setPropertyChecked(props_obj, .children, cv);
                 } else {
                     // Create new props object with children
-                    const new_props = ctx.createObject(null) catch return;
-                    ctx.setPropertyChecked(new_props, .children, cv) catch {};
+                    const new_props = try ctx.createObject(null);
+                    try ctx.setPropertyChecked(new_props, .children, cv);
                     props_val = new_props.toValue();
                 }
             }
@@ -661,10 +682,10 @@ fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: anytyp
     // Handle null/undefined
     if (children.isNull() or children.isUndefined()) return;
 
-    // Handle string children
-    if (children.isString()) {
-        const str = children.toPtr(string.JSString);
-        try escapeHtml(str.data(), writer);
+    // Handle string-like children
+    if (children.isStringOrRope()) {
+        const text = try getStringArg(children);
+        try escapeHtml(text, writer);
         return;
     }
 
@@ -796,9 +817,9 @@ fn isRawTextElement(tag: []const u8) bool {
 fn renderRawChildren(children: value.JSValue, writer: anytype) !void {
     if (children.isNull() or children.isUndefined()) return;
 
-    if (children.isString()) {
-        const str = children.toPtr(string.JSString);
-        try writer.writeAll(str.data());
+    if (children.isStringOrRope()) {
+        const text = try getStringArg(children);
+        try writer.writeAll(text);
         return;
     }
 
@@ -1202,6 +1223,108 @@ test "renderToString with attributes and nested elements" {
         "<a href=\"/api/health\">GET /api/health</a>",
         rendered_str,
     );
+}
+
+test "h flattens array children" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const child_arr = try ctx.createArray();
+    child_arr.prototype = ctx.array_prototype;
+
+    const child1 = try ctx.createString("a");
+    const child2 = try ctx.createString("b");
+    try ctx.setIndexChecked(child_arr, 0, child1);
+    try ctx.setIndexChecked(child_arr, 1, child2);
+    child_arr.setArrayLength(2);
+
+    const tag_val = try ctx.createString("div");
+
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+    const node = try h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        tag_val,
+        value.JSValue.undefined_val,
+        child_arr.toValue(),
+    });
+
+    const pool = ctx.hidden_class_pool.?;
+    const node_obj = object.JSObject.fromValue(node);
+    const children_val_opt = node_obj.getProperty(pool, .children);
+    try std.testing.expect(children_val_opt != null);
+    const children_val = children_val_opt.?;
+    try std.testing.expect(children_val.isObject());
+    const children_obj = object.JSObject.fromValue(children_val);
+    try std.testing.expectEqual(@as(u32, 2), children_obj.getArrayLength());
+}
+
+test "renderToString flattens nested children arrays" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const child_arr = try ctx.createArray();
+    child_arr.prototype = ctx.array_prototype;
+
+    const child1 = try ctx.createString("a");
+    const child2 = try ctx.createString("b");
+    try ctx.setIndexChecked(child_arr, 0, child1);
+    try ctx.setIndexChecked(child_arr, 1, child2);
+    child_arr.setArrayLength(2);
+
+    const tag_val = try ctx.createString("div");
+
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+    const node = try h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        tag_val,
+        value.JSValue.undefined_val,
+        child_arr.toValue(),
+    });
+
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node});
+    try std.testing.expectEqualStrings("<div>ab</div>", rendered.toPtr(string.JSString).data());
+}
+
+test "renderToString handles string slices" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const parent = try string.createString(allocator, "hello");
+    const slice = try string.createSlice(allocator, parent, 1, 3); // "ell"
+
+    const tag_val = try ctx.createString("div");
+
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+    const node = try h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        tag_val,
+        value.JSValue.undefined_val,
+        value.JSValue.fromPtr(slice),
+    });
+
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node});
+    try std.testing.expectEqualStrings("<div>ell</div>", rendered.toPtr(string.JSString).data());
 }
 
 test "Hybrid: h and renderToString accept arena values" {

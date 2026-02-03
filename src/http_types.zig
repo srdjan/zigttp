@@ -31,6 +31,8 @@ pub const HttpRequestOwned = struct {
     path: []const u8 = "",
     /// Parsed query parameters (references into string_storage)
     query_params: []const QueryParam = &.{},
+    /// Backing storage for query_params when owned
+    query_params_storage: ?[]QueryParam = null,
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
 
@@ -38,6 +40,7 @@ pub const HttpRequestOwned = struct {
         allocator.free(self.method);
         allocator.free(self.url);
         if (self.body) |b| allocator.free(b);
+        if (self.query_params_storage) |qps| allocator.free(qps);
         for (self.headers.items) |header| {
             allocator.free(header.key);
             allocator.free(header.value);
@@ -78,6 +81,9 @@ pub const HttpResponse = struct {
     /// Keeps the owner alive while the response is in flight.
     /// In practice this is a *zts.JSString when body is borrowed from the JS heap.
     body_owner: ?*anyopaque,
+    /// True when any response data borrows runtime-managed memory.
+    /// Used to keep the runtime alive until the response is sent.
+    requires_runtime: bool,
     allocator: std.mem.Allocator,
     /// Pre-built raw HTTP response (status line + headers + body).
     /// When set, sendResponseSync can write this directly without any processing.
@@ -90,6 +96,7 @@ pub const HttpResponse = struct {
             .body = "",
             .body_owned = false,
             .body_owner = null,
+            .requires_runtime = false,
             .allocator = allocator,
             .prebuilt_raw = null,
         };
@@ -142,6 +149,7 @@ pub const HttpResponse = struct {
         self.body = bytes;
         self.body_owned = true;
         self.body_owner = null;
+        self.requires_runtime = false;
     }
 
     /// Set body to borrowed data. The owner pointer keeps the data alive
@@ -150,5 +158,12 @@ pub const HttpResponse = struct {
         self.body = data;
         self.body_owned = false;
         self.body_owner = owner;
+        if (owner != null) self.requires_runtime = true;
+    }
+
+    /// Add or update a header that borrows runtime-managed memory.
+    pub fn putHeaderBorrowedRuntime(self: *HttpResponse, key: []const u8, val: []const u8) !void {
+        try self.putHeaderInternal(key, val, false);
+        self.requires_runtime = true;
     }
 };

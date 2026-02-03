@@ -337,12 +337,12 @@ pub const JSValue = packed struct {
             return @floatFromInt(self.getInt());
         }
         if (self.isRawDouble()) {
-            return @bitCast(self.raw);
+            return normalizeOptionalFloat(@bitCast(self.raw));
         }
         if (self.isBoxedFloat64()) {
             const addr = self.raw & PAYLOAD_MASK & ~@as(u64, 0x7);
             const box: *Float64Box = @ptrFromInt(addr);
-            return box.value;
+            return normalizeOptionalFloat(box.value);
         }
         return null;
     }
@@ -495,6 +495,21 @@ pub const JSValue = packed struct {
             return obj_ptr.flags.is_callable;
         }
         return self.isFunction();
+    }
+
+    /// Optional f64 uses NaN-tagging in Zig. Avoid returning the null sentinel
+    /// so callers can distinguish NaN from null.
+    inline fn normalizeOptionalFloat(v: f64) f64 {
+        if (!std.math.isNan(v)) return v;
+        if (@sizeOf(?f64) == @sizeOf(f64)) {
+            const null_bits: u64 = @bitCast(@as(?f64, null));
+            var bits: u64 = @bitCast(v);
+            if (bits == null_bits) {
+                bits ^= 0x1; // Keep NaN, avoid optional null sentinel
+            }
+            return @bitCast(bits);
+        }
+        return v;
     }
 
     // ========================================================================
@@ -838,6 +853,12 @@ test "JSValue toNumber" {
     try std.testing.expectEqual(@as(?f64, 0.0), JSValue.fromInt(0).toNumber());
     try std.testing.expectEqual(@as(?f64, null), JSValue.null_val.toNumber());
     try std.testing.expectEqual(@as(?f64, null), JSValue.undefined_val.toNumber());
+}
+
+test "JSValue toNumber preserves NaN" {
+    const num = JSValue.nan_val.toNumber();
+    try std.testing.expect(num != null);
+    try std.testing.expect(std.math.isNan(num.?));
 }
 
 test "JSValue pointer encoding" {

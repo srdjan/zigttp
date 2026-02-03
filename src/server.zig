@@ -222,6 +222,9 @@ const ConnectionPool = struct {
     }
 
     fn workerFn(self: *ConnectionPool) void {
+        defer if (self.server.pool) |*pool| {
+            pool.releaseThreadLocal();
+        };
         while (self.running.load(.acquire)) {
             const item = self.queue.pop(&self.running) orelse continue;
             self.handleConnection(item.stream_fd);
@@ -1037,39 +1040,29 @@ pub const Server = struct {
         // Read request line
         const request_line = try reader.readLine();
         request_started.* = true;
-        var parts = std.mem.splitScalar(u8, request_line, ' ');
+        const parsed_line = try parseRequestLine(string_storage, &storage_offset, request_line);
 
-        const method_slice = parts.next() orelse return error.InvalidRequest;
-        const method = try copyToStorage(string_storage, &storage_offset, method_slice);
-
-        const url_slice = parts.next() orelse return error.InvalidRequest;
-        const url = try copyToStorage(string_storage, &storage_offset, url_slice);
-
-        // Split URL into path and query string
-        const query_start = std.mem.indexOf(u8, url, "?");
-        const path = if (query_start) |idx| url[0..idx] else url;
-        const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
-
-        const qr = try parseQueryString(allocator, query_string);
+        const qr = try parseQueryString(allocator, parsed_line.query_string);
         errdefer if (qr.storage) |s| allocator.free(s);
 
         // Read headers with fast slot population
-        var header_count: usize = 0;
         var fast_slots = FastHeaderSlots{};
-        while (true) {
-            if (header_count >= self.config.max_headers) return error.TooManyHeaders;
-
-            const line = try reader.readLine();
-            if (line.len == 0) break;
-
-            try processHeaderLine(line, string_storage, &storage_offset, &headers, allocator, &fast_slots);
-            header_count += 1;
-        }
+        var line_reader = HeaderLineReader{ .reader = &reader };
+        try parseHeadersFromLines(
+            allocator,
+            self.config.max_headers,
+            string_storage,
+            &storage_offset,
+            &headers,
+            &fast_slots,
+            &line_reader,
+        );
 
         // Read body if Content-Length present
         var body: ?[]u8 = null;
         if (fast_slots.content_length) |len| {
-            if (len > 0 and len <= self.config.max_body_size) {
+            if (len > self.config.max_body_size) return error.FileTooBig;
+            if (len > 0) {
                 body = try allocator.alloc(u8, len);
                 errdefer if (body) |b| allocator.free(b);
 
@@ -1078,9 +1071,9 @@ pub const Server = struct {
         }
 
         return ParsedRequest{
-            .method = method,
-            .url = url,
-            .path = path,
+            .method = parsed_line.method,
+            .url = parsed_line.url,
+            .path = parsed_line.path,
             .query_params = qr.params,
             .headers = headers,
             .body = body,
@@ -1098,59 +1091,56 @@ pub const Server = struct {
         errdefer headers.deinit(allocator);
         try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 
-        const storage_size: usize = 8192;
-        const string_storage = try allocator.alloc(u8, storage_size);
-        errdefer allocator.free(string_storage);
-        var storage_offset: usize = 0;
-
         // Find end of headers
         const header_end = findHeaderEnd(data) orelse std.mem.indexOf(u8, data, "\r\n\r\n") orelse return error.InvalidRequest;
         const header_section = data[0..header_end];
         const body_start = header_end + 4;
 
+        const storage_size: usize = header_section.len;
+        const string_storage = try allocator.alloc(u8, storage_size);
+        errdefer allocator.free(string_storage);
+        var storage_offset: usize = 0;
+
         // Parse request line
         var lines = std.mem.splitSequence(u8, header_section, "\r\n");
         const request_line = lines.next() orelse return error.InvalidRequest;
-        var parts = std.mem.splitScalar(u8, request_line, ' ');
+        const parsed_line = try parseRequestLine(string_storage, &storage_offset, request_line);
 
-        const method_slice = parts.next() orelse return error.InvalidRequest;
-        const method = try copyToStorage(string_storage, &storage_offset, method_slice);
-
-        const url_slice = parts.next() orelse return error.InvalidRequest;
-        const url = try copyToStorage(string_storage, &storage_offset, url_slice);
-
-        // Split URL into path and query string
-        const query_start = std.mem.indexOf(u8, url, "?");
-        const path = if (query_start) |idx| url[0..idx] else url;
-        const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
-
-        const qr = try parseQueryString(allocator, query_string);
+        const qr = try parseQueryString(allocator, parsed_line.query_string);
         errdefer if (qr.storage) |s| allocator.free(s);
 
         // Parse headers with fast slot population
-        var header_count: usize = 0;
         var fast_slots = FastHeaderSlots{};
-        while (lines.next()) |line| {
-            if (line.len == 0) break;
-            if (header_count >= self.config.max_headers) return error.TooManyHeaders;
-
-            try processHeaderLine(line, string_storage, &storage_offset, &headers, allocator, &fast_slots);
-            header_count += 1;
-        }
+        var line_iter = HeaderLineIterator{ .iter = lines };
+        try parseHeadersFromLines(
+            allocator,
+            self.config.max_headers,
+            string_storage,
+            &storage_offset,
+            &headers,
+            &fast_slots,
+            &line_iter,
+        );
 
         // Extract body if present
         var body: ?[]u8 = null;
         if (fast_slots.content_length) |len| {
-            if (len > 0 and len <= self.config.max_body_size and body_start + len <= data.len) {
-                body = try allocator.alloc(u8, len);
-                @memcpy(body.?, data[body_start..][0..len]);
+            if (len > 0) {
+                if (len > self.config.max_body_size) return error.FileTooBig;
+                if (body_start > data.len or len > data.len - body_start) {
+                    return error.IncompleteBody;
+                }
+                if (len <= self.config.max_body_size) {
+                    body = try allocator.alloc(u8, len);
+                    @memcpy(body.?, data[body_start..][0..len]);
+                }
             }
         }
 
         return ParsedRequest{
-            .method = method,
-            .url = url,
-            .path = path,
+            .method = parsed_line.method,
+            .url = parsed_line.url,
+            .path = parsed_line.path,
             .query_params = qr.params,
             .headers = headers,
             .body = body,
@@ -1168,6 +1158,17 @@ pub const Server = struct {
         var out_buf: [8192]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
         const out = &writer.interface;
+
+        // FAST PATH: If prebuilt_raw is available, write it directly (zero header construction)
+        // Note: prebuilt responses use Connection: keep-alive, which is the common case
+        if (response.prebuilt_raw) |prebuilt| {
+            if (keep_alive) {
+                try out.writeAll(prebuilt);
+                try writer.interface.flush();
+                return;
+            }
+            // For close, we'd need to modify the prebuilt - fall through to normal path
+        }
 
         // Build headers into a single buffer to reduce tiny writes.
         var header_buf: [4096]u8 = undefined;
@@ -1397,6 +1398,67 @@ pub const Server = struct {
 // ============================================================================
 // HTTP Parsing Helpers (shared between streaming and buffer-based paths)
 // ============================================================================
+
+const RequestLine = struct {
+    method: []const u8,
+    url: []const u8,
+    path: []const u8,
+    query_string: []const u8,
+};
+
+const HeaderLineReader = struct {
+    reader: *BufferedReader,
+
+    pub fn next(self: *HeaderLineReader) !?[]const u8 {
+        return try self.reader.readLine();
+    }
+};
+
+const HeaderLineIterator = struct {
+    iter: std.mem.SplitIterator(u8, .sequence),
+
+    pub fn next(self: *HeaderLineIterator) !?[]const u8 {
+        return self.iter.next();
+    }
+};
+
+fn parseRequestLine(storage: []u8, offset: *usize, request_line: []const u8) !RequestLine {
+    var parts = std.mem.splitScalar(u8, request_line, ' ');
+    const method_slice = parts.next() orelse return error.InvalidRequest;
+    const url_slice = parts.next() orelse return error.InvalidRequest;
+
+    const method = try copyToStorage(storage, offset, method_slice);
+    const url = try copyToStorage(storage, offset, url_slice);
+
+    const query_start = std.mem.indexOf(u8, url, "?");
+    const path = if (query_start) |idx| url[0..idx] else url;
+    const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
+
+    return .{
+        .method = method,
+        .url = url,
+        .path = path,
+        .query_string = query_string,
+    };
+}
+
+fn parseHeadersFromLines(
+    allocator: std.mem.Allocator,
+    max_headers: usize,
+    storage: []u8,
+    offset: *usize,
+    headers: *std.ArrayListUnmanaged(HttpHeader),
+    fast_slots: *FastHeaderSlots,
+    line_source: anytype,
+) !void {
+    var header_count: usize = 0;
+    while (try line_source.next()) |line| {
+        if (line.len == 0) break;
+        if (header_count >= max_headers) return error.TooManyHeaders;
+        try processHeaderLine(line, storage, offset, headers, allocator, fast_slots);
+        header_count += 1;
+    }
+}
 
 /// Copy a string into a pre-allocated batch storage buffer.
 /// Returns a slice into the storage buffer.
@@ -1751,16 +1813,22 @@ const StaticFileCache = struct {
 /// Uses the std.Io.Reader interface for reading from Stream
 const BufferedReader = struct {
     reader: net.Stream.Reader,
+    max_line_len: usize,
 
     pub fn init(stream: *net.Stream, io: Io, buffer: []u8) BufferedReader {
         return .{
             .reader = stream.reader(io, buffer),
+            .max_line_len = buffer.len,
         };
     }
 
     /// Read a line ending with \r\n or \n
     pub fn readLine(self: *BufferedReader) ![]const u8 {
-        const line = try self.reader.interface.takeDelimiterExclusive('\n');
+        const line = self.reader.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.HeaderLineTooLong,
+            else => |e| return e,
+        };
+        if (line.len > self.max_line_len) return error.HeaderLineTooLong;
         if (line.len > 0 and line[line.len - 1] == '\r') {
             return line[0 .. line.len - 1];
         }
@@ -2053,4 +2121,141 @@ test "threaded readRequestData handles partial headers" {
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
     try std.testing.expectEqualStrings("hello", request.body.?);
+}
+
+test "parseRequestFromBuffer rejects duplicate content length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "Content-Length: 6\r\n" ++
+        "\r\n" ++
+        "hello";
+
+    try std.testing.expectError(error.DuplicateContentLength, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "parseRequestFromBuffer rejects invalid content length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: nope\r\n" ++
+        "\r\n";
+
+    try std.testing.expectError(error.InvalidContentLength, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "parseRequestFromBuffer accepts large header values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const long_value = try allocator.alloc(u8, 9000);
+    @memset(long_value, 'a');
+
+    const data = try std.fmt.allocPrint(
+        allocator,
+        "GET / HTTP/1.1\r\nHost: example.com\r\nX-Long: {s}\r\n\r\n",
+        .{long_value},
+    );
+
+    var request = try server.parseRequestFromBuffer(allocator, data);
+    defer request.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), request.headers.items.len);
+    try std.testing.expectEqualStrings("x-long", request.headers.items[1].key);
+    try std.testing.expectEqualStrings(long_value, request.headers.items[1].value);
+}
+
+test "parseRequestFromBuffer rejects incomplete body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "\r\n" ++
+        "hel";
+
+    try std.testing.expectError(error.IncompleteBody, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "parseRequestFromBuffer rejects oversized body" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 4, .max_headers = 64 };
+
+    const data =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "\r\n" ++
+        "hello";
+
+    try std.testing.expectError(error.FileTooBig, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "parseRequest rejects long header lines (streaming)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var io_backend: Io.Threaded = undefined;
+    try initIoBackend(&io_backend, allocator);
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
+
+    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    defer std.posix.close(fds[0]);
+
+    const long_value = try allocator.alloc(u8, 9000);
+    defer allocator.free(long_value);
+    @memset(long_value, 'a');
+    const payload = try std.fmt.allocPrint(
+        allocator,
+        "GET / HTTP/1.1\r\nX-Long: {s}\r\n\r\n",
+        .{long_value},
+    );
+    defer allocator.free(payload);
+
+    try writeAllFd(fds[1], payload);
+    std.posix.close(fds[1]);
+
+    var stream = net.Stream{
+        .socket = .{
+            .handle = fds[0],
+            .address = .{ .ip4 = net.Ip4Address.unspecified(0) },
+        },
+    };
+
+    var request_started = false;
+    try std.testing.expectError(error.HeaderLineTooLong, server.parseRequest(allocator, &stream, io, &request_started));
 }

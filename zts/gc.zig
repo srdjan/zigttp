@@ -80,8 +80,8 @@ pub const TenuredHeap = struct {
     free_lists: [16]?*FreeBlock,
     /// Total allocated bytes
     allocated: usize,
-    /// Objects freed in last sweep
-    last_sweep_freed: usize,
+    /// Bytes freed in last sweep
+    last_sweep_freed_bytes: usize,
     allocator: std.mem.Allocator,
 
     const FreeBlock = struct {
@@ -101,7 +101,7 @@ pub const TenuredHeap = struct {
             .free_indices = .{},
             .free_lists = [_]?*FreeBlock{null} ** 16,
             .allocated = 0,
-            .last_sweep_freed = 0,
+            .last_sweep_freed_bytes = 0,
             .allocator = allocator,
         };
     }
@@ -113,16 +113,36 @@ pub const TenuredHeap = struct {
         self.allocator.free(self.mark_bitvector);
     }
 
+    fn accountedBytesForHeader(header: *const heap.MemBlockHeader) usize {
+        const size = header.sizeBytes();
+        const size_class = heap.SizeClass.fromSize(size);
+        return if (size_class == .large) size else size_class.slotSize();
+    }
+
+    fn ensureMarkCapacity(self: *TenuredHeap, idx: usize) !void {
+        const needed_words = idx / 64 + 1;
+        if (needed_words <= self.mark_bitvector.len) return;
+        const current_len = self.mark_bitvector.len;
+        const grow_len = if (current_len == 0) 1 else current_len * 2;
+        const new_len = @max(needed_words, grow_len);
+        self.mark_bitvector = try self.allocator.realloc(self.mark_bitvector, new_len);
+        @memset(self.mark_bitvector[current_len..new_len], 0);
+    }
+
     /// Register an object in tenured space
     pub fn registerObject(self: *TenuredHeap, ptr: *anyopaque) !usize {
+        const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
+        self.allocated += accountedBytesForHeader(header);
         if (self.free_indices.items.len != 0) {
             const idx = self.free_indices.items[self.free_indices.items.len - 1];
             self.free_indices.items.len -= 1;
+            try self.ensureMarkCapacity(idx);
             self.objects.items[idx] = ptr;
             try self.object_index.put(ptr, idx);
             return idx;
         }
         const idx = self.objects.items.len;
+        try self.ensureMarkCapacity(idx);
         try self.objects.append(self.allocator, ptr);
         try self.object_index.put(ptr, idx);
         return idx;
@@ -157,7 +177,7 @@ pub const TenuredHeap = struct {
         const VecSize = 4; // 4 x u64 = 256 bits
         const Vec = @Vector(VecSize, u64);
 
-        self.last_sweep_freed = 0;
+        self.last_sweep_freed_bytes = 0;
         var i: usize = 0;
 
         // Process in SIMD chunks of 256 objects
@@ -207,9 +227,9 @@ pub const TenuredHeap = struct {
                     }
 
                     // CRITICAL: Actually free the memory to prevent leak
-                    // Objects in tenured were allocated via heap, so we must use heap.free()
+                    // Objects in tenured were allocated via heap.allocRaw (embedded header).
                     if (heap_ptr) |h| {
-                        h.free(obj);
+                        h.freeRaw(obj);
                     } else {
                         // Cannot safely free without heap - objects have MemBlockHeader
                         // This is a programming error: majorGC should be called with heap_ptr
@@ -219,7 +239,10 @@ pub const TenuredHeap = struct {
                     _ = self.object_index.remove(obj);
                     self.objects.items[obj_idx] = null;
                     self.free_indices.append(self.allocator, obj_idx) catch {};
-                    self.last_sweep_freed += 1;
+                    const header: *heap.MemBlockHeader = @ptrCast(@alignCast(obj));
+                    const size = accountedBytesForHeader(header);
+                    self.allocated -|= size;
+                    self.last_sweep_freed_bytes += size;
                 }
             }
 
@@ -229,7 +252,7 @@ pub const TenuredHeap = struct {
 
     /// Scalar sweep fallback (for small heaps or debugging)
     pub fn scalarSweep(self: *TenuredHeap, free_callback: ?*const fn (*anyopaque) void, heap_ptr: ?*heap.Heap) void {
-        self.last_sweep_freed = 0;
+        self.last_sweep_freed_bytes = 0;
 
         for (self.mark_bitvector, 0..) |mark_word, word_idx| {
             const free_mask = ~mark_word;
@@ -499,6 +522,9 @@ pub const GC = struct {
     total_bytes_allocated: usize = 0,
     total_bytes_freed: usize = 0,
 
+    /// Memory limit in bytes (0 = no limit)
+    memory_limit: usize = 0,
+
     /// Number of float allocations saved by constant pool
     float_pool_hits: u64 = 0,
 
@@ -547,30 +573,50 @@ pub const GC = struct {
         self.heap_ptr = h;
     }
 
+    pub fn setMemoryLimit(self: *GC, limit: usize) void {
+        self.memory_limit = limit;
+    }
+
     pub fn deinit(self: *GC) void {
         self.forwarding_pointers.deinit();
         self.gray_stack.deinit();
         self.root_set.deinit();
         self.upvalue_pool.deinit();
         self.allocator.free(self.nursery.base[0..self.nursery.size]);
+        if (self.heap_ptr) |h| {
+            for (self.tenured.objects.items) |obj_opt| {
+                if (obj_opt) |obj_ptr| {
+                    h.freeRaw(obj_ptr);
+                }
+            }
+        }
         self.tenured.deinit();
         self.remembered_set.deinit();
     }
 
     /// Allocate in nursery (fast path)
     pub inline fn allocNursery(self: *GC, size: usize) ?*anyopaque {
+        const aligned_size = std.mem.alignForward(usize, size, 8);
+        if (!self.withinBudget(aligned_size)) return null;
         const ptr = self.nursery.alloc(size);
         if (ptr != null) {
-            self.total_bytes_allocated += size;
+            self.total_bytes_allocated += aligned_size;
         }
         return ptr;
     }
 
     /// Allocate with automatic GC trigger
     pub fn allocWithGC(self: *GC, size: usize) !*anyopaque {
+        const aligned_size = std.mem.alignForward(usize, size, 8);
+        if (!self.withinBudget(aligned_size)) {
+            if (!self.hybrid_mode) {
+                self.majorGCWithHeap(self.heap_ptr);
+            }
+            if (!self.withinBudget(aligned_size)) return error.OutOfMemory;
+        }
         // Try nursery first
         if (self.nursery.alloc(size)) |ptr| {
-            self.total_bytes_allocated += size;
+            self.total_bytes_allocated += aligned_size;
             return ptr;
         }
 
@@ -579,7 +625,7 @@ pub const GC = struct {
 
         // Retry after GC
         if (self.nursery.alloc(size)) |ptr| {
-            self.total_bytes_allocated += size;
+            self.total_bytes_allocated += aligned_size;
             return ptr;
         }
 
@@ -988,8 +1034,18 @@ pub const GC = struct {
             self.tenured.scalarSweep(null, heap_ptr);
         }
 
-        self.total_bytes_freed += self.tenured.last_sweep_freed;
+        self.total_bytes_freed += self.tenured.last_sweep_freed_bytes;
         self.phase = .idle;
+    }
+
+    fn currentBytes(self: *const GC) usize {
+        return self.nursery.used() + self.tenured.allocated;
+    }
+
+    fn withinBudget(self: *const GC, size: usize) bool {
+        if (self.memory_limit == 0) return true;
+        const current = self.currentBytes();
+        return current + size <= self.memory_limit;
     }
 
     fn abortMinorGC(self: *GC) void {
@@ -1343,6 +1399,20 @@ test "GC statistics" {
     try std.testing.expectEqual(@as(usize, 4096), stats.nursery_size);
 }
 
+test "GC memory limit enforcement" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 128 });
+    defer gc_state.deinit();
+
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+    gc_state.setMemoryLimit(64);
+
+    _ = try gc_state.allocWithGC(32);
+    try std.testing.expectError(error.OutOfMemory, gc_state.allocWithGC(40));
+}
+
 test "RememberedSet operations" {
     const allocator = std.testing.allocator;
     var rs = RememberedSet.init(allocator);
@@ -1390,11 +1460,27 @@ test "TenuredHeap mark bits" {
     var tenured = try TenuredHeap.init(allocator, 4096);
     defer tenured.deinit();
 
-    var dummy1: u64 = 1;
-    var dummy2: u64 = 2;
+    const DummyObj = struct {
+        header: heap.MemBlockHeader,
+        value: u64,
+    };
 
-    const idx1 = try tenured.registerObject(&dummy1);
-    const idx2 = try tenured.registerObject(&dummy2);
+    const obj1 = try allocator.create(DummyObj);
+    defer allocator.destroy(obj1);
+    obj1.* = .{
+        .header = heap.MemBlockHeader.init(.object, @sizeOf(DummyObj)),
+        .value = 1,
+    };
+
+    const obj2 = try allocator.create(DummyObj);
+    defer allocator.destroy(obj2);
+    obj2.* = .{
+        .header = heap.MemBlockHeader.init(.object, @sizeOf(DummyObj)),
+        .value = 2,
+    };
+
+    const idx1 = try tenured.registerObject(obj1);
+    const idx2 = try tenured.registerObject(obj2);
 
     // Initially unmarked
     try std.testing.expect(!tenured.isMarked(idx1));
@@ -1409,6 +1495,67 @@ test "TenuredHeap mark bits" {
     tenured.setMark(idx2);
     try std.testing.expect(tenured.isMarked(idx1));
     try std.testing.expect(tenured.isMarked(idx2));
+}
+
+test "TenuredHeap grows mark bitvector" {
+    const allocator = std.testing.allocator;
+    var tenured = try TenuredHeap.init(allocator, 64);
+    defer tenured.deinit();
+
+    const DummyObj = struct {
+        header: heap.MemBlockHeader,
+        value: u64,
+    };
+
+    var objects = std.ArrayList(*DummyObj).init(allocator);
+    defer {
+        for (objects.items) |obj| allocator.destroy(obj);
+        objects.deinit();
+    }
+
+    const target_count: usize = 70;
+    var last_idx: usize = 0;
+    for (0..target_count) |i| {
+        const obj = try allocator.create(DummyObj);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(DummyObj)),
+            .value = @intCast(i),
+        };
+        try objects.append(obj);
+        last_idx = try tenured.registerObject(obj);
+    }
+
+    tenured.setMark(last_idx);
+    try std.testing.expect(tenured.isMarked(last_idx));
+    try std.testing.expect(tenured.mark_bitvector.len >= (last_idx / 64 + 1));
+}
+
+test "TenuredHeap accounts slot size" {
+    const allocator = std.testing.allocator;
+    var tenured = try TenuredHeap.init(allocator, 4096);
+    defer tenured.deinit();
+
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+
+    const DummyObj = struct {
+        header: heap.MemBlockHeader,
+        payload: [1]u8,
+    };
+
+    const size = @sizeOf(DummyObj);
+    const ptr = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj: *DummyObj = @ptrCast(@alignCast(ptr));
+    obj.* = .{
+        .header = heap.MemBlockHeader.init(.object, size),
+        .payload = .{0},
+    };
+
+    _ = try tenured.registerObject(obj);
+
+    const size_class = heap.SizeClass.fromSize(obj.header.sizeBytes());
+    const expected = if (size_class == .large) obj.header.sizeBytes() else size_class.slotSize();
+    try std.testing.expectEqual(expected, tenured.allocated);
 }
 
 test "FloatConstantPool caching" {

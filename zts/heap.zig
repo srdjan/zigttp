@@ -88,6 +88,8 @@ pub const HeapConfig = struct {
     total_size: usize = 64 * 1024 * 1024, // 64MB default
     /// Nursery size (young generation)
     nursery_size: usize = 4 * 1024 * 1024, // 4MB default
+    /// Memory limit (0 = no limit)
+    memory_limit: usize = 0,
     /// Page size for size class allocations
     page_size: usize = 4096,
 };
@@ -149,13 +151,27 @@ pub const Heap = struct {
         };
     }
 
+    pub fn setMemoryLimit(self: *Heap, limit: usize) void {
+        self.config.memory_limit = limit;
+    }
+
+    pub fn currentBytes(self: *const Heap) usize {
+        return self.stats.total_allocated -| self.stats.total_freed;
+    }
+
+    fn withinBudget(self: *const Heap, size: usize) bool {
+        if (self.config.memory_limit == 0) return true;
+        const current = self.currentBytes();
+        return current + size <= self.config.memory_limit;
+    }
+
     pub fn deinit(self: *Heap) void {
         // Free all pages for each size class
         for (0..SizeClass.COUNT) |i| {
             var page = self.pages[i];
             while (page) |p| {
                 const next = p.next;
-                const page_ptr: [*]u8 = @ptrCast(p);
+                const page_ptr: [*]align(@alignOf(PageHeader)) u8 = @ptrCast(@alignCast(p));
                 self.allocator.free(page_ptr[0..self.config.page_size]);
                 page = next;
             }
@@ -166,7 +182,7 @@ pub const Heap = struct {
         while (large) |l| {
             const next = l.next;
             const total_size = @sizeOf(LargeHeader) + l.size;
-            const ptr: [*]u8 = @ptrCast(l);
+            const ptr: [*]align(@alignOf(LargeHeader)) u8 = @ptrCast(@alignCast(l));
             self.allocator.free(ptr[0..total_size]);
             large = next;
         }
@@ -187,6 +203,11 @@ pub const Heap = struct {
     /// Allocate from size class free list or new page
     fn allocSmall(self: *Heap, tag: MemTag, size_class: SizeClass) ?*anyopaque {
         const idx = size_class.index();
+        const slot_size = size_class.slotSize();
+
+        if (!self.withinBudget(slot_size)) {
+            return null;
+        }
 
         // Try free list first
         if (self.free_lists[idx]) |node| {
@@ -201,7 +222,7 @@ pub const Heap = struct {
             };
 
             self.stats.small_alloc_count += 1;
-            self.stats.total_allocated += size_class.slotSize();
+            self.stats.total_allocated += slot_size;
 
             // Return pointer after header
             const ptr: [*]u8 = @ptrCast(node);
@@ -219,7 +240,7 @@ pub const Heap = struct {
 
     /// Allocate a new page for given size class
     fn allocPage(self: *Heap, size_class: SizeClass) bool {
-        const page_bytes = self.allocator.alloc(u8, self.config.page_size) catch return false;
+        const page_bytes = self.allocator.alignedAlloc(u8, std.mem.Alignment.of(PageHeader), self.config.page_size) catch return false;
         const slot_size = size_class.slotSize();
         const header_size = @sizeOf(PageHeader);
         const usable_space = self.config.page_size - header_size;
@@ -253,7 +274,10 @@ pub const Heap = struct {
     /// Allocate large block (> 512 bytes)
     fn allocLarge(self: *Heap, tag: MemTag, size: usize) ?*anyopaque {
         const total_size = @sizeOf(LargeHeader) + size;
-        const mem = self.allocator.alloc(u8, total_size) catch return null;
+        if (!self.withinBudget(total_size)) {
+            return null;
+        }
+        const mem = self.allocator.alignedAlloc(u8, std.mem.Alignment.of(LargeHeader), total_size) catch return null;
 
         const header: *LargeHeader = @ptrCast(@alignCast(mem.ptr));
         header.* = .{
@@ -270,7 +294,7 @@ pub const Heap = struct {
         self.large_allocs = header;
 
         self.stats.large_alloc_count += 1;
-        self.stats.total_allocated += size;
+        self.stats.total_allocated += total_size;
 
         return mem.ptr + @sizeOf(LargeHeader);
     }
@@ -289,6 +313,26 @@ pub const Heap = struct {
         } else {
             self.freeSmall(ptr, size_class);
         }
+    }
+
+    /// Free a block allocated with allocRaw (ptr points to embedded header).
+    pub fn freeRaw(self: *Heap, ptr: *anyopaque) void {
+        const header: *MemBlockHeader = @ptrCast(@alignCast(ptr));
+        const size = header.sizeBytes();
+        const size_class = SizeClass.fromSize(size);
+
+        if (size_class == .large) {
+            const bytes: [*]align(@alignOf(MemBlockHeader)) u8 = @ptrCast(@alignCast(ptr));
+            self.allocator.free(bytes[0..size]);
+            self.stats.total_freed += size;
+            return;
+        }
+
+        const idx = size_class.index();
+        const node: *FreeNode = @ptrCast(@alignCast(ptr));
+        node.next = self.free_lists[idx];
+        self.free_lists[idx] = node;
+        self.stats.total_freed += size_class.slotSize();
     }
 
     /// Return small block to free list
@@ -322,10 +366,9 @@ pub const Heap = struct {
             next.prev = header.prev;
         }
 
-        self.stats.total_freed += header.size;
-
         const total_size = @sizeOf(LargeHeader) + header.size;
-        const full_ptr: [*]u8 = @ptrCast(header);
+        self.stats.total_freed += total_size;
+        const full_ptr: [*]align(@alignOf(LargeHeader)) u8 = @ptrCast(@alignCast(header));
         self.allocator.free(full_ptr[0..total_size]);
     }
 
@@ -381,12 +424,17 @@ pub const Heap = struct {
         }
 
         const idx = size_class.index();
+        const slot_size = size_class.slotSize();
+
+        if (!self.withinBudget(slot_size)) {
+            return null;
+        }
 
         // Try free list first
         if (self.free_lists[idx]) |node| {
             self.free_lists[idx] = node.next;
             self.stats.small_alloc_count += 1;
-            self.stats.total_allocated += size_class.slotSize();
+            self.stats.total_allocated += slot_size;
 
             const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(node));
             box.* = .{
@@ -412,19 +460,27 @@ pub const Heap = struct {
 
         if (size_class == .large) {
             // For raw large allocations, just use backing allocator
-            const mem = self.allocator.alloc(u8, size) catch return null;
+            if (!self.withinBudget(size)) {
+                return null;
+            }
+            const mem = self.allocator.alignedAlloc(u8, std.mem.Alignment.of(MemBlockHeader), size) catch return null;
             self.stats.large_alloc_count += 1;
             self.stats.total_allocated += size;
             return mem.ptr;
         }
 
         const idx = size_class.index();
+        const slot_size = size_class.slotSize();
+
+        if (!self.withinBudget(slot_size)) {
+            return null;
+        }
 
         // Try free list first
         if (self.free_lists[idx]) |node| {
             self.free_lists[idx] = node.next;
             self.stats.small_alloc_count += 1;
-            self.stats.total_allocated += size_class.slotSize();
+            self.stats.total_allocated += slot_size;
             return @ptrCast(node);
         }
 
@@ -481,7 +537,16 @@ test "Heap large allocation" {
     try std.testing.expect(ptr != null);
 
     try std.testing.expectEqual(@as(usize, 1), heap.stats.large_alloc_count);
-    try std.testing.expectEqual(@as(usize, 1024), heap.stats.total_allocated);
+    try std.testing.expectEqual(@as(usize, @sizeOf(LargeHeader) + 1024), heap.stats.total_allocated);
+}
+
+test "Heap memory limit enforcement" {
+    const allocator = std.testing.allocator;
+    var heap = Heap.init(allocator, .{ .memory_limit = 64 });
+    defer heap.deinit();
+
+    try std.testing.expect(heap.alloc(.object, 48) != null);
+    try std.testing.expect(heap.alloc(.object, 48) == null);
 }
 
 test "Heap free and reuse" {

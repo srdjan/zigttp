@@ -46,23 +46,23 @@
   - Fix: open via `openat`/no-follow or verify realpath prefix.
 
 ## Medium
-- [ ] **Bytecode constants leak (strings/float boxes/nested functions)** — `zts/object.zig:1421-1450`, `zts/bytecode_cache.zig:172-230`.
+- [x] **Bytecode constants leak (strings/float boxes/nested functions)** — `zts/object.zig:1421-1450`, `zts/bytecode_cache.zig:172-230`.
   - Root cause: `destroyFull` frees `FunctionBytecode` arrays but never walks `constants` to free heap payloads.
   - Fix: add recursive constant cleanup (strings, float boxes, nested `FunctionBytecode`) or ref-counted constant pools.
   - Impact: memory growth in long-lived runtimes.
-- [ ] **NaN treated as non-number in arithmetic** — `zts/value.zig:147-155`, `zts/interpreter.zig:2602-2638`.
+- [x] **NaN treated as non-number in arithmetic** — `zts/value.zig:147-155`, `zts/interpreter.zig:2602-2638`.
   - Root cause: `JSValue.toNumber()` returns null for `nan_val`; arithmetic paths treat null as TypeError.
   - Fix: return `std.math.nan(f64)` for `nan_val` or treat it as a float number.
   - Impact: JS spec violations (`NaN + 1` throws instead of returning NaN).
-- [ ] **ARM64 push/pop use frame pointer instead of stack pointer** — `zts/jit/arm64.zig:657-666`.
+- [x] **ARM64 push/pop use frame pointer instead of stack pointer** — `zts/jit/arm64.zig:657-666`.
   - Root cause: `pushReg`/`popReg` use `x29` as base instead of `sp`.
   - Fix: use `.sp` as base register for pre/post-index ops.
   - Impact: corrupts frame pointer if these helpers are used.
-- [ ] **Fixed 8KB header storage in buffered parse** — `src/server.zig:954-967`.
+- [x] **Fixed 8KB header storage in buffered parse** — `src/server.zig:954-967`.
   - Root cause: `storage_size` is hard-coded to 8192 while `max_header_bytes` allows larger headers.
   - Fix: size storage based on header length or grow dynamically.
   - Impact: valid large headers fail with `HeaderStorageExhausted`.
-- [ ] **Thread-local runtime cache leak on thread exit** — `zts/pool.zig:205-215`, `zts/pool.zig:347-355`.
+- [x] **Thread-local runtime cache leak on thread exit** — `zts/pool.zig:205-215`, `zts/pool.zig:347-355`.
   - Root cause: TLS runtime not reclaimed unless thread calls `releaseThreadLocal()`.
   - Fix: worker shutdown hook or pool-managed TLS registry.
 - [ ] **TypeScript stripper rejects enums/namespaces/decorators** — `zts/stripper.zig:989-1013`.
