@@ -511,6 +511,8 @@ pub const GC = struct {
 
     /// Current GC phase (for incremental GC, future)
     phase: GCPhase = .idle,
+    /// Set when GC cannot complete due to allocation failure.
+    gc_oom: bool = false,
 
     pub const GCPhase = enum {
         idle,
@@ -634,16 +636,25 @@ pub const GC = struct {
         // Skip GC in hybrid mode - arena handles ephemeral cleanup
         if (self.hybrid_mode) return;
 
+        self.gc_oom = false;
         self.minor_gc_count += 1;
 
         // 1. Mark phase: mark all reachable nursery objects
         self.markRoots();
         self.markRememberedSet();
         self.drainGrayStack();
+        if (self.gc_oom) {
+            self.abortMinorGC();
+            return;
+        }
 
         // 2. Evacuate surviving nursery objects to tenured space
         // This copies live objects and updates pointers via forwarding
         self.evacuateSurvivors();
+        if (self.gc_oom) {
+            self.abortMinorGC();
+            return;
+        }
 
         // 3. Update all pointers to forwarded objects
         self.updatePointers();
@@ -676,6 +687,7 @@ pub const GC = struct {
 
         // Evacuate nursery roots and enqueue new copies for scanning.
         for (self.root_set.iterator()) |root| {
+            if (self.gc_oom) return;
             if (root.isPtr()) {
                 const ptr: *anyopaque = @ptrCast(root.toPtr(u8));
                 self.evacuateIfNursery(ptr, &worklist);
@@ -684,21 +696,30 @@ pub const GC = struct {
 
         // Scan remembered-set entries (tenured objects) for nursery references.
         for (self.remembered_set.entries.items) |ptr| {
+            if (self.gc_oom) return;
             self.scanObjectForEvacuation(ptr, &worklist);
         }
 
         // Cheney-style scan of evacuated objects to find transitive nursery refs.
         var i: usize = 0;
         while (i < worklist.items.len) : (i += 1) {
+            if (self.gc_oom) return;
             self.scanObjectForEvacuation(worklist.items[i], &worklist);
         }
     }
 
     fn evacuateIfNursery(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        if (self.gc_oom) return;
         if (!self.isInNursery(ptr)) return;
         if (self.getForwardingPointer(ptr)) |_| return;
-        const new_ptr = self.evacuateObject(ptr) catch return;
-        worklist.append(self.allocator, new_ptr) catch {};
+        const new_ptr = self.evacuateObject(ptr) catch {
+            self.gc_oom = true;
+            return;
+        };
+        worklist.append(self.allocator, new_ptr) catch {
+            self.gc_oom = true;
+            return;
+        };
     }
 
     fn scanObjectForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
@@ -712,6 +733,7 @@ pub const GC = struct {
     }
 
     fn scanJSObjectForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        if (self.gc_oom) return;
         const obj: *object.JSObject = @ptrCast(@alignCast(ptr));
 
         if (obj.prototype) |proto| {
@@ -736,6 +758,7 @@ pub const GC = struct {
     }
 
     fn scanValueArrayForEvacuation(self: *GC, ptr: *anyopaque, size_bytes: usize, worklist: *std.ArrayList(*anyopaque)) void {
+        if (self.gc_oom) return;
         const header_size = @sizeOf(heap.MemBlockHeader);
         const data_size = size_bytes - header_size;
         const num_values = data_size / @sizeOf(value.JSValue);
@@ -753,6 +776,7 @@ pub const GC = struct {
     }
 
     fn scanVarRefForEvacuation(self: *GC, ptr: *anyopaque, worklist: *std.ArrayList(*anyopaque)) void {
+        if (self.gc_oom) return;
         const upvalue: *object.Upvalue = @ptrCast(@alignCast(ptr));
 
         switch (upvalue.location) {
@@ -795,7 +819,10 @@ pub const GC = struct {
         try self.setForwardingPointer(ptr, new_ptr);
 
         // Register in tenured heap for tracking
-        _ = self.tenured.registerObject(new_ptr) catch {};
+        _ = self.tenured.registerObject(new_ptr) catch |err| {
+            self.gc_oom = true;
+            return err;
+        };
 
         self.total_bytes_allocated += size;
 
@@ -936,6 +963,7 @@ pub const GC = struct {
     /// Skipped in hybrid mode
     pub fn majorGCWithHeap(self: *GC, heap_ptr: ?*heap.Heap) void {
         if (self.hybrid_mode) return;
+        self.gc_oom = false;
         self.major_gc_count += 1;
         self.phase = .marking;
 
@@ -947,6 +975,10 @@ pub const GC = struct {
 
         // 3. Drain gray stack (process all gray objects)
         self.drainGrayStack();
+        if (self.gc_oom) {
+            self.abortMajorGC();
+            return;
+        }
 
         // 4. Sweep unmarked and FREE memory (CRITICAL fix for memory leak)
         self.phase = .sweeping;
@@ -960,9 +992,23 @@ pub const GC = struct {
         self.phase = .idle;
     }
 
+    fn abortMinorGC(self: *GC) void {
+        // Avoid resetting nursery or remembered set if evacuation may be incomplete.
+        self.gray_stack.clear();
+        self.forwarding_pointers.clearRetainingCapacity();
+    }
+
+    fn abortMajorGC(self: *GC) void {
+        // Avoid sweeping if marking may be incomplete; clear marks for next attempt.
+        @memset(self.tenured.mark_bitvector, 0);
+        self.gray_stack.clear();
+        self.phase = .idle;
+    }
+
     /// Mark all root values
     fn markRoots(self: *GC) void {
         for (self.root_set.iterator()) |root| {
+            if (self.gc_oom) return;
             self.markValue(root);
         }
     }
@@ -970,6 +1016,7 @@ pub const GC = struct {
     /// Mark objects from remembered set
     fn markRememberedSet(self: *GC) void {
         for (self.remembered_set.entries.items) |ptr| {
+            if (self.gc_oom) return;
             self.markPtr(ptr);
         }
     }
@@ -977,6 +1024,7 @@ pub const GC = struct {
     /// Process gray stack until empty (advancing wavefront)
     fn drainGrayStack(self: *GC) void {
         while (self.gray_stack.pop()) |ptr| {
+            if (self.gc_oom) return;
             self.scanObject(ptr);
         }
     }
@@ -989,14 +1037,21 @@ pub const GC = struct {
     }
 
     fn markPtr(self: *GC, ptr: *anyopaque) void {
+        if (self.gc_oom) return;
         if (self.isInTenured(ptr)) {
             if (self.markTenured(ptr)) {
-                self.gray_stack.push(ptr) catch {};
+                self.gray_stack.push(ptr) catch {
+                    self.gc_oom = true;
+                    return;
+                };
             }
             return;
         }
         // Nursery or unknown pointer: push for scanning
-        self.gray_stack.push(ptr) catch {};
+        self.gray_stack.push(ptr) catch {
+            self.gc_oom = true;
+            return;
+        };
     }
 
     /// Mark a value (if it's a pointer, add to gray stack)

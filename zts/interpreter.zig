@@ -1135,6 +1135,1330 @@ pub const Interpreter = struct {
     /// - goto/goto_if_false: Absolute jump by modifying pc
     /// - call/call_method: Recursive dispatch via callBytecodeFunction
     ///
+    // Dispatch helpers to keep the core loop readable.
+    const DispatchResult = union(enum) {
+        unhandled,
+        handled,
+        ret: value.JSValue,
+    };
+
+    inline fn dispatchStackOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .nop => return .handled,
+            .halt => {
+                // End of script - return last value on stack or undefined
+                if (self.ctx.sp > 0) {
+                    return .{ .ret = self.ctx.pop() };
+                }
+                return .{ .ret = value.JSValue.undefined_val };
+            },
+            .push_0 => {
+                try self.ctx.push(value.JSValue.fromInt(0));
+                return .handled;
+            },
+            .push_1 => {
+                try self.ctx.push(value.JSValue.fromInt(1));
+                return .handled;
+            },
+            .push_2 => {
+                try self.ctx.push(value.JSValue.fromInt(2));
+                return .handled;
+            },
+            .push_3 => {
+                try self.ctx.push(value.JSValue.fromInt(3));
+                return .handled;
+            },
+            .push_null => {
+                try self.ctx.push(value.JSValue.null_val);
+                return .handled;
+            },
+            .push_undefined => {
+                try self.ctx.push(value.JSValue.undefined_val);
+                return .handled;
+            },
+            .push_true => {
+                try self.ctx.push(value.JSValue.true_val);
+                return .handled;
+            },
+            .push_false => {
+                try self.ctx.push(value.JSValue.false_val);
+                return .handled;
+            },
+            .push_i8 => {
+                const val: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                try self.ctx.push(value.JSValue.fromInt(val));
+                return .handled;
+            },
+            .push_i16 => {
+                const val = readI16(self.pc);
+                self.pc += 2;
+                try self.ctx.push(value.JSValue.fromInt(val));
+                return .handled;
+            },
+            .push_const => {
+                const idx = readU16(self.pc);
+                self.pc += 2;
+                try self.ctx.push(try self.getConstant(idx));
+                return .handled;
+            },
+            .dup => {
+                const top = self.ctx.peek();
+                try self.ctx.push(top);
+                return .handled;
+            },
+            .drop => {
+                _ = self.ctx.pop();
+                return .handled;
+            },
+            .swap => {
+                self.ctx.swap2();
+                return .handled;
+            },
+            .rot3 => {
+                self.ctx.rot3();
+                return .handled;
+            },
+            .get_length => {
+                // Optimized - modify stack in place
+                const sp = self.ctx.sp;
+                const obj_val = self.ctx.stack[sp - 1];
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    if (obj.class_id == .array) {
+                        self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH];
+                        return .handled;
+                    } else if (obj.class_id == .range_iterator) {
+                        self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH];
+                        return .handled;
+                    } else {
+                        // Fallback to property lookup
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                            return .handled;
+                        };
+                        if (obj.getProperty(pool, .length)) |len| {
+                            self.ctx.stack[sp - 1] = len;
+                        } else {
+                            self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                        }
+                        return .handled;
+                    }
+                } else if (obj_val.isAnyString()) {
+                    self.ctx.stack[sp - 1] = getAnyStringLength(obj_val);
+                } else {
+                    self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                }
+                return .handled;
+            },
+            .dup2 => {
+                // Duplicate top 2 stack values: [a, b] -> [a, b, a, b]
+                const b = self.ctx.peekAt(0);
+                const a = self.ctx.peekAt(1);
+                try self.ctx.push(a);
+                try self.ctx.push(b);
+                return .handled;
+            },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchLocalOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .get_loc => {
+                const idx = self.pc[0];
+                self.pc += 1;
+                try self.ctx.push(self.ctx.getLocal(idx));
+                return .handled;
+            },
+            .put_loc => {
+                const idx = self.pc[0];
+                self.pc += 1;
+                const val = self.ctx.pop();
+                self.ctx.setLocal(idx, val);
+                return .handled;
+            },
+            .get_loc_0 => {
+                try self.ctx.push(self.ctx.getLocal(0));
+                return .handled;
+            },
+            .get_loc_1 => {
+                try self.ctx.push(self.ctx.getLocal(1));
+                return .handled;
+            },
+            .get_loc_2 => {
+                try self.ctx.push(self.ctx.getLocal(2));
+                return .handled;
+            },
+            .get_loc_3 => {
+                try self.ctx.push(self.ctx.getLocal(3));
+                return .handled;
+            },
+            .put_loc_0 => {
+                self.ctx.setLocal(0, self.ctx.pop());
+                return .handled;
+            },
+            .put_loc_1 => {
+                self.ctx.setLocal(1, self.ctx.pop());
+                return .handled;
+            },
+            .put_loc_2 => {
+                self.ctx.setLocal(2, self.ctx.pop());
+                return .handled;
+            },
+            .put_loc_3 => {
+                self.ctx.setLocal(3, self.ctx.pop());
+                return .handled;
+            },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchArithmeticOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .add => {
+                // Direct stack manipulation avoids push bounds check
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                // Record type feedback for JIT optimization
+                self.recordBinaryOpFeedback(a, b);
+                // Inline integer fast path
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const bi = b.getInt();
+                    const result = @addWithOverflow(ai, bi);
+                    if (result[1] == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                        self.ctx.sp = sp - 1;
+                        return .handled;
+                    }
+                    // Integer overflow - convert to float
+                    self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                } else {
+                    // Slow path for strings/floats
+                    @branchHint(.cold);
+                    self.ctx.sp = sp - 2;
+                    self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
+                    return .handled;
+                }
+            },
+            .sub => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.recordBinaryOpFeedback(a, b);
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const bi = b.getInt();
+                    const result = @subWithOverflow(ai, bi);
+                    if (result[1] == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                        self.ctx.sp = sp - 1;
+                        return .handled;
+                    }
+                    // Integer overflow - convert to float
+                    self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                } else {
+                    @branchHint(.cold);
+                    self.ctx.sp = sp - 2;
+                    self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
+                    return .handled;
+                }
+            },
+            .mul => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.recordBinaryOpFeedback(a, b);
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const bi = b.getInt();
+                    const result = @mulWithOverflow(ai, bi);
+                    if (result[1] == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                        self.ctx.sp = sp - 1;
+                        return .handled;
+                    }
+                    // Integer overflow - convert to float
+                    self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                } else {
+                    @branchHint(.cold);
+                    self.ctx.sp = sp - 2;
+                    self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
+                    return .handled;
+                }
+            },
+            .div => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                self.recordBinaryOpFeedback(a, b);
+                self.ctx.pushUnchecked(try self.divValues(a, b));
+                return .handled;
+            },
+            .mod => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.recordBinaryOpFeedback(a, b);
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const bv = b.getInt();
+                    if (bv != 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(a.getInt(), bv));
+                        self.ctx.sp = sp - 1;
+                        return .handled;
+                    }
+                }
+                return error.DivisionByZero;
+            },
+            .pow => {
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                try self.ctx.push(try self.powValues(a, b));
+                return .handled;
+            },
+            .neg => {
+                const a = self.ctx.pop();
+                try self.ctx.push(try self.negValue(a));
+                return .handled;
+            },
+            .inc => {
+                // Optimize for common integer case - modify stack in place
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
+                if (a.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const result = @addWithOverflow(ai, 1);
+                    if (result[1] == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                        return .handled;
+                    }
+                    // Overflow - convert to float
+                    self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + 1.0);
+                    return .handled;
+                } else if (a.isFloat64()) {
+                    self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() + 1.0);
+                    return .handled;
+                } else {
+                    return error.TypeError;
+                }
+            },
+            .dec => {
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
+                if (a.isInt()) {
+                    const ai = a.getInt();
+                    const result = @subWithOverflow(ai, 1);
+                    if (result[1] == 0) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                        return .handled;
+                    }
+                    self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - 1.0);
+                    return .handled;
+                } else if (a.isFloat64()) {
+                    self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() - 1.0);
+                    return .handled;
+                } else {
+                    return error.TypeError;
+                }
+            },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchComparisonOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .lt => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                // Inline integer fast path
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() < b.getInt());
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                } else {
+                    @branchHint(.cold);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                }
+            },
+            .lte => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() <= b.getInt());
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                }
+                const cmp = try compareValues(a, b);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .lt or cmp == .eq);
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .gt => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() > b.getInt());
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                }
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .gt);
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .gte => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() >= b.getInt());
+                    self.ctx.sp = sp - 1;
+                    return .handled;
+                }
+                const cmp = try compareValues(a, b);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .gt or cmp == .eq);
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .eq => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(looseEquals(a, b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .neq => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(!looseEquals(a, b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .strict_eq => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.strictEquals(b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .strict_neq => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(!a.strictEquals(b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .not => {
+                const a = self.ctx.pop();
+                try self.ctx.push(value.JSValue.fromBool(!a.toBoolean()));
+                return .handled;
+            },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchBitwiseOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .bit_and => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) & toInt32(b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .bit_or => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) | toInt32(b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .bit_xor => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) ^ toInt32(b));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .bit_not => {
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
+                self.ctx.stack[sp - 1] = value.JSValue.fromInt(~toInt32(a));
+                return .handled;
+            },
+            .shl => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) << shift);
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .shr => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) >> shift);
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .ushr => {
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
+                const ua: u32 = @bitCast(toInt32(a));
+                self.ctx.stack[sp - 2] = value.JSValue.fromInt(@bitCast(ua >> shift));
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchControlFlowOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .goto => {
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                // Profile backward jumps (loop back-edges) for hot loop detection
+                if (offset < 0) {
+                    if (self.profileBackedge()) {
+                        if (self.current_func) |func| {
+                            const func_mut = @constCast(func);
+                            if (func_mut.tier == .interpreted) {
+                                func_mut.tier = .baseline_candidate;
+                            }
+                            // Also update function's backedge count for cross-call tracking
+                            func_mut.backedge_count = self.backedge_count;
+                        }
+                        self.backedge_count = 0;
+                    }
+                }
+                self.offsetPc(offset);
+                return .handled;
+            },
+            .loop => {
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                // Profile back-edge for hot loop detection (interpreted code only)
+                // If loop is hot, promote containing function to baseline candidate
+                if (self.profileBackedge()) {
+                    if (self.current_func) |func| {
+                        const func_mut = @constCast(func);
+                        if (func_mut.tier == .interpreted) {
+                            func_mut.tier = .baseline_candidate;
+                        }
+                        // Also update function's backedge count for cross-call tracking
+                        func_mut.backedge_count = self.backedge_count;
+                    }
+                    self.backedge_count = 0; // Reset to avoid repeated promotion
+                }
+                self.offsetPc(-offset);
+                return .handled;
+            },
+            .if_true => {
+                const cond = self.ctx.pop();
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                if (cond.toBoolean()) {
+                    self.offsetPc(offset);
+                }
+                return .handled;
+            },
+            .if_false => {
+                const cond = self.ctx.pop();
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                if (!cond.toBoolean()) {
+                    self.offsetPc(offset);
+                }
+                return .handled;
+            },
+            .ret => return .{ .ret = self.ctx.pop() },
+            .ret_undefined => return .{ .ret = value.JSValue.undefined_val },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchObjectOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            .new_object => {
+                const obj = try self.createObject();
+                try self.ctx.push(obj.toValue());
+                return .handled;
+            },
+            .new_array => {
+                const length = readU16(self.pc);
+                self.pc += 2;
+                // Create array object with Array.prototype
+                const obj = try self.createArray();
+                obj.setArrayLength(@intCast(length));
+                try self.ctx.push(obj.toValue());
+                return .handled;
+            },
+            .new_object_literal => {
+                // Create object with pre-compiled shape (O(1) class allocation)
+                const shape_idx = readU16(self.pc);
+                self.pc += 2;
+                const prop_count = self.pc[0];
+                self.pc += 1;
+                _ = prop_count; // Used for verification in debug builds
+
+                // Look up pre-built hidden class from materialized shapes
+                const class_idx = self.ctx.getLiteralShape(shape_idx) orelse {
+                    // Fallback: create empty object if shape not found
+                    const obj = try self.createObject();
+                    try self.ctx.push(obj.toValue());
+                    return .handled;
+                };
+
+                // Create object with final class directly (no transitions needed)
+                const obj = try self.ctx.createObjectWithClass(class_idx, null);
+                try self.ctx.push(obj.toValue());
+                return .handled;
+            },
+            .set_slot => {
+                // Direct slot write for pre-compiled object literals
+                const slot_idx: u16 = self.pc[0];
+                self.pc += 1;
+                const val = self.ctx.pop();
+                const obj_val = self.ctx.pop();
+
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    obj.setSlot(slot_idx, val);
+                }
+                return .handled;
+            },
+            .get_field => {
+                const atom_idx = readU16(self.pc);
+                self.pc += 2;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const obj_val = self.ctx.pop();
+
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    const pool = self.ctx.hidden_class_pool orelse {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                        return .handled;
+                    };
+                    if (obj.getProperty(pool, atom)) |prop_val| {
+                        try self.ctx.push(prop_val);
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                } else if (obj_val.isAnyString()) {
+                    // Primitive string property access (flat, rope, or slice)
+                    if (atom == .length) {
+                        try self.ctx.push(getAnyStringLength(obj_val));
+                    } else if (self.ctx.string_prototype) |proto| {
+                        // Look up method on String.prototype
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                            return .handled;
+                        };
+                        if (proto.getProperty(pool, atom)) |prop_val| {
+                            try self.ctx.push(prop_val);
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                return .handled;
+            },
+            .put_field => {
+                const atom_idx = readU16(self.pc);
+                self.pc += 2;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const val = self.ctx.pop();
+                const obj_val = self.ctx.pop();
+
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    try self.ctx.setPropertyChecked(obj, atom, val);
+                }
+                // Non-object assignment silently fails in non-strict mode
+                return .handled;
+            },
+            .put_field_keep => {
+                // Same as put_field but keeps the value on the stack
+                const atom_idx = readU16(self.pc);
+                self.pc += 2;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const val = self.ctx.pop();
+                const obj_val = self.ctx.pop();
+
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    try self.ctx.setPropertyChecked(obj, atom, val);
+                }
+                // Push value back as assignment expression result
+                try self.ctx.push(val);
+                return .handled;
+            },
+            .get_field_ic => {
+                const atom_idx = readU16(self.pc);
+                const cache_idx = readU16(self.pc + 2);
+                self.pc += 4;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const obj_val = self.ctx.pop();
+                self.recordPropertyFeedback(obj_val);
+
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    const pic = &self.pic_cache[cache_idx];
+
+                    // PIC lookup: check all cached entries
+                    if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
+                        self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
+                        try self.ctx.push(obj.getSlot(slot_offset));
+                        return .handled;
+                    }
+
+                    // Cache miss: full lookup and update PIC
+                    self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
+                    const pool = self.ctx.hidden_class_pool orelse {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                        return .handled;
+                    };
+                    if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
+                        _ = pic.update(obj.hidden_class_idx, slot_offset);
+                        try self.ctx.push(obj.getSlot(slot_offset));
+                    } else if (obj.getProperty(pool, atom)) |prop_val| {
+                        // Property found in prototype chain (don't cache)
+                        try self.ctx.push(prop_val);
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                } else if (obj_val.isAnyString()) {
+                    // Primitive string property access (flat, rope, or slice)
+                    if (atom == .length) {
+                        try self.ctx.push(getAnyStringLength(obj_val));
+                    } else if (self.ctx.string_prototype) |proto| {
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                            return .handled;
+                        };
+                        if (proto.getProperty(pool, atom)) |prop_val| {
+                            try self.ctx.push(prop_val);
+                        } else {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                        }
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                return .handled;
+            },
+            .put_field_ic => {
+                const atom_idx = readU16(self.pc);
+                const cache_idx = readU16(self.pc + 2);
+                self.pc += 4;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const val = self.ctx.pop();
+                const obj_val = self.ctx.pop();
+                self.recordPropertyFeedback(obj_val);
+
+                if (obj_val.isObject()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    const pic = &self.pic_cache[cache_idx];
+                    if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
+                        return error.ArenaObjectEscape;
+                    }
+
+                    // PIC lookup: check all cached entries
+                    if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
+                        self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
+                        obj.setSlot(slot_offset, val);
+                        return .handled;
+                    }
+
+                    // Cache miss: check if property exists
+                    self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
+                    const pool = self.ctx.hidden_class_pool orelse {
+                        // No pool, use full setProperty path
+                        try self.ctx.setPropertyChecked(obj, atom, val);
+                        return .handled;
+                    };
+                    if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
+                        // Property exists, update PIC and set value
+                        _ = pic.update(obj.hidden_class_idx, slot_offset);
+                        obj.setSlot(slot_offset, val);
+                    } else {
+                        // Property doesn't exist, use full setProperty (may transition)
+                        // Don't cache transitions as hidden class will change
+                        try self.ctx.setPropertyChecked(obj, atom, val);
+                    }
+                }
+                // Non-object assignment silently fails in non-strict mode
+                return .handled;
+            },
+            .get_elem => {
+                // Optimized with direct stack access
+                const sp = self.ctx.sp;
+                const index_val = self.ctx.stack[sp - 1];
+                const obj_val = self.ctx.stack[sp - 2];
+
+                if (obj_val.isObject() and index_val.isInt()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    const idx = index_val.getInt();
+                    if (idx >= 0) {
+                        const idx_u: u32 = @intCast(idx);
+                        if (obj.class_id == .array) {
+                            // Fast path: check bounds once, then unchecked access
+                            const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
+                            if (idx_u < len) {
+                                self.ctx.stack[sp - 2] = obj.getIndexUnchecked(idx_u);
+                            } else {
+                                self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                            }
+                            self.ctx.sp = sp - 1;
+                            return .handled;
+                        } else if (obj.class_id == .range_iterator) {
+                            // Inline range iterator computation
+                            const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt()));
+                            if (idx_u < len) {
+                                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                                self.ctx.stack[sp - 2] = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
+                            } else {
+                                self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                            }
+                            self.ctx.sp = sp - 1;
+                            return .handled;
+                        } else {
+                            var idx_buf: [32]u8 = undefined;
+                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
+                                self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                                self.ctx.sp = sp - 1;
+                                return .handled;
+                            };
+                            const atom = self.ctx.atoms.intern(idx_slice) catch {
+                                self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                                self.ctx.sp = sp - 1;
+                                return .handled;
+                            };
+                            const pool = self.ctx.hidden_class_pool orelse {
+                                self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                                self.ctx.sp = sp - 1;
+                                return .handled;
+                            };
+                            self.ctx.stack[sp - 2] = obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
+                            self.ctx.sp = sp - 1;
+                            return .handled;
+                        }
+                    }
+                }
+                self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
+                self.ctx.sp = sp - 1;
+                return .handled;
+            },
+            .put_elem => {
+                const val = self.ctx.pop();
+                const index_val = self.ctx.pop();
+                const obj_val = self.ctx.pop();
+
+                if (obj_val.isObject() and index_val.isInt()) {
+                    const obj = object.JSObject.fromValue(obj_val);
+                    const idx = index_val.getInt();
+                    if (idx >= 0) {
+                        if (obj.class_id == .array) {
+                            try self.ctx.setIndexChecked(obj, @intCast(idx), val);
+                        } else {
+                            var idx_buf: [32]u8 = undefined;
+                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return .handled;
+                            const atom = self.ctx.atoms.intern(idx_slice) catch return .handled;
+                            try self.ctx.setPropertyChecked(obj, atom, val);
+                        }
+                    }
+                }
+                return .handled;
+            },
+            .get_global => {
+                const atom_idx = readU16(self.pc);
+                self.pc += 2;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                if (self.ctx.getGlobal(atom)) |val| {
+                    try self.ctx.push(val);
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                return .handled;
+            },
+            .put_global => {
+                const atom_idx = readU16(self.pc);
+                self.pc += 2;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const val = self.ctx.pop();
+                try self.ctx.setGlobal(atom, val);
+                return .handled;
+            },
+            .define_global => {
+                const atom_idx = readU16(self.pc);
+                self.pc += 2;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+                const val = self.ctx.pop();
+                try self.ctx.defineGlobal(atom, val);
+                return .handled;
+            },
+            else => return .unhandled,
+        }
+    }
+
+    inline fn dispatchCallOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
+        switch (op) {
+            // ========================================
+            // Function / Closure Creation
+            // ========================================
+            .make_function => {
+                const const_idx = readU16(self.pc);
+                self.pc += 2;
+                // Get bytecode pointer from constant pool
+                const bc_val = try self.getConstant(const_idx);
+                if (!bc_val.isExternPtr()) return error.TypeError;
+                const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
+                // Create function object
+                const root_class_idx = self.ctx.root_class_idx;
+                const func_obj = try object.JSObject.createBytecodeFunction(
+                    self.ctx.allocator,
+                    root_class_idx,
+                    bc_ptr,
+                    @enumFromInt(bc_ptr.name_atom),
+                );
+                try self.ctx.push(func_obj.toValue());
+                return .handled;
+            },
+            .make_async => {
+                const const_idx = readU16(self.pc);
+                self.pc += 2;
+                // Get bytecode pointer from constant pool
+                const bc_val = try self.getConstant(const_idx);
+                if (!bc_val.isExternPtr()) return error.TypeError;
+                const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
+                // Create async function object (marked as async via slot 3)
+                const root_class_idx = self.ctx.root_class_idx;
+                const func_obj = try object.JSObject.createBytecodeFunction(
+                    self.ctx.allocator,
+                    root_class_idx,
+                    bc_ptr,
+                    @enumFromInt(bc_ptr.name_atom),
+                );
+                // Mark as async function using flag (more efficient than inline slot check)
+                func_obj.flags.is_async = true;
+                try self.ctx.push(func_obj.toValue());
+                return .handled;
+            },
+            .make_closure => {
+                const const_idx = readU16(self.pc);
+                self.pc += 2;
+                const upvalue_count: u8 = self.pc[0];
+                self.pc += 1;
+
+                // Get bytecode pointer from constant pool
+                const bc_val = try self.getConstant(const_idx);
+                if (!bc_val.isExternPtr()) return error.TypeError;
+                const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
+
+                // Allocate upvalue array
+                const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
+                errdefer self.ctx.allocator.free(upvalues);
+
+                // Capture upvalues based on bytecode info
+                for (0..upvalue_count) |i| {
+                    const info = bc_ptr.upvalue_info[i];
+                    if (info.is_local) {
+                        // Capture from current function's locals
+                        upvalues[i] = try self.captureUpvalue(info.index);
+                    } else {
+                        // Capture from current closure's upvalues
+                        if (self.current_closure) |closure| {
+                            upvalues[i] = closure.upvalues[info.index];
+                        } else {
+                            // Create a new closed upvalue with undefined from pool
+                            const uv = try self.ctx.gc_state.acquireUpvalue();
+                            uv.* = .{
+                                .location = .{ .closed = value.JSValue.undefined_val },
+                                .next = null,
+                            };
+                            upvalues[i] = uv;
+                        }
+                    }
+                }
+
+                // Create closure object
+                const root_class_idx = self.ctx.root_class_idx;
+                const closure_obj = try object.JSObject.createClosure(
+                    self.ctx.allocator,
+                    root_class_idx,
+                    bc_ptr,
+                    @enumFromInt(bc_ptr.name_atom),
+                    upvalues,
+                );
+                try self.ctx.push(closure_obj.toValue());
+                return .handled;
+            },
+            .get_upvalue => {
+                const idx = self.pc[0];
+                self.pc += 1;
+                // Get the upvalue from the current closure
+                if (self.current_closure) |closure| {
+                    if (idx < closure.upvalues.len) {
+                        const uv = closure.upvalues[idx];
+                        try self.ctx.push(uv.get());
+                    } else {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                    }
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                return .handled;
+            },
+            .put_upvalue => {
+                const idx = self.pc[0];
+                self.pc += 1;
+                const val = self.ctx.pop();
+                // Set the upvalue in the current closure
+                if (self.current_closure) |closure| {
+                    if (idx < closure.upvalues.len) {
+                        closure.upvalues[idx].set(val);
+                    }
+                }
+                return .handled;
+            },
+            .close_upvalue => {
+                const local_idx = self.pc[0];
+                self.pc += 1;
+                // Close any open upvalues pointing to this local slot
+                self.closeUpvaluesAbove(local_idx);
+                return .handled;
+            },
+
+            // ========================================
+            // Await / typeof / spread helpers
+            // ========================================
+            .await_val => {
+                // For synchronous execution, await just returns the value directly
+                // A full implementation would integrate with an event loop and Promises
+                // For now, if the value is a Promise-like object with .then(), we don't support it
+                // Just pass the value through (works for non-Promise values)
+                const awaited = self.ctx.peek();
+                _ = awaited;
+                // Value stays on stack unchanged for sync execution
+                return .handled;
+            },
+            .typeof => {
+                const a = self.ctx.pop();
+                const type_str = a.typeOf();
+                // Create JS string for typeof result
+                const js_str = self.createString(type_str) catch {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                    return .handled;
+                };
+                try self.ctx.push(value.JSValue.fromPtr(js_str));
+                return .handled;
+            },
+            .array_spread => {
+                // Stack: [target_array, current_index, source_array]
+                const source_val = self.ctx.pop();
+                const idx_val = self.ctx.pop();
+                const target_val = self.ctx.peek();
+
+                if (target_val.isObject() and source_val.isObject() and idx_val.isInt()) {
+                    const target = object.JSObject.fromValue(target_val);
+                    const source = object.JSObject.fromValue(source_val);
+                    var idx: usize = @intCast(idx_val.getInt());
+                    const pool = self.ctx.hidden_class_pool orelse {
+                        try self.ctx.push(idx_val);
+                        return .handled;
+                    };
+
+                    // Get source array length
+                    if (source.getProperty(pool, .length)) |len_val| {
+                        if (len_val.isInt()) {
+                            const src_len: usize = @intCast(len_val.getInt());
+                            // Copy each element from source to target
+                            for (0..src_len) |i| {
+                                const elem = source.getSlot(@intCast(i));
+                                if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
+                                    return error.ArenaObjectEscape;
+                                }
+                                target.setSlot(@intCast(idx), elem);
+                                idx += 1;
+                            }
+                            // Push new index for subsequent elements
+                            try self.ctx.push(value.JSValue.fromInt(@intCast(idx)));
+                            return .handled;
+                        }
+                    }
+                }
+                // If spread failed, just push the original index back
+                try self.ctx.push(idx_val);
+                return .handled;
+            },
+            .call_spread => {
+                // For now, call_spread is not fully implemented
+                // Would need to collect spread arguments into a single args array
+                try self.ctx.push(value.JSValue.undefined_val);
+                return .handled;
+            },
+
+            // ========================================
+            // Function Calls
+            // ========================================
+            .call => {
+                const argc: u8 = self.pc[0];
+                self.pc += 1;
+                try self.doCall(argc, false);
+                return .handled;
+            },
+            .call_method => {
+                const argc: u8 = self.pc[0];
+                self.pc += 1;
+                try self.doCall(argc, true);
+                return .handled;
+            },
+            .tail_call => {
+                const argc: u8 = self.pc[0];
+                self.pc += 1;
+                // TODO: Implement proper tail call optimization
+                try self.doCall(argc, false);
+                return .handled;
+            },
+            // Fused push_const + call: load constant and call in one dispatch
+            .push_const_call => {
+                const const_idx = readU16(self.pc);
+                const argc: u8 = self.pc[2];
+                self.pc += 3;
+                // Push the constant (function to call)
+                try self.ctx.push(try self.getConstant(const_idx));
+                // Call it
+                try self.doCall(argc, false);
+                return .handled;
+            },
+            // Fused get_field + call_method: load method and call in one dispatch
+            .get_field_call => {
+                const atom_idx = readU16(self.pc);
+                const argc: u8 = self.pc[2];
+                self.pc += 3;
+                const atom: object.Atom = @enumFromInt(atom_idx);
+
+                // Stack: [obj, obj] (dup from codegen)
+                // Need to: get method from top obj (pop), then call_method with original obj as 'this'
+                const obj = self.ctx.pop();
+                if (obj.isObject()) {
+                    const js_obj = object.JSObject.fromValue(obj);
+                    const pool = self.ctx.hidden_class_pool orelse {
+                        try self.ctx.push(value.JSValue.undefined_val);
+                        try self.doCall(argc, true);
+                        return .handled;
+                    };
+                    if (js_obj.getProperty(pool, atom)) |method| {
+                        // Push method on stack (obj is still there)
+                        try self.ctx.push(method);
+                        // Call as method (will use obj as 'this')
+                        try self.doCall(argc, true);
+                        return .handled;
+                    }
+                } else if (obj.isAnyString()) {
+                    // String method call (flat, rope, or slice)
+                    if (self.ctx.string_prototype) |proto| {
+                        const pool = self.ctx.hidden_class_pool orelse {
+                            try self.ctx.push(value.JSValue.undefined_val);
+                            try self.doCall(argc, true);
+                            return .handled;
+                        };
+                        if (proto.getProperty(pool, atom)) |method| {
+                            try self.ctx.push(method);
+                            try self.doCall(argc, true);
+                            return .handled;
+                        }
+                    }
+                }
+                // Fallback: property not found, push undefined and call
+                try self.ctx.push(value.JSValue.undefined_val);
+                try self.doCall(argc, true);
+                return .handled;
+            },
+
+            // ========================================
+            // Iterator Operations
+            // ========================================
+            .for_of_next => {
+                // Stack: [iterable, index] -> [iterable, index+1, element] or end
+                const end_offset = readI16(self.pc);
+                self.pc += 2;
+                const sp = self.ctx.sp;
+                const idx_val = self.ctx.stack[sp - 1];
+                const iter_val = self.ctx.stack[sp - 2];
+
+                if (iter_val.isObject() and idx_val.isInt()) {
+                    @branchHint(.likely);
+                    const obj = object.JSObject.fromValue(iter_val);
+                    const idx = idx_val.getInt();
+                    if (idx >= 0) {
+                        @branchHint(.likely);
+                        const idx_u: u32 = @intCast(idx);
+                        // Array fast path
+                        if (obj.class_id == .array) {
+                            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+                            if (idx_u < len) {
+                                @branchHint(.likely);
+                                // Profile backedge for hot loop detection (for-of loops)
+                                if (self.profileBackedge()) {
+                                    if (self.current_func) |func| {
+                                        const func_mut = @constCast(func);
+                                        if (func_mut.tier == .interpreted) {
+                                            func_mut.tier = .baseline_candidate;
+                                        }
+                                        func_mut.backedge_count = self.backedge_count;
+                                    }
+                                    self.backedge_count = 0;
+                                }
+                                // Push element, increment index in-place
+                                try self.ctx.push(obj.getIndexUnchecked(idx_u));
+                                self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                return .handled;
+                            }
+                        }
+                        // Range iterator fast path
+                        else if (obj.class_id == .range_iterator) {
+                            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+                            if (idx_u < len) {
+                                @branchHint(.likely);
+                                // Profile backedge for hot loop detection (for-of loops)
+                                if (self.profileBackedge()) {
+                                    if (self.current_func) |func| {
+                                        const func_mut = @constCast(func);
+                                        if (func_mut.tier == .interpreted) {
+                                            func_mut.tier = .baseline_candidate;
+                                        }
+                                        func_mut.backedge_count = self.backedge_count;
+                                    }
+                                    self.backedge_count = 0;
+                                }
+                                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                                try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                                self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                return .handled;
+                            }
+                        }
+                    }
+                }
+                // Loop done - jump to cleanup
+                self.offsetPc(end_offset);
+                return .handled;
+            },
+            .for_of_next_put_loc => {
+                // Fused: for_of_next + put_loc (stores element directly to local)
+                // Stack: [iterable, index] -> [iterable, index+1] (no element pushed)
+                const local_idx = self.pc[0];
+                self.pc += 1;
+                const end_offset = readI16(self.pc);
+                self.pc += 2;
+                const sp = self.ctx.sp;
+                const idx_val = self.ctx.stack[sp - 1];
+                const iter_val = self.ctx.stack[sp - 2];
+
+                if (iter_val.isObject() and idx_val.isInt()) {
+                    @branchHint(.likely);
+                    const obj = object.JSObject.fromValue(iter_val);
+                    const idx = idx_val.getInt();
+                    if (idx >= 0) {
+                        @branchHint(.likely);
+                        const idx_u: u32 = @intCast(idx);
+                        // Array fast path
+                        if (obj.class_id == .array) {
+                            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
+                            if (idx_u < len) {
+                                @branchHint(.likely);
+                                // Profile backedge for hot loop detection (for-of loops)
+                                if (self.profileBackedge()) {
+                                    if (self.current_func) |func| {
+                                        const func_mut = @constCast(func);
+                                        if (func_mut.tier == .interpreted) {
+                                            func_mut.tier = .baseline_candidate;
+                                        }
+                                        func_mut.backedge_count = self.backedge_count;
+                                    }
+                                    self.backedge_count = 0;
+                                }
+                                // Store element directly to local, increment index in-place
+                                self.ctx.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
+                                self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                return .handled;
+                            }
+                        }
+                        // Range iterator fast path
+                        else if (obj.class_id == .range_iterator) {
+                            const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
+                            if (idx_u < len) {
+                                @branchHint(.likely);
+                                // Profile backedge for hot loop detection (for-of loops)
+                                if (self.profileBackedge()) {
+                                    if (self.current_func) |func| {
+                                        const func_mut = @constCast(func);
+                                        if (func_mut.tier == .interpreted) {
+                                            func_mut.tier = .baseline_candidate;
+                                        }
+                                        func_mut.backedge_count = self.backedge_count;
+                                    }
+                                    self.backedge_count = 0;
+                                }
+                                const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
+                                const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
+                                self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
+                                self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
+                                return .handled;
+                            }
+                        }
+                    }
+                }
+                // Loop done - jump to cleanup
+                self.offsetPc(end_offset);
+                return .handled;
+            },
+            else => return .unhandled,
+        }
+    }
     /// Public because native callbacks may need to call back into JS.
     pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
         @setEvalBranchQuota(10000);
@@ -1143,293 +2467,67 @@ pub const Interpreter = struct {
             self.pc += 1;
             self.last_op = op;
 
+            const stack_result = try self.dispatchStackOps(op);
+            switch (stack_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const local_result = try self.dispatchLocalOps(op);
+            switch (local_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const arith_result = try self.dispatchArithmeticOps(op);
+            switch (arith_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const compare_result = try self.dispatchComparisonOps(op);
+            switch (compare_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const bitwise_result = try self.dispatchBitwiseOps(op);
+            switch (bitwise_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const control_result = try self.dispatchControlFlowOps(op);
+            switch (control_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const object_result = try self.dispatchObjectOps(op);
+            switch (object_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
+            const call_result = try self.dispatchCallOps(op);
+            switch (call_result) {
+                .unhandled => {},
+                .handled => continue :dispatch,
+                .ret => |val| return val,
+            }
+
             switch (op) {
-                // ========================================
-                // Stack Operations
-                // ========================================
-                .nop => {},
-
-                .halt => {
-                    // End of script - return last value on stack or undefined
-                    if (self.ctx.sp > 0) {
-                        return self.ctx.pop();
-                    }
-                    return value.JSValue.undefined_val;
-                },
-
-                .push_0 => try self.ctx.push(value.JSValue.fromInt(0)),
-                .push_1 => try self.ctx.push(value.JSValue.fromInt(1)),
-                .push_2 => try self.ctx.push(value.JSValue.fromInt(2)),
-                .push_3 => try self.ctx.push(value.JSValue.fromInt(3)),
-                .push_null => try self.ctx.push(value.JSValue.null_val),
-                .push_undefined => try self.ctx.push(value.JSValue.undefined_val),
-                .push_true => try self.ctx.push(value.JSValue.true_val),
-                .push_false => try self.ctx.push(value.JSValue.false_val),
-
-                .push_i8 => {
-                    const val: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    try self.ctx.push(value.JSValue.fromInt(val));
-                },
-
-                .push_i16 => {
-                    const val = readI16(self.pc);
-                    self.pc += 2;
-                    try self.ctx.push(value.JSValue.fromInt(val));
-                },
-
-                .push_const => {
-                    const idx = readU16(self.pc);
-                    self.pc += 2;
-                    try self.ctx.push(try self.getConstant(idx));
-                },
-
-                .dup => {
-                    const top = self.ctx.peek();
-                    try self.ctx.push(top);
-                },
-
-                .drop => _ = self.ctx.pop(),
-
-                .swap => {
-                    self.ctx.swap2();
-                },
-
-                .rot3 => {
-                    self.ctx.rot3();
-                },
-
-                .get_length => {
-                    // Optimized - modify stack in place
-                    const sp = self.ctx.sp;
-                    const obj_val = self.ctx.stack[sp - 1];
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        if (obj.class_id == .array) {
-                            self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH];
-                            continue :dispatch;
-                        } else if (obj.class_id == .range_iterator) {
-                            self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH];
-                            continue :dispatch;
-                        } else {
-                            // Fallback to property lookup
-                            const pool = self.ctx.hidden_class_pool orelse {
-                                self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                                continue :dispatch;
-                            };
-                            if (obj.getProperty(pool, .length)) |len| {
-                                self.ctx.stack[sp - 1] = len;
-                            } else {
-                                self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                            }
-                            continue :dispatch;
-                        }
-                    } else if (obj_val.isAnyString()) {
-                        self.ctx.stack[sp - 1] = getAnyStringLength(obj_val);
-                    } else {
-                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                    }
-                },
-
-                .dup2 => {
-                    // Duplicate top 2 stack values: [a, b] -> [a, b, a, b]
-                    const b = self.ctx.peekAt(0);
-                    const a = self.ctx.peekAt(1);
-                    try self.ctx.push(a);
-                    try self.ctx.push(b);
-                },
-
-                // ========================================
-                // Local Variables
-                // ========================================
-                .get_loc => {
-                    const idx = self.pc[0];
-                    self.pc += 1;
-                    try self.ctx.push(self.ctx.getLocal(idx));
-                },
-
-                .put_loc => {
-                    const idx = self.pc[0];
-                    self.pc += 1;
-                    const val = self.ctx.pop();
-                    self.ctx.setLocal(idx, val);
-                },
-
-                .get_loc_0 => try self.ctx.push(self.ctx.getLocal(0)),
-                .get_loc_1 => try self.ctx.push(self.ctx.getLocal(1)),
-                .get_loc_2 => try self.ctx.push(self.ctx.getLocal(2)),
-                .get_loc_3 => try self.ctx.push(self.ctx.getLocal(3)),
-
-                .put_loc_0 => self.ctx.setLocal(0, self.ctx.pop()),
-                .put_loc_1 => self.ctx.setLocal(1, self.ctx.pop()),
-                .put_loc_2 => self.ctx.setLocal(2, self.ctx.pop()),
-                .put_loc_3 => self.ctx.setLocal(3, self.ctx.pop()),
-
                 // ========================================
                 // Arithmetic - optimized direct stack access
                 // ========================================
-                .add => {
-                    // Direct stack manipulation avoids push bounds check
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    // Record type feedback for JIT optimization
-                    self.recordBinaryOpFeedback(a, b);
-                    // Inline integer fast path
-                    if (a.isInt() and b.isInt()) {
-                        @branchHint(.likely);
-                        const ai = a.getInt();
-                        const bi = b.getInt();
-                        const result = @addWithOverflow(ai, bi);
-                        if (result[1] == 0) {
-                            @branchHint(.likely);
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                        // Integer overflow - convert to float
-                        self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    } else {
-                        // Slow path for strings/floats
-                        @branchHint(.cold);
-                        self.ctx.sp = sp - 2;
-                        self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
-                    }
-                },
-
-                .sub => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.recordBinaryOpFeedback(a, b);
-                    if (a.isInt() and b.isInt()) {
-                        @branchHint(.likely);
-                        const ai = a.getInt();
-                        const bi = b.getInt();
-                        const result = @subWithOverflow(ai, bi);
-                        if (result[1] == 0) {
-                            @branchHint(.likely);
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                        // Integer overflow - convert to float
-                        self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    } else {
-                        @branchHint(.cold);
-                        self.ctx.sp = sp - 2;
-                        self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
-                    }
-                },
-
-                .mul => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.recordBinaryOpFeedback(a, b);
-                    if (a.isInt() and b.isInt()) {
-                        @branchHint(.likely);
-                        const ai = a.getInt();
-                        const bi = b.getInt();
-                        const result = @mulWithOverflow(ai, bi);
-                        if (result[1] == 0) {
-                            @branchHint(.likely);
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                        // Integer overflow - convert to float
-                        self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    } else {
-                        @branchHint(.cold);
-                        self.ctx.sp = sp - 2;
-                        self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
-                    }
-                },
-
-                .div => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    self.recordBinaryOpFeedback(a, b);
-                    self.ctx.pushUnchecked(try self.divValues(a, b));
-                },
-
-                .mod => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.recordBinaryOpFeedback(a, b);
-                    if (a.isInt() and b.isInt()) {
-                        @branchHint(.likely);
-                        const bv = b.getInt();
-                        if (bv != 0) {
-                            @branchHint(.likely);
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(a.getInt(), bv));
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                    }
-                    return error.DivisionByZero;
-                },
-
-                .pow => {
-                    const b = self.ctx.pop();
-                    const a = self.ctx.pop();
-                    try self.ctx.push(try self.powValues(a, b));
-                },
-
-                .neg => {
-                    const a = self.ctx.pop();
-                    try self.ctx.push(try self.negValue(a));
-                },
-
-                .inc => {
-                    // Optimize for common integer case - modify stack in place
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-                    if (a.isInt()) {
-                        @branchHint(.likely);
-                        const ai = a.getInt();
-                        const result = @addWithOverflow(ai, 1);
-                        if (result[1] == 0) {
-                            @branchHint(.likely);
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
-                            continue :dispatch;
-                        }
-                        // Overflow - convert to float
-                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + 1.0);
-                        continue :dispatch;
-                    } else if (a.isFloat64()) {
-                        self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() + 1.0);
-                    } else {
-                        return error.TypeError;
-                    }
-                },
-
-                .dec => {
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-                    if (a.isInt()) {
-                        const ai = a.getInt();
-                        const result = @subWithOverflow(ai, 1);
-                        if (result[1] == 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
-                            continue :dispatch;
-                        }
-                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - 1.0);
-                        continue :dispatch;
-                    } else if (a.isFloat64()) {
-                        self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() - 1.0);
-                    } else {
-                        return error.TypeError;
-                    }
-                },
+                // (handled by dispatchArithmeticOps)
 
                 // ========================================
                 // String Concatenation - batched allocation
@@ -1575,609 +2673,29 @@ pub const Interpreter = struct {
                 },
 
                 // ========================================
-                // Bitwise Operations - optimized direct stack access
+                // Bitwise Operations
                 // ========================================
-                .bit_and => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) & toInt32(b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                .bit_or => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) | toInt32(b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                .bit_xor => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) ^ toInt32(b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                .bit_not => {
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(~toInt32(a));
-                },
-
-                .shl => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) << shift);
-                    self.ctx.sp = sp - 1;
-                },
-
-                .shr => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) >> shift);
-                    self.ctx.sp = sp - 1;
-                },
-
-                .ushr => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
-                    const ua: u32 = @bitCast(toInt32(a));
-                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(@bitCast(ua >> shift));
-                    self.ctx.sp = sp - 1;
-                },
+                // (handled by dispatchBitwiseOps)
 
                 // ========================================
-                // Comparison - optimized with inline integer fast paths
+                // Comparison / Logical
                 // ========================================
-                .lt => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    // Inline integer fast path
-                    if (a.isInt() and b.isInt()) {
-                        @branchHint(.likely);
-                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() < b.getInt());
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    } else {
-                        @branchHint(.cold);
-                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
-                        self.ctx.sp = sp - 1;
-                    }
-                },
-
-                .lte => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    if (a.isInt() and b.isInt()) {
-                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() <= b.getInt());
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    }
-                    const cmp = try compareValues(a, b);
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .lt or cmp == .eq);
-                    self.ctx.sp = sp - 1;
-                },
-
-                .gt => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    if (a.isInt() and b.isInt()) {
-                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() > b.getInt());
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    }
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .gt);
-                    self.ctx.sp = sp - 1;
-                },
-
-                .gte => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    if (a.isInt() and b.isInt()) {
-                        self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() >= b.getInt());
-                        self.ctx.sp = sp - 1;
-                        continue :dispatch;
-                    }
-                    const cmp = try compareValues(a, b);
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .gt or cmp == .eq);
-                    self.ctx.sp = sp - 1;
-                },
-
-                .eq => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(looseEquals(a, b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                .neq => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(!looseEquals(a, b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                .strict_eq => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.strictEquals(b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                .strict_neq => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(!a.strictEquals(b));
-                    self.ctx.sp = sp - 1;
-                },
-
-                // ========================================
-                // Logical
-                // ========================================
-                .not => {
-                    const a = self.ctx.pop();
-                    try self.ctx.push(value.JSValue.fromBool(!a.toBoolean()));
-                },
+                // (handled by dispatchComparisonOps)
 
                 // ========================================
                 // Control Flow
                 // ========================================
-                .goto => {
-                    const offset = readI16(self.pc);
-                    self.pc += 2;
-                    // Profile backward jumps (loop back-edges) for hot loop detection
-                    if (offset < 0) {
-                        if (self.profileBackedge()) {
-                            if (self.current_func) |func| {
-                                const func_mut = @constCast(func);
-                                if (func_mut.tier == .interpreted) {
-                                    func_mut.tier = .baseline_candidate;
-                                }
-                                // Also update function's backedge count for cross-call tracking
-                                func_mut.backedge_count = self.backedge_count;
-                            }
-                            self.backedge_count = 0;
-                        }
-                    }
-                    self.offsetPc(offset);
-                },
-                .loop => {
-                    const offset = readI16(self.pc);
-                    self.pc += 2;
-                    // Profile back-edge for hot loop detection (interpreted code only)
-                    // If loop is hot, promote containing function to baseline candidate
-                    if (self.profileBackedge()) {
-                        if (self.current_func) |func| {
-                            const func_mut = @constCast(func);
-                            if (func_mut.tier == .interpreted) {
-                                func_mut.tier = .baseline_candidate;
-                            }
-                            // Also update function's backedge count for cross-call tracking
-                            func_mut.backedge_count = self.backedge_count;
-                        }
-                        self.backedge_count = 0; // Reset to avoid repeated promotion
-                    }
-                    self.offsetPc(-offset);
-                },
-
-                .if_true => {
-                    const cond = self.ctx.pop();
-                    const offset = readI16(self.pc);
-                    self.pc += 2;
-                    if (cond.toBoolean()) {
-                        self.offsetPc(offset);
-                    }
-                },
-
-                .if_false => {
-                    const cond = self.ctx.pop();
-                    const offset = readI16(self.pc);
-                    self.pc += 2;
-                    if (!cond.toBoolean()) {
-                        self.offsetPc(offset);
-                    }
-                },
-
-                .ret => return self.ctx.pop(),
-
-                .ret_undefined => return value.JSValue.undefined_val,
+                // (handled by dispatchControlFlowOps)
 
                 // ========================================
                 // Object Operations
                 // ========================================
+                // (handled by dispatchObjectOps)
 
-                .new_object => {
-                    const obj = try self.createObject();
-                    try self.ctx.push(obj.toValue());
-                },
-
-                .new_array => {
-                    const length = readU16(self.pc);
-                    self.pc += 2;
-                    // Create array object with Array.prototype
-                    const obj = try self.createArray();
-                    obj.setArrayLength(@intCast(length));
-                    try self.ctx.push(obj.toValue());
-                },
-
-                .new_object_literal => {
-                    // Create object with pre-compiled shape (O(1) class allocation)
-                    const shape_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const prop_count = self.pc[0];
-                    self.pc += 1;
-                    _ = prop_count; // Used for verification in debug builds
-
-                    // Look up pre-built hidden class from materialized shapes
-                    const class_idx = self.ctx.getLiteralShape(shape_idx) orelse {
-                        // Fallback: create empty object if shape not found
-                        const obj = try self.createObject();
-                        try self.ctx.push(obj.toValue());
-                        continue :dispatch;
-                    };
-
-                    // Create object with final class directly (no transitions needed)
-                    const obj = try self.ctx.createObjectWithClass(class_idx, null);
-                    try self.ctx.push(obj.toValue());
-                },
-
-                .set_slot => {
-                    // Direct slot write for pre-compiled object literals
-                    const slot_idx: u16 = self.pc[0];
-                    self.pc += 1;
-                    const val = self.ctx.pop();
-                    const obj_val = self.ctx.pop();
-
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        obj.setSlot(slot_idx, val);
-                    }
-                },
-
-                .get_field => {
-                    const atom_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const obj_val = self.ctx.pop();
-
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        const pool = self.ctx.hidden_class_pool orelse {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                            continue :dispatch;
-                        };
-                        if (obj.getProperty(pool, atom)) |prop_val| {
-                            try self.ctx.push(prop_val);
-                        } else {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                        }
-                    } else if (obj_val.isAnyString()) {
-                        // Primitive string property access (flat, rope, or slice)
-                        if (atom == .length) {
-                            try self.ctx.push(getAnyStringLength(obj_val));
-                        } else if (self.ctx.string_prototype) |proto| {
-                            // Look up method on String.prototype
-                            const pool = self.ctx.hidden_class_pool orelse {
-                                try self.ctx.push(value.JSValue.undefined_val);
-                                continue :dispatch;
-                            };
-                            if (proto.getProperty(pool, atom)) |prop_val| {
-                                try self.ctx.push(prop_val);
-                            } else {
-                                try self.ctx.push(value.JSValue.undefined_val);
-                            }
-                        } else {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                        }
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                    }
-                },
-
-                .put_field => {
-                    const atom_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const val = self.ctx.pop();
-                    const obj_val = self.ctx.pop();
-
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        try self.ctx.setPropertyChecked(obj, atom, val);
-                    }
-                    // Non-object assignment silently fails in non-strict mode
-                },
-
-                .put_field_keep => {
-                    // Same as put_field but keeps the value on the stack
-                    const atom_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const val = self.ctx.pop();
-                    const obj_val = self.ctx.pop();
-
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        try self.ctx.setPropertyChecked(obj, atom, val);
-                    }
-                    // Push value back as assignment expression result
-                    try self.ctx.push(val);
-                },
-
-                // Polymorphic inline cache opcodes for optimized property access
-                // Format: +u16 atom_idx +u16 cache_idx
-                // Caches up to 4 (hidden_class, slot_offset) pairs per site
-                .get_field_ic => {
-                    const atom_idx = readU16(self.pc);
-                    const cache_idx = readU16(self.pc + 2);
-                    self.pc += 4;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const obj_val = self.ctx.pop();
-                    self.recordPropertyFeedback(obj_val);
-
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        const pic = &self.pic_cache[cache_idx];
-
-                        // PIC lookup: check all cached entries
-                        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
-                            self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
-                            try self.ctx.push(obj.getSlot(slot_offset));
-                            continue :dispatch;
-                        }
-
-                        // Cache miss: full lookup and update PIC
-                        self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
-                        const pool = self.ctx.hidden_class_pool orelse {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                            continue :dispatch;
-                        };
-                        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                            _ = pic.update(obj.hidden_class_idx, slot_offset);
-                            try self.ctx.push(obj.getSlot(slot_offset));
-                        } else if (obj.getProperty(pool, atom)) |prop_val| {
-                            // Property found in prototype chain (don't cache)
-                            try self.ctx.push(prop_val);
-                        } else {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                        }
-                    } else if (obj_val.isAnyString()) {
-                        // Primitive string property access (flat, rope, or slice)
-                        if (atom == .length) {
-                            try self.ctx.push(getAnyStringLength(obj_val));
-                        } else if (self.ctx.string_prototype) |proto| {
-                            const pool = self.ctx.hidden_class_pool orelse {
-                                try self.ctx.push(value.JSValue.undefined_val);
-                                continue :dispatch;
-                            };
-                            if (proto.getProperty(pool, atom)) |prop_val| {
-                                try self.ctx.push(prop_val);
-                            } else {
-                                try self.ctx.push(value.JSValue.undefined_val);
-                            }
-                        } else {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                        }
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                    }
-                },
-
-                .put_field_ic => {
-                    const atom_idx = readU16(self.pc);
-                    const cache_idx = readU16(self.pc + 2);
-                    self.pc += 4;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const val = self.ctx.pop();
-                    const obj_val = self.ctx.pop();
-                    self.recordPropertyFeedback(obj_val);
-
-                    if (obj_val.isObject()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        const pic = &self.pic_cache[cache_idx];
-                        if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !obj.flags.is_arena and self.ctx.isEphemeralValue(val)) {
-                            return error.ArenaObjectEscape;
-                        }
-
-                        // PIC lookup: check all cached entries
-                        if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
-                            self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
-                            obj.setSlot(slot_offset, val);
-                            continue :dispatch;
-                        }
-
-                        // Cache miss: check if property exists
-                        self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
-                        const pool = self.ctx.hidden_class_pool orelse {
-                            // No pool, use full setProperty path
-                            try self.ctx.setPropertyChecked(obj, atom, val);
-                            continue :dispatch;
-                        };
-                        if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                            // Property exists, update PIC and set value
-                            _ = pic.update(obj.hidden_class_idx, slot_offset);
-                            obj.setSlot(slot_offset, val);
-                        } else {
-                            // Property doesn't exist, use full setProperty (may transition)
-                            // Don't cache transitions as hidden class will change
-                            try self.ctx.setPropertyChecked(obj, atom, val);
-                        }
-                    }
-                    // Non-object assignment silently fails in non-strict mode
-                },
-
-                .get_elem => {
-                    // Optimized with direct stack access
-                    const sp = self.ctx.sp;
-                    const index_val = self.ctx.stack[sp - 1];
-                    const obj_val = self.ctx.stack[sp - 2];
-
-                    if (obj_val.isObject() and index_val.isInt()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        const idx = index_val.getInt();
-                        if (idx >= 0) {
-                            const idx_u: u32 = @intCast(idx);
-                            if (obj.class_id == .array) {
-                                // Fast path: check bounds once, then unchecked access
-                                const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
-                                if (idx_u < len) {
-                                    self.ctx.stack[sp - 2] = obj.getIndexUnchecked(idx_u);
-                                } else {
-                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
-                                }
-                                self.ctx.sp = sp - 1;
-                                continue :dispatch;
-                            } else if (obj.class_id == .range_iterator) {
-                                // Inline range iterator computation
-                                const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt()));
-                                if (idx_u < len) {
-                                    const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
-                                    const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step);
-                                } else {
-                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
-                                }
-                                self.ctx.sp = sp - 1;
-                                continue :dispatch;
-                            } else {
-                                var idx_buf: [32]u8 = undefined;
-                                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
-                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
-                                    self.ctx.sp = sp - 1;
-                                    continue :dispatch;
-                                };
-                                const atom = self.ctx.atoms.intern(idx_slice) catch {
-                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
-                                    self.ctx.sp = sp - 1;
-                                    continue :dispatch;
-                                };
-                                const pool = self.ctx.hidden_class_pool orelse {
-                                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
-                                    self.ctx.sp = sp - 1;
-                                    continue :dispatch;
-                                };
-                                self.ctx.stack[sp - 2] = obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
-                                self.ctx.sp = sp - 1;
-                                continue :dispatch;
-                            }
-                        }
-                    }
-                    self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
-                    self.ctx.sp = sp - 1;
-                },
-
-                .put_elem => {
-                    const val = self.ctx.pop();
-                    const index_val = self.ctx.pop();
-                    const obj_val = self.ctx.pop();
-
-                    if (obj_val.isObject() and index_val.isInt()) {
-                        const obj = object.JSObject.fromValue(obj_val);
-                        const idx = index_val.getInt();
-                        if (idx >= 0) {
-                            if (obj.class_id == .array) {
-                                try self.ctx.setIndexChecked(obj, @intCast(idx), val);
-                            } else {
-                                var idx_buf: [32]u8 = undefined;
-                                const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch continue :dispatch;
-                                const atom = self.ctx.atoms.intern(idx_slice) catch continue :dispatch;
-                                try self.ctx.setPropertyChecked(obj, atom, val);
-                            }
-                        }
-                    }
-                },
-
-                .get_global => {
-                    const atom_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    if (self.ctx.getGlobal(atom)) |val| {
-                        try self.ctx.push(val);
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                    }
-                },
-
-                .put_global => {
-                    const atom_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const val = self.ctx.pop();
-                    try self.ctx.setGlobal(atom, val);
-                },
-
-                .define_global => {
-                    const atom_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-                    const val = self.ctx.pop();
-                    try self.ctx.defineGlobal(atom, val);
-                },
-
-                .make_function => {
-                    const const_idx = readU16(self.pc);
-                    self.pc += 2;
-                    // Get bytecode pointer from constant pool
-                    const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isExternPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
-                    // Create function object
-                    const root_class_idx = self.ctx.root_class_idx;
-                    const func_obj = try object.JSObject.createBytecodeFunction(
-                        self.ctx.allocator,
-                        root_class_idx,
-                        bc_ptr,
-                        @enumFromInt(bc_ptr.name_atom),
-                    );
-                    try self.ctx.push(func_obj.toValue());
-                },
-
-                .make_async => {
-                    const const_idx = readU16(self.pc);
-                    self.pc += 2;
-                    // Get bytecode pointer from constant pool
-                    const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isExternPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
-                    // Create async function object (marked as async via slot 3)
-                    const root_class_idx = self.ctx.root_class_idx;
-                    const func_obj = try object.JSObject.createBytecodeFunction(
-                        self.ctx.allocator,
-                        root_class_idx,
-                        bc_ptr,
-                        @enumFromInt(bc_ptr.name_atom),
-                    );
-                    // Mark as async function using flag (more efficient than inline slot check)
-                    func_obj.flags.is_async = true;
-                    try self.ctx.push(func_obj.toValue());
-                },
-
-                .await_val => {
-                    // For synchronous execution, await just returns the value directly
-                    // A full implementation would integrate with an event loop and Promises
-                    // For now, if the value is a Promise-like object with .then(), we don't support it
-                    // Just pass the value through (works for non-Promise values)
-                    const awaited = self.ctx.peek();
-                    _ = awaited;
-                    // Value stays on stack unchanged for sync execution
-                },
+                // ========================================
+                // Call / Closure / Iterator Operations
+                // ========================================
+                // (handled by dispatchCallOps)
 
                 // Module operations
                 .import_module => {
@@ -2243,83 +2761,6 @@ pub const Interpreter = struct {
                     _ = self.ctx.pop();
                 },
 
-                .array_spread => {
-                    // Stack: [target_array, current_index, source_array]
-                    const source_val = self.ctx.pop();
-                    const idx_val = self.ctx.pop();
-                    const target_val = self.ctx.peek();
-
-                    if (target_val.isObject() and source_val.isObject() and idx_val.isInt()) {
-                        const target = object.JSObject.fromValue(target_val);
-                        const source = object.JSObject.fromValue(source_val);
-                        var idx: usize = @intCast(idx_val.getInt());
-                        const pool = self.ctx.hidden_class_pool orelse {
-                            try self.ctx.push(idx_val);
-                            continue :dispatch;
-                        };
-
-                        // Get source array length
-                        if (source.getProperty(pool, .length)) |len_val| {
-                            if (len_val.isInt()) {
-                                const src_len: usize = @intCast(len_val.getInt());
-                                // Copy each element from source to target
-                                for (0..src_len) |i| {
-                                    const elem = source.getSlot(@intCast(i));
-                                    if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
-                                        return error.ArenaObjectEscape;
-                                    }
-                                    target.setSlot(@intCast(idx), elem);
-                                    idx += 1;
-                                }
-                                // Push new index for subsequent elements
-                                try self.ctx.push(value.JSValue.fromInt(@intCast(idx)));
-                                continue;
-                            }
-                        }
-                    }
-                    // If spread failed, just push the original index back
-                    try self.ctx.push(idx_val);
-                },
-
-                .call_spread => {
-                    // For now, call_spread is not fully implemented
-                    // Would need to collect spread arguments into a single args array
-                    try self.ctx.push(value.JSValue.undefined_val);
-                },
-
-                .typeof => {
-                    const a = self.ctx.pop();
-                    const type_str = a.typeOf();
-                    // Create JS string for typeof result
-                    const js_str = self.createString(type_str) catch {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                        continue;
-                    };
-                    try self.ctx.push(value.JSValue.fromPtr(js_str));
-                },
-
-                // ========================================
-                // Function Calls
-                // ========================================
-                .call => {
-                    const argc: u8 = self.pc[0];
-                    self.pc += 1;
-                    try self.doCall(argc, false);
-                },
-
-                .call_method => {
-                    const argc: u8 = self.pc[0];
-                    self.pc += 1;
-                    try self.doCall(argc, true);
-                },
-
-                .tail_call => {
-                    const argc: u8 = self.pc[0];
-                    self.pc += 1;
-                    // TODO: Implement proper tail call optimization
-                    try self.doCall(argc, false);
-                },
-
                 // ========================================
                 // Superinstructions (fused hot paths)
                 // ========================================
@@ -2347,61 +2788,6 @@ pub const Interpreter = struct {
                     if (!cond.toBoolean()) {
                         self.offsetPc(offset);
                     }
-                },
-
-                // Fused push_const + call: load constant and call in one dispatch
-                .push_const_call => {
-                    const const_idx = readU16(self.pc);
-                    const argc: u8 = self.pc[2];
-                    self.pc += 3;
-                    // Push the constant (function to call)
-                    try self.ctx.push(try self.getConstant(const_idx));
-                    // Call it
-                    try self.doCall(argc, false);
-                },
-
-                // Fused get_field + call_method: load method and call in one dispatch
-                .get_field_call => {
-                    const atom_idx = readU16(self.pc);
-                    const argc: u8 = self.pc[2];
-                    self.pc += 3;
-                    const atom: object.Atom = @enumFromInt(atom_idx);
-
-                    // Stack: [obj, obj] (dup from codegen)
-                    // Need to: get method from top obj (pop), then call_method with original obj as 'this'
-                    const obj = self.ctx.pop();
-                    if (obj.isObject()) {
-                        const js_obj = object.JSObject.fromValue(obj);
-                        const pool = self.ctx.hidden_class_pool orelse {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                            try self.doCall(argc, true);
-                            continue :dispatch;
-                        };
-                        if (js_obj.getProperty(pool, atom)) |method| {
-                            // Push method on stack (obj is still there)
-                            try self.ctx.push(method);
-                            // Call as method (will use obj as 'this')
-                            try self.doCall(argc, true);
-                            continue :dispatch;
-                        }
-                    } else if (obj.isAnyString()) {
-                        // String method call (flat, rope, or slice)
-                        if (self.ctx.string_prototype) |proto| {
-                            const pool = self.ctx.hidden_class_pool orelse {
-                                try self.ctx.push(value.JSValue.undefined_val);
-                                try self.doCall(argc, true);
-                                continue :dispatch;
-                            };
-                            if (proto.getProperty(pool, atom)) |method| {
-                                try self.ctx.push(method);
-                                try self.doCall(argc, true);
-                                continue :dispatch;
-                            }
-                        }
-                    }
-                    // Fallback: property not found, push undefined and call
-                    try self.ctx.push(value.JSValue.undefined_val);
-                    try self.doCall(argc, true);
                 },
 
                 // Fused arithmetic-modulo: (a op b) % divisor
@@ -2482,146 +2868,6 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 2;
                     const mul_result = try self.mulValues(a, b);
                     self.ctx.pushUnchecked(try modValues(mul_result, divisor_val));
-                },
-
-                // ========================================
-                // Loop Optimization Superinstructions
-                // ========================================
-                .for_of_next => {
-                    // Combined bounds check + element fetch + index increment
-                    // Stack: [iterable, index] -> [iterable, index+1] with element pushed
-                    // Or jumps to end_offset if iteration complete
-                    const end_offset = readI16(self.pc);
-                    self.pc += 2;
-                    const sp = self.ctx.sp;
-                    const idx_val = self.ctx.stack[sp - 1];
-                    const iter_val = self.ctx.stack[sp - 2];
-
-                    if (iter_val.isObject() and idx_val.isInt()) {
-                        @branchHint(.likely);
-                        const obj = object.JSObject.fromValue(iter_val);
-                        const idx = idx_val.getInt();
-                        if (idx >= 0) {
-                            @branchHint(.likely);
-                            const idx_u: u32 = @intCast(idx);
-                            // Array fast path
-                            if (obj.class_id == .array) {
-                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
-                                if (idx_u < len) {
-                                    @branchHint(.likely);
-                                    // Profile backedge for hot loop detection (for-of loops)
-                                    if (self.profileBackedge()) {
-                                        if (self.current_func) |func| {
-                                            const func_mut = @constCast(func);
-                                            if (func_mut.tier == .interpreted) {
-                                                func_mut.tier = .baseline_candidate;
-                                            }
-                                            func_mut.backedge_count = self.backedge_count;
-                                        }
-                                        self.backedge_count = 0;
-                                    }
-                                    // Push element, increment index in-place
-                                    try self.ctx.push(obj.getIndexUnchecked(idx_u));
-                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                    continue :dispatch;
-                                }
-                            }
-                            // Range iterator fast path
-                            else if (obj.class_id == .range_iterator) {
-                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
-                                if (idx_u < len) {
-                                    @branchHint(.likely);
-                                    // Profile backedge for hot loop detection (for-of loops)
-                                    if (self.profileBackedge()) {
-                                        if (self.current_func) |func| {
-                                            const func_mut = @constCast(func);
-                                            if (func_mut.tier == .interpreted) {
-                                                func_mut.tier = .baseline_candidate;
-                                            }
-                                            func_mut.backedge_count = self.backedge_count;
-                                        }
-                                        self.backedge_count = 0;
-                                    }
-                                    const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
-                                    const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                                    try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
-                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                    continue :dispatch;
-                                }
-                            }
-                        }
-                    }
-                    // Loop done - jump to cleanup
-                    self.offsetPc(end_offset);
-                },
-
-                .for_of_next_put_loc => {
-                    // Fused: for_of_next + put_loc (stores element directly to local)
-                    // Stack: [iterable, index] -> [iterable, index+1] (no element pushed)
-                    const local_idx = self.pc[0];
-                    self.pc += 1;
-                    const end_offset = readI16(self.pc);
-                    self.pc += 2;
-                    const sp = self.ctx.sp;
-                    const idx_val = self.ctx.stack[sp - 1];
-                    const iter_val = self.ctx.stack[sp - 2];
-
-                    if (iter_val.isObject() and idx_val.isInt()) {
-                        @branchHint(.likely);
-                        const obj = object.JSObject.fromValue(iter_val);
-                        const idx = idx_val.getInt();
-                        if (idx >= 0) {
-                            @branchHint(.likely);
-                            const idx_u: u32 = @intCast(idx);
-                            // Array fast path
-                            if (obj.class_id == .array) {
-                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
-                                if (idx_u < len) {
-                                    @branchHint(.likely);
-                                    // Profile backedge for hot loop detection (for-of loops)
-                                    if (self.profileBackedge()) {
-                                        if (self.current_func) |func| {
-                                            const func_mut = @constCast(func);
-                                            if (func_mut.tier == .interpreted) {
-                                                func_mut.tier = .baseline_candidate;
-                                            }
-                                            func_mut.backedge_count = self.backedge_count;
-                                        }
-                                        self.backedge_count = 0;
-                                    }
-                                    // Store element directly to local, increment index in-place
-                                    self.ctx.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
-                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                    continue :dispatch;
-                                }
-                            }
-                            // Range iterator fast path
-                            else if (obj.class_id == .range_iterator) {
-                                const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
-                                if (idx_u < len) {
-                                    @branchHint(.likely);
-                                    // Profile backedge for hot loop detection (for-of loops)
-                                    if (self.profileBackedge()) {
-                                        if (self.current_func) |func| {
-                                            const func_mut = @constCast(func);
-                                            if (func_mut.tier == .interpreted) {
-                                                func_mut.tier = .baseline_candidate;
-                                            }
-                                            func_mut.backedge_count = self.backedge_count;
-                                        }
-                                        self.backedge_count = 0;
-                                    }
-                                    const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
-                                    const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
-                                    self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
-                                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                    continue :dispatch;
-                                }
-                            }
-                        }
-                    }
-                    // Loop done - jump to cleanup
-                    self.offsetPc(end_offset);
                 },
 
                 // ========================================
@@ -2806,93 +3052,6 @@ pub const Interpreter = struct {
                         continue :dispatch;
                     };
                     self.ctx.stack[sp - 1] = if (num <= @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
-                },
-
-                // ========================================
-                // Closure Operations
-                // ========================================
-                .get_upvalue => {
-                    const idx = self.pc[0];
-                    self.pc += 1;
-                    // Get the upvalue from the current closure
-                    if (self.current_closure) |closure| {
-                        if (idx < closure.upvalues.len) {
-                            const uv = closure.upvalues[idx];
-                            try self.ctx.push(uv.get());
-                        } else {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                        }
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                    }
-                },
-
-                .put_upvalue => {
-                    const idx = self.pc[0];
-                    self.pc += 1;
-                    const val = self.ctx.pop();
-                    // Set the upvalue in the current closure
-                    if (self.current_closure) |closure| {
-                        if (idx < closure.upvalues.len) {
-                            closure.upvalues[idx].set(val);
-                        }
-                    }
-                },
-
-                .close_upvalue => {
-                    const local_idx = self.pc[0];
-                    self.pc += 1;
-                    // Close any open upvalues pointing to this local slot
-                    self.closeUpvaluesAbove(local_idx);
-                },
-
-                .make_closure => {
-                    const const_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const upvalue_count: u8 = self.pc[0];
-                    self.pc += 1;
-
-                    // Get bytecode pointer from constant pool
-                    const bc_val = try self.getConstant(const_idx);
-                    if (!bc_val.isExternPtr()) return error.TypeError;
-                    const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
-
-                    // Allocate upvalue array
-                    const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
-                    errdefer self.ctx.allocator.free(upvalues);
-
-                    // Capture upvalues based on bytecode info
-                    for (0..upvalue_count) |i| {
-                        const info = bc_ptr.upvalue_info[i];
-                        if (info.is_local) {
-                            // Capture from current function's locals
-                            upvalues[i] = try self.captureUpvalue(info.index);
-                        } else {
-                            // Capture from current closure's upvalues
-                            if (self.current_closure) |closure| {
-                                upvalues[i] = closure.upvalues[info.index];
-                            } else {
-                                // Create a new closed upvalue with undefined from pool
-                                const uv = try self.ctx.gc_state.acquireUpvalue();
-                                uv.* = .{
-                                    .location = .{ .closed = value.JSValue.undefined_val },
-                                    .next = null,
-                                };
-                                upvalues[i] = uv;
-                            }
-                        }
-                    }
-
-                    // Create closure object
-                    const root_class_idx = self.ctx.root_class_idx;
-                    const closure_obj = try object.JSObject.createClosure(
-                        self.ctx.allocator,
-                        root_class_idx,
-                        bc_ptr,
-                        @enumFromInt(bc_ptr.name_atom),
-                        upvalues,
-                    );
-                    try self.ctx.push(closure_obj.toValue());
                 },
 
                 else => {

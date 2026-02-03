@@ -17,7 +17,8 @@ const bytecode_cache = zq.bytecode_cache;
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
 pub const QueryParam = http_types.QueryParam;
-pub const HttpRequest = http_types.HttpRequest;
+pub const HttpRequestView = http_types.HttpRequestView;
+pub const HttpRequestOwned = http_types.HttpRequestOwned;
 pub const HttpHeader = http_types.HttpHeader;
 pub const ResponseHeader = http_types.ResponseHeader;
 pub const HttpResponse = http_types.HttpResponse;
@@ -53,6 +54,24 @@ pub const RuntimeConfig = struct {
     /// Override JIT compilation threshold (null = use policy default)
     jit_threshold: ?u32 = null,
 };
+
+fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, config: RuntimeConfig) void {
+    // Configure arena escape checking (disabled for scripts/benchmarks)
+    ctx.enforce_arena_escape = config.enforce_arena_escape;
+
+    // Increase major GC threshold for FaaS workloads.
+    // Default 10,000 triggers too frequently during request handling.
+    // Higher threshold reduces GC pause frequency at cost of memory.
+    gc_state.setMajorGCThreshold(50_000);
+
+    // Apply JIT policy from config (global settings)
+    if (config.jit_policy) |policy| {
+        zq.interpreter.setJitPolicy(policy);
+    }
+    if (config.jit_threshold) |threshold| {
+        zq.interpreter.setJitThreshold(threshold);
+    }
+}
 
 // ============================================================================
 // Thread-local Runtime for native function callbacks
@@ -105,11 +124,6 @@ pub const Runtime = struct {
         });
         errdefer gc_state.deinit();
 
-        // Increase major GC threshold for FaaS workloads.
-        // Default 10,000 triggers too frequently during request handling.
-        // Higher threshold reduces GC pause frequency at cost of memory.
-        gc_state.setMajorGCThreshold(50_000);
-
         // Initialize heap for size-class allocation and wire up to GC
         const heap_state = try allocator.create(zq.heap.Heap);
         errdefer allocator.destroy(heap_state);
@@ -120,8 +134,7 @@ pub const Runtime = struct {
         const ctx = try zq.Context.init(allocator, gc_state, .{});
         errdefer ctx.deinit();
 
-        // Configure arena escape checking (disabled for scripts/benchmarks)
-        ctx.enforce_arena_escape = config.enforce_arena_escape;
+        applyRuntimeConfig(ctx, gc_state, config);
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(ctx);
@@ -162,14 +175,6 @@ pub const Runtime = struct {
         };
         errdefer self.strings.deinit();
 
-        // Apply JIT policy from config (only first runtime sets global policy)
-        if (config.jit_policy) |policy| {
-            zq.interpreter.setJitPolicy(policy);
-        }
-        if (config.jit_threshold) |threshold| {
-            zq.interpreter.setJitThreshold(threshold);
-        }
-
         // Install built-in bindings
         try self.installBindings();
 
@@ -200,6 +205,8 @@ pub const Runtime = struct {
             .hybrid_state = null,
         };
         errdefer self.strings.deinit();
+
+        applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, config);
 
         // Install core JS builtins if the pooled runtime hasn't already done so.
         if (pool_rt.ctx.builtin_objects.items.len == 0) {
@@ -429,25 +436,25 @@ pub const Runtime = struct {
     }
 
     /// Execute the handler function with a request
-    pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
+    pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
         return self.executeHandlerWithId(request, 0);
     }
 
-    pub fn executeHandlerWithId(self: *Self, request: HttpRequest, request_id: u64) !HttpResponse {
+    pub fn executeHandlerWithId(self: *Self, request: HttpRequestView, request_id: u64) !HttpResponse {
         return self.executeHandlerInternal(request, request_id, false);
     }
 
     /// Execute handler and return a response that borrows JS string bodies.
     /// Caller must ensure the runtime is not reset or reused until after send.
-    pub fn executeHandlerBorrowed(self: *Self, request: HttpRequest) !HttpResponse {
+    pub fn executeHandlerBorrowed(self: *Self, request: HttpRequestView) !HttpResponse {
         return self.executeHandlerBorrowedWithId(request, 0);
     }
 
-    pub fn executeHandlerBorrowedWithId(self: *Self, request: HttpRequest, request_id: u64) !HttpResponse {
+    pub fn executeHandlerBorrowedWithId(self: *Self, request: HttpRequestView, request_id: u64) !HttpResponse {
         return self.executeHandlerInternal(request, request_id, true);
     }
 
-    fn executeHandlerInternal(self: *Self, request: HttpRequest, request_id: u64, borrow_body: bool) !HttpResponse {
+    fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         const handler_atom = self.handler_atom orelse return error.NoHandler;
         self.last_request_body_len = if (request.body) |b| b.len else 0;
 
@@ -709,7 +716,7 @@ pub const Runtime = struct {
         return @intCast(result);
     }
 
-    fn createRequestObject(self: *Self, request: HttpRequest) !zq.JSValue {
+    fn createRequestObject(self: *Self, request: HttpRequestView) !zq.JSValue {
         // Use pre-shaped request object for faster creation (direct slot access).
         // http_shapes is initialized by default (use_http_shape_cache = true).
         // If not available, fall back to dynamic object creation.
@@ -768,7 +775,7 @@ pub const Runtime = struct {
 
     /// Fallback for creating request objects when http_shapes is not available.
     /// This is slower than the shaped path but handles edge cases.
-    fn createRequestObjectDynamic(self: *Self, request: HttpRequest) !zq.JSValue {
+    fn createRequestObjectDynamic(self: *Self, request: HttpRequestView) !zq.JSValue {
         const req_obj = try self.ctx.createObject(null);
 
         const url_str = try self.ctx.createString(request.url);
@@ -1226,7 +1233,7 @@ pub const HandlerPool = struct {
     }
 
     /// Execute handler with a request (acquire, run, release)
-    pub fn executeHandler(self: *Self, request: HttpRequest) !HttpResponse {
+    pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
         const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
         const base_rt = try self.acquireForRequest();
         defer {
@@ -1255,7 +1262,7 @@ pub const HandlerPool = struct {
 
     /// Execute handler and return a response handle that borrows JS strings.
     /// Caller must call handle.deinit() after sending the response.
-    pub fn executeHandlerBorrowed(self: *Self, request: HttpRequest) !ResponseHandle {
+    pub fn executeHandlerBorrowed(self: *Self, request: HttpRequestView) !ResponseHandle {
         const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
         const base_rt = try self.acquireForRequest();
         errdefer self.releaseForRequest(base_rt);
@@ -1621,7 +1628,7 @@ test "HandlerPool basic operations" {
         pool.deinit();
     }
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1629,7 +1636,7 @@ test "HandlerPool basic operations" {
     };
     defer request.deinit(allocator);
 
-    var response = try pool.executeHandler(request);
+    var response = try pool.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("ok", response.body);
@@ -1647,7 +1654,7 @@ test "HandlerPool bytecode cache" {
     }
 
     // First request triggers cache population during prewarm
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1655,7 +1662,7 @@ test "HandlerPool bytecode cache" {
     };
     defer request.deinit(allocator);
 
-    var response = try pool.executeHandler(request);
+    var response = try pool.executeHandler(request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("cached", response.body);
 
@@ -1674,7 +1681,7 @@ test "HandlerPool handler remains callable across resets" {
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
     defer pool.deinit();
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1685,7 +1692,7 @@ test "HandlerPool handler remains callable across resets" {
     const iterations: usize = 200;
     var i: usize = 0;
     while (i < iterations) : (i += 1) {
-        var response = try pool.executeHandler(request);
+        var response = try pool.executeHandler(request.asView());
         defer response.deinit();
         try std.testing.expectEqualStrings("ok", response.body);
     }
@@ -1704,7 +1711,7 @@ test "AOT override fallback and success" {
     defer rt.deinit();
     try rt.loadHandler(handler_code, "<handler>");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1728,12 +1735,12 @@ test "AOT override fallback and success" {
     setAotOverrideForTest(aot_bail);
     defer setAotOverrideForTest(null);
 
-    var fallback_response = try rt.executeHandler(request);
+    var fallback_response = try rt.executeHandler(request.asView());
     defer fallback_response.deinit();
     try std.testing.expectEqualStrings("{\"ok\":false}", fallback_response.body);
 
     setAotOverrideForTest(aot_ok);
-    var aot_response = try rt.executeHandler(request);
+    var aot_response = try rt.executeHandler(request.asView());
     defer aot_response.deinit();
     try std.testing.expectEqualStrings("{\"ok\":true}", aot_response.body);
 }
@@ -1772,7 +1779,7 @@ test "HandlerPool concurrent stress" {
                 _ = ctx.errors.fetchAdd(1, .acq_rel);
                 return;
             };
-            var request = HttpRequest{
+            var request = HttpRequestOwned{
                 .method = method,
                 .url = url,
                 .headers = .{},
@@ -1782,7 +1789,7 @@ test "HandlerPool concurrent stress" {
 
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                var response = ctx.pool.executeHandler(request) catch {
+                var response = ctx.pool.executeHandler(request.asView()) catch {
                     _ = ctx.errors.fetchAdd(1, .acq_rel);
                     continue;
                 };
@@ -1827,7 +1834,7 @@ test "string prototype methods are callable" {
 
     try rt.loadHandler("function handler(req){ return Response.text(typeof ''.split); }", "<test>");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1835,7 +1842,7 @@ test "string prototype methods are callable" {
     };
     defer request.deinit(allocator);
 
-    var response = try rt.executeHandler(request);
+    var response = try rt.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("function", response.body);
@@ -1853,14 +1860,14 @@ test "request body split works" {
     const simple_test = "function handler(req){ return Response.text('hello'); }";
     try rt.loadHandler(simple_test, "<test1>");
 
-    var req1 = HttpRequest{
+    var req1 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
         .body = null,
     };
 
-    var resp1 = try rt.executeHandler(req1);
+    var resp1 = try rt.executeHandler(req1.asView());
     try std.testing.expectEqualStrings("hello", resp1.body);
     resp1.deinit();
     req1.deinit(allocator);
@@ -1872,14 +1879,14 @@ test "request body split works" {
     const prop_test = "function handler(req){ return Response.text(req.method); }";
     try rt2.loadHandler(prop_test, "<test2>");
 
-    var req2 = HttpRequest{
+    var req2 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
         .body = try allocator.dupe(u8, "test"),
     };
 
-    var resp2 = try rt2.executeHandler(req2);
+    var resp2 = try rt2.executeHandler(req2.asView());
     try std.testing.expectEqualStrings("POST", resp2.body);
     resp2.deinit();
     req2.deinit(allocator);
@@ -1891,14 +1898,14 @@ test "request body split works" {
     const typeof_split = "function handler(req){ return Response.text(typeof 'a&b'.split('&')); }";
     try rt3.loadHandler(typeof_split, "<test3>");
 
-    var req3 = HttpRequest{
+    var req3 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
         .body = null,
     };
 
-    var resp3 = try rt3.executeHandler(req3);
+    var resp3 = try rt3.executeHandler(req3.asView());
     try std.testing.expectEqualStrings("object", resp3.body);
     resp3.deinit();
     req3.deinit(allocator);
@@ -1911,7 +1918,7 @@ test "request body split works" {
         "function handler(req){ let x = 'test'; return Response.text(x); }";
     try rt4.loadHandler(handler_code, "<test>");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1919,7 +1926,7 @@ test "request body split works" {
     };
     defer request.deinit(allocator);
 
-    var response = try rt4.executeHandler(request);
+    var response = try rt4.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("test", response.body);
@@ -1937,7 +1944,7 @@ test "for loop locals preserve numeric values" {
         "function handler(req){ for (let i of range(1)) { return Response.text(typeof i); } return Response.text('none'); }";
     try rt.loadHandler(handler_code, "<test>");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1945,7 +1952,7 @@ test "for loop locals preserve numeric values" {
     };
     defer request.deinit(allocator);
 
-    var response = try rt.executeHandler(request);
+    var response = try rt.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("number", response.body);
@@ -1969,7 +1976,7 @@ test "object property access works" {
     ;
     try rt.loadHandler(handler_code, "<test>");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -1977,7 +1984,7 @@ test "object property access works" {
     };
     defer request.deinit(allocator);
 
-    var response = try rt.executeHandler(request);
+    var response = try rt.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("Alice-30", response.body);
@@ -2002,7 +2009,7 @@ test "array indexing works" {
     ;
     try rt.loadHandler(handler_code, "<test>");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -2010,7 +2017,7 @@ test "array indexing works" {
     };
     defer request.deinit(allocator);
 
-    var response = try rt.executeHandler(request);
+    var response = try rt.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("1-2-3", response.body);
@@ -2033,7 +2040,7 @@ test "JSX rendering works" {
     // Load as .jsx to enable JSX mode
     try rt.loadHandler(handler_code, "test.jsx");
 
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
         .headers = .{},
@@ -2041,7 +2048,7 @@ test "JSX rendering works" {
     };
     defer request.deinit(allocator);
 
-    var response = try rt.executeHandler(request);
+    var response = try rt.executeHandler(request.asView());
     defer response.deinit();
 
     try std.testing.expectEqualStrings("<div>Hello</div>", response.body);
@@ -2060,7 +2067,7 @@ test "HandlerPool exhaustion and recovery" {
 
     const method = try allocator.dupe(u8, "GET");
     const url = try allocator.dupe(u8, "/");
-    var request = HttpRequest{
+    var request = HttpRequestOwned{
         .method = method,
         .url = url,
         .headers = .{},
@@ -2069,7 +2076,7 @@ test "HandlerPool exhaustion and recovery" {
     defer request.deinit(allocator);
 
     // Execute request 1 - should succeed
-    var response1 = try pool.executeHandler(request);
+    var response1 = try pool.executeHandler(request.asView());
     defer response1.deinit();
     try std.testing.expectEqualStrings("ok", response1.body);
 
@@ -2115,7 +2122,7 @@ test "HandlerPool high contention stress" {
                 _ = ctx.errors.fetchAdd(1, .acq_rel);
                 return;
             };
-            var request = HttpRequest{
+            var request = HttpRequestOwned{
                 .method = method,
                 .url = url,
                 .headers = .{},
@@ -2125,7 +2132,7 @@ test "HandlerPool high contention stress" {
 
             var i: usize = 0;
             while (i < iterations) : (i += 1) {
-                var response = ctx.pool.executeHandler(request) catch {
+                var response = ctx.pool.executeHandler(request.asView()) catch {
                     _ = ctx.errors.fetchAdd(1, .acq_rel);
                     continue;
                 };

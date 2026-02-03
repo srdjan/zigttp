@@ -15,7 +15,7 @@ const Runtime = zruntime.Runtime;
 const HandlerPool = zruntime.HandlerPool;
 const RuntimeConfig = zruntime.RuntimeConfig;
 const http_types = @import("http_types.zig");
-const HttpRequest = http_types.HttpRequest;
+const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
@@ -281,7 +281,7 @@ const ConnectionPool = struct {
 
         // Invoke handler
         if (self.server.pool) |*pool| {
-            var handle = pool.executeHandlerBorrowed(HttpRequest{
+            var handle = pool.executeHandlerBorrowed(HttpRequestView{
                 .url = request.url,
                 .method = request.method,
                 .path = request.path,
@@ -359,7 +359,7 @@ const ConnectionPool = struct {
                 if (findHeaderEnd(current_data)) |offset| {
                     header_end = offset;
                     const body_start = offset + 4;
-                    content_length = parseContentLength(current_data[0..offset]) orelse 0;
+                    content_length = (try parseContentLength(current_data[0..offset])) orelse 0;
                     if (content_length > self.server.config.max_body_size) {
                         return error.FileTooBig;
                     }
@@ -928,7 +928,7 @@ pub const Server = struct {
 
         // Invoke JS handler via pool
         if (self.pool) |*pool| {
-            var handle = pool.executeHandlerBorrowed(HttpRequest{
+            var handle = pool.executeHandlerBorrowed(HttpRequestView{
                 .url = request.url,
                 .method = request.method,
                 .path = request.path,
@@ -1473,7 +1473,12 @@ fn processHeaderLine(
 
     // Populate fast header slots during parsing
     if (std.mem.eql(u8, key_lower, "content-length")) {
-        fast_slots.content_length = std.fmt.parseInt(usize, value, 10) catch 0;
+        const parsed = try parseContentLengthValue(value);
+        if (fast_slots.content_length) |existing| {
+            if (existing != parsed) return error.DuplicateContentLength;
+        } else {
+            fast_slots.content_length = parsed;
+        }
     } else if (std.mem.eql(u8, key_lower, "connection")) {
         fast_slots.connection = value_dup;
     } else if (std.mem.eql(u8, key_lower, "content-type")) {
@@ -1787,17 +1792,32 @@ fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u
     return .{ .key = key, .value = value };
 }
 
-fn parseContentLength(header_section: []const u8) ?usize {
+fn parseContentLengthValue(value: []const u8) !usize {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (trimmed.len == 0) return error.InvalidContentLength;
+    for (trimmed) |c| {
+        if (c < '0' or c > '9') return error.InvalidContentLength;
+    }
+    return std.fmt.parseInt(usize, trimmed, 10) catch return error.InvalidContentLength;
+}
+
+fn parseContentLength(header_section: []const u8) !?usize {
     var lines = std.mem.splitSequence(u8, header_section, "\r\n");
     _ = lines.next() orelse return null; // request line
+    var found: ?usize = null;
     while (lines.next()) |line| {
         if (line.len == 0) break;
         const header = splitHeaderLine(line) orelse continue;
         if (std.ascii.eqlIgnoreCase(header.key, "content-length")) {
-            return std.fmt.parseInt(usize, header.value, 10) catch 0;
+            const parsed = try parseContentLengthValue(header.value);
+            if (found) |existing| {
+                if (existing != parsed) return error.DuplicateContentLength;
+            } else {
+                found = parsed;
+            }
         }
     }
-    return null;
+    return found;
 }
 
 fn getStatusText(status: u16) []const u8 {

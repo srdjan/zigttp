@@ -13,7 +13,18 @@ pub const QueryParam = struct {
     value: []const u8,
 };
 
-pub const HttpRequest = struct {
+pub const HttpRequestView = struct {
+    method: []const u8,
+    url: []const u8,
+    /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
+    path: []const u8 = "",
+    /// Parsed query parameters (references into string_storage)
+    query_params: []const QueryParam = &.{},
+    headers: std.ArrayListUnmanaged(HttpHeader),
+    body: ?[]const u8,
+};
+
+pub const HttpRequestOwned = struct {
     method: []const u8,
     url: []const u8,
     /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
@@ -23,7 +34,7 @@ pub const HttpRequest = struct {
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
 
-    pub fn deinit(self: *HttpRequest, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *HttpRequestOwned, allocator: std.mem.Allocator) void {
         allocator.free(self.method);
         allocator.free(self.url);
         if (self.body) |b| allocator.free(b);
@@ -32,6 +43,17 @@ pub const HttpRequest = struct {
             allocator.free(header.value);
         }
         self.headers.deinit(allocator);
+    }
+
+    pub fn asView(self: *const HttpRequestOwned) HttpRequestView {
+        return .{
+            .method = self.method,
+            .url = self.url,
+            .path = self.path,
+            .query_params = self.query_params,
+            .headers = self.headers,
+            .body = self.body,
+        };
     }
 };
 
