@@ -1732,11 +1732,13 @@ pub const JSObject = extern struct {
             else
                 continue;
 
-            // If property is an object, destroy it recursively
-            // This handles both function objects and builtin containers (Math, JSON, console)
+            // If property is a function object, destroy it recursively
+            // (functions like Response constructor may have their own method properties)
             if (val.isObject()) {
                 const obj = val.toPtr(JSObject);
-                obj.destroyBuiltin(allocator, pool);
+                if (obj.class_id == .function) {
+                    obj.destroyBuiltin(allocator, pool);
+                }
             } else if (val.isString()) {
                 // Free string values (e.g., Fragment constant)
                 const str = val.toPtr(string.JSString);

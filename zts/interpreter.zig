@@ -5477,8 +5477,10 @@ test "JIT: deopt on type mismatch in specialized add" {
     try std.testing.expectEqualStrings("ab", result_str.data());
     string.freeString(allocator, result_str);
 
+    // JIT add handles string concatenation via helper function without deoptimization
+    // (type mismatch deopts were removed for add operations - see baseline.zig comment)
     const stats = jit.deopt.getDeoptStats();
-    try std.testing.expectEqual(@as(u64, 1), stats.type_mismatch_count);
+    try std.testing.expectEqual(@as(u64, 0), stats.type_mismatch_count);
 }
 
 test "JIT: Math int fast paths" {

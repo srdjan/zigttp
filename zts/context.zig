@@ -737,9 +737,19 @@ pub const Context = struct {
                 obj.destroyBuiltin(self.allocator, pool);
             }
 
-            // Destroy global object with destroyBuiltin to clean up function properties
-            // (parseFloat, parseInt, isNaN, isFinite, range, etc.)
-            if (self.global_obj) |g| g.destroyBuiltin(self.allocator, pool);
+            // Clean up Fragment string on global before destroying global_obj
+            // (Fragment is a string, not an object, so it's not in builtin_objects)
+            if (self.global_obj) |g| {
+                if (pool.findProperty(g.hidden_class_idx, .Fragment)) |slot| {
+                    const fragment_val = g.getSlot(slot);
+                    if (fragment_val.isString()) {
+                        string.freeString(self.allocator, fragment_val.toPtr(string.JSString));
+                    }
+                }
+                // Destroy global object directly (all function properties are in builtin_objects)
+                // Don't use destroyBuiltin because properties reference already-freed objects
+                g.destroy(self.allocator);
+            }
         }
         self.builtin_objects.deinit(self.allocator);
         if (self.http_strings) |cache| {

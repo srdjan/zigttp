@@ -937,7 +937,7 @@ pub const IRStore = struct {
         return .{
             .scope_id = @truncate(d.a >> 16),
             .slot = @truncate(d.a),
-            .kind = @enumFromInt(@as(u2, @truncate(d.b))),
+            .kind = @enumFromInt(@as(u3, @truncate(d.b))),
         };
     }
 
