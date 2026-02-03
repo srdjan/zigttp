@@ -162,7 +162,7 @@ zigttp uses a two-layer fail-fast validation system to detect unsupported JavaSc
    - Runs for all files (after stripping for TS files)
    - Provides consistent error messages regardless of file type
 
-See [zts/FEATURE_DETECTION.md](zts/FEATURE_DETECTION.md) for the complete matrix of detected features.
+See [zts/FEATURE_DETECTION.md](docs/FEATURE_DETECTION.md) for the complete matrix of detected features.
 
 All error messages follow the pattern: "'feature' is not supported; use X instead"
 
