@@ -14,6 +14,14 @@ const embedded_handler = @import("embedded_handler");
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
 
+// HTTP protocol types (shared with server layer)
+const http_types = @import("http_types.zig");
+pub const QueryParam = http_types.QueryParam;
+pub const HttpRequest = http_types.HttpRequest;
+pub const HttpHeader = http_types.HttpHeader;
+pub const ResponseHeader = http_types.ResponseHeader;
+pub const HttpResponse = http_types.HttpResponse;
+
 // ============================================================================
 // Runtime Configuration
 // ============================================================================
@@ -22,38 +30,6 @@ pub const RuntimeConfig = struct {
     /// Memory limit per context in bytes (0 = no limit)
     memory_limit: usize = 0,
 
-    // NOTE: The following fields are placeholders for future features.
-    // They are defined for API stability but not yet wired into the runtime.
-    // Setting them has no effect on runtime behavior.
-
-    /// Enable all Deno-compatible APIs (NOT YET IMPLEMENTED)
-    enable_deno_apis: bool = true,
-
-    /// Enable fetch() API (NOT YET IMPLEMENTED)
-    enable_fetch: bool = true,
-
-    /// Enable file system APIs (NOT YET IMPLEMENTED)
-    enable_fs: bool = true,
-
-    /// Enable timers (setTimeout, setInterval) (NOT YET IMPLEMENTED)
-    enable_timers: bool = true,
-
-    /// Enable network socket APIs (NOT YET IMPLEMENTED)
-    enable_net: bool = false,
-
-    /// Sandbox mode: restrict file system to specific paths (NOT YET IMPLEMENTED)
-    sandbox_paths: ?[]const []const u8 = null,
-
-    /// Max execution time per request in milliseconds (NOT YET IMPLEMENTED)
-    max_execution_time_ms: u32 = 30_000,
-
-    /// Enable JSX runtime (h, renderToString, Fragment) - JSX IS enabled by file extension
-    enable_jsx: bool = true,
-
-    /// Clear user-defined globals between requests (NOT YET IMPLEMENTED)
-    reset_user_globals: bool = false,
-
-    // Internal zts settings (these ARE wired and functional)
     /// GC nursery size
     nursery_size: usize = 64 * 1024,
 
@@ -76,129 +52,6 @@ pub const RuntimeConfig = struct {
 
     /// Override JIT compilation threshold (null = use policy default)
     jit_threshold: ?u32 = null,
-};
-
-// ============================================================================
-// HTTP Types (Native Zig)
-// ============================================================================
-
-/// A single query parameter key-value pair (references into string_storage)
-pub const QueryParam = struct {
-    key: []const u8,
-    value: []const u8,
-};
-
-pub const HttpRequest = struct {
-    method: []const u8,
-    url: []const u8,
-    /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
-    path: []const u8 = "",
-    /// Parsed query parameters (references into string_storage)
-    query_params: []const QueryParam = &.{},
-    headers: std.ArrayListUnmanaged(HttpHeader),
-    body: ?[]const u8,
-
-    pub fn deinit(self: *HttpRequest, allocator: std.mem.Allocator) void {
-        allocator.free(self.method);
-        allocator.free(self.url);
-        if (self.body) |b| allocator.free(b);
-        for (self.headers.items) |header| {
-            allocator.free(header.key);
-            allocator.free(header.value);
-        }
-        self.headers.deinit(allocator);
-    }
-};
-
-pub const HttpHeader = struct {
-    key: []const u8,
-    value: []const u8,
-};
-
-pub const ResponseHeader = struct {
-    key: []const u8,
-    value: []const u8,
-    key_owned: bool,
-    value_owned: bool,
-};
-
-pub const HttpResponse = struct {
-    status: u16,
-    headers: std.ArrayListUnmanaged(ResponseHeader),
-    body: []const u8,
-    body_owned: bool,
-    body_owner: ?*zq.JSString,
-    allocator: std.mem.Allocator,
-    /// Pre-built raw HTTP response (status line + headers + body).
-    /// When set, sendResponseSync can write this directly without any processing.
-    prebuilt_raw: ?[]const u8 = null,
-
-    pub fn init(allocator: std.mem.Allocator) HttpResponse {
-        return .{
-            .status = 200,
-            .headers = .{},
-            .body = "",
-            .body_owned = false,
-            .body_owner = null,
-            .allocator = allocator,
-            .prebuilt_raw = null,
-        };
-    }
-
-    pub fn deinit(self: *HttpResponse) void {
-        for (self.headers.items) |header| {
-            if (header.key_owned) {
-                self.allocator.free(header.key);
-            }
-            if (header.value_owned) {
-                self.allocator.free(header.value);
-            }
-        }
-        self.headers.deinit(self.allocator);
-        if (self.body.len > 0 and self.body_owned) {
-            self.allocator.free(self.body);
-        }
-        self.body_owner = null;
-    }
-
-    /// Add or update a header, duplicating key/value strings (caller does not retain ownership)
-    pub fn putHeader(self: *HttpResponse, key: []const u8, val: []const u8) !void {
-        try self.putHeaderInternal(key, val, true);
-    }
-
-    /// Add or update a header without duplicating strings (caller retains ownership)
-    pub fn putHeaderBorrowed(self: *HttpResponse, key: []const u8, val: []const u8) !void {
-        try self.putHeaderInternal(key, val, false);
-    }
-
-    fn putHeaderInternal(self: *HttpResponse, key: []const u8, val: []const u8, owned: bool) !void {
-        const final_key = if (owned) try self.allocator.dupe(u8, key) else key;
-        errdefer if (owned) self.allocator.free(final_key);
-        const final_val = if (owned) try self.allocator.dupe(u8, val) else val;
-        errdefer if (owned) self.allocator.free(final_val);
-
-        for (self.headers.items) |*header| {
-            if (ascii.eqlIgnoreCase(header.key, key)) {
-                if (header.key_owned) self.allocator.free(header.key);
-                if (header.value_owned) self.allocator.free(header.value);
-                header.* = .{ .key = final_key, .value = final_val, .key_owned = owned, .value_owned = owned };
-                return;
-            }
-        }
-        try self.headers.append(self.allocator, .{ .key = final_key, .value = final_val, .key_owned = owned, .value_owned = owned });
-    }
-
-    fn setBodyOwned(self: *HttpResponse, bytes: []const u8) void {
-        self.body = bytes;
-        self.body_owned = true;
-        self.body_owner = null;
-    }
-
-    fn setBodyBorrowed(self: *HttpResponse, str: *zq.JSString) void {
-        self.body = str.data();
-        self.body_owned = false;
-        self.body_owner = str;
-    }
 };
 
 // ============================================================================
@@ -857,61 +710,65 @@ pub const Runtime = struct {
     }
 
     fn createRequestObject(self: *Self, request: HttpRequest) !zq.JSValue {
-        // Use pre-shaped request object for faster creation (direct slot access)
-        if (self.ctx.http_shapes) |shapes| {
-            const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, null);
+        // Use pre-shaped request object for faster creation (direct slot access).
+        // http_shapes is initialized by default (use_http_shape_cache = true).
+        // If not available, fall back to dynamic object creation.
+        const shapes = self.ctx.http_shapes orelse return self.createRequestObjectDynamic(request);
 
-            // URL - always needed
-            const url_str = try self.ctx.createString(request.url);
-            req_obj.setSlot(shapes.request.url_slot, url_str);
+        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, null);
 
-            // Method - use cached string if available
-            const method_val: zq.JSValue = if (self.ctx.getCachedMethod(request.method)) |cached|
-                zq.JSValue.fromPtr(cached)
+        // URL
+        const url_str = try self.ctx.createString(request.url);
+        req_obj.setSlot(shapes.request.url_slot, url_str);
+
+        // Method - use cached string if available
+        const method_val: zq.JSValue = if (self.ctx.getCachedMethod(request.method)) |cached|
+            zq.JSValue.fromPtr(cached)
+        else
+            try self.ctx.createString(request.method);
+        req_obj.setSlot(shapes.request.method_slot, method_val);
+
+        // Path - URL without query string
+        const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
+        req_obj.setSlot(shapes.request.path_slot, path_str);
+
+        // Query - create object from parsed query parameters
+        const query_obj = try self.ctx.createObject(null);
+        for (request.query_params) |param| {
+            const key_atom = try self.ctx.atoms.intern(param.key);
+            const param_val = if (parseQueryInt(param.value)) |int_val|
+                zq.JSValue.fromInt(int_val)
             else
-                try self.ctx.createString(request.method);
-            req_obj.setSlot(shapes.request.method_slot, method_val);
+                try self.ctx.createString(param.value);
+            try self.ctx.setPropertyChecked(query_obj, key_atom, param_val);
+        }
+        req_obj.setSlot(shapes.request.query_slot, query_obj.toValue());
 
-            // Path - URL without query string (falls back to url if not set)
-            const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
-            req_obj.setSlot(shapes.request.path_slot, path_str);
-
-            // Query - create object from parsed query parameters
-            // Numeric values are stored as integers for zero-cost access from JS
-            const query_obj = try self.ctx.createObject(null);
-            for (request.query_params) |param| {
-                const key_atom = try self.ctx.atoms.intern(param.key);
-                const param_val = if (parseQueryInt(param.value)) |int_val|
-                    zq.JSValue.fromInt(int_val)
-                else
-                    try self.ctx.createString(param.value);
-                try self.ctx.setPropertyChecked(query_obj, key_atom, param_val);
-            }
-            req_obj.setSlot(shapes.request.query_slot, query_obj.toValue());
-
-            // Body - set to null if not present
-            if (request.body) |body| {
-                const body_str = try self.ctx.createString(body);
-                req_obj.setSlot(shapes.request.body_slot, body_str);
-            } else {
-                req_obj.setSlot(shapes.request.body_slot, zq.JSValue.null_val);
-            }
-
-            // Headers - only create if present
-            if (request.headers.items.len > 0) {
-                const headers_obj = try self.ctx.createObject(null);
-                for (request.headers.items) |header| {
-                    const key_atom = try self.ctx.atoms.intern(header.key);
-                    const value_str = try self.ctx.createString(header.value);
-                    try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
-                }
-                req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
-            }
-
-            return req_obj.toValue();
+        // Body
+        if (request.body) |body| {
+            const body_str = try self.ctx.createString(body);
+            req_obj.setSlot(shapes.request.body_slot, body_str);
+        } else {
+            req_obj.setSlot(shapes.request.body_slot, zq.JSValue.null_val);
         }
 
-        // Fallback: build object dynamically (slower)
+        // Headers
+        if (request.headers.items.len > 0) {
+            const headers_obj = try self.ctx.createObject(null);
+            for (request.headers.items) |header| {
+                const key_atom = try self.ctx.atoms.intern(header.key);
+                const value_str = try self.ctx.createString(header.value);
+                try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
+            }
+            req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
+        }
+
+        return req_obj.toValue();
+    }
+
+    /// Fallback for creating request objects when http_shapes is not available.
+    /// This is slower than the shaped path but handles edge cases.
+    fn createRequestObjectDynamic(self: *Self, request: HttpRequest) !zq.JSValue {
         const req_obj = try self.ctx.createObject(null);
 
         const url_str = try self.ctx.createString(request.url);
@@ -923,12 +780,9 @@ pub const Runtime = struct {
             try self.ctx.createString(request.method);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.method, method_val);
 
-        // Path - URL without query string
         const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.path, path_str);
 
-        // Query - create object from parsed query parameters
-        // Numeric values are stored as integers for zero-cost access from JS
         const query_obj = try self.ctx.createObject(null);
         for (request.query_params) |param| {
             const key_atom = try self.ctx.atoms.intern(param.key);
@@ -997,7 +851,7 @@ pub const Runtime = struct {
             if (result.isString()) {
                 const str = result.toPtr(zq.JSString);
                 if (borrow_body) {
-                    response.setBodyBorrowed(str);
+                    response.setBodyBorrowed(str.data(), @ptrCast(str));
                 } else {
                     const owned = try self.allocator.dupe(u8, str.data());
                     response.setBodyOwned(owned);
@@ -1023,7 +877,7 @@ pub const Runtime = struct {
                 if (body_val.isString()) {
                     const str = body_val.toPtr(zq.JSString);
                     if (borrow_body) {
-                        response.setBodyBorrowed(str);
+                        response.setBodyBorrowed(str.data(), @ptrCast(str));
                     } else {
                         const owned = try self.allocator.dupe(u8, str.data());
                         response.setBodyOwned(owned);
@@ -1065,7 +919,7 @@ pub const Runtime = struct {
             if (body_val.isString()) {
                 const str = body_val.toPtr(zq.JSString);
                 if (borrow_body) {
-                    response.setBodyBorrowed(str);
+                    response.setBodyBorrowed(str.data(), @ptrCast(str));
                 } else {
                     const owned = try self.allocator.dupe(u8, str.data());
                     response.setBodyOwned(owned);

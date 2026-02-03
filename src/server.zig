@@ -14,9 +14,11 @@ const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
 const HandlerPool = zruntime.HandlerPool;
 const RuntimeConfig = zruntime.RuntimeConfig;
-const HttpRequest = zruntime.HttpRequest;
-const HttpResponse = zruntime.HttpResponse;
-const HttpHeader = zruntime.HttpHeader;
+const http_types = @import("http_types.zig");
+const HttpRequest = http_types.HttpRequest;
+const HttpResponse = http_types.HttpResponse;
+const HttpHeader = http_types.HttpHeader;
+const QueryParam = http_types.QueryParam;
 
 /// Read a file synchronously using posix operations (for use before Io is initialized)
 fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
@@ -1025,111 +1027,48 @@ pub const Server = struct {
         errdefer headers.deinit(allocator);
         try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 
-        // Use buffered reader for efficient parsing
         var reader = BufferedReader.init(stream, io, &reader_buf);
 
-        // Batch string storage: single allocation for method, url, and all header strings
-        // Typical request needs ~2-4KB; we allocate 8KB to cover most cases
         const storage_size: usize = 8192;
         const string_storage = try allocator.alloc(u8, storage_size);
         errdefer allocator.free(string_storage);
         var storage_offset: usize = 0;
-
-        // Helper to copy string into batch storage
-        const copyToStorage = struct {
-            fn copy(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
-                if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
-                const dest = storage[offset.*..][0..src.len];
-                @memcpy(dest, src);
-                offset.* += src.len;
-                return dest;
-            }
-        }.copy;
 
         // Read request line
         const request_line = try reader.readLine();
         request_started.* = true;
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
-        // Copy method and url into batch storage
         const method_slice = parts.next() orelse return error.InvalidRequest;
         const method = try copyToStorage(string_storage, &storage_offset, method_slice);
 
         const url_slice = parts.next() orelse return error.InvalidRequest;
         const url = try copyToStorage(string_storage, &storage_offset, url_slice);
 
-        // Split URL into path and query string, parse query parameters
+        // Split URL into path and query string
         const query_start = std.mem.indexOf(u8, url, "?");
         const path = if (query_start) |idx| url[0..idx] else url;
         const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
 
-        // Parse query parameters into storage
-        var query_params_storage: ?[]zruntime.QueryParam = null;
-        var query_params: []const zruntime.QueryParam = &.{};
-        if (query_string.len > 0) {
-            // Count parameters first
-            var param_count: usize = 1;
-            for (query_string) |c| {
-                if (c == '&') param_count += 1;
-            }
+        const qr = try parseQueryString(allocator, query_string);
+        errdefer if (qr.storage) |s| allocator.free(s);
 
-            // Allocate storage for query params
-            const qps = try allocator.alloc(zruntime.QueryParam, param_count);
-            errdefer allocator.free(qps);
-
-            var qp_idx: usize = 0;
-            var pairs = std.mem.splitScalar(u8, query_string, '&');
-            while (pairs.next()) |pair| {
-                if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
-                    qps[qp_idx] = .{
-                        .key = pair[0..eq_idx],
-                        .value = pair[eq_idx + 1 ..],
-                    };
-                    qp_idx += 1;
-                }
-            }
-            query_params_storage = qps;
-            query_params = qps[0..qp_idx];
-        }
-
-        // Read headers (with count limit for DOS protection)
-        // OPTIMIZATION: Fast header slots populated during parsing
+        // Read headers with fast slot population
         var header_count: usize = 0;
-        var content_length: ?usize = null;
-        var connection: ?[]const u8 = null;
-        var content_type: ?[]const u8 = null;
+        var fast_slots = FastHeaderSlots{};
         while (true) {
             if (header_count >= self.config.max_headers) return error.TooManyHeaders;
 
             const line = try reader.readLine();
             if (line.len == 0) break;
 
-            const header = splitHeaderLine(line) orelse continue;
-            const key = header.key;
-            const value = header.value;
-
-            // Normalize key to lowercase using comptime lookup table
-            var key_lower_buf: [256]u8 = undefined;
-            if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
-            const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
-            const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
-            const value_dup = try copyToStorage(string_storage, &storage_offset, value);
-            try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
-
-            // Populate fast header slots during parsing (avoids O(n) lookups later)
-            if (std.mem.eql(u8, key_lower, "content-length")) {
-                content_length = std.fmt.parseInt(usize, value, 10) catch 0;
-            } else if (std.mem.eql(u8, key_lower, "connection")) {
-                connection = value_dup;
-            } else if (std.mem.eql(u8, key_lower, "content-type")) {
-                content_type = value_dup;
-            }
+            try processHeaderLine(line, string_storage, &storage_offset, &headers, allocator, &fast_slots);
             header_count += 1;
         }
 
-        // Read body if Content-Length present (keys normalized to lowercase)
+        // Read body if Content-Length present
         var body: ?[]u8 = null;
-        if (content_length) |len| {
+        if (fast_slots.content_length) |len| {
             if (len > 0 and len <= self.config.max_body_size) {
                 body = try allocator.alloc(u8, len);
                 errdefer if (body) |b| allocator.free(b);
@@ -1142,14 +1081,14 @@ pub const Server = struct {
             .method = method,
             .url = url,
             .path = path,
-            .query_params = query_params,
+            .query_params = qr.params,
             .headers = headers,
             .body = body,
             .string_storage = string_storage,
-            .query_params_storage = query_params_storage,
-            .connection = connection,
-            .content_length = content_length,
-            .content_type = content_type,
+            .query_params_storage = qr.storage,
+            .connection = fast_slots.connection,
+            .content_length = fast_slots.content_length,
+            .content_type = fast_slots.content_type,
         };
     }
 
@@ -1159,21 +1098,10 @@ pub const Server = struct {
         errdefer headers.deinit(allocator);
         try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 
-        // Batch string storage
         const storage_size: usize = 8192;
         const string_storage = try allocator.alloc(u8, storage_size);
         errdefer allocator.free(string_storage);
         var storage_offset: usize = 0;
-
-        const copyToStorage = struct {
-            fn copy(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
-                if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
-                const dest = storage[offset.*..][0..src.len];
-                @memcpy(dest, src);
-                offset.* += src.len;
-                return dest;
-            }
-        }.copy;
 
         // Find end of headers
         const header_end = findHeaderEnd(data) orelse std.mem.indexOf(u8, data, "\r\n\r\n") orelse return error.InvalidRequest;
@@ -1191,75 +1119,28 @@ pub const Server = struct {
         const url_slice = parts.next() orelse return error.InvalidRequest;
         const url = try copyToStorage(string_storage, &storage_offset, url_slice);
 
-        // Split URL into path and query string, parse query parameters
+        // Split URL into path and query string
         const query_start = std.mem.indexOf(u8, url, "?");
         const path = if (query_start) |idx| url[0..idx] else url;
         const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
 
-        // Parse query parameters into storage
-        var query_params_storage: ?[]zruntime.QueryParam = null;
-        var query_params: []const zruntime.QueryParam = &.{};
-        if (query_string.len > 0) {
-            // Count parameters first
-            var param_count: usize = 1;
-            for (query_string) |c| {
-                if (c == '&') param_count += 1;
-            }
+        const qr = try parseQueryString(allocator, query_string);
+        errdefer if (qr.storage) |s| allocator.free(s);
 
-            // Allocate storage for query params
-            const qps = try allocator.alloc(zruntime.QueryParam, param_count);
-            errdefer allocator.free(qps);
-
-            var qp_idx: usize = 0;
-            var pairs = std.mem.splitScalar(u8, query_string, '&');
-            while (pairs.next()) |pair| {
-                if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
-                    qps[qp_idx] = .{
-                        .key = pair[0..eq_idx],
-                        .value = pair[eq_idx + 1 ..],
-                    };
-                    qp_idx += 1;
-                }
-            }
-            query_params_storage = qps;
-            query_params = qps[0..qp_idx];
-        }
-
-        // Parse headers
-        // OPTIMIZATION: Fast header slots populated during parsing
-        var content_length: ?usize = null;
-        var connection: ?[]const u8 = null;
-        var content_type: ?[]const u8 = null;
+        // Parse headers with fast slot population
         var header_count: usize = 0;
+        var fast_slots = FastHeaderSlots{};
         while (lines.next()) |line| {
             if (line.len == 0) break;
             if (header_count >= self.config.max_headers) return error.TooManyHeaders;
 
-            const header = splitHeaderLine(line) orelse continue;
-            const key = header.key;
-            const value = header.value;
-
-            var key_lower_buf: [256]u8 = undefined;
-            if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
-            const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
-            const key_dup = try copyToStorage(string_storage, &storage_offset, key_lower);
-            const value_dup = try copyToStorage(string_storage, &storage_offset, value);
-            try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
-
-            // Populate fast header slots during parsing
-            if (std.mem.eql(u8, key_lower, "content-length")) {
-                content_length = std.fmt.parseInt(usize, value, 10) catch 0;
-            } else if (std.mem.eql(u8, key_lower, "connection")) {
-                connection = value_dup;
-            } else if (std.mem.eql(u8, key_lower, "content-type")) {
-                content_type = value_dup;
-            }
+            try processHeaderLine(line, string_storage, &storage_offset, &headers, allocator, &fast_slots);
             header_count += 1;
         }
 
         // Extract body if present
         var body: ?[]u8 = null;
-        if (content_length) |len| {
+        if (fast_slots.content_length) |len| {
             if (len > 0 and len <= self.config.max_body_size and body_start + len <= data.len) {
                 body = try allocator.alloc(u8, len);
                 @memcpy(body.?, data[body_start..][0..len]);
@@ -1270,14 +1151,14 @@ pub const Server = struct {
             .method = method,
             .url = url,
             .path = path,
-            .query_params = query_params,
+            .query_params = qr.params,
             .headers = headers,
             .body = body,
             .string_storage = string_storage,
-            .query_params_storage = query_params_storage,
-            .connection = connection,
-            .content_length = content_length,
-            .content_type = content_type,
+            .query_params_storage = qr.storage,
+            .connection = fast_slots.connection,
+            .content_length = fast_slots.content_length,
+            .content_type = fast_slots.content_type,
         };
     }
 
@@ -1513,19 +1394,106 @@ pub const Server = struct {
     }
 };
 
+// ============================================================================
+// HTTP Parsing Helpers (shared between streaming and buffer-based paths)
+// ============================================================================
+
+/// Copy a string into a pre-allocated batch storage buffer.
+/// Returns a slice into the storage buffer.
+fn copyToStorage(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
+    if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
+    const dest = storage[offset.*..][0..src.len];
+    @memcpy(dest, src);
+    offset.* += src.len;
+    return dest;
+}
+
+/// Result of query parameter parsing.
+const QueryParseResult = struct {
+    storage: ?[]QueryParam,
+    params: []const QueryParam,
+};
+
+/// Parse query parameters from a query string (the part after '?').
+/// Allocates storage for parameters; caller owns the returned storage.
+fn parseQueryString(allocator: std.mem.Allocator, query_string: []const u8) !QueryParseResult {
+    if (query_string.len == 0) return .{ .storage = null, .params = &.{} };
+
+    // Count parameters first
+    var param_count: usize = 1;
+    for (query_string) |c| {
+        if (c == '&') param_count += 1;
+    }
+
+    const qps = try allocator.alloc(QueryParam, param_count);
+    errdefer allocator.free(qps);
+
+    var qp_idx: usize = 0;
+    var pairs = std.mem.splitScalar(u8, query_string, '&');
+    while (pairs.next()) |pair| {
+        if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
+            qps[qp_idx] = .{
+                .key = pair[0..eq_idx],
+                .value = pair[eq_idx + 1 ..],
+            };
+            qp_idx += 1;
+        }
+    }
+    return .{ .storage = qps, .params = qps[0..qp_idx] };
+}
+
+/// Fast header slots populated during parsing to avoid O(n) lookups later.
+const FastHeaderSlots = struct {
+    connection: ?[]const u8 = null,
+    content_length: ?usize = null,
+    content_type: ?[]const u8 = null,
+};
+
+/// Process a single header line: normalize key to lowercase, copy into storage,
+/// append to header list, and update fast slots.
+fn processHeaderLine(
+    line: []const u8,
+    storage: []u8,
+    offset: *usize,
+    headers: *std.ArrayListUnmanaged(HttpHeader),
+    allocator: std.mem.Allocator,
+    fast_slots: *FastHeaderSlots,
+) !void {
+    const header = splitHeaderLine(line) orelse return;
+    const key = header.key;
+    const value = header.value;
+
+    // Normalize key to lowercase using comptime lookup table
+    var key_lower_buf: [256]u8 = undefined;
+    if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
+    const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
+    const key_dup = try copyToStorage(storage, offset, key_lower);
+    const value_dup = try copyToStorage(storage, offset, value);
+    try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
+
+    // Populate fast header slots during parsing
+    if (std.mem.eql(u8, key_lower, "content-length")) {
+        fast_slots.content_length = std.fmt.parseInt(usize, value, 10) catch 0;
+    } else if (std.mem.eql(u8, key_lower, "connection")) {
+        fast_slots.connection = value_dup;
+    } else if (std.mem.eql(u8, key_lower, "content-type")) {
+        fast_slots.content_type = value_dup;
+    }
+}
+
 const ParsedRequest = struct {
     method: []const u8,
     url: []const u8,
     /// URL path without query string (e.g., "/api/process" from "/api/process?items=100")
     path: []const u8 = "",
     /// Parsed query parameters (references into string_storage)
-    query_params: []const zruntime.QueryParam = &.{},
+    query_params: []const QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]u8,
     /// Batch buffer holding method, url, and header strings (single allocation)
     string_storage: []u8,
     /// Backing storage for query_params array
-    query_params_storage: ?[]zruntime.QueryParam = null,
+    query_params_storage: ?[]QueryParam = null,
     /// OPTIMIZATION: Fast slots for commonly accessed headers (avoids O(n) lookup)
     connection: ?[]const u8 = null,
     content_length: ?usize = null,

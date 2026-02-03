@@ -404,9 +404,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const config = RuntimeConfig{
         .memory_limit = 64 * 1024 * 1024, // 64MB for benchmarks
-        .enable_jsx = false,
-        .enable_fetch = false,
-        .enable_fs = false,
         .use_hybrid_allocation = true, // Keep arena for performance
         // Large arena prevents overflow churn in long-running microbenches.
         .arena_size = 32 * 1024 * 1024,
