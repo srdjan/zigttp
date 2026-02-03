@@ -388,6 +388,9 @@ pub fn releaseThreadLocal(pool: *LockFreePool) void {
 }
 
 test "LockFreePool basic operations" {
+    // Clear thread-local cache from previous tests to avoid dangling pointers
+    for (&thread_local_cache) |*cached| cached.* = null;
+
     const allocator = std.testing.allocator;
 
     var pool = try LockFreePool.init(allocator, .{ .max_size = 4 });
@@ -407,6 +410,9 @@ test "LockFreePool basic operations" {
 }
 
 test "LockFreePool multiple runtimes" {
+    // Clear thread-local cache from previous tests to avoid dangling pointers
+    for (&thread_local_cache) |*cached| cached.* = null;
+
     const allocator = std.testing.allocator;
 
     var pool = try LockFreePool.init(allocator, .{ .max_size = 4 });
@@ -430,6 +436,9 @@ test "LockFreePool multiple runtimes" {
 }
 
 test "LockFreePool beyond pool size creates new runtimes" {
+    // Clear thread-local cache from previous tests to avoid dangling pointers
+    for (&thread_local_cache) |*cached| cached.* = null;
+
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

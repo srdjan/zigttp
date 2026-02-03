@@ -331,11 +331,11 @@ pub const ScopeAnalyzer = struct {
             if (scope.parent) |parent| {
                 scope_id = parent;
             } else {
-                // Not found - it's a global
+                // Not found - it's an undeclared/implicit global (builtin or external)
                 return .{
                     .scope_id = 0,
                     .slot = name_atom, // Atom index stored in slot (for globals)
-                    .kind = .global,
+                    .kind = .undeclared_global,
                 };
             }
         }
@@ -465,9 +465,9 @@ test "basic scope and binding" {
     try std.testing.expectEqual(BindingRef.BindingKind.global, resolved.kind);
     try std.testing.expectEqual(@as(u8, 1), resolved.slot);
 
-    // Resolve undefined - should be global (not found in any scope)
+    // Resolve undefined - should be undeclared_global (not found in any scope)
     const undefined_ref = analyzer.resolveBinding("undefined", 2);
-    try std.testing.expectEqual(BindingRef.BindingKind.global, undefined_ref.kind);
+    try std.testing.expectEqual(BindingRef.BindingKind.undeclared_global, undefined_ref.kind);
 }
 
 test "nested function creates upvalue" {

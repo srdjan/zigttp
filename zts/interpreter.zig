@@ -5310,8 +5310,8 @@ test "JIT: inlined call deopts on callee change" {
     };
 
     const add_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, add_func, .length);
+    // destroyFull handles bytecode cleanup including TypeFeedback, no separate cleanupTypeFeedback needed
     defer add_obj_ptr.destroyFull(allocator);
-    defer cleanupTypeFeedback(allocator, add_func);
 
     // Alternate callee sub(a, b) { return a - b; }
     const sub_code = try allocator.alloc(u8, 4);
@@ -5332,9 +5332,8 @@ test "JIT: inlined call deopts on callee change" {
         .constants = &.{},
         .source_map = null,
     };
-    defer cleanupTypeFeedback(allocator, sub_func);
-
     const sub_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, sub_func, .length);
+    // destroyFull handles bytecode cleanup including TypeFeedback, no separate cleanupTypeFeedback needed
     defer sub_obj_ptr.destroyFull(allocator);
 
     const holder = try ctx.createObject(null);

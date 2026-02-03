@@ -3149,7 +3149,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, console_obj, root_class_idx, .log, wrap(consoleLog), 0);
     // Note: .warn and .error atoms don't exist in predefined atoms, use .log for now
     // In full implementation would add dynamic atoms
-    try ctx.builtin_objects.append(allocator,console_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
 
     // Register console on global
     try ctx.setGlobal(.console, console_obj.toValue());
@@ -3175,7 +3175,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Add Math constants as properties (NaN-boxing: no allocation needed)
     try ctx.setPropertyChecked(math_obj, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromFloat(math_constants.PI));
     // Note: Would need to add "PI", "E" etc as dynamic atoms for full implementation
-    try ctx.builtin_objects.append(allocator,math_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
 
     // Register Math on global
     try ctx.setGlobal(.Math, math_obj.toValue());
@@ -3185,7 +3185,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodWithId(ctx, allocator, pool, json_obj, root_class_idx, .parse, wrap(jsonParse), 1, .json_parse);
     try addMethod(ctx, allocator, pool, json_obj, root_class_idx, .tryParse, wrap(jsonTryParse), 1);
     try addMethodWithId(ctx, allocator, pool, json_obj, root_class_idx, .stringify, wrap(jsonStringify), 1, .json_stringify);
-    try ctx.builtin_objects.append(allocator,json_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
 
     // Register JSON on global
     try ctx.setGlobal(.JSON, json_obj.toValue());
@@ -3198,7 +3198,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Object.assign removed - use spread syntax {...obj1, ...obj2}
     try addMethodDynamic(ctx, object_obj, "hasOwn", wrap(objectHasOwn), 2);
     // Object.freeze and Object.isFrozen removed - immutability is a design choice
-    try ctx.builtin_objects.append(allocator,object_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
 
     // Register Object on global
     try ctx.setGlobal(.Object, object_obj.toValue());
@@ -3259,7 +3259,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
 
     const neg_inf_atom = try ctx.atoms.intern("NEGATIVE_INFINITY");
     try ctx.setPropertyChecked(number_obj, neg_inf_atom, value.JSValue.fromFloat(-std.math.inf(f64)));
-    try ctx.builtin_objects.append(allocator,number_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
 
     // Register Number on global (predefined atom)
     try ctx.setGlobal(.Number, number_obj.toValue());
@@ -3371,13 +3371,13 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Register Date object with Date.now()
     const date_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, date_obj, "now", wrap(dateNow), 0);
-    try ctx.builtin_objects.append(allocator,date_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
     try ctx.setGlobal(.Date, date_obj.toValue());
 
     // Register performance object with performance.now()
     const performance_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, performance_obj, "now", wrap(performanceNow), 0);
-    try ctx.builtin_objects.append(allocator,performance_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
     const performance_atom = try ctx.atoms.intern("performance");
     try ctx.setGlobal(performance_atom, performance_obj.toValue());
 
@@ -3413,7 +3413,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_ctor, "isArray", wrap(arrayIsArray), 1);
     try addMethodDynamic(ctx, array_ctor, "from", wrap(arrayFrom), 1);
     try addMethodDynamic(ctx, array_ctor, "of", wrap(arrayOf), 0);
-    try ctx.builtin_objects.append(allocator,array_ctor);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
     try ctx.setGlobal(.Array, array_ctor.toValue());
 
     // ========================================================================
@@ -3447,7 +3447,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const string_ctor = try object.JSObject.create(allocator, root_class_idx, null, pool);
     // String.fromCharCode static method
     try addMethodDynamic(ctx, string_ctor, "fromCharCode", wrap(stringFromCharCode), 1);
-    try ctx.builtin_objects.append(allocator,string_ctor);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
     try ctx.setGlobal(.String, string_ctor.toValue());
 
     // RegExp removed - use string methods for pattern matching
@@ -3468,7 +3468,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .ok, wrap(resultOk), 1);
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .err, wrap(resultErr), 1);
     try ctx.setPropertyChecked(result_obj, .prototype, result_proto.toValue());
-    try ctx.builtin_objects.append(allocator,result_obj);
+    // Note: Don't add to builtin_objects - will be destroyed by global_obj.destroyBuiltin
     try ctx.setGlobal(.Result, result_obj.toValue());
 
     // Store Result prototype on context for creating Result instances

@@ -1477,8 +1477,8 @@ pub const Parser = struct {
                 if (self.nodes.get(left)) |left_node| {
                     if (left_node.tag == .identifier) {
                         const binding = left_node.data.binding;
-                        // Check if it's a global binding with "Object" atom (predefined = 131)
-                        if (binding.kind == .global and binding.slot == @intFromEnum(object.Atom.Object)) {
+                        // Check if it's the builtin Object global (undeclared)
+                        if (binding.kind == .undeclared_global and binding.slot == @intFromEnum(object.Atom.Object)) {
                             if (std.mem.eql(u8, prop_name, "assign")) {
                                 self.errors.addErrorAt(.unsupported_feature, prop, "'Object.assign' is not supported; use object spread {...obj1, ...obj2} instead");
                                 return error.ParseError;
@@ -1764,8 +1764,8 @@ pub const Parser = struct {
         const name_atom = try self.addAtom(name);
         const binding = self.scopes.resolveBinding(name, name_atom);
 
-        // Check for removed global identifiers (allow local bindings)
-        if (binding.kind == .global) {
+        // Check for removed global identifiers (allow user-declared bindings)
+        if (binding.kind == .undeclared_global) {
             if (std.mem.eql(u8, name, "Promise")) {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'Promise' is not supported; use Result types or callbacks instead");
                 return error.ParseError;

@@ -1724,8 +1724,20 @@ test "TenuredHeap SIMD sweep" {
     var heap_state = heap.Heap.init(allocator, .{});
     defer heap_state.deinit();
 
-    const obj1 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
-    const obj2 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
+    // Use allocRaw to get header pointers (registerObject expects header pointers)
+    const TestObj = struct {
+        header: heap.MemBlockHeader,
+        data: u64,
+    };
+    const size = @sizeOf(TestObj);
+
+    const ptr1 = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj1: *TestObj = @ptrCast(@alignCast(ptr1));
+    obj1.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 1 };
+
+    const ptr2 = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj2: *TestObj = @ptrCast(@alignCast(ptr2));
+    obj2.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 2 };
 
     const idx1 = try tenured.registerObject(obj1);
     const idx2 = try tenured.registerObject(obj2);
@@ -1749,8 +1761,20 @@ test "TenuredHeap scalar sweep" {
     var heap_state = heap.Heap.init(allocator, .{});
     defer heap_state.deinit();
 
-    const obj1 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
-    const obj2 = heap_state.alloc(.object, @sizeOf(u64)) orelse return error.OutOfMemory;
+    // Use allocRaw to get header pointers (registerObject expects header pointers)
+    const TestObj = struct {
+        header: heap.MemBlockHeader,
+        data: u64,
+    };
+    const size = @sizeOf(TestObj);
+
+    const ptr1 = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj1: *TestObj = @ptrCast(@alignCast(ptr1));
+    obj1.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 1 };
+
+    const ptr2 = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj2: *TestObj = @ptrCast(@alignCast(ptr2));
+    obj2.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 2 };
 
     const idx1 = try tenured.registerObject(obj1);
     const idx2 = try tenured.registerObject(obj2);

@@ -479,7 +479,7 @@ pub const CodeGen = struct {
                 try self.emit(.get_upvalue);
                 try self.emitByte(@truncate(binding.slot)); // Upvalue slots are u8
             },
-            .global => {
+            .global, .undeclared_global => {
                 try self.emit(.get_global);
                 try self.emitU16(binding.slot);
             },
@@ -505,7 +505,7 @@ pub const CodeGen = struct {
                 try self.emit(.put_upvalue);
                 try self.emitByte(@truncate(binding.slot)); // Upvalue slots are u8
             },
-            .global => {
+            .global, .undeclared_global => {
                 try self.emit(.put_global);
                 try self.emitU16(binding.slot);
             },
@@ -1022,8 +1022,8 @@ pub const CodeGen = struct {
         // Get binding for the identifier
         const binding = self.ir.getBinding(member.object) orelse return false;
 
-        // Must be a global
-        if (binding.kind != .global) return false;
+        // Must be a global (Math is undeclared/builtin global)
+        if (binding.kind != .global and binding.kind != .undeclared_global) return false;
 
         // Must be Math global (atom index)
         const math_atom: u16 = @intFromEnum(js_object.Atom.Math);

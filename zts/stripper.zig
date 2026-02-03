@@ -744,10 +744,47 @@ const Stripper = struct {
     // Annotation Stripping (Phase 4)
     // ========================================================================
 
+    /// Check if we're at a label colon (identifier at statement start followed by colon).
+    /// Labels: `public: foo();` or `loop: for (...) {...}`
+    fn isLabelColon(self: *Self) bool {
+        const items = self.output.items;
+        if (items.len == 0) return false;
+
+        // Find the identifier that precedes the colon
+        var ident_start = items.len;
+
+        // Skip back through identifier characters
+        while (ident_start > 0 and isIdentifierContinue(items[ident_start - 1])) {
+            ident_start -= 1;
+        }
+
+        // Must have at least one identifier character and start with identifier start char
+        if (ident_start >= items.len) return false;
+        if (!isIdentifierStart(items[ident_start])) return false;
+
+        // Check if we're at statement start (before the identifier)
+        if (ident_start == 0) return true; // Start of file
+
+        // Look at the character before the identifier (skip whitespace)
+        var check_pos = ident_start - 1;
+        while (check_pos > 0 and (items[check_pos] == ' ' or items[check_pos] == '\t')) {
+            check_pos -= 1;
+        }
+
+        const before = items[check_pos];
+        return before == ';' or before == '{' or before == '}' or before == '\n';
+    }
+
     fn tryStripColonAnnotation(self: *Self) StripError!bool {
         // We're at ':'
         // Skip if we're in expression context (object literals, arrays, etc.)
         if (self.in_expression) {
+            return false;
+        }
+
+        // Check if this is a label (identifier at statement start followed by colon)
+        // Labels look like: public: foo(); or loop: for (...) {...}
+        if (self.isLabelColon()) {
             return false;
         }
 

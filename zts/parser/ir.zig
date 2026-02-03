@@ -26,11 +26,12 @@ pub const BindingRef = struct {
     slot: u16, // Changed from u8 to support atom indices > 255
     kind: BindingKind,
 
-    pub const BindingKind = enum(u2) {
+    pub const BindingKind = enum(u3) {
         local, // Local variable in current function
         upvalue, // Captured from outer scope
-        global, // Global variable
+        global, // User-declared global variable
         argument, // Function parameter
+        undeclared_global, // Implicit/builtin global (not declared by user)
     };
 
     /// Create a global reference (slot is atom index)
