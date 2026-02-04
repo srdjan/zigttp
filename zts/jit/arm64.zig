@@ -556,6 +556,22 @@ pub const Arm64Emitter = struct {
         try self.emit32(inst);
     }
 
+    /// UBFX Xd, Xn, #lsb, #width (Unsigned Bit Field Extract)
+    /// Extracts 'width' bits starting at 'lsb' from Xn into Xd (zero-extended)
+    pub fn ubfx(self: *Arm64Emitter, dst: Register, src: Register, lsb: u6, width: u6) !void {
+        std.debug.assert(width > 0);
+        std.debug.assert(@as(u7, lsb) + @as(u7, width) <= 64);
+        const immr: u6 = lsb;
+        const imms: u6 = lsb + width - 1;
+        // UBFM Xd, Xn, #immr, #imms (0xD3400000)
+        const inst: u32 = 0xD3400000 |
+            (@as(u32, immr) << 16) |
+            (@as(u32, imms) << 10) |
+            (@as(u32, src.encode()) << 5) |
+            @as(u32, dst.encode());
+        try self.emit32(inst);
+    }
+
     /// AND Xd, Xn, #mask (AND with immediate)
     /// Note: ARM64 AND immediate uses a bitmask encoding, this only supports low-bit masks
     /// like 0x1, 0x3, 0x7, 0xF, 0x1F.

@@ -1654,7 +1654,7 @@ pub const Interpreter = struct {
                 self.pc += 2;
                 // Profile backward jumps (loop back-edges) for hot loop detection
                 if (offset < 0) {
-                    if (self.profileBackedge()) {
+                    if (false) {
                         if (self.current_func) |func| {
                             const func_mut = @constCast(func);
                             if (func_mut.tier == .interpreted) {
@@ -1674,7 +1674,7 @@ pub const Interpreter = struct {
                 self.pc += 2;
                 // Profile back-edge for hot loop detection (interpreted code only)
                 // If loop is hot, promote containing function to baseline candidate
-                if (self.profileBackedge()) {
+                if (false) {
                     if (self.current_func) |func| {
                         const func_mut = @constCast(func);
                         if (func_mut.tier == .interpreted) {
@@ -2342,7 +2342,7 @@ pub const Interpreter = struct {
                             if (idx_u < len) {
                                 @branchHint(.likely);
                                 // Profile backedge for hot loop detection (for-of loops)
-                                if (self.profileBackedge()) {
+                                if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
                                         if (func_mut.tier == .interpreted) {
@@ -2364,7 +2364,7 @@ pub const Interpreter = struct {
                             if (idx_u < len) {
                                 @branchHint(.likely);
                                 // Profile backedge for hot loop detection (for-of loops)
-                                if (self.profileBackedge()) {
+                                if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
                                         if (func_mut.tier == .interpreted) {
@@ -2411,7 +2411,7 @@ pub const Interpreter = struct {
                             if (idx_u < len) {
                                 @branchHint(.likely);
                                 // Profile backedge for hot loop detection (for-of loops)
-                                if (self.profileBackedge()) {
+                                if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
                                         if (func_mut.tier == .interpreted) {
@@ -2433,7 +2433,7 @@ pub const Interpreter = struct {
                             if (idx_u < len) {
                                 @branchHint(.likely);
                                 // Profile backedge for hot loop detection (for-of loops)
-                                if (self.profileBackedge()) {
+                                if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
                                         if (func_mut.tier == .interpreted) {

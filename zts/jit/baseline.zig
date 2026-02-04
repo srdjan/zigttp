@@ -606,6 +606,8 @@ pub const BaselineCompiler = struct {
     /// Emit code to extract pointer address from JSValue in a register
     /// Input: src_reg contains JSValue with pointer encoding
     /// Output: dst_reg contains raw pointer address (TAG_PREFIX and low 3 bits cleared)
+    ///
+    /// On ARM64, x22 holds the pre-loaded PTR_EXTRACT_MASK, making this a single AND.
     fn emitExtractPtr(self: *BaselineCompiler, dst_reg: Register, src_reg: Register) CompileError!void {
         if (is_x86_64) {
             // Load PTR_EXTRACT_MASK into scratch, AND with src, store to dst
@@ -617,10 +619,8 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(scratch, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
             self.emitter.andRegReg(dst_reg, scratch) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            // On ARM64, use x10 as scratch when dst is x9, otherwise use x9
-            const scratch: Register = if (dst_reg == .x9) .x10 else .x9;
-            self.emitter.movRegImm64(scratch, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
-            self.emitter.andRegReg(dst_reg, src_reg, scratch) catch return CompileError.OutOfMemory;
+            // x22 holds PTR_EXTRACT_MASK (loaded in prologue), so just AND
+            self.emitter.andRegReg(dst_reg, src_reg, .x22) catch return CompileError.OutOfMemory;
         }
     }
 
@@ -1252,6 +1252,10 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegReg(.x19, .x0) catch return CompileError.OutOfMemory;
             try self.emitInitStackCache();
 
+            // Load PTR_EXTRACT_MASK into x22 for fast pointer extraction
+            // This turns every emitExtractPtr from 4-5 instructions to just 1 AND
+            self.emitter.movRegImm64(.x22, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+
             // NOTE: With lazy loading, we DON'T load locals here.
             // They will be loaded on first access in emitGetLocal.
             // This avoids loading locals that might not be used on all code paths.
@@ -1708,7 +1712,7 @@ pub const BaselineCompiler = struct {
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
                 // Profile backedge for hot loop detection
-                try self.emitProfileBackedge();
+                // Disabled
                 try self.emitForOfNext(target);
             },
 
@@ -1718,7 +1722,7 @@ pub const BaselineCompiler = struct {
                 new_pc += 3;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
                 // Profile backedge for hot loop detection
-                try self.emitProfileBackedge();
+                // Disabled
                 try self.emitForOfNextPutLoc(local_idx, target);
             },
 
@@ -1862,7 +1866,7 @@ pub const BaselineCompiler = struct {
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
                 // Profile backward jumps (loop back-edges) for hot loop detection
                 if (offset < 0) {
-                    try self.emitProfileBackedge();
+                    // Disabled
                 }
                 try self.emitJump(target, false);
             },
@@ -1899,7 +1903,7 @@ pub const BaselineCompiler = struct {
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
                 // Profile backedge for hot loop detection (promotes baseline -> optimized)
-                try self.emitProfileBackedge();
+                // Disabled
                 try self.emitJump(target, false);
             },
 
@@ -3581,7 +3585,10 @@ pub const BaselineCompiler = struct {
             }
             self.emitter.movMemReg(ctx, CTX_FP_OFF, .r10) catch return CompileError.OutOfMemory;
         } else if (is_aarch64) {
-            self.emitter.ldrImm(saved_fp, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            // Save caller FP to machine stack (x22 is now used for PTR_EXTRACT_MASK)
+            self.emitter.ldrImm(.x9, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            self.emitter.strPreIndex(.x9, .sp, -16) catch return CompileError.OutOfMemory;
+            // new fp = sp - argc
             self.emitter.movRegReg(.x9, sp) catch return CompileError.OutOfMemory;
             if (argc > 0) {
                 self.emitter.subRegImm12(.x9, .x9, argc) catch return CompileError.OutOfMemory;
@@ -3643,8 +3650,9 @@ pub const BaselineCompiler = struct {
             self.emitter.addRegImm12(.x10, .x10, 1) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(sp, .x10) catch return CompileError.OutOfMemory;
 
-            // Restore caller fp
-            self.emitter.strImm(saved_fp, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            // Restore caller fp from machine stack
+            self.emitter.ldrPostIndex(.x9, .sp, 16) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x9, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
         }
     }
 
