@@ -116,64 +116,71 @@ const ConnectionPool = struct {
         stream_fd: std.posix.fd_t,
     };
 
-    /// Lock-free SPMC bounded queue.
-    /// Single producer (accept thread) pushes without CAS.
-    /// Multiple consumers (worker threads) compete via CAS on count.
-    /// Blocking wait uses Futex on the count atomic.
+    /// Mutex-protected SPMC (single-producer, multiple-consumer) bounded queue.
+    /// Uses adaptive spinning (spin -> short sleep -> longer sleep) for efficiency.
+    /// NOTE: Condition variables had platform-specific issues on macOS; spin-wait is more reliable.
     const BoundedQueue = struct {
         items: [QUEUE_SIZE]WorkItem,
-        /// Consumer head position - advanced via fetchAdd by workers
-        head: std.atomic.Value(usize),
-        /// Producer tail position - only written by accept thread, no contention
+        head: usize,
         tail: usize,
-        /// Item count - doubles as Futex wait target (u32 required by Futex API)
-        count: std.atomic.Value(u32),
+        count: std.atomic.Value(usize), // Atomic for lock-free count check
+        mutex: std.Thread.Mutex,
 
         fn init() BoundedQueue {
             return .{
                 .items = undefined,
-                .head = std.atomic.Value(usize).init(0),
+                .head = 0,
                 .tail = 0,
-                .count = std.atomic.Value(u32).init(0),
+                .count = std.atomic.Value(usize).init(0),
+                .mutex = .{},
             };
         }
 
-        /// Push item (single producer - accept thread only, no CAS needed)
         fn push(self: *BoundedQueue, item: WorkItem) bool {
-            if (self.count.load(.monotonic) >= QUEUE_SIZE) return false;
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
-            self.items[self.tail % QUEUE_SIZE] = item;
-            self.tail +%= 1;
-
-            // Release ensures item write is visible before count increment
-            const old_count = self.count.fetchAdd(1, .release);
-            if (old_count == 0) {
-                // Queue was empty - wake one sleeping worker
-                std.Thread.Futex.wake(&self.count, 1);
+            const cnt = self.count.load(.acquire);
+            if (cnt >= QUEUE_SIZE) {
+                return false; // Queue full
             }
+
+            self.items[self.tail] = item;
+            self.tail = (self.tail + 1) % QUEUE_SIZE;
+            _ = self.count.fetchAdd(1, .release);
             return true;
         }
 
-        /// Pop item (multiple consumers - CAS on count, Futex wait when empty)
         fn pop(self: *BoundedQueue, running: *std.atomic.Value(bool)) ?WorkItem {
-            while (true) {
-                // Try to claim an item by decrementing count
-                var count = self.count.load(.acquire);
-                while (count > 0) {
-                    if (self.count.cmpxchgWeak(count, count - 1, .acquire, .monotonic)) |actual| {
-                        count = actual;
-                        continue;
-                    }
-                    // Won the item - claim a unique head position
-                    const pos = self.head.fetchAdd(1, .monotonic) % QUEUE_SIZE;
-                    return self.items[pos];
-                }
+            var spin_count: u32 = 0;
 
-                // Queue empty - check for shutdown
+            while (true) {
+                self.mutex.lock();
+                const cnt = self.count.load(.acquire);
+                if (cnt > 0) {
+                    const item = self.items[self.head];
+                    self.head = (self.head + 1) % QUEUE_SIZE;
+                    _ = self.count.fetchSub(1, .release);
+                    self.mutex.unlock();
+                    return item;
+                }
+                self.mutex.unlock();
+
                 if (!running.load(.acquire)) return null;
 
-                // Block until count changes from 0 (1ms timeout for shutdown check)
-                std.Thread.Futex.timedWait(&self.count, 0, 1_000_000) catch {};
+                // Adaptive backoff: spin first, then sleep
+                spin_count += 1;
+                if (spin_count < 10) {
+                    std.atomic.spinLoopHint();
+                } else if (spin_count < 100) {
+                    // Short sleep: 1us
+                    const ts = std.c.timespec{ .sec = 0, .nsec = 1000 };
+                    _ = std.c.nanosleep(&ts, null);
+                } else {
+                    // Longer sleep after many attempts: 100us
+                    const ts = std.c.timespec{ .sec = 0, .nsec = 100_000 };
+                    _ = std.c.nanosleep(&ts, null);
+                }
             }
         }
     };
@@ -209,9 +216,7 @@ const ConnectionPool = struct {
 
     fn deinit(self: *ConnectionPool) void {
         self.running.store(false, .release);
-        // Wake all workers so they observe running=false and exit
-        std.Thread.Futex.wake(&self.queue.count, std.math.maxInt(u32));
-
+        // Workers will exit when they see running=false during spin-wait
         for (self.workers) |w| w.join();
         self.allocator.free(self.workers);
         self.allocator.destroy(self);

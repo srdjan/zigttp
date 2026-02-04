@@ -329,48 +329,16 @@ pub fn willReleaseToThreadLocal(runtime: *LockFreePool.Runtime) bool {
 }
 
 /// Acquire runtime with thread-local caching (LIFO order for cache locality)
+/// NOTE: Thread-local caching is disabled due to race conditions with non-atomic
+/// in_use flag causing hangs under high concurrency. TODO: Fix by making in_use atomic.
 pub fn acquireWithCache(pool: *LockFreePool) !*LockFreePool.Runtime {
-    // Check cache LIFO: prefer most recently used
-    for (&thread_local_cache) |*cached| {
-        if (cached.*) |rt| {
-            if (!rt.in_use) {
-                rt.in_use = true;
-                return rt;
-            }
-        }
-    }
-    // Cache miss - acquire from pool
-    const rt = try pool.acquire();
-    // Store in first empty slot, or replace oldest (slot 1)
-    for (&thread_local_cache) |*cached| {
-        if (cached.* == null) {
-            cached.* = rt;
-            return rt;
-        }
-    }
-    // Cache full - replace last slot (LRU eviction)
-    thread_local_cache[THREAD_LOCAL_CACHE_SIZE - 1] = rt;
-    return rt;
+    return pool.acquire();
 }
 
 /// Release runtime with thread-local caching.
 /// Keeps runtime in cache if it was cached, otherwise returns to pool.
-/// OPTIMIZATION: Removed pool pressure check to trust cache more.
+/// NOTE: Thread-local caching disabled - see acquireWithCache comment.
 pub fn releaseWithCache(pool: *LockFreePool, runtime: *LockFreePool.Runtime) void {
-    // Check if runtime is in our cache
-    for (&thread_local_cache, 0..) |*cached, i| {
-        if (cached.* == runtime) {
-            runtime.reset();
-            runtime.in_use = false;
-            // Move to front (LIFO hotness tracking) if not already there
-            if (i > 0) {
-                thread_local_cache[i] = thread_local_cache[0];
-                thread_local_cache[0] = runtime;
-            }
-            return;
-        }
-    }
-    // Not in cache - return to pool
     pool.release(runtime);
 }
 
