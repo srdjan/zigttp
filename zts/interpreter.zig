@@ -638,7 +638,7 @@ pub const Interpreter = struct {
             .ret, .ret_undefined => 0,
             .get_elem, .put_elem => 0,
             .new_object, .array_spread, .call_spread => 0,
-            .typeof => 0,
+            .typeof, .to_number => 0,
             .shr_1, .mul_2, .await_val, .make_async, .import_default, .export_default => 0,
 
             // 1-byte operand
@@ -2193,6 +2193,17 @@ pub const Interpreter = struct {
                     return .handled;
                 };
                 try self.ctx.push(value.JSValue.fromPtr(js_str));
+                return .handled;
+            },
+            .to_number => {
+                const a = self.ctx.pop();
+                if (a.isInt()) {
+                    try self.ctx.push(a);
+                } else if (a.toNumber()) |n| {
+                    try self.ctx.push(value.JSValue.fromFloat(n));
+                } else {
+                    try self.ctx.push(value.JSValue.nan_val);
+                }
                 return .handled;
             },
             .array_spread => {
@@ -3893,8 +3904,10 @@ pub const Interpreter = struct {
                 const val = self.ctx.pop();
                 if (val.isInt()) {
                     try self.ctx.push(value.JSValue.fromInt(val.getInt() + 1));
+                } else if (val.toNumber()) |n| {
+                    try self.ctx.push(value.JSValue.fromFloat(n + 1.0));
                 } else {
-                    try self.ctx.push(value.JSValue.undefined_val);
+                    try self.ctx.push(value.JSValue.nan_val);
                 }
                 return error.NoTransition;
             },
@@ -3902,8 +3915,10 @@ pub const Interpreter = struct {
                 const val = self.ctx.pop();
                 if (val.isInt()) {
                     try self.ctx.push(value.JSValue.fromInt(val.getInt() - 1));
+                } else if (val.toNumber()) |n| {
+                    try self.ctx.push(value.JSValue.fromFloat(n - 1.0));
                 } else {
-                    try self.ctx.push(value.JSValue.undefined_val);
+                    try self.ctx.push(value.JSValue.nan_val);
                 }
                 return error.NoTransition;
             },
@@ -4341,14 +4356,18 @@ pub export fn jitForOfNextPutLoc(ctx: *context.Context, local_idx: u8) u64 {
 // ============================================================================
 
 /// Modulo two values
-/// Modulo operation - optimized for integer fast path
+/// Modulo operation - optimized for integer fast path, with float fallback
 inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     if (a.isInt() and b.isInt()) {
         const bv = b.getInt();
         if (bv == 0) return error.DivisionByZero;
         return value.JSValue.fromInt(@rem(a.getInt(), bv));
     }
-    return error.TypeError;
+    // Float fallback: JS % works on all numeric types
+    const an = a.toNumber() orelse return error.TypeError;
+    const bn = b.toNumber() orelse return error.TypeError;
+    if (bn == 0.0) return value.JSValue.nan_val;
+    return value.JSValue.fromFloat(@rem(an, bn));
 }
 
 /// Compare two values

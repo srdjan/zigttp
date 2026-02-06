@@ -37,7 +37,7 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 | Destructuring (array/object) | ir.zig:177-182, codegen.zig | 4 | 3 | Pattern matching at runtime |
 | Exponentiation (**) | ir.zig:54, bytecode.zig:78 | 1 | 1 | Single pow opcode |
 | Optional chaining (?.) | ir.zig:128, interpreter.zig | 2 | 1 | Null check + short circuit |
-| Nullish coalescing (??) | ir.zig:77, interpreter.zig | 1 | 1 | Single comparison |
+| Nullish coalescing (??) | ir.zig:77, codegen.zig | 1 | 1 | Checks both null and undefined per spec |
 
 ### 1.3 Built-in Objects
 
@@ -118,7 +118,7 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 | Promise (resolve/reject/then/catch) | builtins.zig:3198 | 4 | 3 | Microtask queue |
 | Error types (Error, TypeError, etc.) | builtins.zig:3167 | 2 | 1 | Constructor + toString |
 | RegExp (test/exec) | builtins.zig:3426 | 5 | 4 | Full regex engine |
-| console.log/warn/error | builtins.zig:2966 | 1 | 1 | Output formatting |
+| console.log/warn/error/info/debug | builtins.zig:2966, zruntime.zig | 1 | 1 | Output formatting (warn/debug to stderr/stdout) |
 | performance.now() | builtins.zig:3349 | 1 | 1 | High-res timer |
 | parseInt/parseFloat/isNaN/isFinite | builtins.zig:3250-3263 | 2 | 1 | Number parsing |
 | Number methods (isInteger, etc.) | builtins.zig:3215 | 1 | 1 | Type checks |

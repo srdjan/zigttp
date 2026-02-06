@@ -8,6 +8,8 @@ const value = @import("value.zig");
 const object = @import("object.zig");
 const bytecode = @import("bytecode.zig");
 
+const debug_log = false; // Set to true for type feedback diagnostics
+
 /// Observed runtime type classification for type feedback
 pub const ObservedType = enum(u8) {
     none = 0,
@@ -403,7 +405,7 @@ pub fn analyzeLoopTypes(
     for (loop.binary_op_sites[0..loop.binary_op_count]) |site_idx| {
         if (site_idx == 0xFFFF) continue;
         if (site_idx >= tf.sites.len) {
-            std.debug.print("[TF] analyzeLoopTypes: site_idx={} >= sites.len={}\n", .{ site_idx, tf.sites.len });
+            if (comptime debug_log) std.debug.print("[TF] analyzeLoopTypes: site_idx={} >= sites.len={}\n", .{ site_idx, tf.sites.len });
             loop.all_smi = false;
             return false;
         }
@@ -412,7 +414,7 @@ pub fn analyzeLoopTypes(
 
         // Must be monomorphic SMI
         if (!site.isMonomorphic()) {
-            std.debug.print("[TF] analyzeLoopTypes: site {} not monomorphic (count={} hits={})\n", .{
+            if (comptime debug_log) std.debug.print("[TF] analyzeLoopTypes: site {} not monomorphic (count={} hits={})\n", .{
                 site_idx,
                 site.count,
                 site.total_hits,
@@ -421,12 +423,12 @@ pub fn analyzeLoopTypes(
             return false;
         }
         const dom_type = site.dominantType() orelse {
-            std.debug.print("[TF] analyzeLoopTypes: site {} no dominant type\n", .{site_idx});
+            if (comptime debug_log) std.debug.print("[TF] analyzeLoopTypes: site {} no dominant type\n", .{site_idx});
             loop.all_smi = false;
             return false;
         };
         if (dom_type != .smi) {
-            std.debug.print("[TF] analyzeLoopTypes: site {} not SMI (type={s})\n", .{
+            if (comptime debug_log) std.debug.print("[TF] analyzeLoopTypes: site {} not SMI (type={s})\n", .{
                 site_idx,
                 @tagName(dom_type),
             });

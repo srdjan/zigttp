@@ -97,7 +97,7 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 
 #### String Optimizations
 
-**Lazy String Hashing** (`zts/string.zig:18-24, 44-54`): Hash computation deferred until actually needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access. Reduces overhead for strings never used as hash keys.
+**Lazy String Hashing** (`zts/string.zig:18-24, 44-54`): Hash computation deferred until actually needed. Both `JSString` and `SliceString` use a `hash_computed` flag to track state; `getHash()`/`getHashConst()` compute on first access. Reduces overhead for strings never used as hash keys.
 
 **Pre-interned HTTP Atoms** (`zts/object.zig:237-264`): 27 common headers with O(1) lookup:
 - Basic: content-type, content-length, accept, host, user-agent, authorization
@@ -162,7 +162,7 @@ zigttp uses a two-layer fail-fast validation system to detect unsupported JavaSc
    - Runs for all files (after stripping for TS files)
    - Provides consistent error messages regardless of file type
 
-See [zts/FEATURE_DETECTION.md](docs/FEATURE_DETECTION.md) for the complete matrix of detected features.
+See [feature-detection.md](docs/feature-detection.md) for the complete matrix of detected features.
 
 All error messages follow the pattern: "'feature' is not supported; use X instead"
 
@@ -217,6 +217,20 @@ Tests live alongside code using Zig `test "..."` blocks (no separate test direct
 
 **Path Traversal Prevention**: `isPathSafe()` in server.zig validates static file paths.
 
-## Zig Idioms
+## Language & Style
 
-For Zig-specific patterns (allocators, error unions, comptime, data-oriented design), consult `.codex/skills/zig-expert/SKILL.md`.
+Primary language: **Zig**. All new code should be written in Zig unless the existing file is JavaScript/TypeScript (handler examples, JSX). Consult `/mnt/skills/user/zig-expert/SKILL.md` for Zig-specific patterns (allocators, error unions, comptime, data-oriented design).
+
+## Workflow Conventions
+
+When asked to create a plan, outline, or document, produce a draft structure/skeleton FIRST before deep-diving into codebase exploration. Show incremental output early.
+
+## Performance Work
+
+Before implementing an optimization, always benchmark the current state first and compare against the target metrics. If targets are already met, report that immediately rather than proceeding with implementation.
+
+## Benchmarks
+
+JS/TS benchmark scripts and historical results live in the separate `../zigttp-bench` repository. The Zig-native benchmark harness remains in `src/benchmark.zig` and runs via `zig build bench`.
+
+When performance benchmarks are needed (profiling, regression detection, comparative analysis), use the `../zigttp-bench` repo. Do not create benchmark scripts in this repository.

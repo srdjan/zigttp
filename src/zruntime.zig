@@ -292,6 +292,42 @@ pub const Runtime = struct {
         );
         try console_obj.setProperty(self.allocator, pool, error_atom, error_func.toValue());
 
+        // Add console.warn (aliases to stderr like console.error)
+        const warn_atom = try self.ctx.atoms.intern("warn");
+        const warn_func = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            consoleError,
+            warn_atom,
+            0,
+        );
+        try console_obj.setProperty(self.allocator, pool, warn_atom, warn_func.toValue());
+
+        // Add console.info (aliases to console.log)
+        const info_atom = try self.ctx.atoms.intern("info");
+        const info_func = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            consoleLog,
+            info_atom,
+            0,
+        );
+        try console_obj.setProperty(self.allocator, pool, info_atom, info_func.toValue());
+
+        // Add console.debug (aliases to console.log)
+        const debug_atom = try self.ctx.atoms.intern("debug");
+        const debug_func = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            consoleLog,
+            debug_atom,
+            0,
+        );
+        try console_obj.setProperty(self.allocator, pool, debug_atom, debug_func.toValue());
+
         // Track for cleanup in Context.deinit
         try self.ctx.builtin_objects.append(self.allocator, console_obj);
 

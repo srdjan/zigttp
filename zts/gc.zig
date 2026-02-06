@@ -221,6 +221,10 @@ pub const TenuredHeap = struct {
             if (obj_idx < self.objects.items.len) {
                 const obj_opt = self.objects.items[obj_idx];
                 if (obj_opt) |obj| {
+                    // Read header BEFORE freeing - freeRaw clobbers the memory
+                    const header: *heap.MemBlockHeader = @ptrCast(@alignCast(obj));
+                    const size = accountedBytesForHeader(header);
+
                     // Call optional callback first (for finalizers)
                     if (free_callback) |cb| {
                         cb(obj);
@@ -239,8 +243,6 @@ pub const TenuredHeap = struct {
                     _ = self.object_index.remove(obj);
                     self.objects.items[obj_idx] = null;
                     self.free_indices.append(self.allocator, obj_idx) catch {};
-                    const header: *heap.MemBlockHeader = @ptrCast(@alignCast(obj));
-                    const size = accountedBytesForHeader(header);
                     self.allocated -|= size;
                     self.last_sweep_freed_bytes += size;
                 }

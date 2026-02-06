@@ -1297,7 +1297,7 @@ pub const Parser = struct {
             // Unary operators
             .bang => self.parseUnaryOp(.not),
             .tilde => self.parseUnaryOp(.bit_not),
-            .plus => self.parseUnaryOp(.neg), // Actually +, but often optimized away
+            .plus => self.parseUnaryOp(.pos), // Unary +: coerce to number
             .minus => self.parseUnaryOp(.neg),
             // Prefix increment/decrement - not supported
             .plus_plus => {

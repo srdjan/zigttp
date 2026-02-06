@@ -307,7 +307,7 @@ pub fn responseRawJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const valu
     }
 
     // Get the pre-serialized JSON string
-    const json_str = try getStringArg(args[0]);
+    const json_str = try getStringArgWithCtx(args[0], ctx);
 
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
@@ -330,7 +330,7 @@ pub fn responseText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
         return createResponse(ctx, "", 200, "text/plain; charset=utf-8");
     }
 
-    const text = try getStringArg(args[0]);
+    const text = try getStringArgWithCtx(args[0], ctx);
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
@@ -352,7 +352,7 @@ pub fn responseHtml(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
         return createResponse(ctx, "", 200, "text/html; charset=utf-8");
     }
 
-    const html = try getStringArg(args[0]);
+    const html = try getStringArgWithCtx(args[0], ctx);
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
@@ -374,7 +374,7 @@ pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
         return value.JSValue.undefined_val;
     }
 
-    const url = try getStringArg(args[0]);
+    const url = try getStringArgWithCtx(args[0], ctx);
     var status: u16 = 302;
     if (args.len > 1 and args[1].isInt()) {
         status = @intCast(args[1].getInt());
@@ -411,7 +411,7 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
 
     // Get body from first argument
     if (args.len > 0 and args[0].isString()) {
-        body = try getStringArg(args[0]);
+        body = try getStringArgWithCtx(args[0], ctx);
     }
 
     // Get init options from second argument
@@ -433,7 +433,7 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
                 const ct_atom = ctx.atoms.intern("Content-Type") catch return createResponse(ctx, body, status, content_type);
                 if (headers_obj.getProperty(pool, ct_atom)) |ct| {
                     if (ct.isString()) {
-                        content_type = try getStringArg(ct);
+                        content_type = try getStringArgWithCtx(ct, ctx);
                     }
                 }
             }
@@ -561,7 +561,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
 
     // Handle string-like values (flat, rope, slice)
     if (node.isStringOrRope()) {
-        const text = try getStringArg(node);
+        const text = try getStringArgWithCtx(node, ctx);
         try escapeHtml(text, writer);
         return;
     }
@@ -664,7 +664,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             // Render children - use raw output for style/script elements
             if (obj.getProperty(pool, .children)) |children| {
                 if (isRawTextElement(tag_data)) {
-                    try renderRawChildren(children, writer);
+                    try renderRawChildren(ctx, children, writer);
                 } else {
                     try renderChildren(ctx, children, writer);
                 }
@@ -684,7 +684,7 @@ fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: anytyp
 
     // Handle string-like children
     if (children.isStringOrRope()) {
-        const text = try getStringArg(children);
+        const text = try getStringArgWithCtx(children, ctx);
         try escapeHtml(text, writer);
         return;
     }
@@ -814,11 +814,11 @@ fn isRawTextElement(tag: []const u8) bool {
 }
 
 /// Render children without HTML escaping (for style/script elements)
-fn renderRawChildren(children: value.JSValue, writer: anytype) !void {
+fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: anytype) !void {
     if (children.isNull() or children.isUndefined()) return;
 
     if (children.isStringOrRope()) {
-        const text = try getStringArg(children);
+        const text = try getStringArgWithCtx(children, ctx);
         try writer.writeAll(text);
         return;
     }
@@ -836,7 +836,7 @@ fn renderRawChildren(children: value.JSValue, writer: anytype) !void {
             var i: u32 = 0;
             while (i < len) : (i += 1) {
                 if (children_obj.getIndex(i)) |child| {
-                    try renderRawChildren(child, writer);
+                    try renderRawChildren(ctx, child, writer);
                 }
             }
         }
@@ -848,7 +848,13 @@ fn renderRawChildren(children: value.JSValue, writer: anytype) !void {
 // ============================================================================
 
 /// Get string data from a JSValue (handles flat strings, ropes, and slices)
+/// When ctx is provided, uses arena allocation for rope flattening to avoid
+/// leaking c_allocator memory when arena resets.
 fn getStringArg(val: value.JSValue) ![]const u8 {
+    return getStringArgWithCtx(val, null);
+}
+
+fn getStringArgWithCtx(val: value.JSValue, ctx: ?*context.Context) ![]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();
     }
@@ -861,6 +867,16 @@ fn getStringArg(val: value.JSValue) ![]const u8 {
             return rope.payload.leaf.data();
         }
         // Flatten concat rope and cache result
+        // Use arena when available to avoid leaking heap memory on arena reset
+        if (ctx) |c| {
+            if (c.hybrid) |hybrid| {
+                if (rope.flattenWithArena(hybrid.arena)) |flat| {
+                    rope.kind = .leaf;
+                    rope.payload = .{ .leaf = flat };
+                    return flat.data();
+                }
+            }
+        }
         const flat = try rope.flatten(std.heap.c_allocator);
         rope.kind = .leaf;
         rope.payload = .{ .leaf = flat };

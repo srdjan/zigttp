@@ -154,7 +154,7 @@ fn parseSize(str: []const u8) !usize {
     else
         return error.InvalidSizeSuffix;
 
-    return num * multiplier;
+    return std.math.mul(usize, num, multiplier) catch return error.InvalidSize;
 }
 
 fn printHelp() void {

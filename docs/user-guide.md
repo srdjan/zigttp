@@ -1469,12 +1469,18 @@ function handler(request) {
 ### Debugging
 
 ```javascript
-// Use console.log for debugging
+// Console methods for debugging
+// console.log(value)   - stdout
+// console.error(value) - stderr
+// console.warn(value)  - stderr
+// console.info(value)  - stdout
+// console.debug(value) - stdout
+
 function handler(request) {
     console.log("Method:", request.method);
     console.log("Path:", request.url);
     console.log("Headers:", JSON.stringify(request.headers));
-    console.log("Body:", request.body);
+    console.debug("Body:", request.body);
 
     return Response.text("OK");
 }

@@ -499,8 +499,9 @@ pub const SliceString = extern struct {
 
     /// Get cached hash (compute on first use)
     pub fn getHash(self: *SliceString) u64 {
-        if (self.hash == 0) {
+        if (!self.flags.hash_computed) {
             self.hash = hashString(self.data());
+            self.flags.hash_computed = true;
         }
         return self.hash;
     }

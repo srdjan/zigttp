@@ -134,7 +134,7 @@ Options:
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Developer Experience**: Fetch-like Response API (Response.json, Response.text, Response.html), static file serving with LRU cache, CORS support, pool metrics.
+**Developer Experience**: Fetch-like Response API (Response.json, Response.text, Response.html), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
 ## Build-Time Precompilation
 

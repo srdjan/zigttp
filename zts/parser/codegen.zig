@@ -886,21 +886,38 @@ pub const CodeGen = struct {
         try self.emit(.dup);
         self.pushStack(1);
 
-        // Check if null or undefined
+        // Check if null
         try self.emit(.push_null);
+        self.pushStack(1);
+        try self.emit(.strict_eq);
+        self.popStack(1); // strict_eq consumes two, pushes one
+
+        const use_rhs_label = try self.createLabel();
+        try self.emitJump(.if_true, use_rhs_label);
+        self.popStack(1); // if_true consumes the bool
+
+        // Check if undefined
+        try self.emit(.dup);
+        self.pushStack(1);
+        try self.emit(.push_undefined);
         self.pushStack(1);
         try self.emit(.strict_eq);
         self.popStack(1);
 
-        const not_null_label = try self.createLabel();
-        try self.emitJump(.if_false, not_null_label);
+        try self.emitJump(.if_true, use_rhs_label);
         self.popStack(1);
 
+        // Not nullish: keep LHS, skip RHS
+        const end_label = try self.createLabel();
+        try self.emitJump(.goto, end_label);
+
+        // Nullish: drop LHS, evaluate RHS
+        try self.placeLabel(use_rhs_label);
         try self.emit(.drop);
         self.popStack(1);
         try self.emitNode(binary.right);
 
-        try self.placeLabel(not_null_label);
+        try self.placeLabel(end_label);
     }
 
     fn emitUnaryOp(self: *CodeGen, unary: Node.UnaryExpr) !void {
@@ -912,6 +929,7 @@ pub const CodeGen = struct {
                     if (val == std.math.minInt(i32)) break :blk null;
                     break :blk -val;
                 },
+                .pos => val, // Unary + on integer is identity
                 .bit_not => ~val,
                 else => null,
             };
@@ -925,11 +943,11 @@ pub const CodeGen = struct {
 
         const opcode: Opcode = switch (unary.op) {
             .neg => .neg,
+            .pos => .to_number,
             .not => .not,
             .bit_not => .bit_not,
             .typeof_op => .typeof,
             .void_op => .push_undefined,
-            // delete_op removed - parser rejects delete expressions
         };
 
         try self.emit(opcode);

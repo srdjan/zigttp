@@ -88,6 +88,7 @@ pub const UnaryOp = enum(u4) {
     bit_not,
     typeof_op,
     void_op,
+    pos, // Unary +: coerce to number
     // delete_op removed - delete operator not supported
 };
 
@@ -1171,7 +1172,7 @@ pub const IRStore = struct {
                 }
                 const p = node.data.pattern_elem;
                 const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot |
-                    (@as(u32, @intFromEnum(p.binding.kind)) << 30);
+                    (@as(u32, @intFromEnum(p.binding.kind)) << 29);
                 const extra_start = try self.addExtra(&.{
                     @intFromEnum(p.kind),
                     binding_packed,
@@ -1824,7 +1825,7 @@ pub const IrView = struct {
                     .binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
-                        .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start + 3] >> 2))),
+                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start + 3] >> 2))),
                     },
                     .pattern = extra[extra_start + 1],
                     .init = extra[extra_start + 2],
@@ -1888,7 +1889,7 @@ pub const IrView = struct {
                     .binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
-                        .kind = @enumFromInt(@as(u2, @truncate(flags >> 2))),
+                        .kind = @enumFromInt(@as(u3, @truncate(flags >> 2))),
                     },
                     .pattern = extra[extra_start + 2],
                     .iterable = extra[extra_start + 3],
@@ -2023,9 +2024,9 @@ pub const IrView = struct {
                 break :blk .{
                     .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
                     .binding = .{
-                        .scope_id = @truncate(binding_packed >> 16),
+                        .scope_id = @truncate((binding_packed >> 16) & 0x1FFF),
                         .slot = @truncate(binding_packed),
-                        .kind = @enumFromInt(@as(u2, @truncate(binding_packed >> 30))),
+                        .kind = @enumFromInt(@as(u3, @truncate(binding_packed >> 29))),
                     },
                     .key = extra[extra_start + 2],
                     .key_atom = @truncate(extra[extra_start + 3]),

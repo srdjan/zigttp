@@ -120,7 +120,7 @@ Call site and value type profiling for JIT optimization decisions. Early exits w
 
 **Location**: `zts/string.zig:18-24, 44-54`
 
-Hash computation deferred until actually needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access. Reduces overhead for strings never used as hash keys.
+Hash computation deferred until actually needed. Both `JSString` and `SliceString` use a `hash_computed` flag to track state; `getHash()`/`getHashConst()` compute on first access. Reduces overhead for strings never used as hash keys.
 
 **Benefits**:
 - No hash computation for strings only used for comparison

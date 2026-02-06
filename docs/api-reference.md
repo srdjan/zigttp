@@ -107,6 +107,16 @@ Options:
 ./zig-out/bin/zigttp-server --static ./public handler.js
 ```
 
+## Console Methods
+
+```javascript
+console.log(value)    // Print to stdout
+console.error(value)  // Print to stderr
+console.warn(value)   // Print to stderr
+console.info(value)   // Print to stdout
+console.debug(value)  // Print to stdout
+```
+
 ## Advanced Server Configuration (Zig API)
 
 If you embed `Server` directly in Zig code, these `ServerConfig` fields tune performance features:
@@ -498,7 +508,7 @@ See `zts/builtins.zig` for comprehensive examples of native function implementat
 - Object methods (keys, values, assign)
 - Math functions (floor, ceil, round, sqrt, sin, cos)
 - JSON parsing and stringification
-- Console logging
+- Console methods (log, error, warn, info, debug)
 
 ## Build Configuration
 
