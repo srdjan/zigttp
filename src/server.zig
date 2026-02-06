@@ -1054,6 +1054,7 @@ pub const Server = struct {
 
         const qr = try parseQueryString(allocator, parsed_line.query_string);
         errdefer if (qr.storage) |s| allocator.free(s);
+        errdefer if (qr.decoded_storage) |ds| allocator.free(ds);
 
         // Read headers with fast slot population
         var fast_slots = FastHeaderSlots{};
@@ -1089,6 +1090,7 @@ pub const Server = struct {
             .body = body,
             .string_storage = string_storage,
             .query_params_storage = qr.storage,
+            .query_decoded_storage = qr.decoded_storage,
             .connection = fast_slots.connection,
             .content_length = fast_slots.content_length,
             .content_type = fast_slots.content_type,
@@ -1118,6 +1120,7 @@ pub const Server = struct {
 
         const qr = try parseQueryString(allocator, parsed_line.query_string);
         errdefer if (qr.storage) |s| allocator.free(s);
+        errdefer if (qr.decoded_storage) |ds| allocator.free(ds);
 
         // Parse headers with fast slot population
         var fast_slots = FastHeaderSlots{};
@@ -1156,6 +1159,7 @@ pub const Server = struct {
             .body = body,
             .string_storage = string_storage,
             .query_params_storage = qr.storage,
+            .query_decoded_storage = qr.decoded_storage,
             .connection = fast_slots.connection,
             .content_length = fast_slots.content_length,
             .content_type = fast_slots.content_type,
@@ -1484,12 +1488,54 @@ fn copyToStorage(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
 const QueryParseResult = struct {
     storage: ?[]QueryParam,
     params: []const QueryParam,
+    /// Backing buffer for percent-decoded key/value strings.
+    decoded_storage: ?[]u8,
 };
+
+/// Decode percent-encoded bytes and '+' (as space) from `src` into `dest`.
+/// Returns the slice of `dest` actually written.
+fn percentDecode(dest: []u8, src: []const u8) []u8 {
+    var di: usize = 0;
+    var si: usize = 0;
+    while (si < src.len) {
+        if (src[si] == '+') {
+            dest[di] = ' ';
+            di += 1;
+            si += 1;
+        } else if (src[si] == '%' and si + 2 < src.len) {
+            const hi = hexVal(src[si + 1]);
+            const lo = hexVal(src[si + 2]);
+            if (hi != null and lo != null) {
+                dest[di] = (@as(u8, hi.?) << 4) | @as(u8, lo.?);
+                di += 1;
+                si += 3;
+            } else {
+                dest[di] = src[si];
+                di += 1;
+                si += 1;
+            }
+        } else {
+            dest[di] = src[si];
+            di += 1;
+            si += 1;
+        }
+    }
+    return dest[0..di];
+}
+
+fn hexVal(c: u8) ?u4 {
+    return switch (c) {
+        '0'...'9' => @intCast(c - '0'),
+        'a'...'f' => @intCast(c - 'a' + 10),
+        'A'...'F' => @intCast(c - 'A' + 10),
+        else => null,
+    };
+}
 
 /// Parse query parameters from a query string (the part after '?').
 /// Allocates storage for parameters; caller owns the returned storage.
 fn parseQueryString(allocator: std.mem.Allocator, query_string: []const u8) !QueryParseResult {
-    if (query_string.len == 0) return .{ .storage = null, .params = &.{} };
+    if (query_string.len == 0) return .{ .storage = null, .params = &.{}, .decoded_storage = null };
 
     // Count parameters first
     var param_count: usize = 1;
@@ -1500,18 +1546,34 @@ fn parseQueryString(allocator: std.mem.Allocator, query_string: []const u8) !Que
     const qps = try allocator.alloc(QueryParam, param_count);
     errdefer allocator.free(qps);
 
+    // Decoded strings are always <= original length; one buffer suffices.
+    const decode_buf = try allocator.alloc(u8, query_string.len);
+    errdefer allocator.free(decode_buf);
+    var decode_offset: usize = 0;
+
     var qp_idx: usize = 0;
     var pairs = std.mem.splitScalar(u8, query_string, '&');
     while (pairs.next()) |pair| {
         if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
+            const raw_key = pair[0..eq_idx];
+            const raw_val = pair[eq_idx + 1 ..];
+
+            const key_dest = decode_buf[decode_offset..];
+            const decoded_key = percentDecode(key_dest, raw_key);
+            decode_offset += decoded_key.len;
+
+            const val_dest = decode_buf[decode_offset..];
+            const decoded_val = percentDecode(val_dest, raw_val);
+            decode_offset += decoded_val.len;
+
             qps[qp_idx] = .{
-                .key = pair[0..eq_idx],
-                .value = pair[eq_idx + 1 ..],
+                .key = decoded_key,
+                .value = decoded_val,
             };
             qp_idx += 1;
         }
     }
-    return .{ .storage = qps, .params = qps[0..qp_idx] };
+    return .{ .storage = qps, .params = qps[0..qp_idx], .decoded_storage = decode_buf };
 }
 
 /// Fast header slots populated during parsing to avoid O(n) lookups later.
@@ -1571,6 +1633,8 @@ const ParsedRequest = struct {
     string_storage: []u8,
     /// Backing storage for query_params array
     query_params_storage: ?[]QueryParam = null,
+    /// Backing buffer for percent-decoded query param strings
+    query_decoded_storage: ?[]u8 = null,
     /// OPTIMIZATION: Fast slots for commonly accessed headers (avoids O(n) lookup)
     connection: ?[]const u8 = null,
     content_length: ?usize = null,
@@ -1582,6 +1646,7 @@ const ParsedRequest = struct {
         allocator.free(self.string_storage);
         // Free query params storage if allocated
         if (self.query_params_storage) |qps| allocator.free(qps);
+        if (self.query_decoded_storage) |ds| allocator.free(ds);
         // Headers list only - strings are in string_storage
         self.headers.deinit(allocator);
     }
