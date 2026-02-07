@@ -14,6 +14,7 @@
 //! - Nested functions: recursive bytecode serialization
 
 const std = @import("std");
+const compat = @import("compat.zig");
 const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const string = @import("string.zig");
@@ -450,7 +451,7 @@ pub const BytecodeCache = struct {
     cache: std.AutoHashMapUnmanaged(CacheKey, []const u8),
 
     /// Synchronizes cache access across threads
-    lock: std.Thread.RwLock = .{},
+    lock: compat.RwLock = .{},
 
     /// Cache statistics
     hits: std.atomic.Value(u64),

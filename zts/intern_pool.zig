@@ -10,6 +10,7 @@
 //! - Well-known values for common constants
 
 const std = @import("std");
+const compat = @import("compat.zig");
 
 /// First index for dynamically interned values
 pub const FIRST_DYNAMIC_INDEX: u32 = 16;
@@ -638,7 +639,7 @@ test "AtomBridge syncFromAtoms" {
 /// contention becomes measurable.
 pub const ThreadSafeInternPool = struct {
     inner: InternPool,
-    mutex: std.Thread.Mutex,
+    mutex: compat.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) ThreadSafeInternPool {
         return .{

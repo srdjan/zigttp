@@ -13,6 +13,7 @@
 //!   stats.parse_ns = timer.read();
 
 const std = @import("std");
+const compat = @import("compat.zig");
 
 /// Compile-time flag to enable performance statistics collection.
 /// Set to false in production builds to eliminate all overhead.
@@ -27,25 +28,25 @@ pub const enable_opcode_profiling = true;
 // ============================================================================
 
 pub const Timer = struct {
-    start_time: ?std.time.Instant,
+    start_time: ?compat.Instant,
 
     pub fn start() Timer {
         return .{
-            .start_time = std.time.Instant.now() catch null,
+            .start_time = compat.Instant.now() catch null,
         };
     }
 
     /// Read elapsed nanoseconds since start
     pub fn read(self: Timer) u64 {
         const start_instant = self.start_time orelse return 0;
-        const now = std.time.Instant.now() catch return 0;
+        const now = compat.Instant.now() catch return 0;
         return now.since(start_instant);
     }
 
     /// Read and reset timer
     pub fn lap(self: *Timer) u64 {
         const elapsed = self.read();
-        self.start_time = std.time.Instant.now() catch self.start_time;
+        self.start_time = compat.Instant.now() catch self.start_time;
         return elapsed;
     }
 };

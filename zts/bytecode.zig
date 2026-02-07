@@ -3,6 +3,7 @@
 //! Variable-size instruction encoding with versioned format.
 
 const std = @import("std");
+const compat = @import("compat.zig");
 const value = @import("value.zig");
 const type_feedback = @import("type_feedback.zig");
 const object = @import("object.zig");
@@ -1036,7 +1037,7 @@ pub const HotReloadManager = struct {
     /// Allocator
     allocator: std.mem.Allocator,
     /// Mutex for version list updates
-    mutex: std.Thread.Mutex,
+    mutex: compat.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) HotReloadManager {
         return .{

@@ -5,6 +5,7 @@
 //! Usage: zig build bench
 
 const std = @import("std");
+const compat = @import("compat.zig");
 const zruntime = @import("zruntime.zig");
 const zq = @import("zts");
 const Runtime = zruntime.Runtime;
@@ -446,7 +447,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const run_arg = zq.JSValue.fromInt(@intCast(options.bench_iterations));
             const run_args = [_]zq.JSValue{run_arg};
 
-            const start = std.time.Instant.now() catch {
+            const start = compat.Instant.now() catch {
                 std.log.err("Timer not available", .{});
                 return;
             };
@@ -454,7 +455,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.log.err("Benchmark call failed: {}", .{err});
                 return;
             };
-            const end = std.time.Instant.now() catch {
+            const end = compat.Instant.now() catch {
                 std.log.err("Timer not available", .{});
                 return;
             };
@@ -502,7 +503,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const runtime = try Runtime.init(allocator, config);
         // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
 
-        const start = std.time.Instant.now() catch {
+        const start = compat.Instant.now() catch {
             println("Timer not available");
             return;
         };
@@ -512,7 +513,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             continue;
         };
 
-        const end = std.time.Instant.now() catch continue;
+        const end = compat.Instant.now() catch continue;
         const elapsed_ns = end.since(start);
         total_time_ns += elapsed_ns;
 
