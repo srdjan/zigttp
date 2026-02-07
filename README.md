@@ -184,7 +184,7 @@ Benefits:
 
 **Platform Strategy**:
 - **macOS**: Development only (~100ms is acceptable)
-- **Linux**: Production target (sub-20ms goal via static linking)
+- **Linux**: Production target (sub-10ms goal via static linking)
 - **Pre-fork/daemon**: Alternative for sub-millisecond response times
 
 See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detailed profiling analysis and static linking investigation.
@@ -208,39 +208,6 @@ zts implements ES5 with select ES6+ extensions:
 
 See [User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
 
-## Benchmarks
-
-zts outperforms QuickJS in our benchmark suite:
-
-| Benchmark      | zts         | QuickJS    | Improvement |
-| -------------- | ----------- | ---------- | ----------- |
-| stringOps      | 16.3M ops/s | 258K ops/s | 63x faster  |
-| objectCreate   | 8.1M ops/s  | 1.7M ops/s | 4.8x faster |
-| propertyAccess | 13.2M ops/s | 3.4M ops/s | 3.9x faster |
-| httpHandler    | 1.0M ops/s  | 332K ops/s | 3.1x faster |
-
-See [Performance](docs/performance.md) for detailed analysis.
-
-## HTTP Benchmark Comparison
-
-Comparison against Deno 2.6.7 on realistic HTTP workloads (10 concurrent connections, 30s duration):
-
-| Endpoint | Deno RPS | zigttp RPS | zigttp/Deno Ratio |
-|----------|----------|------------|-------------------|
-| GET /api/health | 108,090 | 78,598 | 0.73x |
-| GET /api/echo | 62,769 | 78,988 | **1.26x** |
-| GET /api/greet/world | 107,681 | 78,954 | 0.73x |
-| GET /api/process | 101,532 | 78,671 | 0.77x |
-
-**Key Findings:**
-
-- **Consistent Performance**: zigttp maintains ~79k RPS across all endpoint types, showing predictable performance characteristics
-- **Echo Endpoint Win**: zigttp's minimal implementation excels at simple request/response patterns (26% faster than Deno)
-- **Realistic Workload**: The `/api/process` endpoint includes query parsing, pagination math, and data transformation - both runtimes handle this exceptionally well
-- **Latency**: zigttp shows consistent 0.5ms p99 latency across all endpoints
-
-Platform: Apple M4 Pro, 14 cores, 24GB RAM, macOS 25.2.0
-
 ## License
 
 MIT licensed.
@@ -249,3 +216,4 @@ MIT licensed.
 
 - **zts** - Pure Zig JavaScript engine (part of this project)
 - [Zig](https://ziglang.org/) programming language
+- Codex & Claude
