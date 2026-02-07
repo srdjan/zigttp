@@ -57,33 +57,33 @@ pub const Timer = struct {
 };
 
 pub const Mutex = struct {
-    inner: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER,
+    inner: std.Io.Mutex = .init,
 
     pub fn lock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_lock(&self.inner);
+        self.inner.lockUncancelable(std.Options.debug_io);
     }
 
     pub fn unlock(self: *Mutex) void {
-        _ = std.c.pthread_mutex_unlock(&self.inner);
+        self.inner.unlock(std.Options.debug_io);
     }
 };
 
 pub const RwLock = struct {
-    inner: std.c.pthread_rwlock_t = .{},
+    inner: std.Io.RwLock = .init,
 
     pub fn lock(self: *RwLock) void {
-        _ = std.c.pthread_rwlock_wrlock(&self.inner);
+        self.inner.lockUncancelable(std.Options.debug_io);
     }
 
     pub fn unlock(self: *RwLock) void {
-        _ = std.c.pthread_rwlock_unlock(&self.inner);
+        self.inner.unlock(std.Options.debug_io);
     }
 
     pub fn lockShared(self: *RwLock) void {
-        _ = std.c.pthread_rwlock_rdlock(&self.inner);
+        self.inner.lockSharedUncancelable(std.Options.debug_io);
     }
 
     pub fn unlockShared(self: *RwLock) void {
-        _ = std.c.pthread_rwlock_unlock(&self.inner);
+        self.inner.unlockShared(std.Options.debug_io);
     }
 };

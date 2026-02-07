@@ -117,14 +117,14 @@ const ConnectionPool = struct {
     };
 
     /// Mutex-protected SPMC (single-producer, multiple-consumer) bounded queue.
-    /// Uses adaptive spinning (spin -> short sleep -> longer sleep) for efficiency.
-    /// NOTE: Condition variables had platform-specific issues on macOS; spin-wait is more reliable.
+    /// Workers block on a semaphore when the queue is empty to avoid spin-wait CPU burn.
     const BoundedQueue = struct {
         items: [QUEUE_SIZE]WorkItem,
         head: usize,
         tail: usize,
         count: std.atomic.Value(usize), // Atomic for lock-free count check
         mutex: compat.Mutex,
+        ready: std.Io.Semaphore,
 
         fn init() BoundedQueue {
             return .{
@@ -133,28 +133,33 @@ const ConnectionPool = struct {
                 .tail = 0,
                 .count = std.atomic.Value(usize).init(0),
                 .mutex = .{},
+                .ready = .{},
             };
         }
 
         fn push(self: *BoundedQueue, item: WorkItem) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            // Fast-fail under obvious saturation to keep accept loop non-blocking.
+            if (self.count.load(.acquire) >= QUEUE_SIZE) return false;
 
+            self.mutex.lock();
             const cnt = self.count.load(.acquire);
             if (cnt >= QUEUE_SIZE) {
+                self.mutex.unlock();
                 return false; // Queue full
             }
 
             self.items[self.tail] = item;
             self.tail = (self.tail + 1) % QUEUE_SIZE;
             _ = self.count.fetchAdd(1, .release);
+            self.mutex.unlock();
+            self.ready.post(std.Options.debug_io);
             return true;
         }
 
         fn pop(self: *BoundedQueue, running: *std.atomic.Value(bool)) ?WorkItem {
-            var spin_count: u32 = 0;
-
             while (true) {
+                self.ready.waitUncancelable(std.Options.debug_io);
+
                 self.mutex.lock();
                 const cnt = self.count.load(.acquire);
                 if (cnt > 0) {
@@ -167,21 +172,11 @@ const ConnectionPool = struct {
                 self.mutex.unlock();
 
                 if (!running.load(.acquire)) return null;
-
-                // Adaptive backoff: spin first, then sleep
-                spin_count += 1;
-                if (spin_count < 10) {
-                    std.atomic.spinLoopHint();
-                } else if (spin_count < 100) {
-                    // Short sleep: 1us
-                    const ts = std.c.timespec{ .sec = 0, .nsec = 1000 };
-                    _ = std.c.nanosleep(&ts, null);
-                } else {
-                    // Longer sleep after many attempts: 100us
-                    const ts = std.c.timespec{ .sec = 0, .nsec = 100_000 };
-                    _ = std.c.nanosleep(&ts, null);
-                }
             }
+        }
+
+        fn wakeWorkers(self: *BoundedQueue, n: usize) void {
+            for (0..n) |_| self.ready.post(std.Options.debug_io);
         }
     };
 
@@ -206,6 +201,7 @@ const ConnectionPool = struct {
                 // If spawn fails, clean up already spawned workers
                 // errdefers will handle freeing workers array and destroying self
                 self.running.store(false, .release);
+                self.queue.wakeWorkers(i);
                 for (self.workers[0..i]) |w| w.join();
                 return error.ThreadSpawnFailed;
             };
@@ -216,7 +212,8 @@ const ConnectionPool = struct {
 
     fn deinit(self: *ConnectionPool) void {
         self.running.store(false, .release);
-        // Workers will exit when they see running=false during spin-wait
+        // Wake blocked workers so they can observe running=false and exit.
+        self.queue.wakeWorkers(self.workers.len);
         for (self.workers) |w| w.join();
         self.allocator.free(self.workers);
         self.allocator.destroy(self);
