@@ -232,13 +232,9 @@ pub const TenuredHeap = struct {
 
                     // CRITICAL: Actually free the memory to prevent leak
                     // Objects in tenured were allocated via heap.allocRaw (embedded header).
-                    if (heap_ptr) |h| {
-                        h.freeRaw(obj);
-                    } else {
-                        // Cannot safely free without heap - objects have MemBlockHeader
-                        // This is a programming error: majorGC should be called with heap_ptr
-                        std.log.warn("GC sweep: cannot free object without heap reference (memory leak)", .{});
-                    }
+                    // heap_ptr must be non-null - asserted at sweep entry points.
+                    const h = heap_ptr orelse unreachable;
+                    h.freeRaw(obj);
 
                     _ = self.object_index.remove(obj);
                     self.objects.items[obj_idx] = null;

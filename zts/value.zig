@@ -610,97 +610,83 @@ pub const JSValue = packed struct {
         return null;
     }
 
-    /// Helper: compare two concat ropes by iterating through leaves
+    /// Compare two concat ropes by streaming through leaves in parallel.
+    /// Uses iterative DFS with bounded stacks - no static mutable state.
     fn ropeEqualsRope(a: *const @import("string.zig").RopeNode, b: *const @import("string.zig").RopeNode) bool {
+        const string_mod = @import("string.zig");
+        const RopeNode = string_mod.RopeNode;
+        const max_depth = 64;
+
         if (a.total_len != b.total_len) return false;
 
-        // Simple approach: collect all leaf data from both and compare
-        // A more sophisticated implementation would use iterators
-        var offset_a: usize = 0;
-        var offset_b: usize = 0;
-        return ropeEqualsRopeRecursive(a, b, &offset_a, &offset_b);
-    }
+        // DFS stacks for iterative leaf traversal of each rope
+        var buf_a: [max_depth]*const RopeNode = undefined;
+        var len_a: usize = 1;
+        buf_a[0] = a;
+        var buf_b: [max_depth]*const RopeNode = undefined;
+        var len_b: usize = 1;
+        buf_b[0] = b;
 
-    fn ropeEqualsRopeRecursive(
-        a: *const @import("string.zig").RopeNode,
-        b: *const @import("string.zig").RopeNode,
-        _: *usize,
-        _: *usize,
-    ) bool {
+        // Current leaf data and position within each leaf
+        var data_a: []const u8 = &.{};
+        var pos_a: usize = 0;
+        var data_b: []const u8 = &.{};
+        var pos_b: usize = 0;
 
-        // Get leaf data from both sides
-        const a_leaves = collectLeaves(a);
-        const b_leaves = collectLeaves(b);
-
-        // Compare byte by byte across all leaves
-        var a_idx: usize = 0;
-        var a_pos: usize = 0;
-        var b_idx: usize = 0;
-        var b_pos: usize = 0;
-
-        while (a_idx < a_leaves.len and b_idx < b_leaves.len) {
-            const a_data = a_leaves[a_idx].data();
-            const b_data = b_leaves[b_idx].data();
-
-            while (a_pos < a_data.len and b_pos < b_data.len) {
-                if (a_data[a_pos] != b_data[b_pos]) return false;
-                a_pos += 1;
-                b_pos += 1;
-            }
-
-            if (a_pos >= a_data.len) {
-                a_idx += 1;
-                a_pos = 0;
-            }
-            if (b_pos >= b_data.len) {
-                b_idx += 1;
-                b_pos = 0;
-            }
-        }
-
-        return a_idx >= a_leaves.len and b_idx >= b_leaves.len;
-    }
-
-    /// Helper: collect all leaf strings from a rope (for comparison)
-    /// Returns a bounded array - won't work for very deep ropes
-    fn collectLeaves(node: *const @import("string.zig").RopeNode) []const *const @import("string.zig").JSString {
-        // Use a static buffer for simplicity - real implementation would use allocator
-        const max_leaves = 64;
-        const LeafArray = struct {
-            var leaves: [max_leaves]*const @import("string.zig").JSString = undefined;
-            var count: usize = 0;
-
-            fn reset() void {
-                count = 0;
-            }
-
-            fn add(s: *const @import("string.zig").JSString) void {
-                if (count < max_leaves) {
-                    leaves[count] = s;
-                    count += 1;
+        while (true) {
+            // Advance to next leaf on side A if current is exhausted
+            while (pos_a >= data_a.len) {
+                if (len_a == 0) {
+                    // A is exhausted - B must also be exhausted (lengths match)
+                    return pos_b >= data_b.len and len_b == 0;
+                }
+                len_a -= 1;
+                const node = buf_a[len_a];
+                switch (node.kind) {
+                    .leaf => {
+                        data_a = node.payload.leaf.data();
+                        pos_a = 0;
+                    },
+                    .concat => {
+                        // Push right first so left is popped first (DFS in-order)
+                        if (len_a + 2 > max_depth) return false;
+                        buf_a[len_a] = node.payload.concat.right;
+                        buf_a[len_a + 1] = node.payload.concat.left;
+                        len_a += 2;
+                    },
                 }
             }
 
-            fn get() []const *const @import("string.zig").JSString {
-                return leaves[0..count];
+            // Advance to next leaf on side B if current is exhausted
+            while (pos_b >= data_b.len) {
+                if (len_b == 0) return false; // B exhausted but A has data
+                len_b -= 1;
+                const node = buf_b[len_b];
+                switch (node.kind) {
+                    .leaf => {
+                        data_b = node.payload.leaf.data();
+                        pos_b = 0;
+                    },
+                    .concat => {
+                        if (len_b + 2 > max_depth) return false;
+                        buf_b[len_b] = node.payload.concat.right;
+                        buf_b[len_b + 1] = node.payload.concat.left;
+                        len_b += 2;
+                    },
+                }
             }
-        };
 
-        LeafArray.reset();
-        collectLeavesRecursive(node, LeafArray.add);
-        return LeafArray.get();
-    }
+            // Compare as many bytes as possible from current leaves
+            const remaining_a = data_a.len - pos_a;
+            const remaining_b = data_b.len - pos_b;
+            const chunk = @min(remaining_a, remaining_b);
 
-    fn collectLeavesRecursive(
-        node: *const @import("string.zig").RopeNode,
-        addFn: *const fn (*const @import("string.zig").JSString) void,
-    ) void {
-        switch (node.kind) {
-            .leaf => addFn(node.payload.leaf),
-            .concat => {
-                collectLeavesRecursive(node.payload.concat.left, addFn);
-                collectLeavesRecursive(node.payload.concat.right, addFn);
-            },
+            if (!string_mod.eqlStrings(data_a[pos_a..][0..chunk], data_b[pos_b..][0..chunk])) {
+                return false;
+            }
+
+            pos_a += chunk;
+            pos_b += chunk;
         }
     }
 
@@ -986,4 +972,83 @@ test "JSValue float type checks" {
     try std.testing.expect(!float_val.isInt());
     try std.testing.expect(!float_val.isPtr());
     try std.testing.expect(!float_val.isSpecial());
+}
+
+test "ropeEqualsRope - identical content via many concatenations" {
+    const string = @import("string.zig");
+    const allocator = std.testing.allocator;
+
+    // Build two ropes with identical content "abcabc...abc" (20 repetitions)
+    // Keep under depth-32 rebalance threshold to avoid pre-existing leak in concatRopes
+    const piece = try string.createString(allocator, "abc");
+    defer string.freeString(allocator, piece);
+
+    var rope_a = try string.createRopeLeaf(allocator, piece);
+    var rope_b = try string.createRopeLeaf(allocator, piece);
+
+    for (0..19) |_| {
+        rope_a = try string.concatRopeString(allocator, rope_a, piece);
+        rope_b = try string.concatRopeString(allocator, rope_b, piece);
+    }
+    defer string.freeRope(allocator, rope_a);
+    defer string.freeRope(allocator, rope_b);
+
+    try std.testing.expect(JSValue.ropeEqualsRope(rope_a, rope_b));
+}
+
+test "ropeEqualsRope - different content same length" {
+    const string = @import("string.zig");
+    const allocator = std.testing.allocator;
+
+    const piece_a = try string.createString(allocator, "abc");
+    defer string.freeString(allocator, piece_a);
+    const piece_b = try string.createString(allocator, "abd");
+    defer string.freeString(allocator, piece_b);
+
+    var rope_a = try string.createRopeLeaf(allocator, piece_a);
+    var rope_b = try string.createRopeLeaf(allocator, piece_b);
+
+    for (0..9) |_| {
+        rope_a = try string.concatRopeString(allocator, rope_a, piece_a);
+        rope_b = try string.concatRopeString(allocator, rope_b, piece_b);
+    }
+    defer string.freeRope(allocator, rope_a);
+    defer string.freeRope(allocator, rope_b);
+
+    try std.testing.expect(!JSValue.ropeEqualsRope(rope_a, rope_b));
+}
+
+test "ropeEqualsRope - asymmetric tree structure" {
+    const string = @import("string.zig");
+    const allocator = std.testing.allocator;
+
+    // Build a deep rope: concat each char one at a time
+    const a_str = try string.createString(allocator, "a");
+    defer string.freeString(allocator, a_str);
+    const b_str = try string.createString(allocator, "b");
+    defer string.freeString(allocator, b_str);
+    const c_str = try string.createString(allocator, "c");
+    defer string.freeString(allocator, c_str);
+
+    // Deep rope: ((a + b) + c) + a + b + c ... (20 chars)
+    var deep = try string.createRopeLeaf(allocator, a_str);
+    const chars = [_]*string.JSString{ b_str, c_str, a_str, b_str, c_str };
+    for (0..19) |i| {
+        deep = try string.concatRopeString(allocator, deep, chars[i % chars.len]);
+    }
+    defer string.freeRope(allocator, deep);
+
+    // Shallow rope: split flat content into two halves to make a 2-leaf concat
+    const flat = try deep.flatten(allocator);
+    defer string.freeString(allocator, flat);
+    const flat_data = flat.data();
+    const mid = flat_data.len / 2;
+    const left_str = try string.createString(allocator, flat_data[0..mid]);
+    defer string.freeString(allocator, left_str);
+    const right_str = try string.createString(allocator, flat_data[mid..]);
+    defer string.freeString(allocator, right_str);
+    const shallow = try string.createRopeFromStrings(allocator, left_str, right_str);
+    defer string.freeRope(allocator, shallow);
+
+    try std.testing.expect(JSValue.ropeEqualsRope(deep, shallow));
 }
