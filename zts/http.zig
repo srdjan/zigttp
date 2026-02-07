@@ -272,6 +272,22 @@ pub fn createResponseFromString(
     return resp_obj.toValue();
 }
 
+fn normalizeStatus(default_status: u16, status_val: value.JSValue) u16 {
+    if (!status_val.isInt()) return default_status;
+    const raw = status_val.getInt();
+    if (raw < 100 or raw > 599) return 500;
+    return @intCast(raw);
+}
+
+fn statusFromInitObject(ctx: *context.Context, init: *object.JSObject, default_status: u16) u16 {
+    const pool = ctx.hidden_class_pool orelse return default_status;
+    const status_atom = ctx.atoms.intern("status") catch return default_status;
+    if (init.getProperty(pool, status_atom)) |status_val| {
+        return normalizeStatus(default_status, status_val);
+    }
+    return default_status;
+}
+
 /// Response.json(data) - Create JSON response
 pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
@@ -287,11 +303,7 @@ pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
-        const pool = ctx.hidden_class_pool orelse return createResponseFromString(ctx, json_js, status, "application/json");
-        const status_atom = ctx.atoms.intern("status") catch return createResponseFromString(ctx, json_js, status, "application/json");
-        if (init.getProperty(pool, status_atom)) |s| {
-            if (s.isInt()) status = @intCast(s.getInt());
-        }
+        status = statusFromInitObject(ctx, init, status);
     }
 
     return createResponseFromString(ctx, json_js, status, "application/json");
@@ -312,11 +324,7 @@ pub fn responseRawJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const valu
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
-        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, json_str, status, "application/json");
-        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, json_str, status, "application/json");
-        if (init.getProperty(pool, status_atom)) |s| {
-            if (s.isInt()) status = @intCast(s.getInt());
-        }
+        status = statusFromInitObject(ctx, init, status);
     }
 
     return createResponse(ctx, json_str, status, "application/json");
@@ -334,11 +342,7 @@ pub fn responseText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
-        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, text, status, "text/plain; charset=utf-8");
-        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, text, status, "text/plain; charset=utf-8");
-        if (init.getProperty(pool, status_atom)) |s| {
-            if (s.isInt()) status = @intCast(s.getInt());
-        }
+        status = statusFromInitObject(ctx, init, status);
     }
 
     return createResponse(ctx, text, status, "text/plain; charset=utf-8");
@@ -356,11 +360,7 @@ pub fn responseHtml(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     var status: u16 = 200;
     if (args.len > 1 and args[1].isObject()) {
         const init = object.JSObject.fromValue(args[1]);
-        const pool = ctx.hidden_class_pool orelse return createResponse(ctx, html, status, "text/html; charset=utf-8");
-        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, html, status, "text/html; charset=utf-8");
-        if (init.getProperty(pool, status_atom)) |s| {
-            if (s.isInt()) status = @intCast(s.getInt());
-        }
+        status = statusFromInitObject(ctx, init, status);
     }
 
     return createResponse(ctx, html, status, "text/html; charset=utf-8");
@@ -377,7 +377,7 @@ pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
     const url = try getStringArgWithCtx(args[0], ctx);
     var status: u16 = 302;
     if (args.len > 1 and args[1].isInt()) {
-        status = @intCast(args[1].getInt());
+        status = normalizeStatus(status, args[1]);
     }
 
     // Create response with Location header
@@ -420,10 +420,7 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
         const pool = ctx.hidden_class_pool orelse return createResponse(ctx, body, status, content_type);
 
         // Get status
-        const status_atom = ctx.atoms.intern("status") catch return createResponse(ctx, body, status, content_type);
-        if (init.getProperty(pool, status_atom)) |s| {
-            if (s.isInt()) status = @intCast(s.getInt());
-        }
+        status = statusFromInitObject(ctx, init, status);
 
         // Get headers for content-type
         const headers_atom = ctx.atoms.intern("headers") catch return createResponse(ctx, body, status, content_type);
@@ -552,7 +549,7 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
 }
 
-const RenderError = std.Io.Writer.Error || error{OutOfMemory, ArenaObjectEscape, NoHiddenClassPool};
+const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool };
 
 /// Render a single node to the writer
 fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer) RenderError!void {
@@ -904,14 +901,14 @@ fn estimateJsonSize(val: value.JSValue) usize {
 
 /// Fast integer to string writing (avoids format string parsing overhead)
 fn writeInt(writer: *std.Io.Writer, val: i32) RenderError!void {
-    var n: i32 = val;
+    var n: u32 = if (val < 0)
+        @intCast(-@as(i64, val))
+    else
+        @intCast(val);
     var buf: [12]u8 = undefined; // -2147483648 is 11 chars + null
     var i: usize = buf.len;
 
-    const negative = n < 0;
-    if (negative) {
-        n = -n;
-    }
+    const negative = val < 0;
 
     // Write digits in reverse
     if (n == 0) {
@@ -920,8 +917,8 @@ fn writeInt(writer: *std.Io.Writer, val: i32) RenderError!void {
     } else {
         while (n > 0) {
             i -= 1;
-            buf[i] = @intCast(@as(u32, @intCast(@rem(n, 10))) + '0');
-            n = @divTrunc(n, 10);
+            buf[i] = @intCast((n % 10) + '0');
+            n /= 10;
         }
     }
 
@@ -1114,6 +1111,47 @@ test "createResponse" {
     try std.testing.expectEqual(@as(i32, 200), status.?.getInt());
 }
 
+test "Response helpers normalize invalid status" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const init_obj = try ctx.createObject(null);
+    try ctx.setPropertyChecked(init_obj, .status, value.JSValue.fromInt(42));
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const text_val = try ctx.createString("hello");
+    const resp = try responseText(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        text_val,
+        init_obj.toValue(),
+    });
+    const resp_obj = object.JSObject.fromValue(resp);
+    const pool = ctx.hidden_class_pool.?;
+    const status_opt = resp_obj.getProperty(pool, .status);
+    try std.testing.expect(status_opt != null);
+    const status = status_opt.?;
+    try std.testing.expect(status.isInt());
+    try std.testing.expectEqual(@as(i32, 500), status.getInt());
+
+    const redirect = try responseRedirect(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{
+        try ctx.createString("/next"),
+        value.JSValue.fromInt(-1),
+    });
+    const redirect_obj = object.JSObject.fromValue(redirect);
+    const redirect_status_opt = redirect_obj.getProperty(pool, .status);
+    try std.testing.expect(redirect_status_opt != null);
+    const redirect_status = redirect_status_opt.?;
+    try std.testing.expect(redirect_status.isInt());
+    try std.testing.expectEqual(@as(i32, 500), redirect_status.getInt());
+}
+
 test "escapeHtml" {
     var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer writer.deinit();
@@ -1147,6 +1185,13 @@ test "valueToJson basic" {
         const json = try valueToJson(ctx, value.JSValue.fromInt(42));
         defer allocator.free(json);
         try std.testing.expectEqualStrings("42", json);
+    }
+
+    // Min i32 regression
+    {
+        const json = try valueToJson(ctx, value.JSValue.fromInt(std.math.minInt(i32)));
+        defer allocator.free(json);
+        try std.testing.expectEqualStrings("-2147483648", json);
     }
 
     // Boolean

@@ -1636,8 +1636,13 @@ pub const JSObject = extern struct {
 
     /// Destroy object
     pub fn destroy(self: *JSObject, allocator: std.mem.Allocator) void {
+        // Arena-allocated objects are reclaimed by arena reset/deinit.
+        if (self.flags.is_arena or self.arena_ptr != null) return;
+
         if (self.overflow_slots) |slots| {
             allocator.free(slots[0..self.overflow_capacity]);
+            self.overflow_slots = null;
+            self.overflow_capacity = 0;
         }
         allocator.destroy(self);
     }
@@ -1725,22 +1730,26 @@ pub const JSObject = extern struct {
         const prop_count = pool.getPropertyCount(self.hidden_class_idx);
         var slot_idx: u16 = 0;
         while (slot_idx < prop_count) : (slot_idx += 1) {
-            const val = if (slot_idx < INLINE_SLOT_COUNT)
-                self.inline_slots[slot_idx]
+            const slot_ref: *value.JSValue = if (slot_idx < INLINE_SLOT_COUNT)
+                &self.inline_slots[slot_idx]
             else if (self.overflow_slots) |slots|
-                slots[slot_idx - INLINE_SLOT_COUNT]
+                &slots[slot_idx - INLINE_SLOT_COUNT]
             else
                 continue;
+            const val = slot_ref.*;
 
             // If property is a function object, destroy it recursively
             // (functions like Response constructor may have their own method properties)
             if (val.isObject()) {
                 const obj = val.toPtr(JSObject);
                 if (obj.class_id == .function) {
+                    // Clear slot first to avoid double-destroy when aliases exist.
+                    slot_ref.* = value.JSValue.undefined_val;
                     obj.destroyBuiltin(allocator, pool);
                 }
             } else if (val.isString()) {
                 // Free string values (e.g., Fragment constant)
+                slot_ref.* = value.JSValue.undefined_val;
                 const str = val.toPtr(string.JSString);
                 string.freeString(allocator, str);
             }

@@ -23,6 +23,7 @@
 //! error messages across .ts and .js files (see zts/parser/parse.zig)
 
 const std = @import("std");
+const builtin = @import("builtin");
 const comptime_eval = @import("comptime.zig");
 
 pub const StripError = error{
@@ -66,6 +67,9 @@ pub const StripOptions = struct {
     enable_comptime: bool = false,
     /// Environment for comptime evaluation
     comptime_env: ?ComptimeEnv = null,
+    /// Emit unsupported-feature diagnostics to std.log
+    /// Disabled by default in tests to avoid expected-error log failures.
+    report_errors: bool = !builtin.is_test,
 };
 
 /// Strip TypeScript types from source code
@@ -89,6 +93,7 @@ const Stripper = struct {
     tsx_mode: bool,
     enable_comptime: bool,
     comptime_env: ?ComptimeEnv,
+    report_errors: bool,
 
     // State
     line: u32,
@@ -109,6 +114,7 @@ const Stripper = struct {
             .tsx_mode = options.tsx_mode,
             .enable_comptime = options.enable_comptime,
             .comptime_env = options.comptime_env,
+            .report_errors = options.report_errors,
             .line = 1,
             .col = 1,
             .in_expression = false,
@@ -458,7 +464,7 @@ const Stripper = struct {
 
             if (self.looksLikeTypeStart()) {
                 // Skip to => or {
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{' });
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'});
                 // Check for =>
                 self.skipWhitespaceTracked();
                 if (self.pos + 1 < self.source.len and
@@ -1050,7 +1056,7 @@ const Stripper = struct {
     fn checkUnsupported(self: *Self) StripError!void {
         // Check for decorator first (before keyword check)
         if (self.pos < self.source.len and self.source[self.pos] == '@') {
-            std.log.err("{}:{}: '@decorator' syntax is not supported; use function composition instead", .{ self.line, self.col });
+            if (self.report_errors) std.log.err("{}:{}: '@decorator' syntax is not supported; use function composition instead", .{ self.line, self.col });
             return StripError.UnsupportedDecorator;
         }
 
@@ -1058,7 +1064,7 @@ const Stripper = struct {
         if (keyword == null) return;
 
         if (std.mem.eql(u8, keyword.?, "enum")) {
-            std.log.err("{}:{}: 'enum' is not supported; use object literals or discriminated unions instead", .{ self.line, self.col });
+            if (self.report_errors) std.log.err("{}:{}: 'enum' is not supported; use object literals or discriminated unions instead", .{ self.line, self.col });
             return StripError.UnsupportedEnum;
         }
         if (std.mem.eql(u8, keyword.?, "const")) {
@@ -1069,18 +1075,18 @@ const Stripper = struct {
             const next_kw = self.peekKeyword();
             self.pos = saved;
             if (next_kw != null and std.mem.eql(u8, next_kw.?, "enum")) {
-                std.log.err("{}:{}: 'const enum' is not supported; use object literals or discriminated unions instead", .{ self.line, self.col });
+                if (self.report_errors) std.log.err("{}:{}: 'const enum' is not supported; use object literals or discriminated unions instead", .{ self.line, self.col });
                 return StripError.UnsupportedEnum;
             }
         }
         if (std.mem.eql(u8, keyword.?, "namespace") or std.mem.eql(u8, keyword.?, "module")) {
-            std.log.err("{}:{}: 'namespace' is not supported; use ES6 modules instead", .{ self.line, self.col });
+            if (self.report_errors) std.log.err("{}:{}: 'namespace' is not supported; use ES6 modules instead", .{ self.line, self.col });
             return StripError.UnsupportedNamespace;
         }
         // NOTE: 'class' and 'abstract class' are now handled by the parser (see zts/parser/parse.zig)
         // This ensures consistent error messages for both .ts and .js files
         if (std.mem.eql(u8, keyword.?, "implements")) {
-            std.log.err("{}:{}: 'implements' is not supported; use duck typing or runtime checks instead", .{ self.line, self.col });
+            if (self.report_errors) std.log.err("{}:{}: 'implements' is not supported; use duck typing or runtime checks instead", .{ self.line, self.col });
             return StripError.UnsupportedClass;
         }
         // Class member modifiers - only valid in class context which is already rejected
@@ -1101,7 +1107,7 @@ const Stripper = struct {
             self.col = saved_col;
 
             if (!is_label) {
-                std.log.err("{}:{}: '{s}' modifier is not supported; use naming conventions (e.g., _private) instead", .{ self.line, self.col, keyword.? });
+                if (self.report_errors) std.log.err("{}:{}: '{s}' modifier is not supported; use naming conventions (e.g., _private) instead", .{ self.line, self.col, keyword.? });
                 return StripError.UnsupportedClass;
             }
         }
@@ -1120,7 +1126,7 @@ const Stripper = struct {
             // Word boundary: next char after "any" must not continue the identifier
             const after = self.pos + 3;
             if (after >= self.source.len or !isIdentifierContinue(self.source[after])) {
-                std.log.err("{}:{}: 'any' type is not supported; use specific types (string, number, object) or union types instead", .{ self.line, self.col });
+                if (self.report_errors) std.log.err("{}:{}: 'any' type is not supported; use specific types (string, number, object) or union types instead", .{ self.line, self.col });
                 return StripError.UnsupportedAnyType;
             }
         }

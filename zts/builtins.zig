@@ -3,7 +3,7 @@
 //! Standard library implementation for Object, Array, String, etc.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const compat = @import("compat.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
@@ -74,8 +74,7 @@ pub fn wrap(comptime impl: ImplFn) object.NativeFn {
 
 /// Get object from JSValue, returns null if not an object
 fn getObject(val: value.JSValue) ?*object.JSObject {
-    if (!val.isPtr()) return null;
-    // In a full implementation, we'd check the header type
+    if (!val.isObject()) return null;
     return val.toPtr(object.JSObject);
 }
 
@@ -144,21 +143,20 @@ pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const va
 pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
-    const ts = std.posix.clock_gettime(.REALTIME) catch {
+    const ms = compat.realtimeNowMs() catch {
         return value.JSValue.undefined_val;
     };
-    const ms: i64 = ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
     // Return as float since timestamps exceed i32 range
     return allocFloat(ctx, @floatFromInt(ms));
 }
 
-var perf_time_origin: ?std.time.Instant = null;
+var perf_time_origin: ?compat.Instant = null;
 
 /// performance.now() - Returns milliseconds since time origin (monotonic)
 pub fn performanceNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
-    const now = std.time.Instant.now() catch return value.JSValue.undefined_val;
+    const now = compat.Instant.now() catch return value.JSValue.undefined_val;
     if (perf_time_origin == null) {
         perf_time_origin = now;
         return allocFloat(ctx, 0);
@@ -2739,7 +2737,6 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
     // String search - replace all
     const search = getStringDataCtx(args[0], ctx) orelse return this;
     if (search.len > 0) {
-
         var result = std.ArrayList(u8).empty;
         defer result.deinit(allocator);
         var pos: usize = 0;
@@ -2954,18 +2951,10 @@ pub fn mathRandom(ctx: *context.Context, this: value.JSValue, args: []const valu
     _ = this;
     _ = args;
     if (prng == null) {
-        const now = std.time.Instant.now() catch {
+        const seed = compat.realtimeNowNs() catch {
             prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
             const r = prng.?.random().float(f64);
             return allocFloat(ctx, r);
-        };
-        const seed: u64 = switch (builtin.os.tag) {
-            .windows, .uefi, .wasi => @as(u64, now.timestamp),
-            else => blk: {
-                const sec: u64 = @intCast(now.timestamp.sec);
-                const nsec: u64 = @intCast(now.timestamp.nsec);
-                break :blk (sec * std.time.ns_per_s) + nsec;
-            },
         };
         prng = std.Random.DefaultPrng.init(seed);
     }
@@ -3206,7 +3195,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     // Create Error prototype with toString method
     const error_proto = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethodDynamic(ctx, error_proto, "toString", wrap(errorToString), 0);
-    try ctx.builtin_objects.append(allocator,error_proto);
+    try ctx.builtin_objects.append(allocator, error_proto);
 
     // Create Error constructor
     const error_ctor_func = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(errorConstructor), .Error, 1);
@@ -3310,7 +3299,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, map_proto, "has", wrap(mapHas), 1);
     try addMethodDynamic(ctx, map_proto, "delete", wrap(mapDelete), 1);
     try addMethodDynamic(ctx, map_proto, "clear", wrap(mapClear), 0);
-    try ctx.builtin_objects.append(allocator,map_proto);
+    try ctx.builtin_objects.append(allocator, map_proto);
 
     // Create Map constructor
     const map_ctor = try object.JSObject.createNativeFunction(allocator, pool, root_class_idx, wrap(mapConstructor), .Map, 0);
@@ -4185,6 +4174,12 @@ test "Array.isArray" {
     // Non-object values
     const int_not_array = arrayIsArray(ctx, value.JSValue.undefined_val, &[_]value.JSValue{value.JSValue.fromInt(42)});
     try std.testing.expect(int_not_array.isFalse());
+
+    // Non-object pointer values (e.g. strings) must not be reinterpreted as JSObject
+    const str = try string.createString(allocator, "not an object");
+    defer string.freeString(allocator, str);
+    const str_not_array = arrayIsArray(ctx, value.JSValue.undefined_val, &[_]value.JSValue{value.JSValue.fromPtr(str)});
+    try std.testing.expect(str_not_array.isFalse());
 
     // Empty args
     const empty = arrayIsArray(ctx, value.JSValue.undefined_val, &[_]value.JSValue{});
@@ -5074,8 +5069,8 @@ test "Array.splice delete and insert" {
 
     // splice(1, 2, 99) -> removes [20, 30], inserts 99 -> [10, 99, 40]
     const deleted = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
-        value.JSValue.fromInt(1),  // start
-        value.JSValue.fromInt(2),  // deleteCount
+        value.JSValue.fromInt(1), // start
+        value.JSValue.fromInt(2), // deleteCount
         value.JSValue.fromInt(99), // insert item
     });
 
@@ -5115,7 +5110,7 @@ test "Array.splice with negative start" {
     // splice(-1, 1) -> removes last element -> [10, 20]
     const deleted = arraySplice(ctx, arr.toValue(), &[_]value.JSValue{
         value.JSValue.fromInt(-1), // start = -1 -> index 2
-        value.JSValue.fromInt(1),  // deleteCount
+        value.JSValue.fromInt(1), // deleteCount
     });
 
     const del_obj = object.JSObject.fromValue(deleted);

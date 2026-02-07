@@ -4,6 +4,7 @@
 //! Implements all opcodes from bytecode.zig.
 
 const std = @import("std");
+const compat = @import("compat.zig");
 const value = @import("value.zig");
 const bytecode = @import("bytecode.zig");
 const context = @import("context.zig");
@@ -439,9 +440,9 @@ pub const Interpreter = struct {
         // Get or create the JIT code allocator
         const code_alloc = try self.ctx.getOrCreateCodeAllocator();
 
-        var timer: ?std.time.Timer = null;
+        var timer: ?compat.Timer = null;
         if (context.enable_jit_metrics) {
-            timer = std.time.Timer.start() catch null;
+            timer = compat.Timer.start() catch null;
         }
 
         // Try to compile (pass hidden_class_pool for monomorphic property optimization)
@@ -475,9 +476,9 @@ pub const Interpreter = struct {
         // Get or create the JIT code allocator
         const code_alloc = try self.ctx.getOrCreateCodeAllocator();
 
-        var timer: ?std.time.Timer = null;
+        var timer: ?compat.Timer = null;
         if (context.enable_jit_metrics) {
-            timer = std.time.Timer.start() catch null;
+            timer = compat.Timer.start() catch null;
         }
 
         // Try to compile with optimized tier
@@ -5242,10 +5243,11 @@ test "Interpreter bytecode function call" {
     // Create function object
     const root_class_idx = ctx.root_class_idx;
     const func_obj = try object.JSObject.createBytecodeFunction(allocator, root_class_idx, inner_func, .length);
+    defer func_obj.destroyFull(allocator);
 
     // Register as global "add" (Atom.abs = 95)
-    // The function will be cleaned up by ctx.deinit() -> destroyBuiltin -> destroyFull
     try ctx.setGlobal(.abs, func_obj.toValue());
+    defer ctx.setGlobal(.abs, value.JSValue.undefined_val) catch {};
 
     var interp = Interpreter.init(ctx);
 
