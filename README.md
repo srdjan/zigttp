@@ -19,6 +19,10 @@ A high-performance serverless JavaScript runtime for FaaS deployments, powered b
 - **Small footprint**: 1.2MB binary, 4MB memory, zero runtime dependencies
 - Request isolation via pre-warmed handler pool
 
+### Perfomance
+
+<img src="docs/bench.png" alt="Performance benchmark" width="70%">
+
 ## Quick Start
 
 Build with Zig 0.16.0 or later:
