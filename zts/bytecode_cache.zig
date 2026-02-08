@@ -169,6 +169,9 @@ fn serializePatternDispatch(dispatch: ?*bytecode.PatternDispatchTable, writer: a
         for (d.patterns) |pattern| {
             // Pattern type
             try writer.writeByte(@intFromEnum(pattern.pattern_type));
+            // Route source atom (`url` or `path`)
+            const route_atom_code: u16 = @intCast(@intFromEnum(pattern.url_atom));
+            try writer.writeInt(u16, route_atom_code, .little);
             // URL bytes
             try writer.writeInt(u16, @intCast(pattern.url_bytes.len), .little);
             try writer.writeAll(pattern.url_bytes);
@@ -354,10 +357,23 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
     errdefer allocator.free(patterns);
 
     for (patterns, 0..) |*pattern, i| {
+        pattern.* = .{
+            .pattern_type = .exact,
+            .url_atom = .url,
+            .url_bytes = &.{},
+            .static_body = &.{},
+            .status = 200,
+            .content_type_idx = 0,
+            .prebuilt_response = null,
+            .response_template_prefix = null,
+            .response_template_suffix = null,
+        };
+
         // Pattern type
         pattern.pattern_type = @enumFromInt(try reader.readByte());
-        // URL atom (not used - will be set below based on pattern type)
-        pattern.url_atom = .url;
+        // Route source atom (`url` or `path`)
+        const url_atom_raw = try reader.readInt(u16, .little);
+        pattern.url_atom = @enumFromInt(url_atom_raw);
 
         // URL bytes
         const url_len = try reader.readInt(u16, .little);

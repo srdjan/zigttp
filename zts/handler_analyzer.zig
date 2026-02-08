@@ -5,7 +5,9 @@
 //!
 //! Detectable patterns:
 //! - `if (url === '/api/health') return Response.json({status: 'ok'})`
+//! - `if (path === '/api/health') return Response.json({status: 'ok'})`
 //! - `if (url.indexOf('/api/greet/') === 0) ...` (prefix match)
+//! - `if (path.indexOf('/api/greet/') === 0) ...` (prefix match)
 
 const std = @import("std");
 const bytecode = @import("bytecode.zig");
@@ -31,7 +33,8 @@ pub const HandlerAnalyzer = struct {
 
     // Analysis state
     patterns: std.ArrayList(HandlerPattern),
-    url_binding_slot: ?u16, // Local slot of `url` variable
+    route_binding_slot: ?u16, // Local slot of `url` or `path` variable
+    route_atom: object.Atom, // Which request field is bound (`url` or `path`)
     request_binding_slot: ?u16, // Local slot of request parameter
 
     pub fn init(
@@ -44,7 +47,8 @@ pub const HandlerAnalyzer = struct {
             .ir = ir_view,
             .atoms = atoms,
             .patterns = .{},
-            .url_binding_slot = null,
+            .route_binding_slot = null,
+            .route_atom = .url,
             .request_binding_slot = null,
         };
     }
@@ -62,10 +66,11 @@ pub const HandlerAnalyzer = struct {
         // Handler must have exactly 1 parameter (request)
         if (func.params_count != 1) return null;
 
-        // Find the URL binding in the function body
-        // Pattern: const url = request.url
-        self.findUrlBinding(func.body);
-        if (self.url_binding_slot == null) return null;
+        // Find route binding in function body:
+        //   const url = request.url
+        //   const path = request.path
+        self.findRouteBinding(func.body);
+        if (self.route_binding_slot == null) return null;
 
         // Extract patterns from if-chain in function body
         try self.extractPatternsFromBlock(func.body);
@@ -92,8 +97,8 @@ pub const HandlerAnalyzer = struct {
         return dispatch;
     }
 
-    /// Find `const url = request.url` binding
-    fn findUrlBinding(self: *HandlerAnalyzer, body_node: NodeIndex) void {
+    /// Find `const route = request.url` or `const route = request.path` binding.
+    fn findRouteBinding(self: *HandlerAnalyzer, body_node: NodeIndex) void {
         const tag = self.ir.getTag(body_node) orelse return;
 
         if (tag == .block or tag == .program) {
@@ -101,13 +106,13 @@ pub const HandlerAnalyzer = struct {
             var i: u16 = 0;
             while (i < block.stmts_count) : (i += 1) {
                 const stmt_idx = self.ir.getListIndex(block.stmts_start, i);
-                self.findUrlBindingInStmt(stmt_idx);
-                if (self.url_binding_slot != null) return;
+                self.findRouteBindingInStmt(stmt_idx);
+                if (self.route_binding_slot != null) return;
             }
         }
     }
 
-    fn findUrlBindingInStmt(self: *HandlerAnalyzer, stmt_node: NodeIndex) void {
+    fn findRouteBindingInStmt(self: *HandlerAnalyzer, stmt_node: NodeIndex) void {
         const tag = self.ir.getTag(stmt_node) orelse return;
 
         if (tag == .var_decl) {
@@ -120,12 +125,15 @@ pub const HandlerAnalyzer = struct {
 
             const member = self.ir.getMember(decl.init) orelse return;
 
-            // Check if property is 'url' (atom 168)
-            if (member.property == @intFromEnum(object.Atom.url)) {
-                // This is `const url = something.url`
+            // Check if property is request.url or request.path
+            if (member.property == @intFromEnum(object.Atom.url) or
+                member.property == @intFromEnum(object.Atom.path))
+            {
+                // This is `const route = something.url/path`
                 // Store the binding slot
                 if (decl.binding.kind == .local or decl.binding.kind == .argument) {
-                    self.url_binding_slot = decl.binding.slot;
+                    self.route_binding_slot = decl.binding.slot;
+                    self.route_atom = @enumFromInt(member.property);
                 }
             }
         }
@@ -153,18 +161,18 @@ pub const HandlerAnalyzer = struct {
 
         const if_stmt = self.ir.getIfStmt(stmt_node) orelse return;
 
-        // Analyze condition for URL pattern
-        const url_pattern = self.analyzeCondition(if_stmt.condition) orelse return;
+        // Analyze condition for route pattern
+        const route_pattern = self.analyzeCondition(if_stmt.condition) orelse return;
 
         // For prefix patterns, try to detect template responses (Response.rawJson with concatenation)
-        if (url_pattern.pattern_type == .prefix) {
+        if (route_pattern.pattern_type == .prefix) {
             const template = try self.analyzeTemplateReturn(if_stmt.then_branch);
             if (template != null) {
                 const t = template.?;
                 try self.patterns.append(self.allocator, .{
-                    .pattern_type = url_pattern.pattern_type,
-                    .url_atom = url_pattern.url_atom,
-                    .url_bytes = url_pattern.url_bytes,
+                    .pattern_type = route_pattern.pattern_type,
+                    .url_atom = route_pattern.url_atom,
+                    .url_bytes = route_pattern.url_bytes,
                     .static_body = "", // Not used for templates
                     .status = t.status,
                     .content_type_idx = t.content_type_idx,
@@ -182,9 +190,9 @@ pub const HandlerAnalyzer = struct {
         // Found a static pattern!
         const response = static_response.?;
         try self.patterns.append(self.allocator, .{
-            .pattern_type = url_pattern.pattern_type,
-            .url_atom = url_pattern.url_atom,
-            .url_bytes = url_pattern.url_bytes,
+            .pattern_type = route_pattern.pattern_type,
+            .url_atom = route_pattern.url_atom,
+            .url_bytes = route_pattern.url_bytes,
             .static_body = response.body,
             .status = response.status,
             .content_type_idx = response.content_type_idx,
@@ -240,9 +248,9 @@ pub const HandlerAnalyzer = struct {
             return null;
         }
 
-        // Verify url_side is the url binding
+        // Verify route side matches the discovered route binding
         const binding = self.ir.getBinding(url_side) orelse return null;
-        if (binding.slot != self.url_binding_slot.?) return null;
+        if (binding.slot != self.route_binding_slot.?) return null;
 
         // Get URL string
         const str_idx = self.ir.getStringIdx(str_side) orelse return null;
@@ -253,7 +261,7 @@ pub const HandlerAnalyzer = struct {
 
         return .{
             .pattern_type = .exact,
-            .url_atom = object.Atom.url,
+            .url_atom = self.route_atom,
             .url_bytes = url_bytes,
         };
     }
@@ -287,7 +295,7 @@ pub const HandlerAnalyzer = struct {
         if (obj_tag != .identifier) return null;
 
         const binding = self.ir.getBinding(member.object) orelse return null;
-        if (binding.slot != self.url_binding_slot.?) return null;
+        if (binding.slot != self.route_binding_slot.?) return null;
 
         // Get the prefix string from the argument
         const arg_idx = self.ir.getListIndex(call.args_start, 0);
@@ -301,7 +309,7 @@ pub const HandlerAnalyzer = struct {
 
         return .{
             .pattern_type = .prefix,
-            .url_atom = object.Atom.url,
+            .url_atom = self.route_atom,
             .url_bytes = url_bytes,
         };
     }
@@ -317,6 +325,13 @@ pub const HandlerAnalyzer = struct {
         suffix: []const u8,
         status: u16,
         content_type_idx: u8,
+    };
+
+    const ResponseKind = enum {
+        json_obj,
+        raw_json,
+        text,
+        html,
     };
 
     /// Analyze then branch for template-based Response.rawJson with string concatenation
@@ -469,7 +484,7 @@ pub const HandlerAnalyzer = struct {
         return try self.analyzeResponseCall(return_val);
     }
 
-    /// Analyze Response.json({...}) or Response.text("...")
+    /// Analyze Response.json({...}), Response.rawJson("..."), Response.text("..."), or Response.html("...")
     fn analyzeResponseCall(self: *HandlerAnalyzer, call_node: NodeIndex) !?StaticResponseInfo {
         const tag = self.ir.getTag(call_node) orelse return null;
         if (tag != .call) return null;
@@ -491,52 +506,71 @@ pub const HandlerAnalyzer = struct {
         if (binding.kind != .global) return null;
         if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
 
-        // Check method
-        const content_type_idx: u8 = if (member.property == @intFromEnum(object.Atom.json))
-            0
+        const response_kind: ResponseKind = if (member.property == @intFromEnum(object.Atom.json))
+            .json_obj
+        else if (member.property == @intFromEnum(object.Atom.rawJson))
+            .raw_json
         else if (member.property == @intFromEnum(object.Atom.text))
-            1
+            .text
         else if (member.property == @intFromEnum(object.Atom.html))
-            2
+            .html
         else
             return null;
+
+        const content_type_idx: u8 = switch (response_kind) {
+            .text => 1,
+            .html => 2,
+            .json_obj, .raw_json => 0,
+        };
 
         // Get the first argument
         const arg_idx = self.ir.getListIndex(call.args_start, 0);
 
         // Try to serialize the argument
-        if (content_type_idx == 0) {
-            // JSON - serialize object literal
-            const body = try self.serializeObjectLiteral(arg_idx);
-            if (body == null) return null;
+        switch (response_kind) {
+            .json_obj => {
+                // JSON - serialize object literal
+                const body = try self.serializeObjectLiteral(arg_idx);
+                if (body == null) return null;
 
-            // Check for status in second arg (options object)
-            var status: u16 = 200;
-            if (call.args_count >= 2) {
-                const opts_idx = self.ir.getListIndex(call.args_start, 1);
-                status = self.extractStatusFromOptions(opts_idx) orelse 200;
-            }
+                // Check for status in second arg (options object)
+                var status: u16 = 200;
+                if (call.args_count >= 2) {
+                    const opts_idx = self.ir.getListIndex(call.args_start, 1);
+                    status = self.extractStatusFromOptions(opts_idx) orelse 200;
+                }
 
-            return .{
-                .body = body.?,
-                .status = status,
-                .content_type_idx = content_type_idx,
-            };
-        } else {
-            // Text/HTML - get string literal
-            const arg_tag = self.ir.getTag(arg_idx) orelse return null;
-            if (arg_tag != .lit_string) return null;
+                return .{
+                    .body = body.?,
+                    .status = status,
+                    .content_type_idx = content_type_idx,
+                };
+            },
+            .raw_json, .text, .html => {
+                // Raw JSON/text/html - first arg must be a static string literal
+                const arg_tag = self.ir.getTag(arg_idx) orelse return null;
+                if (arg_tag != .lit_string) return null;
 
-            const str_idx = self.ir.getStringIdx(arg_idx) orelse return null;
-            const str = self.ir.getString(str_idx) orelse return null;
-            const body = try self.allocator.dupe(u8, str);
+                const str_idx = self.ir.getStringIdx(arg_idx) orelse return null;
+                const str = self.ir.getString(str_idx) orelse return null;
+                const body = try self.allocator.dupe(u8, str);
 
-            return .{
-                .body = body,
-                .status = 200,
-                .content_type_idx = content_type_idx,
-            };
+                var status: u16 = 200;
+                if (call.args_count >= 2) {
+                    const opts_idx = self.ir.getListIndex(call.args_start, 1);
+                    status = self.extractStatusFromOptions(opts_idx) orelse 200;
+                }
+
+                return .{
+                    .body = body,
+                    .status = status,
+                    .content_type_idx = content_type_idx,
+                };
+            },
         }
+
+        // Unreachable with current response_kind variants
+        return null;
     }
 
     /// Extract status from options object: {status: 404}
@@ -718,5 +752,5 @@ test "HandlerAnalyzer init and deinit" {
     var analyzer = HandlerAnalyzer.init(allocator, ir_view, null);
     defer analyzer.deinit();
 
-    try std.testing.expect(analyzer.url_binding_slot == null);
+    try std.testing.expect(analyzer.route_binding_slot == null);
 }

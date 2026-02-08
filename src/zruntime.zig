@@ -111,6 +111,8 @@ pub const Runtime = struct {
     interpreter: zq.Interpreter,
     strings: zq.StringTable,
     handler_atom: ?zq.Atom,
+    cached_handler_obj: ?*zq.JSObject,
+    cached_dispatch: ?*const zq.bytecode.PatternDispatchTable,
     config: RuntimeConfig,
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
@@ -178,6 +180,8 @@ pub const Runtime = struct {
             .interpreter = zq.Interpreter.init(ctx),
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
+            .cached_handler_obj = null,
+            .cached_dispatch = null,
             .config = config,
             .owns_resources = true,
             .active_request_id = std.atomic.Value(u64).init(0),
@@ -208,6 +212,8 @@ pub const Runtime = struct {
             .interpreter = zq.Interpreter.init(pool_rt.ctx),
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
+            .cached_handler_obj = null,
+            .cached_dispatch = null,
             .config = config,
             .owns_resources = false,
             .active_request_id = std.atomic.Value(u64).init(0),
@@ -254,6 +260,8 @@ pub const Runtime = struct {
     fn installBindings(self: *Self) !void {
         // Use predefined handler atom
         self.handler_atom = zq.Atom.handler;
+        self.cached_handler_obj = null;
+        self.cached_dispatch = null;
 
         // Install console object
         try self.installConsole();
@@ -425,6 +433,7 @@ pub const Runtime = struct {
 
         // Execute the compiled code to define functions
         _ = try self.interpreter.run(&func);
+        try self.refreshHandlerCache();
 
         return serialized;
     }
@@ -442,6 +451,21 @@ pub const Runtime = struct {
         if (!func_val.isCallable()) return error.NotCallable;
         const func_obj = func_val.toPtr(zq.JSObject);
         return try self.callFunction(func_obj, args);
+    }
+
+    fn refreshHandlerCache(self: *Self) !void {
+        const handler_atom = self.handler_atom orelse return error.NoHandler;
+        const handler_val = self.ctx.getGlobal(handler_atom) orelse return error.NoHandler;
+        if (!handler_val.isCallable()) return error.HandlerNotCallable;
+
+        const handler_obj = handler_val.toPtr(zq.JSObject);
+        self.cached_handler_obj = handler_obj;
+
+        if (handler_obj.getBytecodeFunctionData()) |bc_data| {
+            self.cached_dispatch = bc_data.bytecode.pattern_dispatch;
+        } else {
+            self.cached_dispatch = null;
+        }
     }
 
     /// Load from cached serialized bytecode (Phase 1d: true cache hit with atoms and shapes)
@@ -474,6 +498,7 @@ pub const Runtime = struct {
 
         // Execute the deserialized bytecode
         _ = try self.interpreter.run(result.func);
+        try self.refreshHandlerCache();
     }
 
     /// Serialize bytecode for caching (Phase 1b: cache miss path)
@@ -503,30 +528,15 @@ pub const Runtime = struct {
     }
 
     fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
-        const handler_atom = self.handler_atom orelse return error.NoHandler;
         self.last_request_body_len = if (request.body) |b| b.len else 0;
 
-        // Get handler function from globals
-        const handler_val = self.ctx.getGlobal(handler_atom) orelse {
-            return error.NoHandler;
-        };
-
-        if (!handler_val.isCallable()) {
-            std.log.err(
-                "Handler not callable (int={any} bool={any} string={any} object={any} ptr={any})",
-                .{
-                    handler_val.isInt(),
-                    handler_val.isBool(),
-                    handler_val.isString(),
-                    handler_val.isObject(),
-                    handler_val.isPtr(),
-                },
-            );
-            return error.HandlerNotCallable;
+        if (self.cached_handler_obj == null) {
+            try self.refreshHandlerCache();
         }
+        const handler_obj = self.cached_handler_obj orelse return error.NoHandler;
 
         var tracked = false;
-        if (request_id != 0) {
+        if (builtin.mode == .Debug and request_id != 0) {
             const prev = self.active_request_id.swap(request_id, .acq_rel);
             if (prev != 0) {
                 std.log.err(
@@ -541,19 +551,18 @@ pub const Runtime = struct {
         var reset_after = true;
         defer if (reset_after) self.resetForNextRequest();
 
-        // Get handler function object for fast path check
-        const handler_obj = handler_val.toPtr(zq.JSObject);
-
         // === FAST PATH: Native dispatch for static routes ===
-        if (handler_obj.getBytecodeFunctionData()) |bc_data| {
-            const func_bc = bc_data.bytecode;
-            if (func_bc.pattern_dispatch) |dispatch| {
-                if (self.tryFastPathDispatch(dispatch, request.url, borrow_body)) |response| {
-                    if (borrow_body and response.requires_runtime) {
-                        reset_after = false;
-                    }
-                    return response;
-                }
+        if (self.cached_dispatch) |dispatch| {
+            if (self.tryFastPathDispatch(
+                dispatch,
+                request.url,
+                request.path,
+                borrow_body,
+            )) |response| {
+                // Native fast-path dispatch does not execute JS bytecode or allocate
+                // request JS objects, so runtime reset is unnecessary on this path.
+                reset_after = false;
+                return response;
             }
         }
 
@@ -623,25 +632,33 @@ pub const Runtime = struct {
         self: *Self,
         dispatch: *const zq.bytecode.PatternDispatchTable,
         url: []const u8,
+        path: []const u8,
         borrow_body: bool,
     ) ?HttpResponse {
+        const effective_path = if (path.len > 0) path else url;
+
         // O(1) exact match via hash lookup
-        const url_hash = std.hash.Wyhash.hash(0, url);
-        if (dispatch.exact_match_map.get(url_hash)) |idx| {
-            const pattern = &dispatch.patterns[idx];
-            // Verify match (handle hash collision)
-            if (pattern.pattern_type == .exact and std.mem.eql(u8, url, pattern.url_bytes)) {
-                return self.buildFastResponse(pattern, borrow_body) catch null;
+        if (self.tryFastExactMatch(dispatch, .url, url, borrow_body)) |response| {
+            return response;
+        }
+        if (!std.mem.eql(u8, effective_path, url)) {
+            if (self.tryFastExactMatch(dispatch, .path, effective_path, borrow_body)) |response| {
+                return response;
             }
         }
 
         // Linear scan for prefix matches (typically 2-3 patterns)
         for (dispatch.patterns) |*pattern| {
             if (pattern.pattern_type == .prefix) {
-                if (std.mem.startsWith(u8, url, pattern.url_bytes)) {
+                const target = switch (pattern.url_atom) {
+                    .path => effective_path,
+                    else => url,
+                };
+
+                if (std.mem.startsWith(u8, target, pattern.url_bytes)) {
                     // Check if we have a template for native interpolation
                     if (pattern.response_template_prefix != null) {
-                        const param = url[pattern.url_bytes.len..];
+                        const param = target[pattern.url_bytes.len..];
                         return self.buildTemplatedResponse(pattern, param) catch null;
                     }
                     // No template - fall back to bytecode
@@ -651,6 +668,25 @@ pub const Runtime = struct {
         }
 
         return null; // Fall back to bytecode execution
+    }
+
+    fn tryFastExactMatch(
+        self: *Self,
+        dispatch: *const zq.bytecode.PatternDispatchTable,
+        route_atom: zq.Atom,
+        target: []const u8,
+        borrow_body: bool,
+    ) ?HttpResponse {
+        const target_hash = std.hash.Wyhash.hash(0, target);
+        const idx = dispatch.exact_match_map.get(target_hash) orelse return null;
+        const pattern = &dispatch.patterns[idx];
+
+        // Verify atom + bytes (handle hash collision)
+        if (pattern.pattern_type != .exact) return null;
+        if (pattern.url_atom != route_atom) return null;
+        if (!std.mem.eql(u8, target, pattern.url_bytes)) return null;
+
+        return self.buildFastResponse(pattern, borrow_body) catch null;
     }
 
     /// Build a response by interpolating a dynamic parameter into a template.
@@ -764,6 +800,17 @@ pub const Runtime = struct {
         return @intCast(result);
     }
 
+    fn headerKeyToAtom(key: []const u8) ?zq.Atom {
+        if (ascii.eqlIgnoreCase(key, "accept")) return .accept;
+        if (ascii.eqlIgnoreCase(key, "host")) return .host;
+        if (ascii.eqlIgnoreCase(key, "user-agent")) return .@"user-agent";
+        if (ascii.eqlIgnoreCase(key, "content-type")) return .@"content-type";
+        if (ascii.eqlIgnoreCase(key, "connection")) return .connection;
+        if (ascii.eqlIgnoreCase(key, "accept-encoding")) return .@"accept-encoding";
+        if (ascii.eqlIgnoreCase(key, "authorization")) return .authorization;
+        return null;
+    }
+
     fn createRequestObject(self: *Self, request: HttpRequestView) !zq.JSValue {
         // Use pre-shaped request object for faster creation (direct slot access).
         // http_shapes is initialized by default (use_http_shape_cache = true).
@@ -784,8 +831,12 @@ pub const Runtime = struct {
         req_obj.setSlot(shapes.request.method_slot, method_val);
 
         // Path - URL without query string
-        const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
-        req_obj.setSlot(shapes.request.path_slot, path_str);
+        const path_slice = if (request.path.len > 0) request.path else request.url;
+        const path_val: zq.JSValue = if (std.mem.eql(u8, path_slice, request.url))
+            url_str
+        else
+            try self.ctx.createString(path_slice);
+        req_obj.setSlot(shapes.request.path_slot, path_val);
 
         // Query - create object from parsed query parameters
         const query_obj = try self.ctx.createObject(null);
@@ -811,7 +862,8 @@ pub const Runtime = struct {
         if (request.headers.items.len > 0) {
             const headers_obj = try self.ctx.createObject(null);
             for (request.headers.items) |header| {
-                const key_atom = try self.ctx.atoms.intern(header.key);
+                const key_atom = headerKeyToAtom(header.key) orelse
+                    try self.ctx.atoms.intern(header.key);
                 const value_str = try self.ctx.createString(header.value);
                 try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
             }
@@ -835,8 +887,12 @@ pub const Runtime = struct {
             try self.ctx.createString(request.method);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.method, method_val);
 
-        const path_str = try self.ctx.createString(if (request.path.len > 0) request.path else request.url);
-        try self.ctx.setPropertyChecked(req_obj, zq.Atom.path, path_str);
+        const path_slice = if (request.path.len > 0) request.path else request.url;
+        const path_val: zq.JSValue = if (std.mem.eql(u8, path_slice, request.url))
+            url_str
+        else
+            try self.ctx.createString(path_slice);
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.path, path_val);
 
         const query_obj = try self.ctx.createObject(null);
         for (request.query_params) |param| {
@@ -857,7 +913,8 @@ pub const Runtime = struct {
         if (request.headers.items.len > 0) {
             const headers_obj = try self.ctx.createObject(null);
             for (request.headers.items) |header| {
-                const key_atom = try self.ctx.atoms.intern(header.key);
+                const key_atom = headerKeyToAtom(header.key) orelse
+                    try self.ctx.atoms.intern(header.key);
                 const value_str = try self.ctx.createString(header.value);
                 try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
             }
@@ -1201,6 +1258,7 @@ pub const HandlerPool = struct {
     embedded_bytecode: ?[]const u8,
 
     const Self = @This();
+    const collect_pool_metrics = builtin.mode == .Debug;
 
     pub const ResponseHandle = struct {
         response: HttpResponse,
@@ -1290,13 +1348,18 @@ pub const HandlerPool = struct {
 
     /// Execute handler with a request (acquire, run, release)
     pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
-        const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
+        const request_id: u64 = if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
         const base_rt = try self.acquireForRequest();
         defer {
             self.releaseForRequest(base_rt);
         }
-        var exec_timer = compat.Timer.start() catch null;
-        defer if (exec_timer) |*t| self.recordExec(t.read());
+        var exec_timer: ?compat.Timer = null;
+        if (collect_pool_metrics) {
+            exec_timer = compat.Timer.start() catch null;
+        }
+        defer if (collect_pool_metrics) {
+            if (exec_timer) |*t| self.recordExec(t.read());
+        };
 
         var attempt: u8 = 0;
         var last_err: ?anyerror = null;
@@ -1319,11 +1382,16 @@ pub const HandlerPool = struct {
     /// Execute handler and return a response handle that borrows JS strings.
     /// Caller must call handle.deinit() after sending the response.
     pub fn executeHandlerBorrowed(self: *Self, request: HttpRequestView) !ResponseHandle {
-        const request_id = self.request_seq.fetchAdd(1, .acq_rel) + 1;
+        const request_id: u64 = if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
         const base_rt = try self.acquireForRequest();
         errdefer self.releaseForRequest(base_rt);
-        var exec_timer = compat.Timer.start() catch null;
-        defer if (exec_timer) |*t| self.recordExec(t.read());
+        var exec_timer: ?compat.Timer = null;
+        if (collect_pool_metrics) {
+            exec_timer = compat.Timer.start() catch null;
+        }
+        defer if (collect_pool_metrics) {
+            if (exec_timer) |*t| self.recordExec(t.read());
+        };
 
         var attempt: u8 = 0;
         var last_err: ?anyerror = null;
@@ -1416,7 +1484,10 @@ pub const HandlerPool = struct {
     }
 
     fn acquireForRequest(self: *Self) !*zq.LockFreePool.Runtime {
-        var wait_timer = compat.Timer.start() catch null;
+        var wait_timer: ?compat.Timer = null;
+        if (self.acquire_timeout_ms > 0 or collect_pool_metrics) {
+            wait_timer = compat.Timer.start() catch null;
+        }
         const timeout_ns: u64 = @as(u64, self.acquire_timeout_ms) * std.time.ns_per_ms;
 
         // Adaptive backoff parameters:
@@ -1455,14 +1526,18 @@ pub const HandlerPool = struct {
                 // Check timeout first
                 if (self.acquire_timeout_ms == 0) {
                     _ = self.exhausted_count.fetchAdd(1, .monotonic);
-                    if (wait_timer) |*t| self.recordWait(t.read());
+                    if (collect_pool_metrics) {
+                        if (wait_timer) |*t| self.recordWait(t.read());
+                    }
                     return error.PoolExhausted;
                 }
 
                 if (wait_timer) |*t| {
                     if (t.read() >= timeout_ns) {
                         _ = self.exhausted_count.fetchAdd(1, .monotonic);
-                        self.recordWait(t.read());
+                        if (collect_pool_metrics) {
+                            self.recordWait(t.read());
+                        }
                         return error.PoolExhausted;
                     }
                 }
@@ -1470,7 +1545,9 @@ pub const HandlerPool = struct {
                 // Circuit breaker: fail fast after max retries
                 if (retry_count > max_retries) {
                     _ = self.exhausted_count.fetchAdd(1, .monotonic);
-                    if (wait_timer) |*t| self.recordWait(t.read());
+                    if (collect_pool_metrics) {
+                        if (wait_timer) |*t| self.recordWait(t.read());
+                    }
                     return error.PoolExhausted;
                 }
 
@@ -1505,10 +1582,14 @@ pub const HandlerPool = struct {
 
         const rt = zq.pool.acquireWithCache(&self.pool) catch |err| {
             _ = self.in_use.fetchSub(1, .monotonic);
-            if (wait_timer) |*t| self.recordWait(t.read());
+            if (collect_pool_metrics) {
+                if (wait_timer) |*t| self.recordWait(t.read());
+            }
             return err;
         };
-        if (wait_timer) |*t| self.recordWait(t.read());
+        if (collect_pool_metrics) {
+            if (wait_timer) |*t| self.recordWait(t.read());
+        }
         return rt;
     }
 

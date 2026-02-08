@@ -53,22 +53,20 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.posix.close(fd);
 
-    const stat = try std.posix.fstat(fd);
-    const file_size: usize = @intCast(@max(0, stat.size));
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
 
-    if (file_size > max_size) return error.FileTooBig;
-
-    const buffer = try allocator.alloc(u8, file_size);
-    errdefer allocator.free(buffer);
-
-    var total_read: usize = 0;
-    while (total_read < file_size) {
-        const bytes_read = try std.posix.read(fd, buffer[total_read..]);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const bytes_read = try std.posix.read(fd, &chunk);
         if (bytes_read == 0) break;
-        total_read += bytes_read;
+        if (buffer.items.len + bytes_read > max_size) {
+            return error.FileTooBig;
+        }
+        try buffer.appendSlice(allocator, chunk[0..bytes_read]);
     }
 
-    return buffer[0..total_read];
+    return buffer.toOwnedSlice(allocator);
 }
 
 /// Write a file synchronously using posix operations
@@ -83,6 +81,7 @@ fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocat
         0o644,
     );
     defer std.posix.close(fd);
+    if (std.c.ftruncate(fd, 0) != 0) return error.WriteFailure;
 
     var total_written: usize = 0;
     while (total_written < data.len) {

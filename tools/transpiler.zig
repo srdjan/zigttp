@@ -90,7 +90,6 @@ pub const IrTranspiler = struct {
 
     // Current function body for mutability analysis
     current_function_body: NodeIndex,
-
     // Name allocations to free
     name_allocs: std.ArrayList([]const u8),
 
@@ -928,6 +927,8 @@ pub const IrTranspiler = struct {
                 self.emitIndent();
                 self.emitFmt("const {s} = extractRequestField(ctx, req_obj, .{s}) orelse return error.AotBail;\n", .{ name, field_name });
             }
+            self.emitIndent();
+            self.emitFmt("if (false) std.mem.doNotOptimizeAway({s});\n", .{name});
             return false; // Not terminal - variable was successfully declared
         }
 
@@ -950,6 +951,8 @@ pub const IrTranspiler = struct {
             }
             self.transpileIntExpr(decl.init);
             self.emit(";\n");
+            self.emitIndent();
+            self.emitFmt("if (false) std.mem.doNotOptimizeAway({s});\n", .{name});
             return false;
         }
 
@@ -959,6 +962,8 @@ pub const IrTranspiler = struct {
             self.emitFmt("const {s} = ", .{name});
             self.transpileStringExpr(decl.init);
             self.emit(";\n");
+            self.emitIndent();
+            self.emitFmt("if (false) std.mem.doNotOptimizeAway({s});\n", .{name});
             return false;
         }
 

@@ -1192,15 +1192,10 @@ pub const Server = struct {
         const header_section = data[0..header_end];
         const body_start = header_end + 4;
 
-        const storage_size: usize = header_section.len;
-        const string_storage = try allocator.alloc(u8, storage_size);
-        errdefer allocator.free(string_storage);
-        var storage_offset: usize = 0;
-
         // Parse request line
         var lines = std.mem.splitSequence(u8, header_section, "\r\n");
         const request_line = lines.next() orelse return error.InvalidRequest;
-        const parsed_line = try parseRequestLine(string_storage, &storage_offset, request_line);
+        const parsed_line = try parseRequestLineBorrowed(request_line);
 
         const qr = try parseQueryString(allocator, parsed_line.query_string);
         errdefer if (qr.storage) |s| allocator.free(s);
@@ -1209,11 +1204,9 @@ pub const Server = struct {
         // Parse headers with fast slot population
         var fast_slots = FastHeaderSlots{};
         var line_iter = HeaderLineIterator{ .iter = lines };
-        try parseHeadersFromLines(
+        try parseHeadersFromLinesBorrowed(
             allocator,
             self.config.max_headers,
-            string_storage,
-            &storage_offset,
             &headers,
             &fast_slots,
             &line_iter,
@@ -1241,7 +1234,8 @@ pub const Server = struct {
             .query_params = qr.params,
             .headers = headers,
             .body = body,
-            .string_storage = string_storage,
+            .string_storage = &.{},
+            .owns_string_storage = false,
             .query_params_storage = qr.storage,
             .query_decoded_storage = qr.decoded_storage,
             .connection = fast_slots.connection,
@@ -1548,6 +1542,23 @@ fn parseRequestLine(storage: []u8, offset: *usize, request_line: []const u8) !Re
     };
 }
 
+fn parseRequestLineBorrowed(request_line: []const u8) !RequestLine {
+    var parts = std.mem.splitScalar(u8, request_line, ' ');
+    const method = parts.next() orelse return error.InvalidRequest;
+    const url = parts.next() orelse return error.InvalidRequest;
+
+    const query_start = std.mem.indexOf(u8, url, "?");
+    const path = if (query_start) |idx| url[0..idx] else url;
+    const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
+
+    return .{
+        .method = method,
+        .url = url,
+        .path = path,
+        .query_string = query_string,
+    };
+}
+
 fn parseHeadersFromLines(
     allocator: std.mem.Allocator,
     max_headers: usize,
@@ -1562,6 +1573,22 @@ fn parseHeadersFromLines(
         if (line.len == 0) break;
         if (header_count >= max_headers) return error.TooManyHeaders;
         try processHeaderLine(line, storage, offset, headers, allocator, fast_slots);
+        header_count += 1;
+    }
+}
+
+fn parseHeadersFromLinesBorrowed(
+    allocator: std.mem.Allocator,
+    max_headers: usize,
+    headers: *std.ArrayListUnmanaged(HttpHeader),
+    fast_slots: *FastHeaderSlots,
+    line_source: anytype,
+) !void {
+    var header_count: usize = 0;
+    while (try line_source.next()) |line| {
+        if (line.len == 0) break;
+        if (header_count >= max_headers) return error.TooManyHeaders;
+        try processHeaderLineBorrowed(line, headers, allocator, fast_slots);
         header_count += 1;
     }
 }
@@ -1712,6 +1739,32 @@ fn processHeaderLine(
     }
 }
 
+/// Process a single header line without copying key/value slices.
+fn processHeaderLineBorrowed(
+    line: []const u8,
+    headers: *std.ArrayListUnmanaged(HttpHeader),
+    allocator: std.mem.Allocator,
+    fast_slots: *FastHeaderSlots,
+) !void {
+    const header = splitHeaderLine(line) orelse return;
+    const key = header.key;
+    const value = header.value;
+    try headers.append(allocator, .{ .key = key, .value = value });
+
+    if (std.ascii.eqlIgnoreCase(key, "content-length")) {
+        const parsed = try parseContentLengthValue(value);
+        if (fast_slots.content_length) |existing| {
+            if (existing != parsed) return error.DuplicateContentLength;
+        } else {
+            fast_slots.content_length = parsed;
+        }
+    } else if (std.ascii.eqlIgnoreCase(key, "connection")) {
+        fast_slots.connection = value;
+    } else if (std.ascii.eqlIgnoreCase(key, "content-type")) {
+        fast_slots.content_type = value;
+    }
+}
+
 const ParsedRequest = struct {
     method: []const u8,
     url: []const u8,
@@ -1723,6 +1776,7 @@ const ParsedRequest = struct {
     body: ?[]u8,
     /// Batch buffer holding method, url, and header strings (single allocation)
     string_storage: []u8,
+    owns_string_storage: bool = true,
     /// Backing storage for query_params array
     query_params_storage: ?[]QueryParam = null,
     /// Backing buffer for percent-decoded query param strings
@@ -1734,8 +1788,10 @@ const ParsedRequest = struct {
 
     pub fn deinit(self: *ParsedRequest, allocator: std.mem.Allocator) void {
         if (self.body) |b| allocator.free(b);
-        // Free single batch allocation instead of individual strings
-        allocator.free(self.string_storage);
+        if (self.owns_string_storage) {
+            // Free single batch allocation instead of individual strings.
+            allocator.free(self.string_storage);
+        }
         // Free query params storage if allocated
         if (self.query_params_storage) |qps| allocator.free(qps);
         if (self.query_decoded_storage) |ds| allocator.free(ds);
@@ -2013,7 +2069,7 @@ const BufferedReader = struct {
 
 fn findHeaderValue(headers: []const HttpHeader, name: []const u8) ?[]const u8 {
     for (headers) |header| {
-        if (std.mem.eql(u8, header.key, name)) {
+        if (std.ascii.eqlIgnoreCase(header.key, name)) {
             return header.value;
         }
     }
@@ -2365,7 +2421,7 @@ test "parseRequestFromBuffer accepts large header values" {
     defer request.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 2), request.headers.items.len);
-    try std.testing.expectEqualStrings("x-long", request.headers.items[1].key);
+    try std.testing.expectEqualStrings("X-Long", request.headers.items[1].key);
     try std.testing.expectEqualStrings(long_value, request.headers.items[1].value);
 }
 
