@@ -21,7 +21,7 @@ A high-performance serverless JavaScript runtime for FaaS deployments, powered b
 
 ### Perfomance
 
-<img src="docs/bench.png" alt="Performance benchmark" width="70%">
+<img src="docs/bench.jpg" alt="Performance benchmark" width="90%">
 
 ## Quick Start
 
