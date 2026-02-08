@@ -860,12 +860,21 @@ pub const Runtime = struct {
 
         // Headers
         if (request.headers.items.len > 0) {
-            const headers_obj = try self.ctx.createObject(null);
+            const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, null);
             for (request.headers.items) |header| {
                 const key_atom = headerKeyToAtom(header.key) orelse
                     try self.ctx.atoms.intern(header.key);
                 const value_str = try self.ctx.createString(header.value);
-                try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
+                switch (key_atom) {
+                    .authorization => headers_obj.setSlot(shapes.request_headers.authorization_slot, value_str),
+                    .@"content-type" => headers_obj.setSlot(shapes.request_headers.content_type_slot, value_str),
+                    .accept => headers_obj.setSlot(shapes.request_headers.accept_slot, value_str),
+                    .host => headers_obj.setSlot(shapes.request_headers.host_slot, value_str),
+                    .@"user-agent" => headers_obj.setSlot(shapes.request_headers.user_agent_slot, value_str),
+                    .@"accept-encoding" => headers_obj.setSlot(shapes.request_headers.accept_encoding_slot, value_str),
+                    .connection => headers_obj.setSlot(shapes.request_headers.connection_slot, value_str),
+                    else => try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str),
+                }
             }
             req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
         }
@@ -1001,17 +1010,49 @@ pub const Runtime = struct {
                 const headers_val = result_obj.getSlot(shapes.response.headers_slot);
                 if (headers_val.isObject()) {
                     const headers_obj = headers_val.toPtr(zq.JSObject);
-                    const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
-                    defer self.allocator.free(keys);
-                    for (keys) |key_atom| {
-                        const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
-                        const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
-                        if (header_val.isString()) {
-                            const str = header_val.toPtr(zq.JSString);
+                    if (headers_obj.hidden_class_idx == shapes.response_headers.class_idx) {
+                        const ct_val = headers_obj.getSlot(shapes.response_headers.content_type_slot);
+                        if (ct_val.isString()) {
+                            const str = ct_val.toPtr(zq.JSString);
                             if (borrow_body) {
-                                try response.putHeaderBorrowedRuntime(key_name, str.data());
+                                try response.putHeaderBorrowedRuntime("Content-Type", str.data());
                             } else {
-                                try response.putHeader(key_name, str.data());
+                                try response.putHeader("Content-Type", str.data());
+                            }
+                        }
+
+                        const cl_val = headers_obj.getSlot(shapes.response_headers.content_length_slot);
+                        if (cl_val.isString()) {
+                            const str = cl_val.toPtr(zq.JSString);
+                            if (borrow_body) {
+                                try response.putHeaderBorrowedRuntime("content-length", str.data());
+                            } else {
+                                try response.putHeader("content-length", str.data());
+                            }
+                        }
+
+                        const cc_val = headers_obj.getSlot(shapes.response_headers.cache_control_slot);
+                        if (cc_val.isString()) {
+                            const str = cc_val.toPtr(zq.JSString);
+                            if (borrow_body) {
+                                try response.putHeaderBorrowedRuntime("cache-control", str.data());
+                            } else {
+                                try response.putHeader("cache-control", str.data());
+                            }
+                        }
+                    } else {
+                        const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
+                        defer self.allocator.free(keys);
+                        for (keys) |key_atom| {
+                            const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
+                            const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
+                            if (header_val.isString()) {
+                                const str = header_val.toPtr(zq.JSString);
+                                if (borrow_body) {
+                                    try response.putHeaderBorrowedRuntime(key_name, str.data());
+                                } else {
+                                    try response.putHeader(key_name, str.data());
+                                }
                             }
                         }
                     }
@@ -1273,6 +1314,17 @@ pub const HandlerPool = struct {
         }
     };
 
+    pub const WorkerRuntimeLease = struct {
+        runtime: *Runtime,
+        base_rt: *zq.LockFreePool.Runtime,
+        pool: *HandlerPool,
+
+        pub fn deinit(self: *WorkerRuntimeLease) void {
+            self.runtime.resetForNextRequest();
+            self.pool.releaseForRequest(self.base_rt);
+        }
+    };
+
     pub fn init(
         allocator: std.mem.Allocator,
         config: RuntimeConfig,
@@ -1346,9 +1398,26 @@ pub const HandlerPool = struct {
         zq.pool.releaseThreadLocal(&self.pool);
     }
 
+    fn nextRequestId(self: *Self) u64 {
+        return if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
+    }
+
+    /// Acquire and pin a runtime to the current worker thread.
+    /// Caller must release it with lease.deinit().
+    pub fn acquireWorkerRuntime(self: *Self) !WorkerRuntimeLease {
+        const base_rt = try self.acquireForRequest();
+        errdefer self.releaseForRequest(base_rt);
+        const rt = try self.ensureRuntime(base_rt);
+        return .{
+            .runtime = rt,
+            .base_rt = base_rt,
+            .pool = self,
+        };
+    }
+
     /// Execute handler with a request (acquire, run, release)
     pub fn executeHandler(self: *Self, request: HttpRequestView) !HttpResponse {
-        const request_id: u64 = if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
+        const request_id = self.nextRequestId();
         const base_rt = try self.acquireForRequest();
         defer {
             self.releaseForRequest(base_rt);
@@ -1382,7 +1451,7 @@ pub const HandlerPool = struct {
     /// Execute handler and return a response handle that borrows JS strings.
     /// Caller must call handle.deinit() after sending the response.
     pub fn executeHandlerBorrowed(self: *Self, request: HttpRequestView) !ResponseHandle {
-        const request_id: u64 = if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
+        const request_id = self.nextRequestId();
         const base_rt = try self.acquireForRequest();
         errdefer self.releaseForRequest(base_rt);
         var exec_timer: ?compat.Timer = null;
@@ -1412,6 +1481,36 @@ pub const HandlerPool = struct {
                 .base_rt = base_rt,
                 .pool = self,
             };
+        }
+        return last_err orelse error.HandlerNotCallable;
+    }
+
+    /// Execute handler on a worker-pinned runtime lease.
+    /// The caller must reset runtime state after response send.
+    pub fn executeHandlerBorrowedLeased(self: *Self, lease: *WorkerRuntimeLease, request: HttpRequestView) !HttpResponse {
+        const request_id = self.nextRequestId();
+        var exec_timer: ?compat.Timer = null;
+        if (collect_pool_metrics) {
+            exec_timer = compat.Timer.start() catch null;
+        }
+        defer if (collect_pool_metrics) {
+            if (exec_timer) |*t| self.recordExec(t.read());
+        };
+
+        var attempt: u8 = 0;
+        var last_err: ?anyerror = null;
+        while (attempt < 2) : (attempt += 1) {
+            const response = lease.runtime.executeHandlerBorrowedWithId(request, request_id) catch |err| {
+                if (isHandlerInvalid(err)) {
+                    std.log.warn("Leased runtime invalid, rebuilding (err={})", .{err});
+                    self.invalidateRuntime(lease.base_rt);
+                    lease.runtime = try self.ensureRuntime(lease.base_rt);
+                    last_err = err;
+                    continue;
+                }
+                return err;
+            };
+            return response;
         }
         return last_err orelse error.HandlerNotCallable;
     }
@@ -1485,9 +1584,6 @@ pub const HandlerPool = struct {
 
     fn acquireForRequest(self: *Self) !*zq.LockFreePool.Runtime {
         var wait_timer: ?compat.Timer = null;
-        if (self.acquire_timeout_ms > 0 or collect_pool_metrics) {
-            wait_timer = compat.Timer.start() catch null;
-        }
         const timeout_ns: u64 = @as(u64, self.acquire_timeout_ms) * std.time.ns_per_ms;
 
         // Adaptive backoff parameters:
@@ -1532,11 +1628,15 @@ pub const HandlerPool = struct {
                     return error.PoolExhausted;
                 }
 
+                if (wait_timer == null) {
+                    wait_timer = compat.Timer.start() catch null;
+                }
                 if (wait_timer) |*t| {
-                    if (t.read() >= timeout_ns) {
+                    const elapsed = t.read();
+                    if (elapsed >= timeout_ns) {
                         _ = self.exhausted_count.fetchAdd(1, .monotonic);
                         if (collect_pool_metrics) {
-                            self.recordWait(t.read());
+                            self.recordWait(elapsed);
                         }
                         return error.PoolExhausted;
                     }
@@ -1583,12 +1683,20 @@ pub const HandlerPool = struct {
         const rt = zq.pool.acquireWithCache(&self.pool) catch |err| {
             _ = self.in_use.fetchSub(1, .monotonic);
             if (collect_pool_metrics) {
-                if (wait_timer) |*t| self.recordWait(t.read());
+                if (wait_timer) |*t| {
+                    self.recordWait(t.read());
+                } else {
+                    self.recordWait(0);
+                }
             }
             return err;
         };
         if (collect_pool_metrics) {
-            if (wait_timer) |*t| self.recordWait(t.read());
+            if (wait_timer) |*t| {
+                self.recordWait(t.read());
+            } else {
+                self.recordWait(0);
+            }
         }
         return rt;
     }

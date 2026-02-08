@@ -10,7 +10,7 @@ A high-performance serverless JavaScript runtime for FaaS deployments, powered b
 - Support 'light functional programming style' with the strict subset of TypeScript
 - make JSX first class citizen in zts.
 - Native TypeScript "comptime" support, a-la Zig
-- Support asynchronous I/O with async/await and Promises
+- Use Zig asynchronous I/O behind the scenes 
 
 ### Runtime Goals:
 - Experimient with AOT compilation for TypeScript/JavaScript handlers in zigttp, while preserving the JIT/interpreter for strictly dynamic runtime scenarios.

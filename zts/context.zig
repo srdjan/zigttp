@@ -88,6 +88,10 @@ pub const HttpRequestHeadersShape = struct {
     authorization_slot: u16,
     content_type_slot: u16,
     accept_slot: u16,
+    host_slot: u16,
+    user_agent_slot: u16,
+    accept_encoding_slot: u16,
+    connection_slot: u16,
 };
 
 pub const HttpShapeCache = struct {
@@ -367,11 +371,16 @@ pub const Context = struct {
         const content_length_slot = try addProp(pool, &resp_headers_class, .@"content-length");
         const cache_control_slot = try addProp(pool, &resp_headers_class, .@"cache-control");
 
-        // Request headers shape: authorization, Content-Type, accept
+        // Request headers shape for common inbound HTTP headers.
+        // This enables direct slot writes in runtime request object creation.
         var req_headers_class = pool.getEmptyClass();
         const req_auth_slot = try addProp(pool, &req_headers_class, .authorization);
         const req_content_type_slot = try addProp(pool, &req_headers_class, content_type_atom);
         const req_accept_slot = try addProp(pool, &req_headers_class, .accept);
+        const req_host_slot = try addProp(pool, &req_headers_class, .host);
+        const req_user_agent_slot = try addProp(pool, &req_headers_class, .@"user-agent");
+        const req_accept_encoding_slot = try addProp(pool, &req_headers_class, .@"accept-encoding");
+        const req_connection_slot = try addProp(pool, &req_headers_class, .connection);
 
         self.http_shapes = .{
             .request = .{
@@ -402,6 +411,10 @@ pub const Context = struct {
                 .authorization_slot = req_auth_slot,
                 .content_type_slot = req_content_type_slot,
                 .accept_slot = req_accept_slot,
+                .host_slot = req_host_slot,
+                .user_agent_slot = req_user_agent_slot,
+                .accept_encoding_slot = req_accept_encoding_slot,
+                .connection_slot = req_connection_slot,
             },
         };
     }
