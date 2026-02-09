@@ -1881,6 +1881,9 @@ pub fn arraySplice(ctx: *context.Context, this: value.JSValue, args: []const val
 }
 
 /// Array.prototype.indexOf(searchElement, fromIndex?) - Find first index of element
+/// Optimized: scans inline_slots and overflow_slots directly as contiguous u64
+/// arrays, avoiding per-element getIndex overhead (class_id check, length check,
+/// inline/overflow branch, undefined check).
 pub fn arrayIndexOf(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     const obj = getObject(this) orelse return value.JSValue.fromInt(-1);
@@ -1896,18 +1899,99 @@ pub fn arrayIndexOf(ctx: *context.Context, this: value.JSValue, args: []const va
         if (from_idx < 0) from_idx = @max(0, @as(i32, @intCast(len)) + from_idx);
     }
 
-    var i: u32 = @intCast(@max(from_idx, 0));
+    const start: u32 = @intCast(@max(from_idx, 0));
+    if (start >= len) return value.JSValue.fromInt(-1);
+
+    // NaN never equals anything via strict equality
+    if (search_elem.isRawDouble() and std.math.isNan(@as(f64, @bitCast(search_elem.raw)))) {
+        return value.JSValue.fromInt(-1);
+    }
+
+    // Strings and boxed floats need content comparison via strictEquals
+    if (search_elem.isAnyString() or search_elem.isBoxedFloat64()) {
+        return arrayIndexOfSlow(obj, search_elem, start, len);
+    }
+
+    // Fast path: raw u64 comparison for ints, raw floats, bools, null, undefined, object identity
+    return arrayIndexOfRaw(obj, search_elem.raw, start, len);
+}
+
+/// Slow path: compare using strictEquals (for strings and boxed floats)
+fn arrayIndexOfSlow(obj: *const object.JSObject, search_elem: value.JSValue, start: u32, len: u32) value.JSValue {
+    var i: u32 = start;
     while (i < len) : (i += 1) {
-        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
-        if (val.strictEquals(search_elem)) {
+        if (obj.getIndexUnchecked(i).strictEquals(search_elem)) {
             return value.JSValue.fromInt(@intCast(i));
         }
     }
     return value.JSValue.fromInt(-1);
 }
 
+/// Fast path: scan inline and overflow slots as contiguous u64 arrays
+fn arrayIndexOfRaw(obj: *const object.JSObject, search_raw: u64, start: u32, len: u32) value.JSValue {
+    const INLINE_CAP = object.JSObject.INLINE_SLOT_COUNT - 1; // 7 elements inline (slot 0 = length)
+
+    // Scan inline slots (elements 0..min(len, 7))
+    const inline_count = @min(len, INLINE_CAP);
+    if (start < inline_count) {
+        const slots_ptr: [*]const u64 = @ptrCast(&obj.inline_slots);
+        var slot: u32 = start + 1; // slot = element_index + 1
+        const slot_end: u32 = inline_count + 1;
+        while (slot < slot_end) : (slot += 1) {
+            if (slots_ptr[slot] == search_raw) {
+                return value.JSValue.fromInt(@intCast(slot - 1));
+            }
+        }
+    }
+
+    // Scan overflow slots (elements 7..len)
+    if (len > INLINE_CAP) {
+        if (obj.overflow_slots) |overflow| {
+            const begin: u32 = if (start > INLINE_CAP) start - INLINE_CAP else 0;
+            const count: u32 = len - INLINE_CAP;
+            const overflow_ptr: [*]const u64 = @ptrCast(overflow);
+            var i: u32 = begin;
+            while (i < count) : (i += 1) {
+                if (overflow_ptr[i] == search_raw) {
+                    return value.JSValue.fromInt(@intCast(i + INLINE_CAP));
+                }
+            }
+        }
+    }
+
+    return value.JSValue.fromInt(-1);
+}
+
 /// Array.prototype.includes(searchElement, fromIndex?) - Check if array contains element
+/// Uses SameValueZero: NaN matches NaN (unlike indexOf which uses strict equality).
 pub fn arrayIncludes(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    // SameValueZero treats NaN as equal to NaN (unlike ===)
+    if (args.len > 0) {
+        const search = args[0];
+        if (search.isRawDouble() and std.math.isNan(@as(f64, @bitCast(search.raw)))) {
+            const obj = getObject(this) orelse return value.JSValue.false_val;
+            if (obj.class_id != .array) return value.JSValue.false_val;
+            const len = obj.getArrayLength();
+            var i: u32 = 0;
+            if (args.len > 1 and args[1].isInt()) {
+                const from = args[1].getInt();
+                if (from < 0) {
+                    i = @intCast(@max(0, @as(i32, @intCast(len)) + from));
+                } else {
+                    i = @intCast(@max(from, 0));
+                }
+            }
+            while (i < len) : (i += 1) {
+                const val = obj.getIndexUnchecked(i);
+                if (val.isRawDouble() and std.math.isNan(@as(f64, @bitCast(val.raw)))) {
+                    return value.JSValue.true_val;
+                }
+            }
+            return value.JSValue.false_val;
+        }
+    }
+
+    // Non-NaN: SameValueZero is identical to strict equality
     const result = arrayIndexOf(ctx, this, args);
     if (result.isInt() and result.getInt() >= 0) {
         return value.JSValue.true_val;
@@ -1916,6 +2000,8 @@ pub fn arrayIncludes(ctx: *context.Context, this: value.JSValue, args: []const v
 }
 
 /// Array.prototype.join(separator?) - Join elements into string
+/// Optimized: for arrays of integers/simple values, writes directly into a stack
+/// buffer avoiding per-element JSString heap allocations.
 pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     if (obj.class_id != .array) return value.JSValue.undefined_val;
@@ -1927,15 +2013,77 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
         separator = sep_str.data();
     }
 
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
+    // Fast path: build result in a stack buffer (no per-element heap allocation)
+    var buf: [512]u8 = undefined;
+    var pos: usize = 0;
+    var fast_ok = true;
 
     var i: u32 = 0;
     while (i < len) : (i += 1) {
         if (i > 0) {
+            if (pos + separator.len > buf.len) {
+                fast_ok = false;
+                break;
+            }
+            @memcpy(buf[pos..][0..separator.len], separator);
+            pos += separator.len;
+        }
+
+        const val = obj.getIndexUnchecked(i);
+        if (val.isUndefined() or val.isNull()) continue;
+
+        if (val.isInt()) {
+            const written = writeIntToBuf(buf[pos..], val.getInt());
+            if (written == 0) {
+                fast_ok = false;
+                break;
+            }
+            pos += written;
+        } else if (val.isString()) {
+            const data = val.toPtr(string.JSString).data();
+            if (pos + data.len > buf.len) {
+                fast_ok = false;
+                break;
+            }
+            @memcpy(buf[pos..][0..data.len], data);
+            pos += data.len;
+        } else if (val.isStringSlice()) {
+            const data = val.toPtr(string.SliceString).data();
+            if (pos + data.len > buf.len) {
+                fast_ok = false;
+                break;
+            }
+            @memcpy(buf[pos..][0..data.len], data);
+            pos += data.len;
+        } else if (val.isTrue()) {
+            if (pos + 4 > buf.len) { fast_ok = false; break; }
+            @memcpy(buf[pos..][0..4], "true");
+            pos += 4;
+        } else if (val.isFalse()) {
+            if (pos + 5 > buf.len) { fast_ok = false; break; }
+            @memcpy(buf[pos..][0..5], "false");
+            pos += 5;
+        } else {
+            fast_ok = false;
+            break;
+        }
+    }
+
+    if (fast_ok) {
+        const result = createStringForJoin(ctx, buf[0..pos]) orelse return value.JSValue.undefined_val;
+        return value.JSValue.fromPtr(result);
+    }
+
+    // Slow path: use ArrayList with heap-allocated string conversions
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(ctx.allocator);
+
+    i = 0;
+    while (i < len) : (i += 1) {
+        if (i > 0) {
             buffer.appendSlice(ctx.allocator, separator) catch return value.JSValue.undefined_val;
         }
-        const val = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const val = obj.getIndexUnchecked(i);
         if (val.isUndefined() or val.isNull()) {
             continue;
         }
@@ -1943,8 +2091,48 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
         buffer.appendSlice(ctx.allocator, elem_str.data()) catch return value.JSValue.undefined_val;
     }
 
-    const result = string.createString(ctx.allocator, buffer.items) catch return value.JSValue.undefined_val;
+    const result = createStringForJoin(ctx, buffer.items) orelse return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
+}
+
+/// Write an i32 as decimal digits into a buffer. Returns bytes written, or 0 if buffer too small.
+fn writeIntToBuf(buf: []u8, val: i32) usize {
+    if (val == 0) {
+        if (buf.len == 0) return 0;
+        buf[0] = '0';
+        return 1;
+    }
+
+    var n: u64 = if (val < 0) @intCast(-@as(i64, val)) else @intCast(val);
+    var digits: [11]u8 = undefined;
+    var dlen: usize = 0;
+    while (n > 0) {
+        digits[dlen] = @intCast('0' + @as(u8, @truncate(n % 10)));
+        n /= 10;
+        dlen += 1;
+    }
+
+    var out_pos: usize = 0;
+    if (val < 0) {
+        if (buf.len == 0) return 0;
+        buf[0] = '-';
+        out_pos = 1;
+    }
+    if (out_pos + dlen > buf.len) return 0;
+
+    var j: usize = 0;
+    while (j < dlen) : (j += 1) {
+        buf[out_pos + j] = digits[dlen - 1 - j];
+    }
+    return out_pos + dlen;
+}
+
+/// Create a string using arena when available, general allocator otherwise.
+fn createStringForJoin(ctx: *context.Context, data: []const u8) ?*string.JSString {
+    if (ctx.hybrid) |h| {
+        return string.createStringWithArena(h.arena, data);
+    }
+    return string.createString(ctx.allocator, data) catch null;
 }
 
 /// Array.prototype.toReversed() - Return new reversed array (non-mutating)

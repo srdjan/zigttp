@@ -325,6 +325,49 @@ pub const X86Emitter = struct {
         }
     }
 
+    /// MOVZX r64, byte [base + offset] (zero-extend 8-bit load to 64-bit)
+    /// Used for loading class_id and other u8 values
+    pub fn movzxRegMem8(self: *X86Emitter, dst: Register, base: Register, disp: i32) !void {
+        // REX.W for 64-bit destination, plus R/B for extended registers
+        try self.emitRex(true, dst.isExtended(), false, base.isExtended());
+        try self.buffer.append(self.allocator, 0x0F);
+        try self.buffer.append(self.allocator, 0xB6); // MOVZX r64, r/m8
+
+        // ModRM/SIB/disp encoding same pattern as movRegMem
+        if (base == .rsp or base == .r12) {
+            if (disp == 0 and base != .rbp and base != .r13) {
+                try self.emitModRM(0b00, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+            } else if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), 0b100);
+                try self.emitSIB(0, 0b100, base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        } else if (base == .rbp or base == .r13) {
+            if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        } else {
+            if (disp == 0) {
+                try self.emitModRM(0b00, dst.low3(), base.low3());
+            } else if (disp >= -128 and disp <= 127) {
+                try self.emitModRM(0b01, dst.low3(), base.low3());
+                try self.buffer.append(self.allocator, @bitCast(@as(i8, @intCast(disp))));
+            } else {
+                try self.emitModRM(0b10, dst.low3(), base.low3());
+                try self.buffer.appendSlice(self.allocator, &@as([4]u8, @bitCast(disp)));
+            }
+        }
+    }
+
     /// MOVZX r64, word [base + offset] (zero-extend 16-bit load to 64-bit)
     /// Used for loading slot_offset from PIC entries
     pub fn movzxRegMem16(self: *X86Emitter, dst: Register, base: Register, disp: i32) !void {

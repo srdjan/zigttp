@@ -376,6 +376,11 @@ pub const Interpreter = struct {
     /// Each entry can cache up to 4 (hidden_class, slot_offset) pairs
     pic_cache: [IC_CACHE_SIZE]PolymorphicInlineCache,
 
+    /// Distance from current pc to the opcode that initiated the call.
+    /// Default 2 for .call/.call_method (opcode + argc).
+    /// Set to 4 for .push_const_call (opcode + u16 + argc) and .get_field_call.
+    call_opcode_offset: usize = 2,
+
     // JIT profiling counters (Phase 11)
     backedge_count: u32 = 0, // Back-edge counter for hot loop detection
     pic_hits: u32 = 0, // PIC cache hits (type feedback)
@@ -552,6 +557,15 @@ pub const Interpreter = struct {
                     call_site_count += 1;
                     pc += 1; // Skip argc
                 },
+                // Fused call opcodes also need call site feedback
+                .push_const_call => {
+                    call_site_count += 1;
+                    pc += 3; // Skip u16 const_idx + u8 argc
+                },
+                .get_field_call => {
+                    call_site_count += 1;
+                    pc += 3; // Skip u16 atom_idx + u8 argc
+                },
                 // Skip other opcodes based on their encoding
                 else => {
                     pc += getOpcodeSize(op);
@@ -600,6 +614,17 @@ pub const Interpreter = struct {
                     site_map[op_offset] = call_idx | 0x8000;
                     call_idx += 1;
                     pc += 1;
+                },
+                // Fused call opcodes also get call site entries
+                .push_const_call => {
+                    site_map[op_offset] = call_idx | 0x8000;
+                    call_idx += 1;
+                    pc += 3;
+                },
+                .get_field_call => {
+                    site_map[op_offset] = call_idx | 0x8000;
+                    call_idx += 1;
+                    pc += 3;
                 },
                 else => {
                     pc += getOpcodeSize(op);
@@ -718,12 +743,12 @@ pub const Interpreter = struct {
         const tf = func.type_feedback_ptr orelse return;
         const site_map = func.feedback_site_map orelse return;
 
-        // Calculate bytecode offset (pc was already incremented past opcode + argc)
-        // For call: opcode (1) + argc (1) = 2 bytes total
+        // Calculate bytecode offset using the caller-set opcode distance
+        const pc_offset = self.call_opcode_offset;
         const func_code_start = @intFromPtr(func.code.ptr);
         const pc_addr = @intFromPtr(self.pc);
-        if (pc_addr < func_code_start + 2) return;
-        const bc_offset = pc_addr - func_code_start - 2;
+        if (pc_addr < func_code_start + pc_offset) return;
+        const bc_offset = pc_addr - func_code_start - pc_offset;
         if (bc_offset >= site_map.len) return;
 
         const site_idx = site_map[bc_offset];
@@ -2281,8 +2306,11 @@ pub const Interpreter = struct {
                 self.pc += 3;
                 // Push the constant (function to call)
                 try self.ctx.push(try self.getConstant(const_idx));
-                // Call it
+                // Set correct pc-to-opcode distance for call site feedback
+                // push_const_call = opcode(1) + u16(2) + argc(1) = 4 bytes
+                self.call_opcode_offset = 4;
                 try self.doCall(argc, false);
+                self.call_opcode_offset = 2; // restore default
                 return .handled;
             },
             // Fused get_field + call_method: load method and call in one dispatch
@@ -2290,6 +2318,10 @@ pub const Interpreter = struct {
                 const atom_idx = readU16(self.pc);
                 const argc: u8 = self.pc[2];
                 self.pc += 3;
+                // Set correct pc-to-opcode distance for call site feedback
+                // get_field_call = opcode(1) + u16(2) + argc(1) = 4 bytes
+                self.call_opcode_offset = 4;
+                defer self.call_opcode_offset = 2; // restore default
                 const atom: object.Atom = @enumFromInt(atom_idx);
 
                 // Stack: [obj, obj] (dup from codegen)

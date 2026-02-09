@@ -267,6 +267,30 @@ pub const Arm64Emitter = struct {
         }
     }
 
+    /// LDRB Wt, [Xn, #imm] (8-bit load, zero-extends to 64-bit, unscaled)
+    /// Used for loading class_id and other u8 values
+    pub fn ldrbImm(self: *Arm64Emitter, dst: Register, base: Register, offset_bytes: i32) !void {
+        if (offset_bytes >= 0 and offset_bytes <= 4095) {
+            // Unsigned offset form: LDRB Wt, [Xn, #pimm] (no scaling for byte loads)
+            const pimm: u12 = @intCast(offset_bytes);
+            const inst: u32 = 0x39400000 | // size=00, opc=01 for 8-bit load
+                (@as(u32, pimm) << 10) |
+                (@as(u32, base.encode()) << 5) |
+                @as(u32, dst.encode());
+            try self.emit32(inst);
+        } else if (offset_bytes >= -256 and offset_bytes <= 255) {
+            // Unscaled immediate: LDURB Wt, [Xn, #simm9]
+            const simm9: u9 = @bitCast(@as(i9, @intCast(offset_bytes)));
+            const inst: u32 = 0x38400000 |
+                (@as(u32, simm9) << 12) |
+                (@as(u32, base.encode()) << 5) |
+                @as(u32, dst.encode());
+            try self.emit32(inst);
+        } else {
+            return error.OffsetTooLarge;
+        }
+    }
+
     /// LDRH Xt, [Xn, #imm] (16-bit load, zero-extends to 64-bit, scaled by 2)
     /// Used for loading slot_offset from PIC entries
     pub fn ldrhImm(self: *Arm64Emitter, dst: Register, base: Register, offset_bytes: i32) !void {

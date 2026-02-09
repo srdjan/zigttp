@@ -36,6 +36,15 @@ const CTX_STACK_PTR_OFF: i32 = @intCast(@offsetOf(Context, "stack"));
 const CTX_SP_OFF: i32 = @intCast(@offsetOf(Context, "sp"));
 const CTX_FP_OFF: i32 = @intCast(@offsetOf(Context, "fp"));
 
+const JSObject = object.JSObject;
+const OBJ_CLASS_ID_OFF: i32 = @intCast(@offsetOf(JSObject, "class_id"));
+const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
+const OBJ_RANGE_START_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_START)) * 8;
+const OBJ_RANGE_STEP_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_STEP)) * 8;
+const OBJ_RANGE_LENGTH_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_LENGTH)) * 8;
+const PTR_EXTRACT_MASK: u64 = 0x0000_FFFF_FFFF_FFF8;
+const INT_TYPE_MASK: u64 = 0xFFFF_F000_0000_0000;
+
 // Re-use baseline definitions
 pub const Arch = baseline.Arch;
 pub const is_x86_64 = baseline.is_x86_64;
@@ -1440,9 +1449,10 @@ pub const OptimizedCompiler = struct {
 
     // Specialized shift and multiply opcodes
     // NaN-boxing integer encoding:
-    // - Tag: 0xFFFD_0000_0000_0000 (TAG_PREFIX | TYPE_INT with TYPE_SHIFT=44)
+    // TAG_PREFIX = 0xFFFC_0000_0000_0000, TYPE_INT = 1 << 44 = 0x0000_1000_0000_0000
+    // - Tag: 0xFFFC_1000_0000_0000 (TAG_PREFIX | TYPE_INT)
     // - Value: lower 32 bits (signed i32)
-    const INT_TAG: u64 = 0xFFFD_0000_0000_0000;
+    const INT_TAG: u64 = 0xFFFC_1000_0000_0000;
 
     fn emitShr1(self: *OptimizedCompiler) CompileError!void {
         // Shift right by 1 in JS: v >> 1
@@ -1952,62 +1962,213 @@ pub const OptimizedCompiler = struct {
     }
 
     fn emitForOfNext(self: *OptimizedCompiler, target: u32) CompileError!void {
-        const fn_ptr = @intFromPtr(&Context.jitForOfNext);
-        if (is_x86_64) {
-            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
+        const sp = getSpCacheReg();
+        const stack_ptr = getStackPtrCacheReg();
+
+        if (is_aarch64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Load iter_val and idx_val from stack
+            self.emitter.subRegImm12(.x9, sp, 2) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x9, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x10, .x9, 0) catch return CompileError.OutOfMemory; // x10 = iter_val
+            self.emitter.ldrImm(.x11, .x9, 8) catch return CompileError.OutOfMemory; // x11 = idx_val
+
+            // Check iter_val is a pointer: (raw & 7) == 1
+            self.emitter.andRegImm(.x12, .x10, 0b111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer
+            self.emitter.movRegImm64(.x12, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x10, .x10, .x12) catch return CompileError.OutOfMemory;
+
+            // Check memtag == object (1)
+            self.emitter.ldrImmW(.x12, .x10, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x12, .x12, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x12, .x12, 0b1111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check class_id == range_iterator (23)
+            self.emitter.ldrbImm(.x12, .x10, OBJ_CLASS_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 23) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check idx_val is int
+            self.emitter.movRegImm64(.x12, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x13, .x11, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x13, .x12) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract idx and length as u32
+            self.emitter.ubfx(.x13, .x11, 0, 32) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_LENGTH_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Compare idx < length
+            self.emitter.cmpRegReg(.x13, .x14) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.hs, target);
+
+            // Load start and step
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_START_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x15, .x10, OBJ_RANGE_STEP_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x15, .x15, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Compute element = start + idx * step
+            self.emitter.mulRegReg(.x15, .x13, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Encode as JSValue int
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory;
+
+            // Push element to stack[sp] and increment sp
+            self.emitter.addRegRegShift(.x15, stack_ptr, sp, 3) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x14, .x15, 0) catch return CompileError.OutOfMemory;
+            self.emitter.addRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
+
+            // Update idx on stack
+            self.emitter.addRegImm12(.x13, .x13, 1) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x13, .x13, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x13, .x9, 8) catch return CompileError.OutOfMemory;
+
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper
+            try self.markLabel(slow);
+            const sp_off: i12 = @intCast(@as(u32, @bitCast(CTX_SP_OFF)));
+            self.emitter.strImm(sp, .x19, sp_off) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, @intFromPtr(&Context.jitForOfNext)) catch return CompileError.OutOfMemory;
+            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(sp, .x19, sp_off) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, target);
+
+            try self.markLabel(done);
+        } else if (is_x86_64) {
+            const fn_ptr = @intFromPtr(&Context.jitForOfNext);
             self.emitter.movMemReg(.rbx, CTX_SP_OFF, getSpCacheReg()) catch return CompileError.OutOfMemory;
-            // ctx is in rbx
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
-            // Reload sp cache after helper call
             self.emitter.movRegMem(getSpCacheReg(), .rbx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
-            // Result in rax: 0 = done, 1 = continue
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
-        } else if (is_aarch64) {
-            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
-            const sp_off: i12 = @intCast(@as(u32, @bitCast(CTX_SP_OFF)));
-            self.emitter.strImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
-            // ctx is in x19
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
-            // Reload sp cache after helper call
-            self.emitter.ldrImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.eq, target);
         }
     }
 
     fn emitForOfNextPutLoc(self: *OptimizedCompiler, local_idx: u8, target: u32) CompileError!void {
-        const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
-        if (is_x86_64) {
-            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
+        const sp = getSpCacheReg();
+        const stack_ptr = getStackPtrCacheReg();
+
+        if (is_aarch64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Load iter_val and idx_val from stack
+            self.emitter.subRegImm12(.x9, sp, 2) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x9, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x10, .x9, 0) catch return CompileError.OutOfMemory; // x10 = iter_val
+            self.emitter.ldrImm(.x11, .x9, 8) catch return CompileError.OutOfMemory; // x11 = idx_val
+
+            // Check iter_val is a pointer: (raw & 7) == 1
+            self.emitter.andRegImm(.x12, .x10, 0b111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer
+            self.emitter.movRegImm64(.x12, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x10, .x10, .x12) catch return CompileError.OutOfMemory;
+
+            // Check memtag == object (1)
+            self.emitter.ldrImmW(.x12, .x10, 0) catch return CompileError.OutOfMemory;
+            self.emitter.lsrRegImm(.x12, .x12, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x12, .x12, 0b1111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check class_id == range_iterator (23)
+            self.emitter.ldrbImm(.x12, .x10, OBJ_CLASS_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 23) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check idx_val is int
+            self.emitter.movRegImm64(.x12, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x13, .x11, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x13, .x12) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract idx and length as u32
+            self.emitter.ubfx(.x13, .x11, 0, 32) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_LENGTH_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Compare idx < length
+            self.emitter.cmpRegReg(.x13, .x14) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.hs, target);
+
+            // Load start and step
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_START_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x15, .x10, OBJ_RANGE_STEP_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x15, .x15, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Compute element = start + idx * step
+            self.emitter.mulRegReg(.x15, .x13, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Encode as JSValue int
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory;
+
+            // Store element to local: stack[fp + local_idx]
+            self.emitter.ldrImm(.x15, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            if (local_idx > 0) {
+                self.emitter.addRegImm12(.x15, .x15, local_idx) catch return CompileError.OutOfMemory;
+            }
+            self.emitter.addRegRegShift(.x15, stack_ptr, .x15, 3) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x14, .x15, 0) catch return CompileError.OutOfMemory;
+
+            // Update idx on stack
+            self.emitter.addRegImm12(.x13, .x13, 1) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x13, .x13, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x13, .x9, 8) catch return CompileError.OutOfMemory;
+
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper
+            try self.markLabel(slow);
+            const sp_off: i12 = @intCast(@as(u32, @bitCast(CTX_SP_OFF)));
+            self.emitter.strImm(sp, .x19, sp_off) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x1, local_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, @intFromPtr(&Context.jitForOfNextPutLoc)) catch return CompileError.OutOfMemory;
+            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(sp, .x19, sp_off) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, target);
+
+            try self.markLabel(done);
+        } else if (is_x86_64) {
+            const fn_ptr = @intFromPtr(&Context.jitForOfNextPutLoc);
             self.emitter.movMemReg(.rbx, CTX_SP_OFF, getSpCacheReg()) catch return CompileError.OutOfMemory;
-            // ctx is in rbx
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
-            // Reload sp cache after helper call
             self.emitter.movRegMem(getSpCacheReg(), .rbx, CTX_SP_OFF) catch return CompileError.OutOfMemory;
-            // Result in rax: 0 = done, 1 = continue
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
-        } else if (is_aarch64) {
-            // Flush sp cache to ctx.sp before helper call (helper reads ctx.sp)
-            const sp_off: i12 = @intCast(@as(u32, @bitCast(CTX_SP_OFF)));
-            self.emitter.strImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
-            // ctx is in x19
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x1, local_idx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
-            // Reload sp cache after helper call
-            self.emitter.ldrImm(getSpCacheReg(), .x19, sp_off) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.eq, target);
         }
     }
 };

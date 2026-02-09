@@ -75,6 +75,11 @@ const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
 const OBJ_FUNC_DATA_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_DATA)) * 8;
 const OBJ_FUNC_IS_BYTECODE_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_IS_BYTECODE)) * 8;
 const OBJ_FUNC_GUARD_ID_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.FUNC_GUARD_ID)) * 8;
+const OBJ_CLASS_ID_OFF: i32 = @intCast(@offsetOf(JSObject, "class_id"));
+// Range iterator inline slot offsets (each slot is 8 bytes = sizeof(JSValue))
+const OBJ_RANGE_START_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_START)) * 8;
+const OBJ_RANGE_STEP_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_STEP)) * 8;
+const OBJ_RANGE_LENGTH_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_LENGTH)) * 8;
 const NATIVE_ARGCOUNT_OFF: i32 = @intCast(@offsetOf(object.NativeFunctionData, "arg_count"));
 
 // Interpreter field offsets for inline cache fast path
@@ -240,6 +245,15 @@ pub const BaselineCompiler = struct {
     /// Register allocation state for hot locals (ARM64 only)
     reg_alloc: ?RegAllocState,
 
+    /// Virtual stack top: tracks when the last push came from a register-allocated local.
+    /// This allows fusing get_local + get_field_ic by skipping the redundant push/pop
+    /// and using the callee-saved register directly for property access.
+    /// Set by emitGetLocal when the local is register-allocated.
+    /// Consumed (and cleared) by emitMonomorphicGetField/PutField.
+    /// Cleared by any instruction that modifies the operand stack in unexpected ways.
+    pending_reg_push: ?Register,
+
+
     const PendingJump = struct {
         native_offset: u32, // Offset in emitted code where the rel32/imm is
         bytecode_target: u32, // Target bytecode offset
@@ -277,6 +291,7 @@ pub const BaselineCompiler = struct {
             .stack_overflow_label = null,
             .suppress_stack_checks = false,
             .reg_alloc = null,
+            .pending_reg_push = null,
         };
     }
 
@@ -598,8 +613,9 @@ pub const BaselineCompiler = struct {
     }
 
     // NaN-boxing integer tag: TAG_PREFIX | TYPE_INT
-    // With TYPE_SHIFT=44: 0xFFFC_0000_0000_0000 | (1 << 44) = 0xFFFD_0000_0000_0000
-    const INT_TAG: u64 = 0xFFFD_0000_0000_0000;
+    // TAG_PREFIX = 0xFFFC_0000_0000_0000, TYPE_INT = 1 << 44 = 0x0000_1000_0000_0000
+    // Result: 0xFFFC_1000_0000_0000
+    const INT_TAG: u64 = 0xFFFC_1000_0000_0000;
     // Mask for checking integer type: upper 20 bits (TAG + TYPE)
     const INT_TYPE_MASK: u64 = 0xFFFF_F000_0000_0000;
 
@@ -907,7 +923,7 @@ pub const BaselineCompiler = struct {
 
     /// Emit monomorphic get field when type feedback shows consistent hidden class.
     /// Hardcodes the hidden class check and slot offset, skipping PIC lookup entirely.
-    fn emitMonomorphicGetField(self: *BaselineCompiler, hc_idx: object.HiddenClassIndex, slot: u16, atom_idx: u16, cache_idx: u16) CompileError!void {
+    fn emitMonomorphicGetField(self: *BaselineCompiler, hc_idx: object.HiddenClassIndex, slot: u16, atom_idx: u16, cache_idx: u16, pending_obj_reg: ?Register) CompileError!void {
         const fn_ptr = @intFromPtr(&jitGetFieldIC);
 
         if (is_x86_64) {
@@ -959,17 +975,30 @@ pub const BaselineCompiler = struct {
             const slow = self.newLocalLabel();
             const done = self.newLocalLabel();
 
-            // Pop object value into x12
-            try self.emitPopReg(.x12);
+            // Fused get_local + get_field_ic optimization:
+            // If pending_obj_reg is set, the previous get_local already pushed the object
+            // from a callee-saved register. Instead of popping it back, undo the push
+            // (decrement sp) and use the register directly. This saves 6 instructions
+            // (3 for push + 3 for pop) per property access.
+            const obj_reg: Register = if (pending_obj_reg) |reg| blk: {
+                // Undo the push from get_local: just decrement sp
+                const sp = getSpCacheReg();
+                self.emitter.subRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory;
+                break :blk reg;
+            } else blk: {
+                // Normal path: pop object value from operand stack
+                try self.emitPopReg(.x12);
+                break :blk .x12;
+            };
 
             // Quick pointer check: (raw & 0x7) == 1
             // This confirms we have a tagged object pointer
-            self.emitter.andRegImm(.x9, .x12, 0x7) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x9, obj_reg, 0x7) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegImm12(.x9, 1) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
             // Extract object pointer (clear TAG_PREFIX and low 3 bits)
-            try self.emitExtractPtr(.x9, .x12);
+            try self.emitExtractPtr(.x9, obj_reg);
 
             // Skip MemTag check - pointer tag already confirms object pointer
             // Hidden class check will catch any type mismatches
@@ -987,8 +1016,15 @@ pub const BaselineCompiler = struct {
             try self.emitJmpToLabel(done);
 
             // Slow path: call helper
+            // For fused path, re-push the register value so the helper can pop it
             try self.markLabel(slow);
-            self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
+            if (pending_obj_reg) |reg| {
+                // The object was never on the operand stack (we undid the push).
+                // The helper expects the object as an argument, not on the stack.
+                self.emitter.movRegReg(.x1, reg) catch return CompileError.OutOfMemory;
+            } else {
+                self.emitter.movRegReg(.x1, .x12) catch return CompileError.OutOfMemory;
+            }
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x3, cache_idx) catch return CompileError.OutOfMemory;
@@ -1402,6 +1438,12 @@ pub const BaselineCompiler = struct {
     fn compileOpcode(self: *BaselineCompiler, op: Opcode, pc: u32, code: []const u8) CompileError!u32 {
         var new_pc = pc;
 
+        // Capture and clear the pending register push from a previous get_local.
+        // Only get_field_ic/put_field_ic with monomorphic info will use this to
+        // skip redundant push/pop and access the object register directly.
+        const pending_obj_reg = self.pending_reg_push;
+        self.pending_reg_push = null;
+
         switch (op) {
             .nop => {
                 // No operation - emit nothing
@@ -1615,9 +1657,17 @@ pub const BaselineCompiler = struct {
                 const idx = readU16(code, new_pc);
                 const argc: u8 = code[new_pc + 2];
                 new_pc += 3;
+                const opcode_offset = pc - 1;
                 const val = self.func.constants[idx];
                 try self.emitPushImm64(@bitCast(val));
-                try self.emitCall(argc, false);
+                // Check for inlining/monomorphic call (same as .call handler)
+                if (self.getInlineCandidate(opcode_offset)) |callee| {
+                    try self.emitInlinedCall(callee, argc, false, opcode_offset);
+                } else if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
+                    try self.emitMonomorphicCall(callee, argc, false);
+                } else {
+                    try self.emitCall(argc, false);
+                }
             },
 
             .add_mod => {
@@ -1762,7 +1812,7 @@ pub const BaselineCompiler = struct {
                 new_pc += 4;
                 const opcode_offset = pc - 1;
                 if (self.getMonomorphicPropertyInfo(atom_idx, opcode_offset)) |info| {
-                    try self.emitMonomorphicGetField(info.hc_idx, info.slot, atom_idx, cache_idx);
+                    try self.emitMonomorphicGetField(info.hc_idx, info.slot, atom_idx, cache_idx, pending_obj_reg);
                 } else {
                     try self.emitGetFieldIC(atom_idx, cache_idx);
                 }
@@ -3658,13 +3708,16 @@ pub const BaselineCompiler = struct {
 
     fn emitInlinedCall(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8, is_method: bool, bytecode_offset: u32) CompileError!void {
         if (argc > callee.local_count) {
+
             try self.emitMonomorphicCall(callee, argc, is_method);
             return;
         }
         if (!self.canInlineFunction(callee)) {
+
             try self.emitMonomorphicCall(callee, argc, is_method);
             return;
         }
+
 
         const deopt_label = self.newLocalLabel();
         const done_label = self.newLocalLabel();
@@ -3724,7 +3777,10 @@ pub const BaselineCompiler = struct {
         }
 
         // Reserve space for the inlined frame to avoid per-push checks.
-        try self.emitInlineStackCheck(callee.stack_size);
+        // Skip if already within an inline (stack was already reserved by parent inline).
+        if (!self.suppress_stack_checks) {
+            try self.emitInlineStackCheck(callee.stack_size);
+        }
 
         // Inline prologue (sets ctx->fp, initializes locals)
         try self.emitInlinePrologue(callee, argc);
@@ -4156,43 +4212,60 @@ pub const BaselineCompiler = struct {
     }
 
     /// Emit code for math_floor: pop arg, push floor(arg)
-    /// Inline fast path for integers (floor(int) = int), calls helper for floats
+    /// ARM64: inline integer fast path + inline FRINTM for raw doubles
+    /// x86-64: inline integer fast path, helper call for doubles
     fn emitMathFloor(self: *BaselineCompiler) CompileError!void {
+        try self.emitMathRoundingOp(&jitMathFloor);
+    }
+
+    /// Shared implementation for floor/ceil/round: integer fast path + helper call for non-integers
+    fn emitMathRoundingOp(self: *BaselineCompiler, helper: *const anyopaque) CompileError!void {
         const done = self.newLocalLabel();
         const slow = self.newLocalLabel();
 
         if (is_x86_64) {
             try self.emitPopReg(.rsi); // arg
-            // Check if integer (tag bit 0 == 0)
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            // Correct integer check: (raw & INT_TYPE_MASK) == INT_TAG
+            self.emitter.movRegImm64(.r10, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r11, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
-            // Integer: floor(int) = int, just push back
+            // Integer: floor/ceil/round(int) = int
             try self.emitPushReg(.rsi);
             try self.emitJmpToLabel(done);
 
             try self.markLabel(slow);
-            // Non-integer: call helper
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory; // ctx
             // rsi already has arg
-            self.emitter.movRegImm64(.rax, @intFromPtr(&jitMathFloor)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, @intFromPtr(helper)) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
         } else if (is_aarch64) {
             try self.emitPopReg(.x1); // arg
-            // Check if integer
-            self.emitter.andRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
+
+            // Fast integer check using upper 16 bits + type bits:
+            // Tagged values have (raw >> 48) == 0xFFFC
+            // Integers additionally have (raw >> 44) & 7 == 1
+            // Check tagged first (raw >> 48)
+            self.emitter.lsrRegImm(.x10, .x1, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, 0xFFFC) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow); // not tagged -> raw double, use helper
+            // Tagged: check if integer type (bits 44-46 == 1)
+            self.emitter.ubfx(.x10, .x1, 44, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow); // tagged non-integer -> helper
+            // Integer: floor/ceil/round(int) = int, push unchanged
             try self.emitPushReg(.x1);
             try self.emitJmpToLabel(done);
 
+            // All non-integer values: call helper (handles both raw doubles and specials)
             try self.markLabel(slow);
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
-            self.emitter.movRegImm64(.x9, @intFromPtr(&jitMathFloor)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, @intFromPtr(helper)) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
 
@@ -4201,117 +4274,57 @@ pub const BaselineCompiler = struct {
     }
 
     /// Emit code for math_ceil: pop arg, push ceil(arg)
+    /// ARM64: inline integer fast path + inline FRINTP for raw doubles
     fn emitMathCeil(self: *BaselineCompiler) CompileError!void {
-        const done = self.newLocalLabel();
-        const slow = self.newLocalLabel();
-
-        if (is_x86_64) {
-            try self.emitPopReg(.rsi);
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-            try self.emitPushReg(.rsi);
-            try self.emitJmpToLabel(done);
-
-            try self.markLabel(slow);
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, @intFromPtr(&jitMathCeil)) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
-            try self.emitPushReg(.rax);
-
-            try self.markLabel(done);
-        } else if (is_aarch64) {
-            try self.emitPopReg(.x1);
-            self.emitter.andRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-            try self.emitPushReg(.x1);
-            try self.emitJmpToLabel(done);
-
-            try self.markLabel(slow);
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, @intFromPtr(&jitMathCeil)) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.x9);
-            try self.emitPushReg(.x0);
-
-            try self.markLabel(done);
-        }
+        try self.emitMathRoundingOp(&jitMathCeil);
     }
 
     /// Emit code for math_round: pop arg, push round(arg)
+    /// ARM64: inline integer fast path + inline FRINTA for raw doubles
     fn emitMathRound(self: *BaselineCompiler) CompileError!void {
-        const done = self.newLocalLabel();
-        const slow = self.newLocalLabel();
-
-        if (is_x86_64) {
-            try self.emitPopReg(.rsi);
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-            try self.emitPushReg(.rsi);
-            try self.emitJmpToLabel(done);
-
-            try self.markLabel(slow);
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, @intFromPtr(&jitMathRound)) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
-            try self.emitPushReg(.rax);
-
-            try self.markLabel(done);
-        } else if (is_aarch64) {
-            try self.emitPopReg(.x1);
-            self.emitter.andRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-            try self.emitPushReg(.x1);
-            try self.emitJmpToLabel(done);
-
-            try self.markLabel(slow);
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, @intFromPtr(&jitMathRound)) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.x9);
-            try self.emitPushReg(.x0);
-
-            try self.markLabel(done);
-        }
+        try self.emitMathRoundingOp(&jitMathRound);
     }
 
     /// Emit code for math_abs: pop arg, push abs(arg)
+    /// ARM64: inline for both integers (negate if negative, check INT_MIN)
+    /// and raw doubles (FABS instruction)
     fn emitMathAbs(self: *BaselineCompiler) CompileError!void {
         const done = self.newLocalLabel();
         const slow = self.newLocalLabel();
-        const int_min_i32: i32 = std.math.minInt(i32);
 
         if (is_x86_64) {
-            const pos = self.newLocalLabel();
             try self.emitPopReg(.rsi);
-            // Check if integer
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            // Correct integer check: (raw & INT_TYPE_MASK) == INT_TAG
+            self.emitter.movRegImm64(.r10, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r11, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            // Extract integer value
+            // Extract i32 from lower 32 bits of JSValue
             self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm(.r10, 1) catch return CompileError.OutOfMemory;
+            // r10 lower 32 bits = the i32 value (as u32 bitcast)
+            // Sign-extend to 64 bits for comparison
             self.emitter.movsxdRegReg(.r10, .r10) catch return CompileError.OutOfMemory;
 
-            // Check for INT_MIN (overflow case)
+            // Check for INT_MIN (abs overflow)
+            const int_min_i32: i32 = std.math.minInt(i32);
             self.emitter.cmpRegImm32(.r10, int_min_i32) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, slow);
 
-            // Already non-negative? Push and done
+            // Already non-negative?
+            const pos = self.newLocalLabel();
             self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ge, pos);
-
-            // Negate
             self.emitter.negReg(.r10) catch return CompileError.OutOfMemory;
 
             try self.markLabel(pos);
-            // Re-encode as integer JSValue
-            self.emitter.shlRegImm(.r10, 1) catch return CompileError.OutOfMemory;
+            // Re-encode as integer JSValue: INT_TAG | (u32)result
+            // r10 has the absolute value, mask to lower 32 bits
+            self.emitter.movRegImm64(.r11, 0xFFFFFFFF) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r11, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.orRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.r10);
             try self.emitJmpToLabel(done);
 
@@ -4324,35 +4337,43 @@ pub const BaselineCompiler = struct {
             try self.markLabel(done);
         } else if (is_aarch64) {
             const pos = self.newLocalLabel();
-            const int_min_u64: u64 = @bitCast(@as(i64, int_min_i32));
-            try self.emitPopReg(.x1);
-            self.emitter.andRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
 
-            // Extract integer value and sign-extend to 64 bits
-            self.emitter.lsrRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x10, .x10, 32) catch return CompileError.OutOfMemory;
+            try self.emitPopReg(.x1); // arg
+
+            // Fast integer check: tagged + TYPE_INT
+            self.emitter.lsrRegImm(.x10, .x1, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, 0xFFFC) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow); // not tagged -> helper
+            self.emitter.ubfx(.x10, .x1, 44, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow); // tagged non-integer -> helper
+
+            // Integer abs: extract i32, negate if negative, re-encode
+            // Extract i32: lower 32 bits, sign-extend
+            self.emitter.lslRegImm(.x10, .x1, 32) catch return CompileError.OutOfMemory;
             self.emitter.asrRegImm(.x10, .x10, 32) catch return CompileError.OutOfMemory;
-
-            // Check for INT_MIN
+            // Check for INT_MIN (abs(-2147483648) overflows i32)
+            const int_min_u64: u64 = @bitCast(@as(i64, std.math.minInt(i32)));
             self.emitter.movRegImm64(.x11, int_min_u64) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, slow);
-
+            // If non-negative, skip negate
             self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ge, pos);
-
-            // Negate
             self.emitter.negReg(.x10, .x10) catch return CompileError.OutOfMemory;
 
             try self.markLabel(pos);
-            self.emitter.lslRegImm(.x10, .x10, 1) catch return CompileError.OutOfMemory;
+            // Re-encode as JSValue int: INT_TAG | (u32)abs_val
+            self.emitter.ubfx(.x10, .x10, 0, 32) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.orrRegReg(.x10, .x10, .x11) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x10);
             try self.emitJmpToLabel(done);
 
+            // Non-integer (raw doubles and specials): call helper
             try self.markLabel(slow);
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
             self.emitter.movRegImm64(.x9, @intFromPtr(&jitMathAbs)) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
@@ -4362,136 +4383,100 @@ pub const BaselineCompiler = struct {
     }
 
     /// Emit code for math_min2: pop 2 args, push min(a, b)
+    /// ARM64: inline for both integers (CSEL) and raw doubles (FMIN)
     fn emitMathMin2(self: *BaselineCompiler) CompileError!void {
-        const done = self.newLocalLabel();
-        const slow = self.newLocalLabel();
-
-        if (is_x86_64) {
-            try self.emitPopReg(.rdx); // b
-            try self.emitPopReg(.rsi); // a
-            // Check if both are integers
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-            self.emitter.movRegReg(.r10, .rdx) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.ne, slow);
-
-            // Both integers: compare and select min
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.r10, .r10) catch return CompileError.OutOfMemory;
-            self.emitter.movRegReg(.r11, .rdx) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm(.r11, 1) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.r11, .r11) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
-            self.emitter.movRegReg(.rax, .rdx) catch return CompileError.OutOfMemory;
-            self.emitter.cmovcc(.le, .rax, .rsi) catch return CompileError.OutOfMemory;
-            try self.emitPushReg(.rax);
-            try self.emitJmpToLabel(done);
-
-            try self.markLabel(slow);
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, @intFromPtr(&jitMathMin2)) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
-            try self.emitPushReg(.rax);
-
-            try self.markLabel(done);
-        } else if (is_aarch64) {
-            try self.emitPopReg(.x2); // b
-            try self.emitPopReg(.x1); // a
-            self.emitter.andRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-            self.emitter.andRegImm(.x10, .x2, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-
-            // Both integers - sign extend to 64 bits
-            self.emitter.lsrRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x10, .x10, 32) catch return CompileError.OutOfMemory;
-            self.emitter.asrRegImm(.x10, .x10, 32) catch return CompileError.OutOfMemory;
-            self.emitter.lsrRegImm(.x11, .x2, 1) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x11, .x11, 32) catch return CompileError.OutOfMemory;
-            self.emitter.asrRegImm(.x11, .x11, 32) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
-            self.emitter.csel(.x0, .x1, .x2, .le) catch return CompileError.OutOfMemory;
-            try self.emitPushReg(.x0);
-            try self.emitJmpToLabel(done);
-
-            try self.markLabel(slow);
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, @intFromPtr(&jitMathMin2)) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.x9);
-            try self.emitPushReg(.x0);
-
-            try self.markLabel(done);
-        }
+        try self.emitMathMinMax(&jitMathMin2, .min);
     }
 
     /// Emit code for math_max2: pop 2 args, push max(a, b)
+    /// ARM64: inline for both integers (CSEL) and raw doubles (FMAX)
     fn emitMathMax2(self: *BaselineCompiler) CompileError!void {
+        try self.emitMathMinMax(&jitMathMax2, .max);
+    }
+
+    const MinMaxKind = enum { min, max };
+
+    /// Shared implementation for min/max with correct NaN-boxing integer checks
+    fn emitMathMinMax(self: *BaselineCompiler, helper: *const anyopaque, kind: MinMaxKind) CompileError!void {
         const done = self.newLocalLabel();
         const slow = self.newLocalLabel();
 
         if (is_x86_64) {
             try self.emitPopReg(.rdx); // b
             try self.emitPopReg(.rsi); // a
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            // Check if both are integers: (raw & INT_TYPE_MASK) == INT_TAG
+            self.emitter.movRegImm64(.r10, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.r11, INT_TAG) catch return CompileError.OutOfMemory;
+            // Check a
+            self.emitter.movRegReg(.rax, .rsi) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.rax, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rax, .r11) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
-            self.emitter.movRegReg(.r10, .rdx) catch return CompileError.OutOfMemory;
-            self.emitter.andRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm32(.r10, 0) catch return CompileError.OutOfMemory;
+            // Check b
+            self.emitter.movRegReg(.rax, .rdx) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.rax, .r10) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rax, .r11) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.ne, slow);
 
-            self.emitter.movRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm(.r10, 1) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.r10, .r10) catch return CompileError.OutOfMemory;
-            self.emitter.movRegReg(.r11, .rdx) catch return CompileError.OutOfMemory;
-            self.emitter.shrRegImm(.r11, 1) catch return CompileError.OutOfMemory;
-            self.emitter.movsxdRegReg(.r11, .r11) catch return CompileError.OutOfMemory;
+            // Both integers: extract i32 from lower 32 bits and sign-extend
+            self.emitter.movsxdRegReg(.r10, .rsi) catch return CompileError.OutOfMemory;
+            self.emitter.movsxdRegReg(.r11, .rdx) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.r10, .r11) catch return CompileError.OutOfMemory;
             self.emitter.movRegReg(.rax, .rdx) catch return CompileError.OutOfMemory;
-            self.emitter.cmovcc(.ge, .rax, .rsi) catch return CompileError.OutOfMemory;
+            const cond: x86.Condition = if (kind == .min) .le else .ge;
+            self.emitter.cmovcc(cond, .rax, .rsi) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.rax);
             try self.emitJmpToLabel(done);
 
             try self.markLabel(slow);
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, @intFromPtr(&jitMathMax2)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, @intFromPtr(helper)) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
             try self.emitPushReg(.rax);
 
             try self.markLabel(done);
         } else if (is_aarch64) {
+            const int_path = self.newLocalLabel();
+
             try self.emitPopReg(.x2); // b
             try self.emitPopReg(.x1); // a
-            self.emitter.andRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
-            self.emitter.andRegImm(.x10, .x2, 1) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-            try self.emitBcondToLabel(.ne, slow);
 
-            // Sign extend both integers to 64 bits
-            self.emitter.lsrRegImm(.x10, .x1, 1) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x10, .x10, 32) catch return CompileError.OutOfMemory;
+            // Fast integer check for a: (raw >> 48) == 0xFFFC && ubfx(raw, 44, 3) == 1
+            self.emitter.lsrRegImm(.x10, .x1, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x11, 0xFFFC) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow); // a not tagged -> slow
+            self.emitter.ubfx(.x10, .x1, 44, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow); // a not int -> slow
+            // Fast integer check for b
+            self.emitter.lsrRegImm(.x10, .x2, 48) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory; // x11 still 0xFFFC
+            try self.emitBcondToLabel(.ne, slow); // b not tagged -> slow
+            self.emitter.ubfx(.x10, .x2, 44, 3) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, int_path); // both ints -> int path
+            try self.emitJmpToLabel(slow); // b tagged non-int -> slow
+
+            // --- Integer path ---
+            try self.markLabel(int_path);
+            // Extract i32 values and sign-extend for signed comparison
+            // Lower 32 bits of JSValue contain the i32 payload (bitcast as u32)
+            self.emitter.lslRegImm(.x10, .x1, 32) catch return CompileError.OutOfMemory;
             self.emitter.asrRegImm(.x10, .x10, 32) catch return CompileError.OutOfMemory;
-            self.emitter.lsrRegImm(.x11, .x2, 1) catch return CompileError.OutOfMemory;
-            self.emitter.lslRegImm(.x11, .x11, 32) catch return CompileError.OutOfMemory;
+            self.emitter.lslRegImm(.x11, .x2, 32) catch return CompileError.OutOfMemory;
             self.emitter.asrRegImm(.x11, .x11, 32) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
-            self.emitter.csel(.x0, .x1, .x2, .ge) catch return CompileError.OutOfMemory;
+            // Select the original JSValue (not the extracted int)
+            const cond: arm64.Condition = if (kind == .min) .le else .ge;
+            self.emitter.csel(.x0, .x1, .x2, cond) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x0);
             try self.emitJmpToLabel(done);
 
+            // --- Slow path ---
             try self.markLabel(slow);
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, @intFromPtr(&jitMathMax2)) catch return CompileError.OutOfMemory;
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
+            self.emitter.movRegImm64(.x9, @intFromPtr(helper)) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
 
@@ -4540,18 +4525,24 @@ pub const BaselineCompiler = struct {
                         ra.loaded[reg_idx] = true;
                     }
 
-                    // Now just push the register value
+                    // Record that we're pushing from a callee-saved register.
+                    // If the next instruction is get_field_ic (monomorphic), it can
+                    // undo this push and use the register directly, saving 6 instructions.
+                    self.pending_reg_push = reg;
+
+                    // Now push the register value
                     return self.emitPushReg(reg);
                 }
             }
 
             // Slow path: load from memory (not allocated to register)
+            // Use stack_ptr_cache (x21) instead of reloading from ctx
+            const stack_ptr = getStackPtrCacheReg();
             self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
             if (idx > 0) {
                 self.emitter.addRegImm12(.x9, .x9, idx) catch return CompileError.OutOfMemory;
             }
-            self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
-            self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x11, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
             self.emitter.ldrImm(.x9, .x11, 0) catch return CompileError.OutOfMemory;
             try self.emitPushReg(.x9);
         }
@@ -4589,14 +4580,15 @@ pub const BaselineCompiler = struct {
             }
 
             // Slow path: store to memory (not allocated to register)
+            // Use stack_ptr_cache (x21) instead of reloading from ctx
+            const stack_ptr = getStackPtrCacheReg();
             try self.emitPopReg(.x9);
             self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
             if (idx > 0) {
                 self.emitter.addRegImm12(.x10, .x10, idx) catch return CompileError.OutOfMemory;
             }
-            self.emitter.ldrImm(.x11, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
-            self.emitter.addRegRegShift(.x12, .x11, .x10, 3) catch return CompileError.OutOfMemory;
-            // 5. Store value
+            self.emitter.addRegRegShift(.x12, stack_ptr, .x10, 3) catch return CompileError.OutOfMemory;
+            // Store value
             self.emitter.strImm(.x9, .x12, 0) catch return CompileError.OutOfMemory;
         }
     }
@@ -5264,40 +5256,231 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitForOfNext(self: *BaselineCompiler, target: u32) CompileError!void {
-        // Call jitForOfNext(ctx) -> returns 0 if done, 1 if continue
-        const fn_ptr = @intFromPtr(&jitForOfNext);
-        if (is_x86_64) {
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
-            self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
-            try self.emitJccToLabel(.e, target);
-        } else if (is_aarch64) {
+        // Inline range iterator fast path, falling back to helper for arrays/other iterators
+        //
+        // Stack layout: [iter_val @ sp-2, idx_val @ sp-1]
+        // Range iterator: check class_id == 23 (range_iterator), idx < length
+        // Compute element = start + idx * step, push element, update idx to idx+1
+
+        const sp = getSpCacheReg();
+        const stack_ptr = getStackPtrCacheReg();
+
+        if (is_aarch64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Load iter_val from stack[sp-2]
+            // x9 = &stack[(sp-2)] = stack_ptr + (sp-2)*8
+            self.emitter.subRegImm12(.x9, sp, 2) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x9, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x10, .x9, 0) catch return CompileError.OutOfMemory; // x10 = iter_val
+
+            // Load idx_val from stack[sp-1]
+            self.emitter.ldrImm(.x11, .x9, 8) catch return CompileError.OutOfMemory; // x11 = idx_val
+
+            // Check iter_val is a pointer: (raw & 7) == 1
+            self.emitter.andRegImm(.x12, .x10, 0b111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer from iter_val
+            self.emitter.andRegReg(.x10, .x10, .x22) catch return CompileError.OutOfMemory; // x10 = obj ptr
+
+            // Check memtag == object (1): load header u32, (header >> 1) & 0xF == 1
+            self.emitter.ldrImmW(.x12, .x10, 0) catch return CompileError.OutOfMemory; // x12 = header word
+            // (header >> 1) & 0xF: shift right 1, mask low 4 bits
+            self.emitter.lsrRegImm(.x12, .x12, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x12, .x12, 0b1111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory; // MemTag.object == 1
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check class_id == range_iterator (23)
+            self.emitter.ldrbImm(.x12, .x10, OBJ_CLASS_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 23) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check idx_val is an integer: (raw & INT_TYPE_MASK) == INT_TAG
+            self.emitter.movRegImm64(.x12, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x13, .x11, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x13, .x12) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract idx as u32 (lower 32 bits of NaN-boxed int)
+            self.emitter.ubfx(.x13, .x11, 0, 32) catch return CompileError.OutOfMemory; // x13 = idx
+
+            // Load RANGE_LENGTH from inline_slots[3] and extract u32
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_LENGTH_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory; // x14 = length
+
+            // Compare idx < length (unsigned)
+            self.emitter.cmpRegReg(.x13, .x14) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.hs, target); // idx >= length means done
+
+            // Load start and step, extract u32
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_START_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory; // x14 = start
+            self.emitter.ldrImm(.x15, .x10, OBJ_RANGE_STEP_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x15, .x15, 0, 32) catch return CompileError.OutOfMemory; // x15 = step
+
+            // Compute element = start + idx * step
+            self.emitter.mulRegReg(.x15, .x13, .x15) catch return CompileError.OutOfMemory; // x15 = idx * step
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory; // x14 = element (u32)
+            // Truncate to 32 bits to handle signed wraparound correctly
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Encode as JSValue int: INT_TAG | (u32)val
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory; // x14 = JSValue int
+
+            // Push element to stack[sp] and increment sp
+            self.emitter.addRegRegShift(.x15, stack_ptr, sp, 3) catch return CompileError.OutOfMemory; // &stack[sp]
+            self.emitter.strImm(.x14, .x15, 0) catch return CompileError.OutOfMemory; // stack[sp] = element
+            self.emitter.addRegImm12(sp, sp, 1) catch return CompileError.OutOfMemory; // sp++
+
+            // Update idx on stack: stack[sp-2] = JSValue.fromInt(idx + 1)
+            // sp was incremented, so sp-2 is the old sp-1 position
+            self.emitter.addRegImm12(.x13, .x13, 1) catch return CompileError.OutOfMemory; // idx + 1
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x13, .x13, .x15) catch return CompileError.OutOfMemory; // encode as JSValue int
+            // x9 still points to stack[sp-2] (before sp increment), +8 = stack[sp-1] = idx slot
+            self.emitter.strImm(.x13, .x9, 8) catch return CompileError.OutOfMemory;
+
+            // Continue loop (don't jump to target)
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper for arrays and other iterators
+            try self.markLabel(slow);
+            const fn_ptr = @intFromPtr(&jitForOfNext);
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
-        }
-    }
 
-    fn emitForOfNextPutLoc(self: *BaselineCompiler, local_idx: u8, target: u32) CompileError!void {
-        // Call jitForOfNextPutLoc(ctx, local_idx) -> returns 0 if done, 1 if continue
-        const fn_ptr = @intFromPtr(&jitForOfNextPutLoc);
-        if (is_x86_64) {
+            try self.markLabel(done);
+        } else if (is_x86_64) {
+            // x86-64: fall back to helper call (range iterator optimization is ARM64-focused)
+            const fn_ptr = @intFromPtr(&jitForOfNext);
             self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.rax);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
             try self.emitJccToLabel(.e, target);
-        } else if (is_aarch64) {
+        }
+    }
+
+    fn emitForOfNextPutLoc(self: *BaselineCompiler, local_idx: u8, target: u32) CompileError!void {
+        // Inline range iterator fast path for for-of with local variable
+        //
+        // Stack layout: [iter_val @ sp-2, idx_val @ sp-1]
+        // Range iterator: check class_id == 23 (range_iterator), idx < length
+        // Compute element = start + idx * step, store to local, update idx to idx+1
+
+        const sp = getSpCacheReg();
+        const stack_ptr = getStackPtrCacheReg();
+        const ctx = getCtxReg();
+
+        if (is_aarch64) {
+            const slow = self.newLocalLabel();
+            const done = self.newLocalLabel();
+
+            // Load iter_val from stack[sp-2] and idx_val from stack[sp-1]
+            self.emitter.subRegImm12(.x9, sp, 2) catch return CompileError.OutOfMemory;
+            self.emitter.addRegRegShift(.x9, stack_ptr, .x9, 3) catch return CompileError.OutOfMemory;
+            self.emitter.ldrImm(.x10, .x9, 0) catch return CompileError.OutOfMemory; // x10 = iter_val
+            self.emitter.ldrImm(.x11, .x9, 8) catch return CompileError.OutOfMemory; // x11 = idx_val
+
+            // Check iter_val is a pointer: (raw & 7) == 1
+            self.emitter.andRegImm(.x12, .x10, 0b111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract object pointer
+            self.emitter.andRegReg(.x10, .x10, .x22) catch return CompileError.OutOfMemory; // x10 = obj ptr
+
+            // Check memtag == object (1)
+            self.emitter.ldrImmW(.x12, .x10, 0) catch return CompileError.OutOfMemory; // header word
+            self.emitter.lsrRegImm(.x12, .x12, 1) catch return CompileError.OutOfMemory;
+            self.emitter.andRegImm(.x12, .x12, 0b1111) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check class_id == range_iterator (23)
+            self.emitter.ldrbImm(.x12, .x10, OBJ_CLASS_ID_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegImm12(.x12, 23) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Check idx_val is an integer
+            self.emitter.movRegImm64(.x12, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(.x13, .x11, .x12) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x12, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x13, .x12) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.ne, slow);
+
+            // Extract idx as u32 and range_length as u32
+            self.emitter.ubfx(.x13, .x11, 0, 32) catch return CompileError.OutOfMemory; // x13 = idx
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_LENGTH_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory; // x14 = length
+
+            // Compare idx < length (unsigned)
+            self.emitter.cmpRegReg(.x13, .x14) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.hs, target); // idx >= length means done
+
+            // Load start and step, extract u32
+            self.emitter.ldrImm(.x14, .x10, OBJ_RANGE_START_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory; // x14 = start
+            self.emitter.ldrImm(.x15, .x10, OBJ_RANGE_STEP_OFF) catch return CompileError.OutOfMemory;
+            self.emitter.ubfx(.x15, .x15, 0, 32) catch return CompileError.OutOfMemory; // x15 = step
+
+            // Compute element = start + idx * step
+            self.emitter.mulRegReg(.x15, .x13, .x15) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory; // x14 = element
+            // Truncate to 32 bits to handle signed wraparound correctly
+            self.emitter.ubfx(.x14, .x14, 0, 32) catch return CompileError.OutOfMemory;
+
+            // Encode as JSValue int: INT_TAG | (u32)val
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x14, .x14, .x15) catch return CompileError.OutOfMemory; // x14 = JSValue
+
+            // Store element to local: stack[fp + local_idx]
+            self.emitter.ldrImm(.x15, ctx, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
+            if (local_idx > 0) {
+                self.emitter.addRegImm12(.x15, .x15, local_idx) catch return CompileError.OutOfMemory;
+            }
+            self.emitter.addRegRegShift(.x15, stack_ptr, .x15, 3) catch return CompileError.OutOfMemory;
+            self.emitter.strImm(.x14, .x15, 0) catch return CompileError.OutOfMemory;
+
+            // Update idx on stack: stack[sp-1] = JSValue.fromInt(idx + 1)
+            self.emitter.addRegImm12(.x13, .x13, 1) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x15, INT_TAG) catch return CompileError.OutOfMemory;
+            self.emitter.addRegReg(.x13, .x13, .x15) catch return CompileError.OutOfMemory;
+            // x9 still points to stack[sp-2], so sp-1 is x9+8
+            self.emitter.strImm(.x13, .x9, 8) catch return CompileError.OutOfMemory;
+
+            // Continue loop
+            try self.emitJmpToLabel(done);
+
+            // Slow path: call helper for arrays and other iterators
+            try self.markLabel(slow);
+            const fn_ptr = @intFromPtr(&jitForOfNextPutLoc);
             self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x1, local_idx) catch return CompileError.OutOfMemory;
             self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
             try self.emitCallHelperReg(.x9);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.eq, target);
+
+            try self.markLabel(done);
+        } else if (is_x86_64) {
+            // x86-64: fall back to helper call
+            const fn_ptr = @intFromPtr(&jitForOfNextPutLoc);
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rsi, local_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            try self.emitCallHelperReg(.rax);
+            self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.e, target);
         }
     }
 
