@@ -47,7 +47,6 @@ extern fn jitForOfNext(ctx: *Context) u64;
 extern fn jitForOfNextPutLoc(ctx: *Context, local_idx: u8) u64;
 const jitDeoptimize = deopt.jitDeoptimize;
 
-
 // Context field offsets for JIT code generation
 // These are computed at compile time using @offsetOf
 const CTX_STACK_PTR_OFF: i32 = @intCast(@offsetOf(Context, "stack"));
@@ -190,20 +189,6 @@ pub const RegAllocState = struct {
     pub fn deinit(self: *RegAllocState, allocator: std.mem.Allocator) void {
         allocator.free(self.local_allocs);
     }
-
-    /// Reset loaded state at control flow merge points (jump targets)
-    pub fn resetLoadedState(self: *RegAllocState) void {
-        self.loaded = .{false} ** MAX_REG_LOCALS;
-    }
-
-    /// Mark all dirty registers as needing spill (before helper calls)
-    /// Returns true if any registers need spilling
-    pub fn hasDirtyRegisters(self: *const RegAllocState) bool {
-        for (0..self.reg_local_count) |i| {
-            if (self.dirty[i]) return true;
-        }
-        return false;
-    }
 };
 
 /// Baseline compiler state
@@ -252,7 +237,6 @@ pub const BaselineCompiler = struct {
     /// Consumed (and cleared) by emitMonomorphicGetField/PutField.
     /// Cleared by any instruction that modifies the operand stack in unexpected ways.
     pending_reg_push: ?Register,
-
 
     const PendingJump = struct {
         native_offset: u32, // Offset in emitted code where the rel32/imm is
@@ -601,17 +585,6 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    /// Record a deoptimization point and return its index
-    fn recordDeoptPoint(self: *BaselineCompiler, bytecode_offset: u32, reason: DeoptReason) !u32 {
-        const idx: u32 = @intCast(self.deopt_points.items.len);
-        try self.deopt_points.append(self.allocator, .{
-            .native_offset = 0, // Will be patched later
-            .bytecode_offset = bytecode_offset,
-            .reason = reason,
-        });
-        return idx;
-    }
-
     // NaN-boxing integer tag: TAG_PREFIX | TYPE_INT
     // TAG_PREFIX = 0xFFFC_0000_0000_0000, TYPE_INT = 1 << 44 = 0x0000_1000_0000_0000
     // Result: 0xFFFC_1000_0000_0000
@@ -642,8 +615,7 @@ pub const BaselineCompiler = struct {
 
     /// Emit specialized integer binary operation when type feedback shows both operands are integers.
     /// Guards integer type and deoptimizes on mismatch. On overflow, falls back to slow path helper.
-    fn emitSpecializedIntBinaryOp(self: *BaselineCompiler, op: BinaryOp, bytecode_offset: u32) CompileError!void {
-        _ = bytecode_offset; // Used only for deopt, which we no longer do for type mismatch
+    fn emitSpecializedIntBinaryOp(self: *BaselineCompiler, op: BinaryOp) CompileError!void {
         if (is_x86_64) {
             const overflow_slow = self.newLocalLabel();
             const try_float = self.newLocalLabel();
@@ -1375,57 +1347,6 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    /// Spill dirty register-allocated locals to memory before helper calls.
-    /// Helpers might access locals through ctx->stack, so we need consistent memory state.
-    fn emitSpillDirtyLocals(self: *BaselineCompiler) CompileError!void {
-        if (!is_aarch64) return;
-
-        var ra = &(self.reg_alloc orelse return);
-        if (ra.reg_local_count == 0) return;
-
-        // Check if any registers are dirty
-        var has_dirty = false;
-        for (0..ra.reg_local_count) |i| {
-            if (ra.dirty[i]) {
-                has_dirty = true;
-                break;
-            }
-        }
-        if (!has_dirty) return;
-
-        // Load ctx->fp and ctx->stack.ptr once
-        self.emitter.ldrImm(.x9, .x19, @intCast(@as(u32, @bitCast(CTX_FP_OFF)))) catch return CompileError.OutOfMemory;
-        self.emitter.ldrImm(.x10, .x19, @intCast(@as(u32, @bitCast(CTX_STACK_PTR_OFF)))) catch return CompileError.OutOfMemory;
-
-        // Store each dirty local
-        for (0..ra.reg_local_count) |i| {
-            if (!ra.dirty[i]) continue;
-
-            const local_idx = ra.reg_to_local[i] orelse continue;
-            const reg = ra.local_allocs[local_idx].register orelse continue;
-
-            // Compute address: x11 = x10 + (x9 + local_idx) * 8
-            if (local_idx > 0) {
-                self.emitter.addRegImm12(.x11, .x9, local_idx) catch return CompileError.OutOfMemory;
-                self.emitter.addRegRegShift(.x11, .x10, .x11, 3) catch return CompileError.OutOfMemory;
-            } else {
-                self.emitter.addRegRegShift(.x11, .x10, .x9, 3) catch return CompileError.OutOfMemory;
-            }
-            self.emitter.strImm(reg, .x11, 0) catch return CompileError.OutOfMemory;
-
-            // After spilling, clear dirty flag (memory is now consistent)
-            ra.dirty[i] = false;
-        }
-    }
-
-    /// Reset loaded state at jump targets (control flow merge points).
-    /// Called when emitting code at a label that could be jumped to.
-    fn resetRegAllocLoadedState(self: *BaselineCompiler) void {
-        if (self.reg_alloc) |*ra| {
-            ra.resetLoadedState();
-        }
-    }
-
     /// Get the register index for a local variable, or null if not allocated.
     fn getRegIndexForLocal(self: *BaselineCompiler, local_idx: u8) ?usize {
         const ra = self.reg_alloc orelse return null;
@@ -1546,7 +1467,7 @@ pub const BaselineCompiler = struct {
                 // Type-specialized path when both operands are known SMI
                 const opcode_offset = pc - 1;
                 if (self.shouldSpecializeIntBinaryOp(opcode_offset)) {
-                    try self.emitSpecializedIntBinaryOp(.add, opcode_offset);
+                    try self.emitSpecializedIntBinaryOp(.add);
                 } else {
                     try self.emitBinaryOp(.add);
                 }
@@ -1556,7 +1477,7 @@ pub const BaselineCompiler = struct {
                 // Type-specialized path when both operands are known SMI
                 const opcode_offset = pc - 1;
                 if (self.shouldSpecializeIntBinaryOp(opcode_offset)) {
-                    try self.emitSpecializedIntBinaryOp(.sub, opcode_offset);
+                    try self.emitSpecializedIntBinaryOp(.sub);
                 } else {
                     try self.emitBinaryOp(.sub);
                 }
@@ -1566,7 +1487,7 @@ pub const BaselineCompiler = struct {
                 // Type-specialized path when both operands are known SMI
                 const opcode_offset = pc - 1;
                 if (self.shouldSpecializeIntBinaryOp(opcode_offset)) {
-                    try self.emitSpecializedIntBinaryOp(.mul, opcode_offset);
+                    try self.emitSpecializedIntBinaryOp(.mul);
                 } else {
                     try self.emitBinaryOp(.mul);
                 }
@@ -1660,14 +1581,7 @@ pub const BaselineCompiler = struct {
                 const opcode_offset = pc - 1;
                 const val = self.func.constants[idx];
                 try self.emitPushImm64(@bitCast(val));
-                // Check for inlining/monomorphic call (same as .call handler)
-                if (self.getInlineCandidate(opcode_offset)) |callee| {
-                    try self.emitInlinedCall(callee, argc, false, opcode_offset);
-                } else if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
-                    try self.emitMonomorphicCall(callee, argc, false);
-                } else {
-                    try self.emitCall(argc, false);
-                }
+                try self.emitCallWithFeedback(argc, false, opcode_offset, false);
             },
 
             .add_mod => {
@@ -1761,8 +1675,6 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                // Profile backedge for hot loop detection
-                // Disabled
                 try self.emitForOfNext(target);
             },
 
@@ -1771,8 +1683,6 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc + 1));
                 new_pc += 3;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                // Profile backedge for hot loop detection
-                // Disabled
                 try self.emitForOfNextPutLoc(local_idx, target);
             },
 
@@ -1877,31 +1787,14 @@ pub const BaselineCompiler = struct {
                 const argc = code[new_pc];
                 new_pc += 1;
                 const opcode_offset = pc - 1;
-
-                if (self.getInlineCandidate(opcode_offset)) |callee| {
-                    try self.emitInlinedCall(callee, argc, false, opcode_offset);
-                } else if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
-                    try self.emitMonomorphicCall(callee, argc, false);
-                } else if (try self.emitMathBuiltinFastPath(argc, false)) {
-                    // emitted
-                } else {
-                    try self.emitCall(argc, false);
-                }
+                try self.emitCallWithFeedback(argc, false, opcode_offset, true);
             },
 
             .call_method => {
                 const argc = code[new_pc];
                 new_pc += 1;
                 const opcode_offset = pc - 1;
-                if (self.getInlineCandidate(opcode_offset)) |callee| {
-                    try self.emitInlinedCall(callee, argc, true, opcode_offset);
-                } else if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
-                    try self.emitMonomorphicCall(callee, argc, true);
-                } else if (try self.emitMathBuiltinFastPath(argc, true)) {
-                    // emitted
-                } else {
-                    try self.emitCall(argc, true);
-                }
+                try self.emitCallWithFeedback(argc, true, opcode_offset, true);
             },
 
             .tail_call => {
@@ -1914,11 +1807,7 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                // Profile backward jumps (loop back-edges) for hot loop detection
-                if (offset < 0) {
-                    // Disabled
-                }
-                try self.emitJump(target, false);
+                try self.emitJump(target);
             },
 
             .if_true => {
@@ -1947,14 +1836,12 @@ pub const BaselineCompiler = struct {
             .strict_eq => try self.emitStrictEquality(false),
             .strict_neq => try self.emitStrictEquality(true),
 
-            // Loop back-edge with hot loop profiling
+            // Loop back-edge jump
             .loop => {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                // Profile backedge for hot loop detection (promotes baseline -> optimized)
-                // Disabled
-                try self.emitJump(target, false);
+                try self.emitJump(target);
             },
 
             // Bitwise operations
@@ -2146,6 +2033,14 @@ pub const BaselineCompiler = struct {
         self.labels.put(self.allocator, id, @intCast(self.emitter.buffer.items.len)) catch return CompileError.OutOfMemory;
     }
 
+    fn appendPendingJump(self: *BaselineCompiler, native_offset: u32, target: u32, is_conditional: bool) CompileError!void {
+        self.pending_jumps.append(self.allocator, .{
+            .native_offset = native_offset,
+            .bytecode_target = target,
+            .is_conditional = is_conditional,
+        }) catch return CompileError.OutOfMemory;
+    }
+
     fn emitJmpToLabel(self: *BaselineCompiler, target: u32) CompileError!void {
         if (self.labels.get(target)) |native_offset| {
             const current = @as(i32, @intCast(self.emitter.buffer.items.len));
@@ -2160,18 +2055,10 @@ pub const BaselineCompiler = struct {
             const patch_offset: u32 = @intCast(self.emitter.buffer.items.len);
             if (is_x86_64) {
                 self.emitter.jmp(0) catch return CompileError.OutOfMemory;
-                self.pending_jumps.append(self.allocator, .{
-                    .native_offset = patch_offset + 1,
-                    .bytecode_target = target,
-                    .is_conditional = false,
-                }) catch return CompileError.OutOfMemory;
+                try self.appendPendingJump(patch_offset + 1, target, false);
             } else if (is_aarch64) {
                 self.emitter.b(0) catch return CompileError.OutOfMemory;
-                self.pending_jumps.append(self.allocator, .{
-                    .native_offset = patch_offset,
-                    .bytecode_target = target,
-                    .is_conditional = false,
-                }) catch return CompileError.OutOfMemory;
+                try self.appendPendingJump(patch_offset, target, false);
             }
         }
     }
@@ -2185,11 +2072,7 @@ pub const BaselineCompiler = struct {
         } else {
             const patch_offset: u32 = @intCast(self.emitter.buffer.items.len + 2);
             self.emitter.jcc(cond, 0) catch return CompileError.OutOfMemory;
-            self.pending_jumps.append(self.allocator, .{
-                .native_offset = patch_offset,
-                .bytecode_target = target,
-                .is_conditional = true,
-            }) catch return CompileError.OutOfMemory;
+            try self.appendPendingJump(patch_offset, target, true);
         }
     }
 
@@ -2202,11 +2085,7 @@ pub const BaselineCompiler = struct {
         } else {
             const patch_offset: u32 = @intCast(self.emitter.buffer.items.len);
             self.emitter.bcond(cond, 0) catch return CompileError.OutOfMemory;
-            self.pending_jumps.append(self.allocator, .{
-                .native_offset = patch_offset,
-                .bytecode_target = target,
-                .is_conditional = true,
-            }) catch return CompileError.OutOfMemory;
+            try self.appendPendingJump(patch_offset, target, true);
         }
     }
 
@@ -2762,6 +2641,19 @@ pub const BaselineCompiler = struct {
             try self.emitCallHelperReg(.x9);
             try self.emitPushReg(.x0);
         }
+    }
+
+    fn emitCallWithFeedback(self: *BaselineCompiler, argc: u8, is_method: bool, opcode_offset: u32, allow_math_fast_path: bool) CompileError!void {
+        if (self.getInlineCandidate(opcode_offset)) |callee| {
+            return self.emitInlinedCall(callee, argc, is_method, opcode_offset);
+        }
+        if (self.getMonomorphicCallTarget(opcode_offset)) |callee| {
+            return self.emitMonomorphicCall(callee, argc, is_method);
+        }
+        if (allow_math_fast_path and try self.emitMathBuiltinFastPath(argc, is_method)) {
+            return;
+        }
+        try self.emitCall(argc, is_method);
     }
 
     fn emitMathBuiltinFastPath(self: *BaselineCompiler, argc: u8, is_method: bool) CompileError!bool {
@@ -3605,8 +3497,7 @@ pub const BaselineCompiler = struct {
         };
     }
 
-    fn canInlineFunction(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode) bool {
-        _ = self;
+    fn canInlineFunction(callee: *const bytecode.FunctionBytecode) bool {
         // Reject closures/generators/async
         if (callee.upvalue_count > 0) return false;
         if (callee.flags.is_generator or callee.flags.is_async) return false;
@@ -3708,16 +3599,13 @@ pub const BaselineCompiler = struct {
 
     fn emitInlinedCall(self: *BaselineCompiler, callee: *const bytecode.FunctionBytecode, argc: u8, is_method: bool, bytecode_offset: u32) CompileError!void {
         if (argc > callee.local_count) {
-
             try self.emitMonomorphicCall(callee, argc, is_method);
             return;
         }
-        if (!self.canInlineFunction(callee)) {
-
+        if (!canInlineFunction(callee)) {
             try self.emitMonomorphicCall(callee, argc, is_method);
             return;
         }
-
 
         const deopt_label = self.newLocalLabel();
         const done_label = self.newLocalLabel();
@@ -5484,29 +5372,6 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    /// Emit call to jitProfileBackedge for hot loop detection.
-    /// This increments the function's backedge counter and may promote to optimized tier.
-    fn emitProfileBackedge(self: *BaselineCompiler) CompileError!void {
-        const fn_ptr = @intFromPtr(&Context.jitProfileBackedge);
-        const func_addr = @intFromPtr(self.func);
-
-        if (is_x86_64) {
-            // jitProfileBackedge(ctx, func_ptr)
-            // rdi = context (rbx), rsi = function bytecode pointer
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rsi, func_addr) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
-            // Return value ignored - promotion happens on next function entry
-        } else if (is_aarch64) {
-            // x0 = context (x19), x1 = function bytecode pointer
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x1, func_addr) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.x9);
-        }
-    }
-
     const ComparisonOp = enum { lt, lte, gt, gte, eq, neq };
 
     /// Emit comparison with integer fast path, inline float path, and slow-path helpers.
@@ -6326,7 +6191,7 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    fn emitJump(self: *BaselineCompiler, target: u32, is_conditional: bool) CompileError!void {
+    fn emitJump(self: *BaselineCompiler, target: u32) CompileError!void {
         if (self.labels.get(target)) |native_offset| {
             // Backward jump - emit directly
             const current = @as(i32, @intCast(self.emitter.buffer.items.len));
@@ -6342,18 +6207,10 @@ pub const BaselineCompiler = struct {
             const patch_offset: u32 = @intCast(self.emitter.buffer.items.len);
             if (is_x86_64) {
                 self.emitter.jmp(0) catch return CompileError.OutOfMemory;
-                self.pending_jumps.append(self.allocator, .{
-                    .native_offset = patch_offset + 1, // Skip opcode byte
-                    .bytecode_target = target,
-                    .is_conditional = is_conditional,
-                }) catch return CompileError.OutOfMemory;
+                try self.appendPendingJump(patch_offset + 1, target, false); // Skip opcode byte
             } else if (is_aarch64) {
                 self.emitter.b(0) catch return CompileError.OutOfMemory;
-                self.pending_jumps.append(self.allocator, .{
-                    .native_offset = patch_offset,
-                    .bytecode_target = target,
-                    .is_conditional = is_conditional,
-                }) catch return CompileError.OutOfMemory;
+                try self.appendPendingJump(patch_offset, target, false);
             }
         }
     }
@@ -6377,11 +6234,7 @@ pub const BaselineCompiler = struct {
             } else {
                 const patch_offset: u32 = @intCast(self.emitter.buffer.items.len + 2);
                 self.emitter.jcc(cond, 0) catch return CompileError.OutOfMemory;
-                self.pending_jumps.append(self.allocator, .{
-                    .native_offset = patch_offset,
-                    .bytecode_target = target,
-                    .is_conditional = true,
-                }) catch return CompileError.OutOfMemory;
+                try self.appendPendingJump(patch_offset, target, true);
             }
         } else if (is_aarch64) {
             try self.emitPopReg(.x1);
@@ -6399,11 +6252,7 @@ pub const BaselineCompiler = struct {
             } else {
                 const patch_offset: u32 = @intCast(self.emitter.buffer.items.len);
                 self.emitter.bcond(cond, 0) catch return CompileError.OutOfMemory;
-                self.pending_jumps.append(self.allocator, .{
-                    .native_offset = patch_offset,
-                    .bytecode_target = target,
-                    .is_conditional = true,
-                }) catch return CompileError.OutOfMemory;
+                try self.appendPendingJump(patch_offset, target, true);
             }
         }
     }
