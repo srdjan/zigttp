@@ -5003,6 +5003,12 @@ test "End-to-end: JSX parse, compile, and execute" {
     const code = try p.parse();
     try std.testing.expect(code.len > 0);
 
+    // Materialize object literal shapes (including JSX props shapes)
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
     var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,

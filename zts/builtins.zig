@@ -3549,10 +3549,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.builtin_objects.append(allocator, render_func);
     try ctx.setGlobal(render_atom, render_func.toValue());
 
-    // Register Fragment constant for JSX
+    // Register Fragment constant for JSX (null value - fragments have no wrapper element)
     const fragment_atom: object.Atom = .Fragment;
-    const fragment_str = try string.createString(allocator, http.FRAGMENT_MARKER);
-    try ctx.setGlobal(fragment_atom, value.JSValue.fromPtr(fragment_str));
+    try ctx.setGlobal(fragment_atom, value.JSValue.null_val);
 
     // Register Date object with Date.now()
     const date_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
@@ -4571,10 +4570,10 @@ test "initBuiltins registers console and Math" {
     try std.testing.expect(render_val != null);
     try std.testing.expect(render_val.?.isCallable());
 
-    // Check Fragment is registered
+    // Check Fragment is registered (null value - fragments render children without wrapper)
     const fragment_val = ctx.getGlobal(.Fragment);
     try std.testing.expect(fragment_val != null);
-    try std.testing.expect(fragment_val.?.isString());
+    try std.testing.expect(fragment_val.?.isNull());
 }
 
 test "Number.isInteger" {

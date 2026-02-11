@@ -1961,15 +1961,59 @@ pub const CodeGen = struct {
 
         // Push props object
         if (elem.props_count > 0) {
-            try self.emit(.new_object);
-            self.pushStack(1);
-            // Add props
-            var i: u8 = 0;
-            while (i < elem.props_count) : (i += 1) {
-                const prop_idx = self.ir.getListIndex(elem.props_start, i);
-                const prop_tag = self.ir.getTag(prop_idx) orelse continue;
-                if (prop_tag == .jsx_attribute) {
+            // Check if all props are static attributes (no spread) for shape optimization
+            var all_static = true;
+            var static_count: u8 = 0;
+            {
+                var i: u8 = 0;
+                while (i < elem.props_count) : (i += 1) {
+                    const prop_idx = self.ir.getListIndex(elem.props_start, i);
+                    const prop_tag = self.ir.getTag(prop_idx) orelse {
+                        all_static = false;
+                        break;
+                    };
+                    if (prop_tag == .jsx_spread_attribute) {
+                        all_static = false;
+                        break;
+                    }
+                    if (prop_tag == .jsx_attribute) {
+                        static_count += 1;
+                    }
+                }
+            }
+
+            if (all_static and static_count > 0) {
+                // Collect atom keys for shape registration
+                var shape_atoms: [32]js_object.Atom = undefined;
+                var atom_count: u8 = 0;
+                var i: u8 = 0;
+                while (i < elem.props_count) : (i += 1) {
+                    const prop_idx = self.ir.getListIndex(elem.props_start, i);
+                    const prop_tag = self.ir.getTag(prop_idx) orelse continue;
+                    if (prop_tag != .jsx_attribute) continue;
                     const attr = self.ir.getJsxAttr(prop_idx) orelse continue;
+                    if (atom_count < 32) {
+                        shape_atoms[atom_count] = @enumFromInt(attr.name_atom);
+                        atom_count += 1;
+                    }
+                }
+
+                // Register shape and emit new_object_literal
+                const shape_idx = try self.registerShape(shape_atoms[0..atom_count]);
+                try self.emit(.new_object_literal);
+                try self.emitU16(shape_idx);
+                try self.emitU8(atom_count);
+                self.pushStack(1);
+
+                // Emit values with direct slot writes
+                var slot: u8 = 0;
+                i = 0;
+                while (i < elem.props_count) : (i += 1) {
+                    const prop_idx = self.ir.getListIndex(elem.props_start, i);
+                    const prop_tag = self.ir.getTag(prop_idx) orelse continue;
+                    if (prop_tag != .jsx_attribute) continue;
+                    const attr = self.ir.getJsxAttr(prop_idx) orelse continue;
+
                     try self.emit(.dup);
                     self.pushStack(1);
                     if (attr.value != null_node) {
@@ -1978,8 +2022,33 @@ pub const CodeGen = struct {
                         try self.emit(.push_true);
                         self.pushStack(1);
                     }
-                    try self.emitPutField(attr.name_atom);
+                    try self.emit(.set_slot);
+                    try self.emitU8(slot);
                     self.popStack(2);
+                    slot += 1;
+                }
+            } else {
+                // Dynamic path: spread attributes or other non-static patterns
+                try self.emit(.new_object);
+                self.pushStack(1);
+                var i: u8 = 0;
+                while (i < elem.props_count) : (i += 1) {
+                    const prop_idx = self.ir.getListIndex(elem.props_start, i);
+                    const prop_tag = self.ir.getTag(prop_idx) orelse continue;
+                    if (prop_tag == .jsx_attribute) {
+                        const attr = self.ir.getJsxAttr(prop_idx) orelse continue;
+                        try self.emit(.dup);
+                        self.pushStack(1);
+                        if (attr.value != null_node) {
+                            try self.emitNode(attr.value);
+                        } else {
+                            try self.emit(.push_true);
+                            self.pushStack(1);
+                        }
+                        try self.emitPutField(attr.name_atom);
+                        self.popStack(2);
+                    }
+                    // Note: jsx_spread_attribute not yet supported in codegen
                 }
             }
         } else {

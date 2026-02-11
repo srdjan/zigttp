@@ -444,8 +444,9 @@ pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const 
 // JSX Runtime
 // ============================================================================
 
-/// Fragment marker for JSX
-pub const FRAGMENT_MARKER = "__fragment__";
+/// Fragment is represented as a null tag value in vnodes.
+/// Both <> shorthand (codegen push_null) and <Fragment> (global = null)
+/// produce null tags, detected via O(1) isNull() check in renderNode.
 
 fn appendChild(
     ctx: *context.Context,
@@ -477,57 +478,42 @@ fn appendChild(
 pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
-    // Debug: log what h() receives
-    if (args.len > 0) {
-        const tag_arg = args[0];
-        if (tag_arg.isString()) {
-            std.log.debug("h() called with string tag: {s}", .{tag_arg.toPtr(string.JSString).data()});
-        } else if (tag_arg.isCallable()) {
-            std.log.debug("h() called with callable tag", .{});
-        } else if (tag_arg.isUndefined()) {
-            std.log.debug("h() called with UNDEFINED tag!", .{});
-        } else if (tag_arg.isNull()) {
-            std.log.debug("h() called with NULL tag!", .{});
-        } else {
-            std.log.debug("h() called with unknown tag type: {x}", .{tag_arg.raw});
-        }
-    } else {
-        std.log.debug("h() called with NO args!", .{});
-    }
+    // Tag (first arg), defaults to "div"
+    const tag_val = if (args.len > 0) args[0] else blk: {
+        break :blk try ctx.createString("div");
+    };
 
-    // Create node object with { tag, props, children }
-    const node = try ctx.createObject(null);
-
-    // Set tag (first arg)
-    const tag_atom: object.Atom = .tag;
-    if (args.len > 0) {
-        try ctx.setPropertyChecked(node, tag_atom, args[0]);
-    } else {
-        const div_str = try ctx.createString("div");
-        try ctx.setPropertyChecked(node, tag_atom, div_str);
-    }
-
-    // Set props (second arg or empty object)
-    const props_atom: object.Atom = .props;
-    if (args.len > 1 and args[1].isObject()) {
-        try ctx.setPropertyChecked(node, props_atom, args[1]);
-    } else {
-        const empty_props = try ctx.createObject(null);
-        try ctx.setPropertyChecked(node, props_atom, empty_props.toValue());
-    }
+    // Props (second arg) - pass null through instead of allocating empty object
+    const props_val = if (args.len > 1 and args[1].isObject())
+        args[1]
+    else
+        value.JSValue.null_val;
 
     // Collect children (remaining args)
-    const children_atom: object.Atom = .children;
     const children_arr = try ctx.createArray();
     children_arr.prototype = ctx.array_prototype;
-
     var child_count: u32 = 0;
-    for (args[2..]) |child| {
-        try appendChild(ctx, children_arr, &child_count, child);
+    if (args.len > 2) {
+        for (args[2..]) |child| {
+            try appendChild(ctx, children_arr, &child_count, child);
+        }
     }
     children_arr.setArrayLength(child_count);
-    try ctx.setPropertyChecked(node, children_atom, children_arr.toValue());
 
+    // Create vnode with preallocated shape for direct slot writes
+    if (ctx.vnode_shape) |shape| {
+        const node = try ctx.createObjectWithClass(shape.class_idx, null);
+        node.setSlot(shape.tag_slot, tag_val);
+        node.setSlot(shape.props_slot, props_val);
+        node.setSlot(shape.children_slot, children_arr.toValue());
+        return node.toValue();
+    }
+
+    // Fallback: dynamic property setting
+    const node = try ctx.createObject(null);
+    try ctx.setPropertyChecked(node, .tag, tag_val);
+    try ctx.setPropertyChecked(node, .props, props_val);
+    try ctx.setPropertyChecked(node, .children, children_arr.toValue());
     return node.toValue();
 }
 
@@ -539,14 +525,12 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
         return ctx.createString("") catch return value.JSValue.undefined_val;
     }
 
-    var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
-
-    var aw: std.Io.Writer.Allocating = .fromArrayList(ctx.allocator, &buffer);
+    // Use per-context reusable buffer to avoid allocation per call
+    var aw = &ctx.render_writer;
+    aw.clearRetainingCapacity();
     try renderNode(ctx, args[0], &aw.writer);
-    buffer = aw.toArrayList();
-
-    return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
+    const result = try ctx.createString(aw.written());
+    return result;
 }
 
 const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool };
@@ -628,17 +612,17 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             return;
         }
 
-        // Fragment: just render children
+        // Fragment: null tag means render children without wrapper
+        if (tag_val.isNull()) {
+            if (obj.getProperty(pool, .children)) |children| {
+                try renderChildren(ctx, children, writer);
+            }
+            return;
+        }
+
+        // HTML element
         if (tag_val.isString()) {
             const tag_str = tag_val.toPtr(string.JSString);
-            if (std.mem.eql(u8, tag_str.data(), FRAGMENT_MARKER)) {
-                if (obj.getProperty(pool, .children)) |children| {
-                    try renderChildren(ctx, children, writer);
-                }
-                return;
-            }
-
-            // HTML element
             try writer.writeByte('<');
             try writer.writeAll(tag_str.data());
 
@@ -674,42 +658,9 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
     }
 }
 
-/// Render array of children or single child
-fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: anytype) !void {
-    // Handle null/undefined
-    if (children.isNull() or children.isUndefined()) return;
-
-    // Handle string-like children
-    if (children.isStringOrRope()) {
-        const text = try getStringArgWithCtx(children, ctx);
-        try escapeHtml(text, writer);
-        return;
-    }
-
-    // Handle number children
-    if (children.isInt()) {
-        try writer.print("{d}", .{children.getInt()});
-        return;
-    }
-
-    // Handle object (array or single vnode)
-    if (!children.isObject()) return;
-
-    const children_obj = object.JSObject.fromValue(children);
-
-    // If it's an array, iterate
-    if (children_obj.class_id == .array) {
-        const len = children_obj.getArrayLength();
-        var i: u32 = 0;
-        while (i < len) : (i += 1) {
-            if (children_obj.getIndex(i)) |child| {
-                try renderNode(ctx, child, writer);
-            }
-        }
-    } else {
-        // Single child vnode - render it directly
-        try renderNode(ctx, children, writer);
-    }
+/// Render children value - delegates to renderNode which handles all types.
+fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: *std.Io.Writer) RenderError!void {
+    try renderNode(ctx, children, writer);
 }
 
 /// Render HTML attributes from props object
@@ -770,39 +721,59 @@ fn renderAttributes(ctx: *context.Context, props: value.JSValue, writer: anytype
     }
 }
 
-/// Escape HTML special characters
+/// Escape HTML special characters using scan-then-copy for bulk writes.
 fn escapeHtml(text: []const u8, writer: *std.Io.Writer) RenderError!void {
-    for (text) |c| {
-        switch (c) {
-            '&' => try writer.writeAll("&amp;"),
-            '<' => try writer.writeAll("&lt;"),
-            '>' => try writer.writeAll("&gt;"),
-            else => try writer.writeByte(c),
-        }
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        const replacement: []const u8 = switch (c) {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            else => continue,
+        };
+        if (i > start) try writer.writeAll(text[start..i]);
+        try writer.writeAll(replacement);
+        start = i + 1;
     }
+    if (start < text.len) try writer.writeAll(text[start..]);
 }
 
-/// Escape attribute value
+/// Escape attribute value using scan-then-copy for bulk writes.
 fn escapeAttr(text: []const u8, writer: anytype) !void {
-    for (text) |c| {
-        switch (c) {
-            '&' => try writer.writeAll("&amp;"),
-            '"' => try writer.writeAll("&quot;"),
-            else => try writer.writeByte(c),
-        }
+    var start: usize = 0;
+    for (text, 0..) |c, i| {
+        const replacement: []const u8 = switch (c) {
+            '&' => "&amp;",
+            '"' => "&quot;",
+            '\'' => "&#x27;",
+            else => continue,
+        };
+        if (i > start) try writer.writeAll(text[start..i]);
+        try writer.writeAll(replacement);
+        start = i + 1;
     }
+    if (start < text.len) try writer.writeAll(text[start..]);
 }
 
-/// Check if element is a void element (self-closing)
+/// Check if element is a void element (self-closing).
+/// Uses first-char dispatch to avoid linear scan of all 14 void elements.
 fn isVoidElement(tag: []const u8) bool {
-    const void_elements = [_][]const u8{
-        "area",  "base", "br",   "col",   "embed",  "hr",    "img",
-        "input", "link", "meta", "param", "source", "track", "wbr",
+    if (tag.len < 2) return false;
+    return switch (tag[0]) {
+        'a' => std.mem.eql(u8, tag, "area"),
+        'b' => std.mem.eql(u8, tag, "base") or std.mem.eql(u8, tag, "br"),
+        'c' => std.mem.eql(u8, tag, "col"),
+        'e' => std.mem.eql(u8, tag, "embed"),
+        'h' => std.mem.eql(u8, tag, "hr"),
+        'i' => std.mem.eql(u8, tag, "img") or std.mem.eql(u8, tag, "input"),
+        'l' => std.mem.eql(u8, tag, "link"),
+        'm' => std.mem.eql(u8, tag, "meta"),
+        'p' => std.mem.eql(u8, tag, "param"),
+        's' => std.mem.eql(u8, tag, "source"),
+        't' => std.mem.eql(u8, tag, "track"),
+        'w' => std.mem.eql(u8, tag, "wbr"),
+        else => false,
     };
-    for (void_elements) |ve| {
-        if (std.mem.eql(u8, tag, ve)) return true;
-    }
-    return false;
 }
 
 /// Check if element should have raw (unescaped) text content

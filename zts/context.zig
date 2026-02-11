@@ -94,6 +94,13 @@ pub const HttpRequestHeadersShape = struct {
     connection_slot: u16,
 };
 
+pub const VnodeShape = struct {
+    class_idx: object.HiddenClassIndex,
+    tag_slot: u16,
+    props_slot: u16,
+    children_slot: u16,
+};
+
 pub const HttpShapeCache = struct {
     request: HttpRequestShape,
     response: HttpResponseShape,
@@ -223,6 +230,8 @@ pub const Context = struct {
     enforce_arena_escape: bool = true,
     /// Reusable buffer for JSON serialization to reduce allocations
     json_writer: std.Io.Writer.Allocating,
+    /// Reusable buffer for JSX renderToString to reduce allocations
+    render_writer: std.Io.Writer.Allocating,
     /// JIT code allocator for compiled functions (Phase 11)
     /// Lazily initialized when first JIT compilation is requested
     code_allocator: ?*jit.CodeAllocator,
@@ -237,6 +246,8 @@ pub const Context = struct {
     builtin_objects: std.ArrayList(*object.JSObject),
     /// Cached HTTP shapes for fast Request/Response creation
     http_shapes: ?HttpShapeCache,
+    /// Cached vnode shape for fast JSX virtual DOM node creation
+    vnode_shape: ?VnodeShape,
     /// Cached HTTP strings and atoms for common values
     http_strings: ?HttpStringCache,
     /// Cached strings for small integers (0-99) to avoid repeated allocations
@@ -301,10 +312,12 @@ pub const Context = struct {
             .hybrid = null,
             .enforce_arena_escape = true,
             .json_writer = std.Io.Writer.Allocating.init(allocator),
+            .render_writer = std.Io.Writer.Allocating.init(allocator),
             .code_allocator = null,
             .jit_metrics = .{},
             .builtin_objects = .{},
             .http_shapes = null,
+            .vnode_shape = null,
             .http_strings = null,
             .small_int_cache = small_int_cache,
             .literal_shapes = .{},
@@ -312,6 +325,7 @@ pub const Context = struct {
 
         if (config.use_http_shape_cache) {
             try ctx.initHttpShapes();
+            try ctx.initVnodeShape();
         }
         if (config.use_http_string_cache) {
             try ctx.initHttpStrings();
@@ -416,6 +430,32 @@ pub const Context = struct {
                 .accept_encoding_slot = req_accept_encoding_slot,
                 .connection_slot = req_connection_slot,
             },
+        };
+    }
+
+    fn initVnodeShape(self: *Context) !void {
+        if (self.vnode_shape != null) return;
+        const pool = self.hidden_class_pool orelse return;
+
+        const addProp = struct {
+            fn add(hc_pool: *object.HiddenClassPool, class_idx: *object.HiddenClassIndex, name: object.Atom) !u16 {
+                const next = try hc_pool.addProperty(class_idx.*, name);
+                const slot = hc_pool.getPropertyCount(next) - 1;
+                class_idx.* = next;
+                return slot;
+            }
+        }.add;
+
+        var vnode_class = pool.getEmptyClass();
+        const tag_slot = try addProp(pool, &vnode_class, .tag);
+        const props_slot = try addProp(pool, &vnode_class, .props);
+        const children_slot = try addProp(pool, &vnode_class, .children);
+
+        self.vnode_shape = .{
+            .class_idx = vnode_class,
+            .tag_slot = tag_slot,
+            .props_slot = props_slot,
+            .children_slot = children_slot,
         };
     }
 
@@ -750,17 +790,10 @@ pub const Context = struct {
                 obj.destroyBuiltin(self.allocator, pool);
             }
 
-            // Clean up Fragment string on global before destroying global_obj
-            // (Fragment is a string, not an object, so it's not in builtin_objects)
+            // Destroy global object directly (all function properties are in builtin_objects)
+            // Don't use destroyBuiltin because properties reference already-freed objects
+            // Fragment is null (not a string), so no string cleanup needed
             if (self.global_obj) |g| {
-                if (pool.findProperty(g.hidden_class_idx, .Fragment)) |slot| {
-                    const fragment_val = g.getSlot(slot);
-                    if (fragment_val.isString()) {
-                        string.freeString(self.allocator, fragment_val.toPtr(string.JSString));
-                    }
-                }
-                // Destroy global object directly (all function properties are in builtin_objects)
-                // Don't use destroyBuiltin because properties reference already-freed objects
                 g.destroy(self.allocator);
             }
         }
@@ -802,6 +835,7 @@ pub const Context = struct {
 
         self.atoms.deinit();
         self.json_writer.deinit();
+        self.render_writer.deinit();
         self.allocator.free(self.call_stack);
         self.allocator.free(self.stack);
         self.allocator.destroy(self);
