@@ -1553,8 +1553,8 @@ pub const BaselineCompiler = struct {
             .get_loc_add => {
                 const idx = code[new_pc];
                 new_pc += 1;
+                // Stack has left operand; getLocal pushes right operand on top
                 try self.emitGetLocal(idx);
-                try self.emitSwap();
                 try self.emitBinaryOp(.add);
             },
 

@@ -2814,8 +2814,8 @@ pub const Interpreter = struct {
                 .get_loc_add => {
                     const idx = self.pc[0];
                     self.pc += 1;
-                    const a = self.ctx.getLocal(idx);
-                    const b = self.ctx.pop();
+                    const b = self.ctx.getLocal(idx); // Right operand (get_loc was emitted second)
+                    const a = self.ctx.pop(); // Left operand (was already on stack)
                     try self.ctx.push(try self.addValues(a, b));
                 },
 
