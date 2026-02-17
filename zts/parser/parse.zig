@@ -169,28 +169,34 @@ pub const Parser = struct {
             .kw_if => self.parseIfStatement(),
             .kw_while => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'while' is not supported; use 'for-of' with a finite collection instead");
+                self.advance();
                 return error.ParseError;
             },
             .kw_do => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'do-while' is not supported; use 'for-of' with a finite collection instead");
+                self.advance();
                 return error.ParseError;
             },
             .kw_for => self.parseForStatement(),
             .kw_return => self.parseReturnStatement(),
             .kw_break => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'break' is not supported; use early return or filter instead");
+                self.advance();
                 return error.ParseError;
             },
             .kw_continue => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'continue' is not supported; use filter or conditional logic instead");
+                self.advance();
                 return error.ParseError;
             },
             .kw_throw => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'throw' is not supported; use Result types for error handling");
+                self.advance();
                 return error.ParseError;
             },
             .kw_try => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'try/catch' is not supported; use Result types for error handling");
+                self.advance();
                 return error.ParseError;
             },
             .kw_switch => self.parseSwitchStatement(),
@@ -198,6 +204,7 @@ pub const Parser = struct {
             // Catches class declarations (both .js and .ts files after stripping)
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
+                self.advance();
                 return error.ParseError;
             },
             .lbrace => self.parseBlock(),
@@ -211,6 +218,7 @@ pub const Parser = struct {
         // Reject 'var' - only 'let' and 'const' are supported
         if (self.current.type == .kw_var) {
             self.errors.addErrorAt(.unsupported_feature, self.current, "'var' is not supported; use 'let' or 'const' instead");
+            self.advance(); // consume 'var' so synchronize() doesn't loop on it
             return error.ParseError;
         }
 
@@ -839,6 +847,7 @@ pub const Parser = struct {
             // Reject 'var' in for loops - only 'let' and 'const' are supported
             if (self.check(.kw_var)) {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'var' is not supported; use 'let' or 'const' instead");
+                self.advance(); // consume 'var' so synchronize() doesn't loop on it
                 return error.ParseError;
             }
 
@@ -1264,16 +1273,19 @@ pub const Parser = struct {
             },
             .kw_new => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'new' is not supported; use factory functions instead");
+                self.advance();
                 return error.ParseError;
             },
             .kw_function => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "function expressions are not supported; use arrow functions '(x) => x * 2' or function declarations 'function name() { }' instead");
+                self.advance();
                 return error.ParseError;
             },
             // class keyword in expression context: const X = class { }
             // Catches class expressions (both .js and .ts files after stripping)
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
+                self.advance();
                 return error.ParseError;
             },
             .kw_async => self.parseAsyncExpression(),
