@@ -95,8 +95,9 @@ pub const CodeGen = struct {
     /// Map from shape content hash to shape index for deduplication.
     shape_dedup: std.AutoHashMapUnmanaged(u64, u16),
 
-    /// Maximum inline cache slots per function (must match interpreter.IC_CACHE_SIZE)
-    pub const IC_CACHE_SIZE: u16 = 256;
+    /// Maximum inline cache slots per compilation unit (must match interpreter.IC_CACHE_SIZE).
+    /// This limit applies globally across all functions in a file to ensure unique IC indices.
+    pub const IC_CACHE_SIZE: u16 = 512;
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1368,9 +1369,10 @@ pub const CodeGen = struct {
         const saved_scope = self.current_scope;
         const saved_max_stack = self.max_stack_depth;
         const saved_current_stack = self.current_stack_depth;
-        const saved_ic_cache_idx = self.ic_cache_idx;
-
-        // Reset for function compilation
+        // Reset per-function state for compilation. Note: ic_cache_idx is NOT reset
+        // because it must be globally unique across all functions in the compilation
+        // unit. The interpreter shares a single PIC cache, so functions compiled with
+        // overlapping IC indices would corrupt each other's cached property lookups.
         self.code = std.ArrayList(u8).empty;
         self.constants = std.ArrayList(JSValue).empty;
         self.upvalue_info = std.ArrayList(UpvalueInfo).empty;
@@ -1380,7 +1382,6 @@ pub const CodeGen = struct {
         self.current_scope = func.scope_id;
         self.max_stack_depth = 0;
         self.current_stack_depth = 0;
-        self.ic_cache_idx = 0;
 
         // Compile function body
         try self.emitNode(func.body);
@@ -1450,7 +1451,8 @@ pub const CodeGen = struct {
         self.loop_stack.deinit(self.allocator);
         upvalue_info_list.deinit(self.allocator);
 
-        // Restore parent state
+        // Restore parent state (ic_cache_idx intentionally NOT restored -
+        // it must keep incrementing to ensure unique IC indices across functions)
         self.code = saved_code;
         self.constants = saved_constants;
         self.upvalue_info = saved_upvalue_info;
@@ -1460,7 +1462,6 @@ pub const CodeGen = struct {
         self.current_scope = saved_scope;
         self.max_stack_depth = saved_max_stack;
         self.current_stack_depth = saved_current_stack;
-        self.ic_cache_idx = saved_ic_cache_idx;
 
         // Add function bytecode to parent constants and emit opcode
         const func_idx = try self.addConstant(JSValue.fromExternPtr(func_bc));

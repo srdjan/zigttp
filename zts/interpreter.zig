@@ -343,9 +343,12 @@ pub const InlineCacheEntry = struct {
     slot_offset: u16 = 0,
 };
 
-/// Maximum number of inline cache slots per function
-/// Each get_field_ic/put_field_ic instruction references a cache index
-pub const IC_CACHE_SIZE = 256;
+/// Maximum number of inline cache slots per compilation unit.
+/// Each get_field_ic/put_field_ic instruction references a cache index.
+/// Must match codegen.IC_CACHE_SIZE. IC indices are globally unique across
+/// all functions in a file, so this must be large enough for the total
+/// property access count across all functions.
+pub const IC_CACHE_SIZE = 512;
 
 /// Interpreter state
 pub const Interpreter = struct {
