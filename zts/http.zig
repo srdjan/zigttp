@@ -948,10 +948,27 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer) 
         } else {
             try writer.print("{d}", .{f});
         }
-    } else if (val.isString()) {
+    } else if (val.isAnyString()) {
         try writer.writeByte('"');
-        const str = val.toPtr(string.JSString);
-        const data = str.data();
+        // Handle all string types: flat strings, ropes, and slices
+        const data = blk: {
+            if (val.isString()) {
+                break :blk val.toPtr(string.JSString).data();
+            } else if (val.isRope()) {
+                const rope = val.toPtr(string.RopeNode);
+                if (ctx.hybrid) |hyb| {
+                    const flat = rope.flattenWithArena(hyb.arena) orelse return RenderError.OutOfMemory;
+                    break :blk flat.data();
+                } else {
+                    const flat = rope.flatten(ctx.allocator) catch return RenderError.OutOfMemory;
+                    break :blk flat.data();
+                }
+            } else {
+                // String slice
+                const slice = val.toPtr(string.SliceString);
+                break :blk slice.data();
+            }
+        };
         // Fast path: check if any escaping is needed
         var needs_escape = false;
         for (data) |c| {

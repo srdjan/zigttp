@@ -177,10 +177,7 @@ pub fn jsonParse(ctx: *context.Context, this: value.JSValue, args: []const value
     if (args.len == 0) return value.JSValue.undefined_val;
 
     const str_val = args[0];
-    if (!str_val.isString()) return value.JSValue.undefined_val;
-
-    const js_str = str_val.toPtr(string.JSString);
-    const text = js_str.data();
+    const text = getStringDataCtx(str_val, ctx) orelse return value.JSValue.undefined_val;
 
     return parseJsonValue(ctx, text) catch value.JSValue.undefined_val;
 }
@@ -195,13 +192,10 @@ pub fn jsonTryParse(ctx: *context.Context, this: value.JSValue, args: []const va
     }
 
     const str_val = args[0];
-    if (!str_val.isString()) {
+    const text = getStringDataCtx(str_val, ctx) orelse {
         const err_msg = string.createString(ctx.allocator, "JSON.tryParse argument must be a string") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
-    }
-
-    const js_str = str_val.toPtr(string.JSString);
-    const text = js_str.data();
+    };
 
     const parsed = parseJsonValue(ctx, text) catch {
         const err_msg = string.createString(ctx.allocator, "Invalid JSON") catch return value.JSValue.undefined_val;
