@@ -126,6 +126,10 @@ Options:
   -n, --pool <N>        Runtime pool size (default: auto)
   --cors                Enable CORS headers
   --static <DIR>        Serve static files
+  --outbound-http       Enable native outbound bridge (httpRequest)
+  --outbound-host <H>   Restrict outbound bridge to exact host H
+  --outbound-timeout-ms Connect timeout for outbound bridge (ms)
+  --outbound-max-response <SIZE>
 ```
 
 ## Key Features
@@ -139,6 +143,22 @@ Options:
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
 **Developer Experience**: Fetch-like Response API (Response.json, Response.text, Response.html), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
+
+## Native Outbound Bridge
+
+When enabled with `--outbound-http`, handlers can call:
+
+```javascript
+const raw = httpRequest(JSON.stringify({
+  url: "http://127.0.0.1:8787/v1/ops?view=state",
+  method: "GET",
+  headers: { Authorization: "Bearer ..." }
+}));
+const resp = JSON.parse(raw);
+```
+
+`httpRequest` returns JSON with either `{ ok: true, status, reason, body, content_type? }` or `{ ok: false, error, details }`.
+Use `--outbound-host` to restrict egress to a single host.
 
 ## Build-Time Precompilation
 

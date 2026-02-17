@@ -13,6 +13,10 @@
 //!   -q, --quiet           Disable request logging
 //!   --cors                Enable CORS headers
 //!   --static <DIR>        Serve static files from directory
+//!   --outbound-http       Enable native outbound HTTP bridge (httpRequest)
+//!   --outbound-host <H>   Restrict outbound bridge to exact host H
+//!   --outbound-timeout-ms Connect timeout for outbound bridge (default: 10000)
+//!   --outbound-max-response <SIZE>  Max captured response bytes (default: 1mb)
 //!   --help                Show this help message
 //!
 //! Handler API (Deno-compatible):
@@ -26,6 +30,7 @@
 //!   - Response.json/text/html/redirect helpers
 //!   - Math, String, Array, Object builtins
 //!   - JSON.parse/stringify
+//!   - httpRequest(jsonString) when outbound bridge is enabled
 
 const std = @import("std");
 const Server = @import("server.zig").Server;
@@ -109,6 +114,20 @@ fn parseArgs(args_vector: std.process.Args) !ServerConfig {
             config.enable_cors = true;
         } else if (std.mem.eql(u8, arg, "--static")) {
             config.static_dir = args.next() orelse return error.MissingStaticDir;
+        } else if (std.mem.eql(u8, arg, "--outbound-http")) {
+            config.runtime_config.outbound_http_enabled = true;
+        } else if (std.mem.eql(u8, arg, "--outbound-host")) {
+            const host = args.next() orelse return error.MissingOutboundHost;
+            config.runtime_config.outbound_http_enabled = true;
+            config.runtime_config.outbound_allow_host = host;
+        } else if (std.mem.eql(u8, arg, "--outbound-timeout-ms")) {
+            const timeout_str = args.next() orelse return error.MissingOutboundTimeout;
+            config.runtime_config.outbound_http_enabled = true;
+            config.runtime_config.outbound_timeout_ms = std.fmt.parseInt(u32, timeout_str, 10) catch return error.InvalidOutboundTimeout;
+        } else if (std.mem.eql(u8, arg, "--outbound-max-response")) {
+            const size_str = args.next() orelse return error.MissingOutboundMaxResponse;
+            config.runtime_config.outbound_http_enabled = true;
+            config.runtime_config.outbound_max_response_bytes = parseSize(size_str) catch return error.InvalidOutboundMaxResponse;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             // Positional argument: handler file (overrides embedded)
             config.handler = .{ .file_path = arg };
@@ -175,6 +194,11 @@ fn printHelp() void {
         \\  -q, --quiet           Disable request logging
         \\  --cors                Enable CORS headers
         \\  --static <DIR>        Serve static files from directory
+        \\  --outbound-http       Enable native outbound HTTP bridge (httpRequest)
+        \\  --outbound-host <H>   Restrict outbound bridge to exact host H
+        \\  --outbound-timeout-ms Connect timeout for outbound bridge in ms
+        \\  --outbound-max-response <SIZE>
+        \\                        Max captured response bytes (supports k/m/g suffixes)
         \\  --help                Show this help message
         \\
         \\Handler API:
@@ -193,6 +217,7 @@ fn printHelp() void {
         \\    Response.json(data, init?)
         \\    Response.text(text, init?)
         \\    Response.html(html, init?)
+        \\    httpRequest(jsonString)        // when outbound bridge is enabled
         \\
         \\Example handler.js:
         \\  function handler(request) {

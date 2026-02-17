@@ -54,6 +54,19 @@ pub const RuntimeConfig = struct {
 
     /// Override JIT compilation threshold (null = use policy default)
     jit_threshold: ?u32 = null,
+
+    /// Enable native outbound HTTP bridge (`httpRequest(json)`).
+    outbound_http_enabled: bool = false,
+
+    /// Optional exact host allowlist for outbound HTTP requests.
+    /// Example: `127.0.0.1` or `localhost`.
+    outbound_allow_host: ?[]const u8 = null,
+
+    /// Maximum response bytes captured by `httpRequest`.
+    outbound_max_response_bytes: usize = 1024 * 1024,
+
+    /// Connect timeout in milliseconds for outbound HTTP requests.
+    outbound_timeout_ms: u32 = 10_000,
 };
 
 fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.Heap, config: RuntimeConfig) void {
@@ -265,6 +278,7 @@ pub const Runtime = struct {
 
         // Install console object
         try self.installConsole();
+        try self.installHttpRequest();
 
         // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
         // Don't re-register them here as it would overwrite the proper constructor
@@ -342,6 +356,23 @@ pub const Runtime = struct {
 
         // Register on global
         try self.ctx.setGlobal(.console, console_obj.toValue());
+    }
+
+    fn installHttpRequest(self: *Self) !void {
+        const root_class_idx = self.ctx.root_class_idx;
+        const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+        const fn_atom = try self.ctx.atoms.intern("httpRequest");
+        const fn_obj = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            httpRequestNative,
+            fn_atom,
+            1,
+        );
+        try self.ctx.builtin_objects.append(self.allocator, fn_obj);
+        try self.ctx.setGlobal(fn_atom, fn_obj.toValue());
     }
 
     // Note: installResponseHelpers and installJsxRuntime removed - these are now handled by initBuiltins()
@@ -1173,6 +1204,233 @@ pub const Runtime = struct {
 // Native Function Implementations
 // ============================================================================
 
+fn httpRequestNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const rt = current_runtime orelse return error.RuntimeUnavailable;
+    const out = httpRequestResultJsonAlloc(rt, args) catch |err| {
+        const fallback = try httpRequestErrorJsonAlloc(rt.allocator, "InternalError", @errorName(err));
+        defer rt.allocator.free(fallback);
+        return rt.createString(fallback);
+    };
+    defer rt.allocator.free(out);
+    return rt.createString(out);
+}
+
+fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
+    const a = rt.allocator;
+    if (!rt.config.outbound_http_enabled) {
+        return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
+    }
+    if (args.len == 0 or !args[0].isString()) {
+        return try httpRequestErrorJsonAlloc(a, "InvalidArgs", "expected one JSON string argument");
+    }
+
+    const input_json = args[0].toPtr(zq.JSString).data();
+    var parsed = std.json.parseFromSlice(std.json.Value, a, input_json, .{}) catch {
+        return try httpRequestErrorJsonAlloc(a, "InvalidJson", "failed to parse request JSON");
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) {
+        return try httpRequestErrorJsonAlloc(a, "InvalidJson", "request JSON must be an object");
+    }
+    const obj = parsed.value.object;
+
+    const url_v = obj.get("url") orelse {
+        return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "missing url field");
+    };
+    if (url_v != .string or url_v.string.len == 0) {
+        return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "url must be a non-empty string");
+    }
+    const uri = std.Uri.parse(url_v.string) catch {
+        return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "url parse failed");
+    };
+
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch {
+        return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "url host is required");
+    };
+    if (rt.config.outbound_allow_host) |allowed_host| {
+        if (!ascii.eqlIgnoreCase(host.bytes, allowed_host)) {
+            return try httpRequestErrorJsonAlloc(a, "HostNotAllowed", allowed_host);
+        }
+    }
+
+    const method = blk: {
+        if (obj.get("method")) |method_v| {
+            if (method_v != .string) {
+                return try httpRequestErrorJsonAlloc(a, "InvalidMethod", "method must be string");
+            }
+            break :blk parseHttpMethod(method_v.string) orelse {
+                return try httpRequestErrorJsonAlloc(a, "InvalidMethod", method_v.string);
+            };
+        }
+        break :blk std.http.Method.GET;
+    };
+
+    const body: ?[]const u8 = if (obj.get("body")) |body_v| switch (body_v) {
+        .null => null,
+        .string => |s| s,
+        else => return try httpRequestErrorJsonAlloc(a, "InvalidBody", "body must be string|null"),
+    } else null;
+
+    const max_response_bytes = blk: {
+        const cfg_max = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);
+        if (obj.get("max_response_bytes")) |max_v| switch (max_v) {
+            .integer => |i| {
+                const req_max = std.math.cast(usize, i) orelse {
+                    return try httpRequestErrorJsonAlloc(a, "InvalidMaxResponseBytes", "max_response_bytes out of range");
+                };
+                break :blk @min(cfg_max, @max(@as(usize, 1), req_max));
+            },
+            else => return try httpRequestErrorJsonAlloc(a, "InvalidMaxResponseBytes", "max_response_bytes must be integer"),
+        };
+        break :blk cfg_max;
+    };
+
+    var owned_header_slices = std.array_list.Managed([]u8).init(a);
+    defer {
+        for (owned_header_slices.items) |s| a.free(s);
+        owned_header_slices.deinit();
+    }
+    var headers = std.array_list.Managed(std.http.Header).init(a);
+    defer headers.deinit();
+
+    if (obj.get("headers")) |headers_v| {
+        if (headers_v != .object) {
+            return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "headers must be object<string,string>");
+        }
+        var it = headers_v.object.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .string) {
+                return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header values must be strings");
+            }
+            const name = try a.dupe(u8, entry.key_ptr.*);
+            errdefer a.free(name);
+            const value = try a.dupe(u8, entry.value_ptr.string);
+            errdefer a.free(value);
+            if (name.len == 0) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name must be non-empty");
+            if (std.mem.indexOfAny(u8, name, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name contains newline");
+            if (std.mem.indexOfAny(u8, value, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header value contains newline");
+
+            try owned_header_slices.append(name);
+            try owned_header_slices.append(value);
+            try headers.append(.{ .name = name, .value = value });
+        }
+    }
+
+    var client = std.http.Client{
+        .allocator = a,
+        .io = std.Options.debug_io,
+    };
+    defer client.deinit();
+
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
+        return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "unsupported URI scheme");
+    };
+    const timeout: std.Io.Timeout = if (rt.config.outbound_timeout_ms == 0) .none else blk: {
+        const duration = std.Io.Duration.fromMilliseconds(@intCast(rt.config.outbound_timeout_ms));
+        break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
+    };
+    const connection = client.connectTcpOptions(.{
+        .host = host,
+        .port = uri.port orelse switch (protocol) {
+            .plain => 80,
+            .tls => 443,
+        },
+        .protocol = protocol,
+        .timeout = timeout,
+    }) catch |err| {
+        return try httpRequestErrorJsonAlloc(a, "ConnectFailed", @errorName(err));
+    };
+
+    var req = client.request(method, uri, .{
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+        .connection = connection,
+        .extra_headers = headers.items,
+    }) catch |err| {
+        client.connection_pool.release(connection, client.io);
+        return try httpRequestErrorJsonAlloc(a, "RequestInitFailed", @errorName(err));
+    };
+    defer req.deinit();
+
+    if (body) |payload| {
+        req.transfer_encoding = .{ .content_length = payload.len };
+        var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
+            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+        };
+        request_body.writer.writeAll(payload) catch |err| {
+            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+        };
+        request_body.end() catch |err| {
+            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+        };
+        req.connection.?.flush() catch |err| {
+            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+        };
+    } else {
+        req.sendBodiless() catch |err| {
+            return try httpRequestErrorJsonAlloc(a, "RequestSendFailed", @errorName(err));
+        };
+    }
+
+    var response = req.receiveHead(&.{}) catch |err| {
+        return try httpRequestErrorJsonAlloc(a, "ResponseHeadFailed", @errorName(err));
+    };
+
+    var body_transfer: [64]u8 = undefined;
+    var response_reader = response.reader(&body_transfer);
+    const response_body = response_reader.allocRemaining(a, std.Io.Limit.limited(max_response_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return try httpRequestErrorJsonAlloc(a, "ResponseTooLarge", "response exceeded max_response_bytes"),
+        else => return try httpRequestErrorJsonAlloc(a, "ResponseReadFailed", @errorName(err)),
+    };
+    defer a.free(response_body);
+
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("ok");
+    try stream.write(response.head.status.class() != .server_error and response.head.status.class() != .client_error);
+    try stream.objectField("status");
+    try stream.write(@intFromEnum(response.head.status));
+    try stream.objectField("reason");
+    try stream.write(response.head.reason);
+    if (response.head.content_type) |ct| {
+        try stream.objectField("content_type");
+        try stream.write(ct);
+    }
+    try stream.objectField("body");
+    try stream.write(response_body);
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
+fn parseHttpMethod(raw: []const u8) ?std.http.Method {
+    if (ascii.eqlIgnoreCase(raw, "GET")) return .GET;
+    if (ascii.eqlIgnoreCase(raw, "POST")) return .POST;
+    if (ascii.eqlIgnoreCase(raw, "PUT")) return .PUT;
+    if (ascii.eqlIgnoreCase(raw, "PATCH")) return .PATCH;
+    if (ascii.eqlIgnoreCase(raw, "DELETE")) return .DELETE;
+    if (ascii.eqlIgnoreCase(raw, "HEAD")) return .HEAD;
+    if (ascii.eqlIgnoreCase(raw, "OPTIONS")) return .OPTIONS;
+    return null;
+}
+
+fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, details: []const u8) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(a);
+    defer aw.deinit();
+    var stream: std.json.Stringify = .{ .writer = &aw.writer };
+    try stream.beginObject();
+    try stream.objectField("ok");
+    try stream.write(false);
+    try stream.objectField("error");
+    try stream.write(err_code);
+    try stream.objectField("details");
+    try stream.write(details);
+    try stream.endObject();
+    return try aw.toOwnedSlice();
+}
+
 fn consoleLog(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     for (args, 0..) |arg, i| {
         if (i > 0) writeToFd(std.c.STDOUT_FILENO, " ");
@@ -1861,6 +2119,85 @@ test "Runtime creation" {
     defer rt.deinit();
 
     try std.testing.expect(rt.ctx.sp == 0);
+}
+
+test "httpRequest native binding reports disabled bridge by default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const out = httpRequest(JSON.stringify({ url: "http://example.com" }));
+        \\  return Response.json(JSON.parse(out));
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<http-bridge-disabled>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+    const ok_v = obj.get("ok") orelse return error.BadGolden;
+    try std.testing.expect(ok_v == .bool and !ok_v.bool);
+    const err_v = obj.get("error") orelse return error.BadGolden;
+    try std.testing.expect(err_v == .string);
+    try std.testing.expectEqualStrings("OutboundHttpDisabled", err_v.string);
+}
+
+test "httpRequest native binding enforces allowlisted host before dialing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "localhost",
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const out = httpRequest(JSON.stringify({ url: "http://example.com" }));
+        \\  return Response.json(JSON.parse(out));
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<http-bridge-allowlist>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value == .object);
+    const obj = parsed.value.object;
+    const ok_v = obj.get("ok") orelse return error.BadGolden;
+    try std.testing.expect(ok_v == .bool and !ok_v.bool);
+    const err_v = obj.get("error") orelse return error.BadGolden;
+    try std.testing.expect(err_v == .string);
+    try std.testing.expectEqualStrings("HostNotAllowed", err_v.string);
 }
 
 test "HandlerPool basic operations" {

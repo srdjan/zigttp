@@ -79,6 +79,10 @@ Options:
   -q, --quiet           Disable request logging
   --cors                Enable CORS headers
   --static <DIR>        Serve static files from directory
+  --outbound-http       Enable native outbound bridge (httpRequest)
+  --outbound-host <H>   Restrict outbound bridge to exact host H
+  --outbound-timeout-ms Connect timeout for outbound bridge (ms)
+  --outbound-max-response <SIZE>
   --help                Show help message
 ```
 
@@ -116,6 +120,21 @@ console.warn(value)   // Print to stderr
 console.info(value)   // Print to stdout
 console.debug(value)  // Print to stdout
 ```
+
+### Native outbound bridge
+
+```javascript
+const raw = httpRequest(JSON.stringify({
+  url: "http://127.0.0.1:8787/v1/ops?view=state",
+  method: "GET",
+  headers: { Authorization: "Bearer ..." }
+}));
+const resp = JSON.parse(raw);
+```
+
+`httpRequest` returns JSON:
+- success: `{ ok: true, status, reason, body, content_type? }`
+- failure: `{ ok: false, error, details }`
 
 ## Advanced Server Configuration (Zig API)
 
