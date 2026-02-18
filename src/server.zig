@@ -27,7 +27,7 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     defer allocator.free(path_z);
 
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer std.posix.close(fd);
+    defer std.Io.Threaded.closeFd(fd);
 
     // Read file in chunks without fstat (avoids libc/Linux compatibility issues)
     var buffer: std.ArrayList(u8) = .empty;
@@ -234,7 +234,7 @@ const ConnectionPool = struct {
     }
 
     fn handleConnection(self: *ConnectionPool, fd: std.posix.fd_t) void {
-        defer std.posix.close(fd);
+        defer std.Io.Threaded.closeFd(fd);
 
         // TCP_NODELAY: disable Nagle's algorithm for lower latency
         // This reduces response latency by sending data immediately
@@ -879,7 +879,7 @@ pub const Server = struct {
                 const fd = stream.socket.handle;
                 if (!cp.submit(fd)) {
                     // Queue full - close connection
-                    std.posix.close(fd);
+                    std.Io.Threaded.closeFd(fd);
                 }
             } else {
                 // Evented path: use async I/O group
@@ -2351,11 +2351,11 @@ test "threaded readRequestData handles partial headers" {
     };
 
     const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
-    defer std.posix.close(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[0]);
 
     try writeAllFd(fds[1], "GET / HTTP/1.1\r\nHost: example.com\r\n");
     try writeAllFd(fds[1], "Content-Length: 5\r\n\r\nhello");
-    std.posix.close(fds[1]);
+    std.Io.Threaded.closeFd(fds[1]);
 
     const data = try pool.readRequestData(fds[0], allocator);
     var request = try server.parseRequestFromBuffer(allocator, data);
@@ -2479,7 +2479,7 @@ test "parseRequest rejects long header lines (streaming)" {
     server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
 
     const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
-    defer std.posix.close(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[0]);
 
     const long_value = try allocator.alloc(u8, 9000);
     defer allocator.free(long_value);
@@ -2492,7 +2492,7 @@ test "parseRequest rejects long header lines (streaming)" {
     defer allocator.free(payload);
 
     try writeAllFd(fds[1], payload);
-    std.posix.close(fds[1]);
+    std.Io.Threaded.closeFd(fds[1]);
 
     var stream = net.Stream{
         .socket = .{

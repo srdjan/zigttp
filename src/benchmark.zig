@@ -127,7 +127,7 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     defer allocator.free(path_z);
 
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer std.posix.close(fd);
+    defer std.Io.Threaded.closeFd(fd);
 
     // Read file in chunks without fstat (avoids libc/Linux compatibility issues)
     var buffer: std.ArrayList(u8) = .empty;
