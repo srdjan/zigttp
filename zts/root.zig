@@ -47,6 +47,7 @@ pub const bytecode_cache = @import("bytecode_cache.zig");
 pub const bytecode_opt = @import("bytecode_opt.zig");
 pub const arena = @import("arena.zig");
 pub const handler_analyzer = @import("handler_analyzer.zig");
+pub const modules = @import("modules/root.zig");
 // Optional/experimental modules (not wired into runtime by default)
 // These are kept in zts/ for future development but not exported publicly.
 // To use: @import("zts/perf.zig") directly, or uncomment below.

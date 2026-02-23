@@ -2009,6 +2009,70 @@ pub const IrView = struct {
         };
     }
 
+    // ============ Module Accessors ============
+
+    /// Get import declaration data
+    /// Packing: a = module_idx, b = specifiers_start_low16 | (specifiers_count << 16)
+    pub fn getImportDecl(self: IrView, idx: NodeIndex) ?Node.ImportDecl {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.import_decl else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .module_idx = @truncate(d.a),
+                    .specifiers_start = @truncate(d.b),
+                    .specifiers_count = @truncate(d.b >> 16),
+                };
+            },
+        };
+    }
+
+    /// Get import specifier data
+    /// Packing: a = extra_start -> extra = [kind, imported_atom, binding_packed]
+    pub fn getImportSpec(self: IrView, idx: NodeIndex) ?Node.ImportSpec {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.import_spec else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                const binding_packed = extra[extra_start + 2];
+                break :blk .{
+                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .imported_atom = @truncate(extra[extra_start + 1]),
+                    .local_binding = .{
+                        .scope_id = @truncate((binding_packed >> 16) & 0x1FFF),
+                        .slot = @truncate(binding_packed),
+                        .kind = @enumFromInt(@as(u3, @truncate(binding_packed >> 29))),
+                    },
+                };
+            },
+        };
+    }
+
+    /// Get export declaration data
+    /// Packing: a = extra_start -> extra = [kind, declaration, specifiers_start, specifiers_count, from_module_idx]
+    pub fn getExportDecl(self: IrView, idx: NodeIndex) ?Node.ExportDecl {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.export_decl else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const extra_start = d.a;
+                const extra = ir.extra.items;
+                break :blk .{
+                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .declaration = extra[extra_start + 1],
+                    .specifiers_start = extra[extra_start + 2],
+                    .specifiers_count = @truncate(extra[extra_start + 3]),
+                    .from_module_idx = @truncate(extra[extra_start + 4]),
+                };
+            },
+        };
+    }
+
     // ============ Pattern Accessors ============
 
     /// Get pattern element data

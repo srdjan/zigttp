@@ -207,6 +207,8 @@ pub const Parser = struct {
                 self.advance();
                 return error.ParseError;
             },
+            .kw_import => self.parseImportDeclaration(),
+            .kw_export => self.parseExportDeclaration(),
             .lbrace => self.parseBlock(),
             .semicolon => self.parseEmptyStatement(),
             .kw_debugger => self.parseDebuggerStatement(),
@@ -1197,6 +1199,184 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .none = {} },
         });
+    }
+
+    // ============ Module Declaration Parsing ============
+
+    /// Parse import declaration: import { X, Y } from "specifier"
+    /// Also rejects unsupported forms (dynamic import, require, default, namespace)
+    fn parseImportDeclaration(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume 'import'
+
+        // Collect specifiers
+        var specifiers = std.ArrayList(NodeIndex).empty;
+        defer specifiers.deinit(self.allocator);
+
+        // Must have { for named imports
+        if (!self.check(.lbrace)) {
+            // Check for `import "module"` (side-effect import) or `import X from`
+            if (self.check(.string_literal)) {
+                self.errorAt(loc, "'import \"module\"' side-effect imports are not supported; use named imports: import { x } from \"module\"");
+                return error.ParseError;
+            }
+            if (self.check(.star)) {
+                self.errorAt(loc, "'import * as X' namespace imports are not supported; use named imports: import { x } from \"module\"");
+                return error.ParseError;
+            }
+            // Assume default import attempt
+            self.errorAt(loc, "'import X from' default imports are not supported; use named imports: import { x } from \"module\"");
+            return error.ParseError;
+        }
+
+        self.advance(); // consume '{'
+
+        // Parse specifier list: { name1, name2, name3 as alias }
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            const spec_loc = self.current.location();
+
+            // Accept identifiers and keywords-as-identifiers (e.g., import { default as x })
+            const imported_name = if (self.check(.identifier) or self.isKeyword(self.current.type))
+                blk: {
+                    const tok = self.current;
+                    self.advance();
+                    break :blk tok;
+                }
+            else {
+                self.errors.addExpectedError(self.current, "import specifier name");
+                return error.UnexpectedToken;
+            };
+
+            const imported_atom = try self.addAtom(imported_name.text(self.source));
+
+            // Check for 'as' alias
+            const local_name = if (self.match(.kw_as))
+                try self.expectIdentifier("alias name after 'as'")
+            else
+                imported_name;
+
+            const local_atom = try self.addAtom(local_name.text(self.source));
+
+            // Declare local binding in scope
+            const binding = self.scopes.declareBinding(
+                local_name.text(self.source),
+                local_atom,
+                .variable,
+                true, // imports are const
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    self.errorAt(spec_loc, "duplicate import binding");
+                    return error.ParseError;
+                },
+            };
+
+            const spec_node = try self.nodes.add(.{
+                .tag = .import_specifier,
+                .loc = spec_loc,
+                .data = .{ .import_spec = .{
+                    .kind = .named,
+                    .imported_atom = imported_atom,
+                    .local_binding = binding,
+                } },
+            });
+
+            try specifiers.append(self.allocator, spec_node);
+
+            if (!self.match(.comma)) break;
+        }
+
+        try self.expect(.rbrace, "'}'");
+        try self.expect(.kw_from, "'from'");
+
+        // Parse module specifier string
+        if (!self.check(.string_literal)) {
+            self.errors.addExpectedError(self.current, "module specifier string");
+            return error.UnexpectedToken;
+        }
+        const module_token = self.current;
+        self.advance();
+
+        // Get the string content without quotes
+        const raw = module_token.text(self.source);
+        const module_str = if (raw.len >= 2) raw[1 .. raw.len - 1] else raw;
+        const module_idx = try self.addString(module_str);
+
+        try self.expectSemicolon();
+
+        const specs_start = if (specifiers.items.len > 0)
+            try self.addNodeList(specifiers.items)
+        else
+            null_node;
+
+        return try self.nodes.add(.{
+            .tag = .import_decl,
+            .loc = loc,
+            .data = .{ .import_decl = .{
+                .module_idx = module_idx,
+                .specifiers_start = specs_start,
+                .specifiers_count = @intCast(specifiers.items.len),
+            } },
+        });
+    }
+
+    /// Parse export declaration: export function X() {} or export const X = ...
+    fn parseExportDeclaration(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume 'export'
+
+        // export default - not supported
+        if (self.check(.kw_default)) {
+            self.errorAt(loc, "'export default' is not supported; use named exports: export function handler() {}");
+            return error.ParseError;
+        }
+
+        // export { ... } - re-exports, not supported
+        if (self.check(.lbrace)) {
+            self.errorAt(loc, "'export { }' re-exports are not supported; use named exports: export function handler() {}");
+            return error.ParseError;
+        }
+
+        // export * from - not supported
+        if (self.check(.star)) {
+            self.errorAt(loc, "'export *' is not supported; use named exports: export function handler() {}");
+            return error.ParseError;
+        }
+
+        // export function X() {}
+        if (self.check(.kw_function)) {
+            const decl = try self.parseFunctionDeclaration();
+            return try self.nodes.add(.{
+                .tag = .export_decl,
+                .loc = loc,
+                .data = .{ .export_decl = .{
+                    .kind = .named,
+                    .declaration = decl,
+                    .specifiers_start = null_node,
+                    .specifiers_count = 0,
+                    .from_module_idx = 0,
+                } },
+            });
+        }
+
+        // export const X = ...
+        if (self.check(.kw_const) or self.check(.kw_let)) {
+            const decl = try self.parseVarDeclaration();
+            return try self.nodes.add(.{
+                .tag = .export_decl,
+                .loc = loc,
+                .data = .{ .export_decl = .{
+                    .kind = .named,
+                    .declaration = decl,
+                    .specifiers_start = null_node,
+                    .specifiers_count = 0,
+                    .from_module_idx = 0,
+                } },
+            });
+        }
+
+        self.errorAt(loc, "'export' must be followed by 'function', 'const', or 'let'");
+        return error.ParseError;
     }
 
     fn parseExpressionStatement(self: *Parser) anyerror!NodeIndex {
@@ -3496,6 +3676,196 @@ test "unsupported: delete operator" {
         try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
         try std.testing.expect(std.mem.indexOf(u8, err.message, "delete") != null);
         try std.testing.expect(std.mem.indexOf(u8, err.message, "spread") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "parse import declaration" {
+    var parser = Parser.init(std.testing.allocator,
+        \\import { env } from "zigttp:env";
+        \\const name = env("USER");
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse import multiple specifiers" {
+    var parser = Parser.init(std.testing.allocator,
+        \\import { sha256, hmacSha256, base64Encode } from "zigttp:crypto";
+        \\const h = sha256("test");
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse import with as alias" {
+    var parser = Parser.init(std.testing.allocator,
+        \\import { env as getEnv } from "zigttp:env";
+        \\const name = getEnv("USER");
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse export function" {
+    var parser = Parser.init(std.testing.allocator,
+        \\export function handler(req) {
+        \\  return req;
+        \\}
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse export const" {
+    var parser = Parser.init(std.testing.allocator,
+        \\export const version = "1.0";
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "unsupported: import default" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import env from "zigttp:env";
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "default import") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "named import") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: import namespace star" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import * as mod from "zigttp:env";
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "namespace import") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "named import") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: export default" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export default function handler() {}
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "export default") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "named export") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: export re-export braces" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export { foo } from "bar";
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "export { }") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "named export") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: export star" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export * from "bar";
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "export *") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "named export") != null);
         return;
     };
 

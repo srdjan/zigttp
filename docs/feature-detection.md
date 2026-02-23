@@ -28,6 +28,39 @@ These features are TypeScript-specific and have no JavaScript equivalent. They a
 
 **Note**: After Stage 3 implementation, `class` and `abstract class` will be handled by the parser to ensure consistent error messages for both .ts and .js files.
 
+## Supported Module Syntax
+
+The parser supports ES6 `import`/`export` syntax for the virtual module system (`zigttp:*`).
+
+### Supported Import Forms
+
+| Syntax | Description |
+|--------|-------------|
+| `import { x } from "zigttp:env"` | Named import (single) |
+| `import { x, y, z } from "zigttp:crypto"` | Named import (multiple) |
+| `import { x as alias } from "zigttp:env"` | Named import with alias |
+
+### Supported Export Forms
+
+| Syntax | Description |
+|--------|-------------|
+| `export function handler(req) {}` | Named function export |
+| `export const version = "1.0"` | Named const export |
+| `export let count = 0` | Named let export |
+
+### Unsupported Module Forms
+
+These produce helpful error messages directing users to named imports/exports:
+
+| Syntax | Error Message |
+|--------|---------------|
+| `import X from "mod"` | Default imports not supported; use named imports |
+| `import * as X from "mod"` | Namespace imports not supported; use named imports |
+| `import "mod"` | Side-effect imports not supported; use named imports |
+| `export default function() {}` | Export default not supported; use named exports |
+| `export { x } from "mod"` | Re-exports not supported; use named exports |
+| `export * from "mod"` | Export star not supported; use named exports |
+
 ## Parser Features (46 total)
 
 These are JavaScript language features that are syntactically valid but unsupported in zigttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".

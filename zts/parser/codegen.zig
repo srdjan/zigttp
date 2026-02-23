@@ -387,6 +387,20 @@ pub const CodeGen = struct {
             .return_stmt => try self.emitReturn(self.ir.getOptValue(index)),
             .switch_stmt => try self.emitSwitch(self.ir.getSwitchStmt(index).?),
             .block, .program => try self.emitBlock(self.ir.getBlock(index).?),
+            // Module declarations
+            // import_decl is a no-op at codegen level: module resolution registers
+            // native functions as globals before codegen runs, so import bindings
+            // resolve through the normal global variable mechanism.
+            .import_decl, .import_specifier => {},
+            // export_decl emits its inner declaration (export is just a marker)
+            .export_decl => {
+                if (self.ir.getExportDecl(index)) |exp| {
+                    if (exp.declaration != null_node) {
+                        try self.emitNode(exp.declaration);
+                    }
+                }
+            },
+
             .empty_stmt, .debugger_stmt => {},
 
             // JSX - emit as h() calls

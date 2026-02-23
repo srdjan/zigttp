@@ -235,6 +235,80 @@ pub const Parser = struct {
         }
         return &[_][]const object.Atom{};
     }
+
+    /// Import declaration info extracted from the IR after parsing.
+    pub const ImportInfo = struct {
+        module_specifier: []const u8,
+        specifier_names: []const []const u8,
+    };
+
+    /// Extract module import declarations from the parsed IR.
+    /// Must be called after parse(). Returns a list of (module_specifier, imported_names).
+    /// Caller owns the returned slices and must free with the same allocator.
+    pub fn getImports(self: *const Parser) ![]ImportInfo {
+        const ir_store = &self.js_parser.nodes;
+        const ir_constants = &self.js_parser.constants;
+        const view = IrView.fromIRStore(ir_store, ir_constants);
+
+        var imports = std.ArrayList(ImportInfo).empty;
+        errdefer {
+            for (imports.items) |info| {
+                self.allocator.free(info.specifier_names);
+            }
+            imports.deinit(self.allocator);
+        }
+
+        // Scan all nodes for import_decl
+        const node_count = view.nodeCount();
+        for (0..node_count) |idx| {
+            const tag = view.getTag(@intCast(idx)) orelse continue;
+            if (tag != .import_decl) continue;
+
+            const import_decl = view.getImportDecl(@intCast(idx)) orelse continue;
+            const module_str = view.getString(import_decl.module_idx) orelse continue;
+
+            // Collect specifier names
+            var names = std.ArrayList([]const u8).empty;
+            errdefer names.deinit(self.allocator);
+
+            for (0..import_decl.specifiers_count) |si| {
+                const spec_idx = view.getListIndex(import_decl.specifiers_start, @intCast(si));
+                const spec = view.getImportSpec(spec_idx) orelse continue;
+                // Resolve atom to string name (handles both predefined and dynamic atoms)
+                const atom: object.Atom = @enumFromInt(spec.imported_atom);
+                const imported_name = resolveAtomName(atom, self.atoms) orelse continue;
+                try names.append(self.allocator, imported_name);
+            }
+
+            try imports.append(self.allocator, .{
+                .module_specifier = module_str,
+                .specifier_names = try names.toOwnedSlice(self.allocator),
+            });
+        }
+
+        return imports.toOwnedSlice(self.allocator);
+    }
+
+    /// Resolve an atom index back to a string name
+    fn resolveAtomName(atom: object.Atom, atoms: ?*context.AtomTable) ?[]const u8 {
+        // Check predefined atoms first
+        if (atom.isPredefined()) {
+            return atom.toPredefinedName();
+        }
+        // Check dynamic atoms from atom table
+        if (atoms) |at| {
+            return at.getName(atom);
+        }
+        return null;
+    }
+
+    /// Free import info returned by getImports
+    pub fn freeImports(self: *const Parser, imports: []ImportInfo) void {
+        for (imports) |info| {
+            self.allocator.free(info.specifier_names);
+        }
+        self.allocator.free(imports);
+    }
 };
 
 test "root module imports" {

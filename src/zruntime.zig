@@ -280,6 +280,11 @@ pub const Runtime = struct {
         try self.installConsole();
         try self.installHttpRequest();
 
+        // Register all virtual module native functions eagerly.
+        // This ensures import bindings resolve correctly whether the handler
+        // was parsed or loaded from bytecode cache.
+        try self.installVirtualModules();
+
         // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
         // Don't re-register them here as it would overwrite the proper constructor
     }
@@ -377,6 +382,47 @@ pub const Runtime = struct {
 
     // Note: installResponseHelpers and installJsxRuntime removed - these are now handled by initBuiltins()
 
+    /// Validate module imports from parsed IR.
+    /// Called after parse() to verify that all import specifiers reference valid modules.
+    /// Native functions are registered eagerly by installVirtualModules(), so this only validates.
+    fn resolveModuleImports(_: *Self, p: *const zq.parser.Parser) !void {
+        const imports = p.getImports() catch |err| {
+            std.log.err("Failed to extract module imports: {}", .{err});
+            return err;
+        };
+        defer p.freeImports(imports);
+
+        for (imports) |import_info| {
+            const result = zq.modules.resolve(import_info.module_specifier);
+            switch (result) {
+                .virtual => |module| {
+                    // Validate that all imported names exist in the module
+                    if (zq.modules.validateImports(module, import_info.specifier_names)) |missing| {
+                        std.log.err("Module '{s}' has no export '{s}'", .{ import_info.module_specifier, missing });
+                        return error.ModuleExportNotFound;
+                    }
+                },
+                .file => {
+                    std.log.err("File imports not yet supported: '{s}'", .{import_info.module_specifier});
+                    return error.UnsupportedImport;
+                },
+                .unknown => {
+                    std.log.err("Unknown module: '{s}'; only zigttp:* virtual modules and relative file imports are supported", .{import_info.module_specifier});
+                    return error.UnknownModule;
+                },
+            }
+        }
+    }
+
+    /// Register all virtual module native functions on the context.
+    /// Called during installBindings() for every runtime instance.
+    fn installVirtualModules(self: *Self) !void {
+        inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
+            const module: zq.modules.VirtualModule = @enumFromInt(field.value);
+            try zq.modules.registerVirtualModule(self.ctx, module, self.allocator);
+        }
+    }
+
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
         _ = try self.loadCodeWithCaching(code, filename, null);
@@ -424,6 +470,9 @@ pub const Runtime = struct {
             }
             return err;
         };
+
+        // Resolve module imports and register virtual module native functions
+        try self.resolveModuleImports(&p);
 
         // Materialize object literal shapes before execution
         const shapes = p.getShapes();
