@@ -224,9 +224,6 @@ const ConnectionPool = struct {
     }
 
     fn workerFn(self: *ConnectionPool) void {
-        defer if (self.server.pool) |*pool| {
-            pool.releaseThreadLocal();
-        };
         while (self.running.load(.acquire)) {
             const item = self.queue.pop(&self.running) orelse continue;
             self.handleConnection(item.stream_fd);

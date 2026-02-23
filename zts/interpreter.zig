@@ -257,17 +257,17 @@ pub const PICEntry = struct {
 };
 
 /// Number of entries in a polymorphic inline cache
-/// 4 entries provides good coverage for common polymorphic patterns
-/// while keeping memory overhead reasonable (40 bytes per IC site)
+/// 8 entries provides good coverage for common polymorphic patterns
+/// while keeping memory overhead reasonable per IC site
 pub const PIC_ENTRIES = 8;
 
 /// Polymorphic Inline Cache for property access optimization
-/// Caches up to 4 (hidden_class, slot_offset) pairs per access site
-/// Falls back to megamorphic mode when more than 4 shapes are observed
+/// Caches up to 8 (hidden_class, slot_offset) pairs per access site
+/// Falls back to megamorphic mode when more than 8 shapes are observed
 pub const PolymorphicInlineCache = struct {
     /// Cached entries (only first `count` are valid)
     /// Initialize all entries with invalid hidden class to prevent JIT false matches
-    /// on uninitialized memory (JIT checks all 4 entries without checking count)
+    /// on uninitialized memory (JIT checks first PIC_CHECK_COUNT entries inline)
     entries: [PIC_ENTRIES]PICEntry = [_]PICEntry{.{ .hidden_class_idx = .none, .slot_offset = 0 }} ** PIC_ENTRIES,
     /// Number of valid entries (0-8)
     count: u8 = 0,

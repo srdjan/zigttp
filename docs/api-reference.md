@@ -21,7 +21,9 @@ The request object contains all information about the incoming HTTP request:
 ```javascript
 {
     method: string,      // "GET", "POST", etc.
-    url: string,        // URL path (e.g., "/api/users")
+    url: string,        // Full URL path (e.g., "/api/users?id=1")
+    path: string,       // URL path without query string (e.g., "/api/users")
+    query: string,      // Query string (e.g., "id=1"), empty string if none
     headers: object,    // HTTP headers
     body: string|null   // Request body (for POST/PUT)
 }

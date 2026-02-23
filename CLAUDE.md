@@ -79,13 +79,13 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 
 #### Property Access Optimizations
 
-**Shape Preallocation** (`zts/context.zig:284-346`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
-- Request shape: method, url, body, headers (4 props)
+**Shape Preallocation** (`zts/context.zig:352-434`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
+- Request shape: method, url, path, query, body, headers (6 props)
 - Response shape: body, status, statusText, ok, headers (5 props)
 - Response headers shape: content-type, content-length, cache-control (3 props)
-- Request headers shape: authorization, content-type, accept (3 props)
+- Request headers shape: authorization, content-type, accept, host, user-agent, accept-encoding, connection (7 props)
 
-**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:214-272`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
+**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
 
 **Binary Search for Large Objects** (`zts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
 
@@ -105,7 +105,7 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 - CORS: origin, access-control-allow-origin, access-control-allow-methods, access-control-allow-headers, access-control-allow-credentials, access-control-max-age
 - Other: connection, accept-encoding, cookie, x-forwarded-for, x-request-id, content-encoding, transfer-encoding, vary
 
-**HTTP String Cache** (`zts/context.zig:96-110, 349-400`): Pre-allocated status texts (OK, Created, Not Found, etc.) and content-type strings (application/json, text/plain, text/html).
+**HTTP String Cache** (`zts/context.zig:111-135, 462+`): Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
 
 #### Pool and Request Optimizations
 
@@ -158,7 +158,7 @@ zigttp uses a two-layer fail-fast validation system to detect unsupported JavaSc
    - Logs helpful error messages with source location and suggested alternatives
 
 2. **Parser** ([zts/parser/parse.zig](zts/parser/parse.zig)): Catches unsupported JavaScript features
-   - 46 features including class, while, throw, try/catch, var, ==, ++, compound assignments, etc.
+   - 48 features including class, while, throw, try/catch, var, ==, ++, compound assignments, etc.
    - Runs for all files (after stripping for TS files)
    - Provides consistent error messages regardless of file type
 
@@ -173,7 +173,7 @@ All error messages follow the pattern: "'feature' is not supported; use X instea
 
 ## JavaScript Runtime
 
-**Supported**: ES5 + `for...of` (arrays), typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions.
+**Supported**: ES5 + `for...of` (arrays), typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`.
 
 **Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API.
 

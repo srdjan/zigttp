@@ -1807,11 +1807,6 @@ pub const HandlerPool = struct {
         self.cache.deinit();
     }
 
-    /// Release any thread-local cached runtimes back to the pool.
-    /// Call this before a worker thread exits.
-    pub fn releaseThreadLocal(self: *Self) void {
-        zq.pool.releaseThreadLocal(&self.pool);
-    }
 
     fn nextRequestId(self: *Self) u64 {
         return if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
@@ -2095,7 +2090,7 @@ pub const HandlerPool = struct {
             }
         }
 
-        const rt = zq.pool.acquireWithCache(&self.pool) catch |err| {
+        const rt = self.pool.acquire() catch |err| {
             _ = self.in_use.fetchSub(1, .monotonic);
             if (collect_pool_metrics) {
                 if (wait_timer) |*t| {
@@ -2117,7 +2112,7 @@ pub const HandlerPool = struct {
     }
 
     fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
-        zq.pool.releaseWithCache(&self.pool, rt);
+        self.pool.release(rt);
         _ = self.in_use.fetchSub(1, .monotonic);
     }
 
@@ -2370,8 +2365,6 @@ test "HandlerPool basic operations" {
     const handler_code = "function handler(req) { return Response.text('ok'); }";
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
     defer {
-        // Flush thread-local cache before deinit to avoid dangling pointer
-        zq.pool.releaseThreadLocal(&pool.pool);
         pool.deinit();
     }
 
@@ -2396,7 +2389,6 @@ test "HandlerPool bytecode cache" {
     const handler_code = "function handler(req) { return Response.text('cached'); }";
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 4, 0);
     defer {
-        zq.pool.releaseThreadLocal(&pool.pool);
         pool.deinit();
     }
 
@@ -2444,8 +2436,6 @@ test "HandlerPool handler remains callable across resets" {
         try std.testing.expectEqualStrings("ok", response.body);
     }
 
-    // Flush main thread cache (if any).
-    zq.pool.releaseThreadLocal(&pool.pool);
 }
 
 test "AOT override fallback and success" {
@@ -2548,8 +2538,6 @@ test "HandlerPool concurrent stress" {
                 response.deinit();
             }
 
-            // Flush thread-local runtime cache so pool can deinit cleanly in tests.
-            zq.pool.releaseThreadLocal(&ctx.pool.pool);
         }
     };
 
@@ -2565,8 +2553,6 @@ test "HandlerPool concurrent stress" {
     }
     for (threads) |t| t.join();
 
-    // Flush main thread cache (if any).
-    zq.pool.releaseThreadLocal(&pool.pool);
 
     try std.testing.expectEqual(@as(u32, 0), errors.load(.acquire));
 }
@@ -2892,8 +2878,6 @@ test "HandlerPool high contention stress" {
                 _ = ctx.completed.fetchAdd(1, .acq_rel);
             }
 
-            // Flush thread-local runtime cache
-            zq.pool.releaseThreadLocal(&ctx.pool.pool);
         }
     };
 
@@ -2909,9 +2893,6 @@ test "HandlerPool high contention stress" {
         threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
     }
     for (threads) |t| t.join();
-
-    // Flush main thread cache
-    zq.pool.releaseThreadLocal(&pool.pool);
 
     // Verify results - primary goal is no crashes under contention
     const error_count = errors.load(.acquire);

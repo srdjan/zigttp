@@ -61,7 +61,7 @@ These produce helpful error messages directing users to named imports/exports:
 | `export { x } from "mod"` | Re-exports not supported; use named exports |
 | `export * from "mod"` | Export star not supported; use named exports |
 
-## Parser Features (46 total)
+## Parser Features (48 total)
 
 These are JavaScript language features that are syntactically valid but unsupported in zigttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".
 
@@ -248,4 +248,4 @@ This created inconsistent developer experience based on file extension. Moving `
 
 - **Stage 3 (pending)**: Moved `class` and `abstract class` from stripper to parser for consistent error messages
 - **Stage 2 (pending)**: Enhanced stripper error logging to include helpful alternatives
-- **Initial state**: 46 parser features, 7 stripper features (with class duplication)
+- **Initial state**: 48 parser features, 7 stripper features (with class duplication)

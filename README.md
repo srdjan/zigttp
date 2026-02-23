@@ -222,7 +222,7 @@ See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detai
 
 zts implements ES5 with select ES6+ extensions:
 
-**Supported**: Strict mode, let/const, for...of (arrays), typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis.
+**Supported**: Strict mode, let/const, for...of (arrays), typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`.
 
 **Not Supported**: Arrow functions, template literals, destructuring, spread operator, classes, async/await, Promises.
 

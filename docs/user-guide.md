@@ -190,8 +190,14 @@ function handler(request) {
     // Method
     console.log(request.method); // "GET", "POST", etc.
 
-    // Path
-    console.log(request.url); // "/api/users"
+    // Full URL (including query string)
+    console.log(request.url); // "/api/users?id=1"
+
+    // Path (without query string)
+    console.log(request.path); // "/api/users"
+
+    // Query string (empty string if none)
+    console.log(request.query); // "id=1"
 
     // Headers
     console.log(request.headers["Content-Type"]); // "application/json"

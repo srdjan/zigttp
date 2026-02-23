@@ -1221,7 +1221,8 @@ pub const IRStore = struct {
             },
             .import_specifier => blk: {
                 const i = node.data.import_spec;
-                const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
+                const binding_packed = (@as(u32, i.local_binding.scope_id & 0x1FFF) << 16) | i.local_binding.slot |
+                    (@as(u32, @intFromEnum(i.local_binding.kind)) << 29);
                 const extra_start = try self.addExtra(&.{
                     @intFromEnum(i.kind),
                     i.imported_atom,
@@ -1281,7 +1282,8 @@ pub const IRStore = struct {
             // --- Pattern default ---
             .pattern_default => blk: {
                 const p = node.data.pattern_elem;
-                const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot;
+                const binding_packed = (@as(u32, p.binding.scope_id & 0x1FFF) << 16) | p.binding.slot |
+                    (@as(u32, @intFromEnum(p.binding.kind)) << 29);
                 const extra_start = try self.addExtra(&.{
                     @intFromEnum(p.kind),
                     binding_packed,
@@ -1295,7 +1297,8 @@ pub const IRStore = struct {
             // --- Import/Export variants ---
             .import_default, .import_namespace => blk: {
                 const i = node.data.import_spec;
-                const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
+                const binding_packed = (@as(u32, i.local_binding.scope_id & 0x1FFF) << 16) | i.local_binding.slot |
+                    (@as(u32, @intFromEnum(i.local_binding.kind)) << 29);
                 const extra_start = try self.addExtra(&.{
                     @intFromEnum(i.kind),
                     i.imported_atom,

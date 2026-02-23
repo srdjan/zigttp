@@ -115,7 +115,7 @@ const Result = union(enum) {
 
 V8-style hidden class transitions for inline caching. Enables fast property access through predictable object shapes.
 
-**Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`zts/context.zig:284-346`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
+**Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`zts/context.zig:352-434`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
 
 ### Hybrid Arena Allocation
 
@@ -187,7 +187,7 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 ### Property Access Optimizations
 
-**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:214-272`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
+**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
 
 **Binary Search for Large Objects** (`zts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
 
@@ -201,7 +201,7 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 **Pre-interned HTTP Atoms** (`zts/object.zig:237-264`): 27 common headers with O(1) lookup (content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, etc.).
 
-**HTTP String Cache** (`zts/context.zig:96-110, 349-400`): Pre-allocated status texts (OK, Created, Not Found, etc.) and content-type strings (application/json, text/plain, text/html).
+**HTTP String Cache** (`zts/context.zig:111-135, 462+`): Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
 
 ### Pool and Request Optimizations
 

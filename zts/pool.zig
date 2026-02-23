@@ -207,8 +207,6 @@ pub const LockFreePool = struct {
     }
 
     pub fn deinit(self: *LockFreePool) void {
-        // Ensure the current thread doesn't keep a cached runtime when tearing down the pool.
-        releaseThreadLocal(self);
         // Destroy all pooled runtimes
         for (self.slots) |*slot| {
             if (slot.load(.acquire)) |runtime| {
@@ -302,62 +300,8 @@ pub const LockFreePool = struct {
     }
 };
 
-/// Thread-local runtime cache depth for reduced pool contention.
-/// OPTIMIZATION: Increased from 1 to 2 to reduce pool access frequency.
-const THREAD_LOCAL_CACHE_SIZE = 4;
-
-/// Thread-local runtime cache for reduced pool contention.
-/// Uses LIFO order: index 0 is the most recently used (hottest).
-pub threadlocal var thread_local_cache: [THREAD_LOCAL_CACHE_SIZE]?*LockFreePool.Runtime = [_]?*LockFreePool.Runtime{null} ** THREAD_LOCAL_CACHE_SIZE;
-
-/// Check if thread-local cache can satisfy an acquire (no pool access needed)
-pub fn hasAvailableThreadLocal() bool {
-    for (&thread_local_cache) |cached| {
-        if (cached) |rt| {
-            if (!rt.in_use) return true;
-        }
-    }
-    return false;
-}
-
-/// Check if releasing this runtime will go to thread-local cache (no pool access needed)
-pub fn willReleaseToThreadLocal(runtime: *LockFreePool.Runtime) bool {
-    for (&thread_local_cache) |cached| {
-        if (cached == runtime) return true;
-    }
-    return false;
-}
-
-/// Acquire runtime with thread-local caching (LIFO order for cache locality)
-/// NOTE: Thread-local caching is disabled due to race conditions with non-atomic
-/// in_use flag causing hangs under high concurrency. TODO: Fix by making in_use atomic.
-pub fn acquireWithCache(pool: *LockFreePool) !*LockFreePool.Runtime {
-    return pool.acquire();
-}
-
-/// Release runtime with thread-local caching.
-/// Keeps runtime in cache if it was cached, otherwise returns to pool.
-/// NOTE: Thread-local caching disabled - see acquireWithCache comment.
-pub fn releaseWithCache(pool: *LockFreePool, runtime: *LockFreePool.Runtime) void {
-    pool.release(runtime);
-}
-
-/// Release all thread-local cached runtimes back to the pool.
-/// Call this before a thread exits if you want pooled runtimes reclaimed.
-pub fn releaseThreadLocal(pool: *LockFreePool) void {
-    for (&thread_local_cache) |*cached| {
-        if (cached.*) |rt| {
-            if (!rt.in_use) {
-                pool.release(rt);
-            }
-            cached.* = null;
-        }
-    }
-}
 
 test "LockFreePool basic operations" {
-    // Clear thread-local cache from previous tests to avoid dangling pointers
-    for (&thread_local_cache) |*cached| cached.* = null;
 
     const allocator = std.testing.allocator;
 
@@ -378,8 +322,6 @@ test "LockFreePool basic operations" {
 }
 
 test "LockFreePool multiple runtimes" {
-    // Clear thread-local cache from previous tests to avoid dangling pointers
-    for (&thread_local_cache) |*cached| cached.* = null;
 
     const allocator = std.testing.allocator;
 
@@ -404,8 +346,6 @@ test "LockFreePool multiple runtimes" {
 }
 
 test "LockFreePool beyond pool size creates new runtimes" {
-    // Clear thread-local cache from previous tests to avoid dangling pointers
-    for (&thread_local_cache) |*cached| cached.* = null;
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -464,24 +404,21 @@ test "Hybrid runtime reset clears arena allocations" {
     pool.release(rt);
 }
 
-test "acquireWithCache and releaseWithCache" {
+test "pool acquire and release" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     var pool = try LockFreePool.init(allocator, .{ .max_size = 4 });
 
-    // Clear thread-local cache from previous tests
-    for (&thread_local_cache) |*cached| cached.* = null;
-
-    const rt = try acquireWithCache(&pool);
+    const rt = try pool.acquire();
     try std.testing.expect(rt.in_use);
 
-    releaseWithCache(&pool, rt);
+    pool.release(rt);
     try std.testing.expect(!rt.in_use);
 
-    // Verify runtime stayed in cache (should reacquire same one)
-    const rt2 = try acquireWithCache(&pool);
+    // Should reacquire same runtime
+    const rt2 = try pool.acquire();
     try std.testing.expectEqual(rt, rt2);
-    releaseWithCache(&pool, rt2);
+    pool.release(rt2);
 }

@@ -57,19 +57,19 @@ HandlerPool reuses pre-warmed contexts for subsequent requests:
 
 #### Shape Preallocation
 
-**Location**: `zts/context.zig:284-346`
+**Location**: `zts/context.zig:352-434`
 
 HTTP Request and Response objects use preallocated hidden class shapes, eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
 
 **Shapes**:
-- Request shape: method, url, body, headers (4 props)
+- Request shape: method, url, path, query, body, headers (6 props)
 - Response shape: body, status, statusText, ok, headers (5 props)
 - Response headers shape: content-type, content-length, cache-control (3 props)
-- Request headers shape: authorization, content-type, accept (3 props)
+- Request headers shape: authorization, content-type, accept, host, user-agent, accept-encoding, connection (7 props)
 
 #### Polymorphic Inline Cache (PIC)
 
-**Location**: `zts/interpreter.zig:214-272`
+**Location**: `zts/interpreter.zig:259-335`
 
 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
 
@@ -143,9 +143,9 @@ Hash computation deferred until actually needed. Both `JSString` and `SliceStrin
 
 #### HTTP String Cache
 
-**Location**: `zts/context.zig:96-110, 349-400`
+**Location**: `zts/context.zig:111-135, 462+`
 
-Pre-allocated status texts (OK, Created, Not Found, etc.) and content-type strings (application/json, text/plain, text/html).
+Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
 
 **Benefits**:
 - Zero allocation for common status texts

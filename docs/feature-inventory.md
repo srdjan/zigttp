@@ -285,13 +285,13 @@ This document provides a comprehensive feature inventory of the zts JavaScript e
 
 | Optimization | Files | Impact | Notes |
 |--------------|-------|--------|-------|
-| Shape Preallocation | context.zig:284-346 | High | O(1) HTTP object property access |
-| Polymorphic IC | interpreter.zig:234-300 | High | O(1) monomorphic property access |
+| Shape Preallocation | context.zig:352-434 | High | O(1) HTTP object property access |
+| Polymorphic IC | interpreter.zig:259-335 | High | O(1) monomorphic property access |
 | JIT Object Literal Shapes | context.zig:746-779, baseline.zig | High | Zero transition object creation |
 | Pre-interned HTTP Atoms | object.zig:237-264 | Medium | 27 headers with O(1) lookup |
 | Lazy String Hashing | string.zig:43-54 | Medium | Defer hash until needed |
 | SIMD String Operations | string.zig:204-343 | Medium | 8x faster for large strings |
-| HTTP String Cache | context.zig:96-110 | Medium | Pre-allocated status/content-type |
+| HTTP String Cache | context.zig:111-135 | Medium | Pre-allocated status/content-type/methods |
 | Pool Slot Hint | pool.zig | Medium | O(1) vs O(N) slot acquisition |
 | Arena Allocation | arena.zig | High | O(1) request cleanup |
 | Type Feedback | type_feedback.zig | Medium | Guides JIT optimization |
@@ -514,7 +514,7 @@ Mutating array methods were previously removed for a functional paradigm but hav
 | Codegen | zts/parser/codegen.zig | ~2,000 | 1732-1791 (JSX) |
 | Type Stripper | zts/stripper.zig | ~1,000 | Multi-phase stripping |
 | Comptime | zts/comptime.zig | ~1,700 | Pratt parser evaluation |
-| Context | zts/context.zig | ~800 | 284-346 (shape preallocation) |
+| Context | zts/context.zig | ~800 | 352-434 (shape preallocation) |
 | HTTP/JSX Runtime | zts/http.zig | ~800 | 428-632 (h(), renderToString) |
 
 ---

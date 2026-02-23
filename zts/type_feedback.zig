@@ -40,7 +40,7 @@ pub const TypeFeedbackSite = struct {
 
     /// Record a value's type at this feedback site
     pub fn record(self: *TypeFeedbackSite, val: value.JSValue) void {
-        self.total_hits +%= 1;
+        self.total_hits +|= 1;
 
         // Skip recording if already megamorphic - no point checking types
         if (self.megamorphic) return;
@@ -116,7 +116,7 @@ pub const CallSiteFeedback = struct {
 
     /// Record a callee at this call site
     pub fn recordCallee(self: *CallSiteFeedback, func_bc: ?*const bytecode.FunctionBytecode) void {
-        self.total_calls +%= 1;
+        self.total_calls +|= 1;
 
         // Skip recording if already megamorphic - no point checking callees
         if (self.megamorphic) return;
