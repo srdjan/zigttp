@@ -33,10 +33,19 @@ const CompiledHandler = struct {
     bytecode: []const u8,
     aot: ?AotAnalysis = null,
     transpiled_source: ?[]const u8 = null,
+    /// Additional dependency module bytecodes (for file imports).
+    /// Stored in execution order, entry module is NOT included.
+    dep_bytecodes: ?[]const []const u8 = null,
 
     fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.aot) |*analysis| {
             analysis.deinit(allocator);
+        }
+        if (self.dep_bytecodes) |deps| {
+            for (deps) |dep| {
+                allocator.free(dep);
+            }
+            allocator.free(deps);
         }
         if (self.bytecode.len > 0) {
             allocator.free(self.bytecode);
@@ -51,7 +60,7 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     defer allocator.free(path_z);
 
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer std.posix.close(fd);
+    defer std.Io.Threaded.closeFd(fd);
 
     var buffer: std.ArrayList(u8) = .empty;
     errdefer buffer.deinit(allocator);
@@ -80,7 +89,7 @@ fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocat
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
         0o644,
     );
-    defer std.posix.close(fd);
+    defer std.Io.Threaded.closeFd(fd);
     if (std.c.ftruncate(fd, 0) != 0) return error.WriteFailure;
 
     var total_written: usize = 0;
@@ -237,6 +246,14 @@ fn compileHandler(
         return err;
     };
 
+    // Check for file imports before proceeding with single-module compilation
+    const has_file_imports = hasFileImports(&js_parser, root);
+
+    if (has_file_imports) {
+        std.debug.print("File imports detected, building module graph...\n", .{});
+        return compileMultiModule(allocator, source_to_parse, filename, &strings, &atoms);
+    }
+
     // Optimize IR (cold-start-friendly single pass)
     _ = zts.parser.optimizeIR(
         allocator,
@@ -274,7 +291,7 @@ fn compileHandler(
 
     // Copy the serialized data to owned memory
     const serialized = writer.getWritten();
-    const bytecode = try allocator.dupe(u8, serialized);
+    const bytecode_data = try allocator.dupe(u8, serialized);
 
     var aot: ?AotAnalysis = null;
     var transpiled_source: ?[]const u8 = null;
@@ -290,7 +307,7 @@ fn compileHandler(
             transpiler.deinit();
             aot = try analyzeAot(allocator, &js_parser, &atoms, root);
             return .{
-                .bytecode = bytecode,
+                .bytecode = bytecode_data,
                 .aot = aot,
             };
         };
@@ -309,10 +326,123 @@ fn compileHandler(
     }
 
     return .{
-        .bytecode = bytecode,
+        .bytecode = bytecode_data,
         .aot = aot,
         .transpiled_source = transpiled_source,
     };
+}
+
+/// Scan parsed IR for file import declarations
+fn hasFileImports(js_parser: *zts.parser.JsParser, _: ir.NodeIndex) bool {
+    const view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const node_count = view.nodeCount();
+
+    for (0..node_count) |idx| {
+        const tag = view.getTag(@intCast(idx)) orelse continue;
+        if (tag != .import_decl) continue;
+
+        const import_decl = view.getImportDecl(@intCast(idx)) orelse continue;
+        const module_str = view.getString(import_decl.module_idx) orelse continue;
+
+        const result = zts.modules.resolver.resolve(module_str);
+        switch (result) {
+            .file => return true,
+            .virtual, .unknown => {},
+        }
+    }
+
+    return false;
+}
+
+/// Compile a handler with file imports as a multi-module bundle
+fn compileMultiModule(
+    allocator: std.mem.Allocator,
+    entry_source: []const u8,
+    filename: []const u8,
+    strings: *zts.string.StringTable,
+    atoms: *zts.context.AtomTable,
+) !CompiledHandler {
+    // Build module graph
+    var graph = zts.modules.ModuleGraph.init(allocator);
+    defer graph.deinit();
+
+    graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
+        std.debug.print("Module graph error: {}\n", .{err});
+        return err;
+    };
+
+    std.debug.print("Module graph: {d} modules ({d} dependencies)\n", .{
+        graph.module_list.items.len,
+        graph.dependencyCount(),
+    });
+
+    // Compile all modules with shared atoms
+    var module_compiler = zts.modules.ModuleCompiler.init(allocator, atoms, strings);
+    var compile_result = module_compiler.compileAll(&graph) catch |err| {
+        std.debug.print("Multi-module compilation error: {}\n", .{err});
+        return err;
+    };
+    defer compile_result.deinit();
+
+    // Serialize each module and collect dependency bytecodes
+    const mod_count = compile_result.modules.len;
+    var dep_bytecodes = try allocator.alloc([]const u8, mod_count - 1);
+    errdefer {
+        for (dep_bytecodes) |d| allocator.free(d);
+        allocator.free(dep_bytecodes);
+    }
+
+    // Serialize dependency modules (all except last, which is the entry)
+    for (compile_result.modules[0 .. mod_count - 1], 0..) |*compiled_mod, i| {
+        var buffer: [256 * 1024]u8 = undefined;
+        var writer = zts.bytecode_cache.SliceWriter{ .buffer = &buffer };
+
+        zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+            &compiled_mod.func,
+            atoms,
+            compiled_mod.shapes,
+            &writer,
+            allocator,
+        ) catch |err| {
+            std.debug.print("Dependency serialization error: {}\n", .{err});
+            return err;
+        };
+
+        dep_bytecodes[i] = try allocator.dupe(u8, writer.getWritten());
+    }
+
+    // Serialize entry module (last in execution order)
+    const entry_mod = &compile_result.modules[mod_count - 1];
+    var entry_buffer: [256 * 1024]u8 = undefined;
+    var entry_writer = zts.bytecode_cache.SliceWriter{ .buffer = &entry_buffer };
+
+    zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+        &entry_mod.func,
+        atoms,
+        entry_mod.shapes,
+        &entry_writer,
+        allocator,
+    ) catch |err| {
+        std.debug.print("Entry serialization error: {}\n", .{err});
+        return err;
+    };
+
+    const entry_bytecode = try allocator.dupe(u8, entry_writer.getWritten());
+
+    std.debug.print("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
+
+    return .{
+        .bytecode = entry_bytecode,
+        .dep_bytecodes = dep_bytecodes,
+    };
+}
+
+/// Read file for module graph - matches ReadFileFn signature
+fn readFilePosixForGraph(allocator: std.mem.Allocator, path: []const u8) zts.modules.module_graph.ReadFileError![]const u8 {
+    const data = readFilePosix(allocator, path, 10 * 1024 * 1024) catch {
+        return error.FileNotFound;
+    };
+    return data;
 }
 
 fn analyzeAot(
@@ -572,6 +702,24 @@ fn writeZigFile(
     try writer.writeAll("pub const bytecode = [_]u8{\n");
     try writeBytecodeArray(writer, compiled.bytecode);
     try writer.writeAll("};\n");
+
+    // Write dependency module bytecodes if present
+    if (compiled.dep_bytecodes) |deps| {
+        try writer.print("\npub const dep_count: u16 = {d};\n\n", .{deps.len});
+        for (deps, 0..) |dep, i| {
+            try writer.print("const dep_{d} = [_]u8{{\n", .{i});
+            try writeBytecodeArray(writer, dep);
+            try writer.writeAll("};\n\n");
+        }
+        try writer.print("pub const dep_bytecodes = [_][]const u8{{\n", .{});
+        for (0..deps.len) |i| {
+            try writer.print("    &dep_{d},\n", .{i});
+        }
+        try writer.writeAll("};\n");
+    } else {
+        try writer.writeAll("\npub const dep_count: u16 = 0;\n");
+        try writer.writeAll("pub const dep_bytecodes = [_][]const u8{};\n");
+    }
 
     output = aw.toArrayList();
     try writeFilePosix(path, output.items, allocator);

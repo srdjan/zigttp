@@ -96,6 +96,40 @@ fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.H
 }
 
 // ============================================================================
+// File reading for module graph (POSIX, no async I/O dependency)
+// ============================================================================
+
+/// Read a file using POSIX syscalls. Matches the ReadFileFn signature
+/// required by ModuleGraph.build().
+fn readFilePosixForGraph(allocator: std.mem.Allocator, path: []const u8) zq.modules.module_graph.ReadFileError![]const u8 {
+    const path_z = allocator.dupeZ(u8, path) catch return error.OutOfMemory;
+    defer allocator.free(path_z);
+
+    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch {
+        return error.FileNotFound;
+    };
+    defer std.Io.Threaded.closeFd(fd);
+
+    const max_size = 10 * 1024 * 1024; // 10MB limit
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(allocator);
+
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const bytes_read = std.posix.read(fd, &chunk) catch {
+            return error.InputOutput;
+        };
+        if (bytes_read == 0) break;
+        if (buffer.items.len + bytes_read > max_size) {
+            return error.FileTooBig;
+        }
+        buffer.appendSlice(allocator, chunk[0..bytes_read]) catch return error.OutOfMemory;
+    }
+
+    return buffer.toOwnedSlice(allocator) catch return error.OutOfMemory;
+}
+
+// ============================================================================
 // Thread-local Runtime for native function callbacks
 // ============================================================================
 
@@ -385,12 +419,15 @@ pub const Runtime = struct {
     /// Validate module imports from parsed IR.
     /// Called after parse() to verify that all import specifiers reference valid modules.
     /// Native functions are registered eagerly by installVirtualModules(), so this only validates.
-    fn resolveModuleImports(_: *Self, p: *const zq.parser.Parser) !void {
+    /// Returns true if file imports are present (requiring module graph compilation).
+    fn resolveModuleImports(_: *Self, p: *const zq.parser.Parser) !bool {
         const imports = p.getImports() catch |err| {
             std.log.err("Failed to extract module imports: {}", .{err});
             return err;
         };
         defer p.freeImports(imports);
+
+        var has_file_imports = false;
 
         for (imports) |import_info| {
             const result = zq.modules.resolve(import_info.module_specifier);
@@ -403,8 +440,7 @@ pub const Runtime = struct {
                     }
                 },
                 .file => {
-                    std.log.err("File imports not yet supported: '{s}'", .{import_info.module_specifier});
-                    return error.UnsupportedImport;
+                    has_file_imports = true;
                 },
                 .unknown => {
                     std.log.err("Unknown module: '{s}'; only zigttp:* virtual modules and relative file imports are supported", .{import_info.module_specifier});
@@ -412,6 +448,60 @@ pub const Runtime = struct {
                 },
             }
         }
+
+        return has_file_imports;
+    }
+
+    /// Build a module graph from file imports, compile all dependencies,
+    /// and run them in topological order so their exports are available
+    /// as globals when the entry file executes.
+    fn compileAndRunFileImports(self: *Self, entry_source: []const u8, filename: []const u8) !void {
+        // Build module graph
+        var graph = zq.modules.ModuleGraph.init(self.allocator);
+        defer graph.deinit();
+
+        graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
+            switch (err) {
+                error.CircularImport => std.log.err("Circular import detected starting from '{s}'", .{filename}),
+                error.ImportFileNotFound => std.log.err("Could not read an imported file from '{s}'", .{filename}),
+                error.ImportNestingTooDeep => std.log.err("Import nesting too deep (max 32) from '{s}'", .{filename}),
+                else => std.log.err("Module graph error for '{s}': {}", .{ filename, err }),
+            }
+            return err;
+        };
+
+        if (graph.dependencyCount() == 0) {
+            // No actual file dependencies found; run entry normally
+            // This shouldn't happen since resolveModuleImports said there were file imports,
+            // but handle gracefully.
+            return;
+        }
+
+        // Compile all modules with shared atom table
+        var module_compiler = zq.modules.ModuleCompiler.init(
+            self.allocator,
+            &self.ctx.atoms,
+            &self.strings,
+        );
+        var compile_result = module_compiler.compileAll(&graph) catch |err| {
+            std.log.err("Multi-module compilation failed: {}", .{err});
+            return err;
+        };
+        defer compile_result.deinit();
+
+        // Run each module in execution order
+        for (compile_result.modules) |*compiled_mod| {
+            // Materialize shapes
+            if (compiled_mod.shapes.len > 0) {
+                try self.ctx.materializeShapes(compiled_mod.shapes);
+            }
+
+            // Run bytecode - this defines exported globals
+            _ = try self.interpreter.run(&compiled_mod.func);
+        }
+
+        // The last module is the entry file; refresh handler cache
+        try self.refreshHandlerCache();
     }
 
     /// Register all virtual module native functions on the context.
@@ -472,7 +562,13 @@ pub const Runtime = struct {
         };
 
         // Resolve module imports and register virtual module native functions
-        try self.resolveModuleImports(&p);
+        const has_file_imports = try self.resolveModuleImports(&p);
+
+        // If file imports are present, build module graph and compile dependencies
+        if (has_file_imports) {
+            try self.compileAndRunFileImports(code, filename);
+            return null; // Disable caching for multi-module handlers
+        }
 
         // Materialize object literal shapes before execution
         const shapes = p.getShapes();
@@ -550,6 +646,16 @@ pub const Runtime = struct {
 
     /// Load from cached serialized bytecode (Phase 1d: true cache hit with atoms and shapes)
     pub fn loadFromCachedBytecode(self: *Self, cached_data: []const u8) !void {
+        try self.loadFromCachedBytecodeImpl(cached_data, true);
+    }
+
+    /// Load from cached bytecode without refreshing handler cache.
+    /// Used for dependency modules that define exports but not the handler function.
+    pub fn loadFromCachedBytecodeNoHandler(self: *Self, cached_data: []const u8) !void {
+        try self.loadFromCachedBytecodeImpl(cached_data, false);
+    }
+
+    fn loadFromCachedBytecodeImpl(self: *Self, cached_data: []const u8, refresh_handler: bool) !void {
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
         // Deserialize bytecode with atoms and shapes - skips parsing entirely
@@ -578,7 +684,9 @@ pub const Runtime = struct {
 
         // Execute the deserialized bytecode
         _ = try self.interpreter.run(result.func);
-        try self.refreshHandlerCache();
+        if (refresh_handler) {
+            try self.refreshHandlerCache();
+        }
     }
 
     /// Serialize bytecode for caching (Phase 1b: cache miss path)
@@ -2106,8 +2214,14 @@ pub const HandlerPool = struct {
         }
 
         // Fast path: use embedded bytecode if available (precompiled at build time)
-        if (self.embedded_bytecode) |bytecode| {
-            try rt.loadFromCachedBytecode(bytecode);
+        if (self.embedded_bytecode) |entry_bytecode| {
+            // Load dependency modules first (if any were precompiled)
+            if (embedded_handler.dep_count > 0) {
+                for (embedded_handler.dep_bytecodes[0..embedded_handler.dep_count]) |dep_data| {
+                    try rt.loadFromCachedBytecodeNoHandler(dep_data);
+                }
+            }
+            try rt.loadFromCachedBytecode(entry_bytecode);
             return;
         }
 
