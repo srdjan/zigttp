@@ -1204,7 +1204,7 @@ pub const Parser = struct {
     // ============ Module Declaration Parsing ============
 
     /// Parse import declaration: import { X, Y } from "specifier"
-    /// Also rejects unsupported forms (dynamic import, require, default, namespace)
+    /// Rejects unsupported declaration forms (side-effect, default, namespace).
     fn parseImportDeclaration(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance(); // consume 'import'
@@ -1236,13 +1236,11 @@ pub const Parser = struct {
             const spec_loc = self.current.location();
 
             // Accept identifiers and keywords-as-identifiers (e.g., import { default as x })
-            const imported_name = if (self.check(.identifier) or self.isKeyword(self.current.type))
-                blk: {
-                    const tok = self.current;
-                    self.advance();
-                    break :blk tok;
-                }
-            else {
+            const imported_name = if (self.check(.identifier) or self.isKeyword(self.current.type)) blk: {
+                const tok = self.current;
+                self.advance();
+                break :blk tok;
+            } else {
                 self.errors.addExpectedError(self.current, "import specifier name");
                 return error.UnexpectedToken;
             };

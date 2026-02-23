@@ -1807,7 +1807,6 @@ pub const HandlerPool = struct {
         self.cache.deinit();
     }
 
-
     fn nextRequestId(self: *Self) u64 {
         return if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
     }
@@ -2279,6 +2278,34 @@ test "Runtime creation" {
     try std.testing.expect(rt.ctx.sp == 0);
 }
 
+test "virtual module import alias resolves to callable binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { env as getEnv } from "zigttp:env";
+        \\function handler(req) {
+        \\  return Response.text(typeof getEnv);
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<import-alias>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("function", response.body);
+}
+
 test "httpRequest native binding reports disabled bridge by default" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2435,7 +2462,6 @@ test "HandlerPool handler remains callable across resets" {
         defer response.deinit();
         try std.testing.expectEqualStrings("ok", response.body);
     }
-
 }
 
 test "AOT override fallback and success" {
@@ -2537,7 +2563,6 @@ test "HandlerPool concurrent stress" {
                 };
                 response.deinit();
             }
-
         }
     };
 
@@ -2552,7 +2577,6 @@ test "HandlerPool concurrent stress" {
         threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
     }
     for (threads) |t| t.join();
-
 
     try std.testing.expectEqual(@as(u32, 0), errors.load(.acquire));
 }
@@ -2877,7 +2901,6 @@ test "HandlerPool high contention stress" {
                 response.deinit();
                 _ = ctx.completed.fetchAdd(1, .acq_rel);
             }
-
         }
     };
 

@@ -13,7 +13,6 @@
 const std = @import("std");
 const object = @import("../object.zig");
 const context = @import("../context.zig");
-const value = @import("../value.zig");
 
 const env_mod = @import("env.zig");
 const crypto_mod = @import("crypto.zig");
@@ -113,4 +112,15 @@ pub fn validateImports(module: VirtualModule, specifier_names: []const []const u
         if (!found) return name;
     }
     return null;
+}
+
+test "validateImports accepts known exports" {
+    const names = [_][]const u8{ "sha256", "base64Encode" };
+    try std.testing.expect(validateImports(.crypto, &names) == null);
+}
+
+test "validateImports reports first missing export" {
+    const names = [_][]const u8{ "env", "missing" };
+    const missing = validateImports(.env, &names) orelse return error.ExpectedMissingExport;
+    try std.testing.expectEqualStrings("missing", missing);
 }

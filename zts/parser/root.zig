@@ -340,6 +340,34 @@ test "legacy Parser API" {
     // max_local_count is 0 for top-level code with only global vars
 }
 
+test "legacy Parser API getImports returns imported names" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var p = Parser.init(
+        allocator,
+        \\import { sha256 as hash, base64Encode } from "zigttp:crypto";
+        \\const out = hash("abc");
+    ,
+        &strings,
+        &atoms,
+    );
+    defer p.deinit();
+
+    _ = try p.parse();
+    const imports = try p.getImports();
+    defer p.freeImports(imports);
+
+    try std.testing.expectEqual(@as(usize, 1), imports.len);
+    try std.testing.expectEqualStrings("zigttp:crypto", imports[0].module_specifier);
+    try std.testing.expectEqual(@as(usize, 2), imports[0].specifier_names.len);
+    try std.testing.expectEqualStrings("sha256", imports[0].specifier_names[0]);
+    try std.testing.expectEqualStrings("base64Encode", imports[0].specifier_names[1]);
+}
+
 test "JSX parsing with enableJsx" {
     const allocator = std.testing.allocator;
     var strings = string.StringTable.init(allocator);

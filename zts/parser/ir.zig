@@ -20,6 +20,27 @@ pub const ScopeId = u16;
 /// Sentinel value for "no scope"
 pub const null_scope: ScopeId = std.math.maxInt(ScopeId);
 
+/// Pack an index-list start/count pair into a single u32.
+/// Layout: low 16 bits = start index, high 16 bits = count.
+fn packListRef(start: NodeIndex, count: u16) u32 {
+    const start16: u16 = @truncate(start);
+    std.debug.assert(start == start16);
+    return @as(u32, start16) | (@as(u32, count) << 16);
+}
+
+/// Unpack an index-list start/count pair encoded by `packListRef`.
+const ListRef = struct {
+    start: NodeIndex,
+    count: u16,
+};
+
+fn unpackListRef(packed_value: u32) ListRef {
+    return .{
+        .start = @as(NodeIndex, packed_value & 0xFFFF),
+        .count = @as(u16, @truncate(packed_value >> 16)),
+    };
+}
+
 /// Reference to a variable binding
 pub const BindingRef = struct {
     scope_id: ScopeId,
@@ -1216,7 +1237,7 @@ pub const IRStore = struct {
                 const i = node.data.import_decl;
                 break :blk self.addNode(.import_decl, loc, .{
                     .a = i.module_idx,
-                    .b = @as(u32, @as(u16, @truncate(i.specifiers_start))) | (@as(u32, i.specifiers_count) << 16),
+                    .b = packListRef(i.specifiers_start, i.specifiers_count),
                 });
             },
             .import_specifier => blk: {
@@ -1347,8 +1368,15 @@ pub const IRStore = struct {
                     break :blk .{ .binary = .{ .op = bin.op, .left = bin.left, .right = bin.right } };
                 },
                 .unary_op => .{ .unary = .{ .op = @enumFromInt(@as(u4, @truncate(d.a))), .operand = d.b } },
-                .return_stmt, .throw_stmt, .expr_stmt, .spread, .object_spread,
-                .yield_expr, .await_expr, .template_part_expr, .jsx_expr_container,
+                .return_stmt,
+                .throw_stmt,
+                .expr_stmt,
+                .spread,
+                .object_spread,
+                .yield_expr,
+                .await_expr,
+                .template_part_expr,
+                .jsx_expr_container,
                 => .{ .opt_value = if (d.a == null_node) null else d.a },
                 .block, .program => .{ .block = .{
                     .stmts_start = d.a,
@@ -2022,10 +2050,11 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
+                const list_ref = unpackListRef(d.b);
                 break :blk .{
                     .module_idx = @truncate(d.a),
-                    .specifiers_start = @truncate(d.b),
-                    .specifiers_count = @truncate(d.b >> 16),
+                    .specifiers_start = list_ref.start,
+                    .specifiers_count = @truncate(list_ref.count),
                 };
             },
         };

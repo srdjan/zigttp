@@ -388,10 +388,10 @@ pub const CodeGen = struct {
             .switch_stmt => try self.emitSwitch(self.ir.getSwitchStmt(index).?),
             .block, .program => try self.emitBlock(self.ir.getBlock(index).?),
             // Module declarations
-            // import_decl is a no-op at codegen level: module resolution registers
-            // native functions as globals before codegen runs, so import bindings
-            // resolve through the normal global variable mechanism.
-            .import_decl, .import_specifier => {},
+            // Emit alias binding copies for named imports.
+            // Runtime module resolution validates module/exports before execution.
+            .import_decl => try self.emitImportDecl(index),
+            .import_specifier => {},
             // export_decl emits its inner declaration (export is just a marker)
             .export_decl => {
                 if (self.ir.getExportDecl(index)) |exp| {
@@ -526,6 +526,25 @@ pub const CodeGen = struct {
             },
         }
         self.popStack(1);
+    }
+
+    fn emitImportDecl(self: *CodeGen, import_decl_idx: NodeIndex) !void {
+        const import_decl = self.ir.getImportDecl(import_decl_idx) orelse return;
+
+        for (0..import_decl.specifiers_count) |si| {
+            const spec_idx = self.ir.getListIndex(import_decl.specifiers_start, @intCast(si));
+            if (spec_idx == null_node) continue;
+            const spec = self.ir.getImportSpec(spec_idx) orelse continue;
+
+            // Parser currently only accepts named imports.
+            if (spec.kind != .named) continue;
+
+            // Copy the exported global into the local import binding.
+            try self.emit(.get_global);
+            try self.emitU16(spec.imported_atom);
+            self.pushStack(1);
+            try self.emitSetBinding(spec.local_binding);
+        }
     }
 
     // ============ Expression Emission ============
