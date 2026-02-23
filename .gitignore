@@ -13,6 +13,4 @@ test_mmap2
 test_mprotect
 test_prot
 test_time
-libroot.a
-libroot.a.o
 build_link.log

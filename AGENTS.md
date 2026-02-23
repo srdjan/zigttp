@@ -16,7 +16,7 @@
 - `zig build test` — unit tests for the main runtime.
 - `zig build test-zts` — unit tests for the JS engine.
 - `zig build test-zruntime` — unit tests for `src/zruntime.zig`.
-- `./setup.sh` — convenience script that builds a release binary.
+- `./scripts/setup.sh` — convenience script that builds a release binary.
 
 ## Coding Style & Naming Conventions
 - Format Zig code with `zig fmt` and follow existing patterns.
