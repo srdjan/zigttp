@@ -28,24 +28,14 @@ const std = @import("std");
 const object = @import("../object.zig");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
-const string = @import("../string.zig");
 const resolver = @import("resolver.zig");
+const util = @import("util.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
     .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2 },
 };
 
-/// Extract string data from a JSValue
-fn extractString(val: value.JSValue) ?[]const u8 {
-    if (val.isString()) {
-        return val.toPtr(string.JSString).data();
-    }
-    if (val.isStringSlice()) {
-        return val.toPtr(string.SliceString).data();
-    }
-    return null;
-}
 
 /// routerMatch(routes, req) -> { handler, params } | null
 fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
@@ -67,12 +57,12 @@ fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
     const pool = ctx.hidden_class_pool orelse return value.JSValue.null_val;
 
     const method_val = req_obj.getProperty(pool, .method) orelse return value.JSValue.null_val;
-    const method_str = extractString(method_val) orelse return value.JSValue.null_val;
+    const method_str = util.extractString(method_val) orelse return value.JSValue.null_val;
 
     // Try url first (full URL path), fall back to path
     const path_val = req_obj.getProperty(pool, .url) orelse
         (req_obj.getProperty(pool, .path) orelse return value.JSValue.null_val);
-    const full_path = extractString(path_val) orelse return value.JSValue.null_val;
+    const full_path = util.extractString(path_val) orelse return value.JSValue.null_val;
 
     // Strip query string for matching
     const path_str = if (std.mem.indexOfScalar(u8, full_path, '?')) |qi| full_path[0..qi] else full_path;

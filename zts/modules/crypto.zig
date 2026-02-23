@@ -10,11 +10,10 @@
 //! Native Zig crypto - no JS overhead.
 
 const std = @import("std");
-const object = @import("../object.zig");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
-const string = @import("../string.zig");
 const resolver = @import("resolver.zig");
+const util = @import("util.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
@@ -24,23 +23,13 @@ pub const exports = [_]resolver.ModuleExport{
     .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1 },
 };
 
-/// Extract string data from a JSValue (handles flat strings and slices)
-fn extractString(val: value.JSValue) ?[]const u8 {
-    if (val.isString()) {
-        return val.toPtr(string.JSString).data();
-    }
-    if (val.isStringSlice()) {
-        return val.toPtr(string.SliceString).data();
-    }
-    return null;
-}
 
 /// sha256(data) -> hex string
 fn sha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
     if (args.len == 0) return value.JSValue.undefined_val;
-    const data = extractString(args[0]) orelse return value.JSValue.undefined_val;
+    const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(data);
@@ -56,8 +45,8 @@ fn hmacSha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
     if (args.len < 2) return value.JSValue.undefined_val;
-    const key = extractString(args[0]) orelse return value.JSValue.undefined_val;
-    const data = extractString(args[1]) orelse return value.JSValue.undefined_val;
+    const key = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
+    const data = util.extractString(args[1]) orelse return value.JSValue.undefined_val;
 
     var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
     std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, data, key);
@@ -71,7 +60,7 @@ fn base64EncodeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
     if (args.len == 0) return value.JSValue.undefined_val;
-    const data = extractString(args[0]) orelse return value.JSValue.undefined_val;
+    const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
 
     const encoder = std.base64.standard;
     const encoded_len = encoder.Encoder.calcSize(data.len);
@@ -88,7 +77,7 @@ fn base64DecodeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
     if (args.len == 0) return value.JSValue.undefined_val;
-    const data = extractString(args[0]) orelse return value.JSValue.undefined_val;
+    const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
 
     const decoder = std.base64.standard;
     const decoded_len = decoder.Decoder.calcSizeForSlice(data) catch return value.JSValue.undefined_val;

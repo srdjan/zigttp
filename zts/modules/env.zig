@@ -9,11 +9,10 @@
 //!   const x = comptime(env("APP_NAME"));  // inlined as string literal
 
 const std = @import("std");
-const object = @import("../object.zig");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
-const string = @import("../string.zig");
 const resolver = @import("resolver.zig");
+const util = @import("util.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
@@ -27,7 +26,7 @@ fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
     if (args.len == 0) return value.JSValue.undefined_val;
 
     // Get the variable name from the first argument
-    const name_str = extractString(args[0]) orelse return value.JSValue.undefined_val;
+    const name_str = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
 
     // Need a null-terminated copy for the C getenv API
     var name_buf: [256]u8 = undefined;
@@ -42,14 +41,3 @@ fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
     return ctx.createString(result) catch value.JSValue.undefined_val;
 }
 
-/// Extract string data from a JSValue (handles flat strings, ropes, and slices)
-fn extractString(val: value.JSValue) ?[]const u8 {
-    if (val.isString()) {
-        return val.toPtr(string.JSString).data();
-    }
-    if (val.isStringSlice()) {
-        const slice = val.toPtr(string.SliceString);
-        return slice.data();
-    }
-    return null;
-}

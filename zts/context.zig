@@ -13,6 +13,7 @@ const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const builtins = @import("builtins.zig");
 const bytecode = @import("bytecode.zig");
+const modules = @import("modules/root.zig");
 
 pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
 
@@ -180,6 +181,18 @@ pub const CatchHandler = struct {
     fp: usize, // Frame pointer at entry
 };
 
+/// Maximum number of virtual module state slots.
+/// Sized to accommodate all VirtualModule enum variants with room for growth.
+pub const MAX_MODULE_STATE_SLOTS = 8;
+
+/// Per-runtime state entry for a virtual module.
+/// Modules that need persistent state (caches, registries) store an opaque
+/// pointer here, along with a cleanup function called during Context.deinit.
+pub const ModuleStateEntry = struct {
+    ptr: *anyopaque,
+    deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void,
+};
+
 /// JavaScript execution context
 pub const Context = struct {
     /// Allocator for context-owned memory
@@ -255,6 +268,9 @@ pub const Context = struct {
     /// Pre-built hidden class indices for object literal shapes.
     /// Indexed by shape_idx from bytecode, populated via materializeShapes().
     literal_shapes: std.ArrayList(object.HiddenClassIndex),
+    /// Per-module persistent state (caches, registries).
+    /// Indexed by VirtualModule enum ordinal. Null when module has no state.
+    module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -321,6 +337,7 @@ pub const Context = struct {
             .http_strings = null,
             .small_int_cache = small_int_cache,
             .literal_shapes = .{},
+            .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
         };
 
         if (config.use_http_shape_cache) {
@@ -775,6 +792,14 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
+        // Clean up per-module state (caches, registries) before destroying objects
+        for (&self.module_state) |*slot| {
+            if (slot.*) |entry| {
+                entry.deinit_fn(entry.ptr, self.allocator);
+                slot.* = null;
+            }
+        }
+
         // Destroy prototypes with destroyBuiltin to clean up their method properties
         if (self.hidden_class_pool) |pool| {
             if (self.array_prototype) |proto| proto.destroyBuiltin(self.allocator, pool);
@@ -839,6 +864,19 @@ pub const Context = struct {
         self.allocator.free(self.call_stack);
         self.allocator.free(self.stack);
         self.allocator.destroy(self);
+    }
+
+    /// Get per-module state by slot index, cast to the expected type.
+    pub fn getModuleState(self: *Context, comptime T: type, slot: usize) ?*T {
+        if (slot >= MAX_MODULE_STATE_SLOTS) return null;
+        const entry = self.module_state[slot] orelse return null;
+        return @ptrCast(@alignCast(entry.ptr));
+    }
+
+    /// Set per-module state for a slot. The deinit_fn will be called during Context.deinit.
+    pub fn setModuleState(self: *Context, slot: usize, ptr: *anyopaque, deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void) void {
+        if (slot >= MAX_MODULE_STATE_SLOTS) return;
+        self.module_state[slot] = .{ .ptr = ptr, .deinit_fn = deinit_fn };
     }
 
     // ========================================================================

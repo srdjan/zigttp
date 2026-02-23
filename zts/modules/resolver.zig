@@ -17,6 +17,9 @@ const context = @import("../context.zig");
 const env_mod = @import("env.zig");
 const crypto_mod = @import("crypto.zig");
 const router_mod = @import("router.zig");
+const auth_mod = @import("auth.zig");
+const validate_mod = @import("validate.zig");
+const cache_mod = @import("cache.zig");
 
 /// A single exported function from a virtual module
 pub const ModuleExport = struct {
@@ -30,11 +33,17 @@ pub const VirtualModule = enum {
     env,
     crypto,
     router,
+    auth,
+    validate,
+    cache,
 
     pub fn fromSpecifier(specifier: []const u8) ?VirtualModule {
         if (std.mem.eql(u8, specifier, "zigttp:env")) return .env;
         if (std.mem.eql(u8, specifier, "zigttp:crypto")) return .crypto;
         if (std.mem.eql(u8, specifier, "zigttp:router")) return .router;
+        if (std.mem.eql(u8, specifier, "zigttp:auth")) return .auth;
+        if (std.mem.eql(u8, specifier, "zigttp:validate")) return .validate;
+        if (std.mem.eql(u8, specifier, "zigttp:cache")) return .cache;
         return null;
     }
 
@@ -43,6 +52,9 @@ pub const VirtualModule = enum {
             .env => &env_mod.exports,
             .crypto => &crypto_mod.exports,
             .router => &router_mod.exports,
+            .auth => &auth_mod.exports,
+            .validate => &validate_mod.exports,
+            .cache => &cache_mod.exports,
         };
     }
 };

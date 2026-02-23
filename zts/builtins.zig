@@ -1118,7 +1118,7 @@ pub fn setClear(ctx: *context.Context, this: value.JSValue, _: []const value.JSV
     return value.JSValue.undefined_val;
 }
 
-const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass, ArenaObjectEscape, NoHiddenClassPool };
+pub const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClass, ArenaObjectEscape, NoHiddenClassPool };
 
 // ============================================================================
 // JSON Shape Cache - Avoids hidden class transitions in JSON.parse
@@ -1222,7 +1222,7 @@ inline fn skipJsonWhitespace(text: []const u8, pos: *usize) void {
 }
 
 /// Parse a JSON value from text
-fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSValue {
+pub fn parseJsonValue(ctx: *context.Context, text: []const u8) JsonError!value.JSValue {
     var pos: usize = 0;
     return parseJsonValueAt(ctx, text, &pos);
 }
