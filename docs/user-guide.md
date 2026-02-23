@@ -16,11 +16,12 @@ Functions, Cloudflare Workers), powered by Zig and zts.
 7. [Routing Patterns](#routing-patterns)
 8. [Working with JSON](#working-with-json)
 9. [Error Handling](#error-handling)
-10. [JavaScript Subset Reference](#javascript-subset-reference)
-11. [TypeScript Support](#typescript-support)
-12. [Complete Examples](#complete-examples)
-13. [Performance Tuning](#performance-tuning)
-14. [Troubleshooting](#troubleshooting)
+10. [Virtual Modules](#virtual-modules)
+11. [JavaScript Subset Reference](#javascript-subset-reference)
+12. [TypeScript Support](#typescript-support)
+13. [Complete Examples](#complete-examples)
+14. [Performance Tuning](#performance-tuning)
+15. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -697,6 +698,212 @@ function handler(request) {
         return errorResponse(400, "Invalid JSON");
     }
 }
+```
+
+---
+
+## Virtual Modules
+
+zigttp provides native virtual modules that run as compiled Zig code - no JS
+interpretation overhead. Import them using ES6 import syntax:
+
+```typescript
+import { functionName } from "zigttp:module";
+```
+
+### zigttp:env
+
+```typescript
+import { env } from "zigttp:env";
+
+const apiKey = env("API_KEY");        // string or undefined
+const appName = env("APP_NAME");
+```
+
+### zigttp:crypto
+
+```typescript
+import { sha256, hmacSha256, base64Encode, base64Decode } from "zigttp:crypto";
+
+const hash = sha256("hello");                   // hex-encoded SHA-256
+const mac = hmacSha256("secret", "data");       // hex-encoded HMAC-SHA256
+const encoded = base64Encode("hello");          // base64 string
+const decoded = base64Decode(encoded);          // original string
+```
+
+### zigttp:router
+
+```typescript
+import { routerMatch } from "zigttp:router";
+
+const routes = {
+    "GET /":          function(req) { return Response.text("home"); },
+    "GET /users/:id": function(req) { return Response.json({ id: req.params.id }); },
+    "POST /users":    function(req) { return Response.json({ created: true }, { status: 201 }); },
+};
+
+function handler(req) {
+    const match = routerMatch(routes, req);
+    if (match) {
+        req.params = match.params;
+        return match.handler(req);
+    }
+    return Response.json({ error: "Not Found" }, { status: 404 });
+}
+```
+
+### zigttp:auth
+
+Authentication utilities with HS256 JWT support and webhook signature
+verification.
+
+```typescript
+import { parseBearer, jwtVerify, jwtSign, verifyWebhookSignature, timingSafeEqual } from "zigttp:auth";
+```
+
+**parseBearer(header)** - Extract token from "Bearer \<token\>" header. Returns
+string or null.
+
+```typescript
+const token = parseBearer(req.headers["authorization"]);
+// "Bearer eyJ..." -> "eyJ..."
+// "Basic ..." -> null
+```
+
+**jwtVerify(token, secret)** - Verify HS256 JWT. Checks `exp` and `nbf` claims
+automatically. Returns `{ ok: true, value: claims }` or
+`{ ok: false, error: message }`.
+
+```typescript
+const result = jwtVerify(token, "my-secret-key");
+if (result.ok) {
+    const userId = result.value.sub;
+} else {
+    // result.error: "invalid signature", "token expired", "token not yet valid"
+}
+```
+
+**jwtSign(claims_json, secret)** - Create HS256 JWT from JSON claims string.
+Returns the signed token string.
+
+```typescript
+const token = jwtSign(JSON.stringify({
+    sub: "user-123",
+    iat: Date.now() / 1000,
+    exp: Date.now() / 1000 + 3600  // 1 hour
+}), "my-secret-key");
+```
+
+**verifyWebhookSignature(payload, secret, signature)** - HMAC-SHA256 webhook
+verification. Handles `sha256=` prefix (GitHub/Stripe style). Constant-time
+comparison. Returns boolean.
+
+```typescript
+const valid = verifyWebhookSignature(req.body, "webhook-secret", req.headers["x-hub-signature-256"]);
+```
+
+**timingSafeEqual(a, b)** - Constant-time string comparison. Returns boolean.
+
+```typescript
+const match = timingSafeEqual(providedToken, expectedToken);
+```
+
+### zigttp:validate
+
+JSON Schema validation with a compiled schema registry. Schemas persist across
+requests within the same runtime pool slot.
+
+```typescript
+import { schemaCompile, validateJson, validateObject, coerceJson, schemaDrop } from "zigttp:validate";
+```
+
+**schemaCompile(name, schema_json)** - Compile and register a JSON Schema.
+Returns boolean.
+
+Supported schema keywords: `type`, `required`, `properties`, `minLength`,
+`maxLength`, `minimum`, `maximum`, `enum`, `items`.
+
+Supported types: `string`, `number`, `integer`, `boolean`, `array`, `object`,
+`null`.
+
+```typescript
+schemaCompile("user", JSON.stringify({
+    type: "object",
+    required: ["name", "email"],
+    properties: {
+        name: { type: "string", minLength: 1, maxLength: 100 },
+        email: { type: "string", minLength: 5 },
+        age: { type: "integer", minimum: 0, maximum: 200 },
+        role: { type: "string", enum: ["admin", "user", "guest"] }
+    }
+}));
+```
+
+**validateJson(name, json_string)** - Parse JSON and validate against a
+compiled schema. Returns `{ ok: true, value: parsed }` or
+`{ ok: false, errors: [...] }`.
+
+```typescript
+const result = validateJson("user", req.body);
+if (!result.ok) {
+    // result.errors is an array of { path, message }
+    return Response.json({ errors: result.errors }, { status: 400 });
+}
+// result.value is the parsed object
+```
+
+**validateObject(name, value)** - Validate an existing JS value (no parsing
+step).
+
+**coerceJson(name, json_string)** - Parse JSON with type coercion before
+validation. Coerces string-to-number, string-to-boolean, and number-to-string
+when the schema expects a different type.
+
+**schemaDrop(name)** - Remove a compiled schema. Returns boolean.
+
+### zigttp:cache
+
+In-memory key-value cache with namespace isolation, LRU eviction, and lazy TTL
+expiry. Cache persists across requests within the same runtime pool slot.
+
+```typescript
+import { cacheGet, cacheSet, cacheDelete, cacheIncr, cacheStats } from "zigttp:cache";
+```
+
+**cacheGet(namespace, key)** - Retrieve a cached value. Returns string or null.
+Expired entries are removed on access.
+
+```typescript
+const cached = cacheGet("sessions", sessionId);
+```
+
+**cacheSet(namespace, key, value, ttl?)** - Store a value. Optional TTL in
+seconds (omit or 0 for no expiry). Evicts LRU entries if over capacity (default:
+10,000 entries or 16MB).
+
+```typescript
+cacheSet("sessions", sessionId, JSON.stringify(userData), 3600); // 1 hour TTL
+cacheSet("config", "settings", jsonString);                       // no expiry
+```
+
+**cacheDelete(namespace, key)** - Remove a cached entry. Returns boolean.
+
+**cacheIncr(namespace, key, delta?, ttl?)** - Atomic increment. Creates entry
+at 0 if missing. Default delta is 1. Returns the new value as a number.
+
+```typescript
+const count = cacheIncr("counters", "requests");       // +1
+const score = cacheIncr("game", "score", 10);          // +10
+const neg = cacheIncr("counters", "errors", -1);       // -1
+```
+
+**cacheStats(namespace?)** - Get cache statistics. Returns
+`{ hits, misses, entries, bytes }`. Pass a namespace for per-namespace stats,
+or omit for aggregate.
+
+```typescript
+const stats = cacheStats();           // aggregate
+const nsStats = cacheStats("api");    // per-namespace
 ```
 
 ---

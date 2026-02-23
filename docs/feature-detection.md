@@ -39,6 +39,9 @@ The parser supports ES6 `import`/`export` syntax for the virtual module system (
 | `import { x } from "zigttp:env"` | Named import (single) |
 | `import { x, y, z } from "zigttp:crypto"` | Named import (multiple) |
 | `import { x as alias } from "zigttp:env"` | Named import with alias |
+| `import { parseBearer, jwtVerify } from "zigttp:auth"` | Auth module imports |
+| `import { schemaCompile, validateJson } from "zigttp:validate"` | Validation module imports |
+| `import { cacheGet, cacheSet } from "zigttp:cache"` | Cache module imports |
 
 ### Supported Export Forms
 

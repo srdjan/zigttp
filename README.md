@@ -113,6 +113,80 @@ function handler(request) {
 
 See [examples/htmx-todo/](examples/htmx-todo/) for a complete HTMX application.
 
+## Virtual Modules
+
+zigttp provides native virtual modules via `import { ... } from "zigttp:*"` syntax. These run as native Zig code with zero JS interpretation overhead.
+
+### Available Modules
+
+| Module | Exports | Description |
+|--------|---------|-------------|
+| `zigttp:env` | `env` | Environment variable access |
+| `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Cryptographic functions |
+| `zigttp:router` | `routerMatch` | Pattern-matching HTTP router |
+| `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
+| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation |
+| `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
+
+### Auth Example
+
+```typescript
+import { parseBearer, jwtVerify, jwtSign } from "zigttp:auth";
+
+function handler(req: Request): Response {
+    const token = parseBearer(req.headers["authorization"]);
+    if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+    const result = jwtVerify(token, "my-secret");
+    if (!result.ok) return Response.json({ error: result.error }, { status: 401 });
+
+    return Response.json({ user: result.value });
+}
+```
+
+### Validation Example
+
+```typescript
+import { schemaCompile, validateJson } from "zigttp:validate";
+
+schemaCompile("user", JSON.stringify({
+    type: "object",
+    required: ["name", "email"],
+    properties: {
+        name: { type: "string", minLength: 1, maxLength: 100 },
+        email: { type: "string", minLength: 5 },
+        age: { type: "integer", minimum: 0, maximum: 200 }
+    }
+}));
+
+function handler(req: Request): Response {
+    if (req.method === "POST") {
+        const result = validateJson("user", req.body);
+        if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
+        return Response.json({ user: result.value }, { status: 201 });
+    }
+    return Response.json({ ok: true });
+}
+```
+
+### Cache Example
+
+```typescript
+import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
+
+function handler(req: Request): Response {
+    const cached = cacheGet("api", req.url);
+    if (cached) return Response.json(JSON.parse(cached));
+
+    const data = { message: "computed", path: req.url };
+    cacheSet("api", req.url, JSON.stringify(data), 60); // TTL: 60 seconds
+
+    return Response.json(data);
+}
+```
+
+See [examples/modules_all.ts](examples/modules_all.ts) for an integration example using all modules together.
+
 ## CLI Options
 
 ```bash
@@ -141,6 +215,8 @@ Options:
 **Language Support**: ES5 + select ES6 features (for...of, typed arrays, exponentiation), native TypeScript/TSX stripping, compile-time evaluation with `comptime()`, direct JSX parsing.
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
+
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
 **Developer Experience**: Fetch-like Response API (Response.json, Response.text, Response.html), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 

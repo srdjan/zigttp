@@ -183,6 +183,23 @@ All error messages follow the pattern: "'feature' is not supported; use X instea
 - `Response.html(html, init?)`
 - `Response.redirect(url, status?)`
 
+## Virtual Modules
+
+Native `zigttp:*` modules provide common FaaS functionality with zero JS interpretation overhead. Import via `import { fn } from "zigttp:module"`.
+
+| Module | Exports | Notes |
+|--------|---------|-------|
+| `zigttp:env` | `env` | Environment variable access |
+| `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Stateless crypto |
+| `zigttp:router` | `routerMatch` | Pattern-matching HTTP router with path params |
+| `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | HS256 JWT, webhook HMAC-SHA256 |
+| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema subset (type, required, properties, min/maxLength, min/max, enum, items). Per-runtime SchemaRegistry via module_state. |
+| `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory KV cache with namespace isolation, LRU eviction, lazy TTL. Per-runtime CacheStore via module_state. Persists across requests in same pool slot. |
+
+Module implementations: `zts/modules/{auth,validate,cache,env,crypto,router,util}.zig`. Shared helpers in `util.zig`. Resolver/wiring in `resolver.zig` and `root.zig`.
+
+Stateful modules (validate, cache) use `Context.module_state` - a fixed-size array of opaque pointers with deinit callbacks, indexed by VirtualModule enum ordinal. Lazy-initialized on first use.
+
 ## CLI Options
 
 ```

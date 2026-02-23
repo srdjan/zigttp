@@ -113,6 +113,59 @@ Options:
 ./zig-out/bin/zigttp-server --static ./public handler.js
 ```
 
+## Virtual Modules
+
+zigttp provides native virtual modules imported via `import { ... } from "zigttp:*"` syntax. These execute as native Zig code with zero JS interpretation overhead.
+
+### Available Modules
+
+| Module | Exports | Description |
+|--------|---------|-------------|
+| `zigttp:env` | `env` | Environment variable access |
+| `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Cryptographic functions |
+| `zigttp:router` | `routerMatch` | Pattern-matching HTTP router |
+| `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
+| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation |
+| `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
+
+### zigttp:auth
+
+**`parseBearer(headerValue)`** - Extracts the token from a `Bearer <token>` authorization header. Returns the token string or `null` if the header is missing or malformed.
+
+**`jwtVerify(token, secret)`** - Verifies an HS256 JWT. Returns `{ok: true, value: <claims>}` on success or `{ok: false, error: "<reason>"}` on failure. Automatically checks `exp` and `nbf` claims when present.
+
+**`jwtSign(claimsJson, secret)`** - Signs a JSON claims string as an HS256 JWT. Returns the signed token string.
+
+**`verifyWebhookSignature(payload, secret, signature)`** - Verifies an HMAC-SHA256 webhook signature. The signature may optionally have a `sha256=` prefix. Returns `true` or `false`.
+
+**`timingSafeEqual(a, b)`** - Constant-time string comparison. Returns `true` if strings are identical, `false` otherwise.
+
+### zigttp:validate
+
+**`schemaCompile(name, schemaJson)`** - Compiles a JSON Schema string into an internal representation and registers it under the given name. Supported keywords: `type`, `required`, `properties`, `minLength`, `maxLength`, `minimum`, `maximum`, `enum`, `items`. Returns `true` on success.
+
+**`validateJson(name, jsonString)`** - Parses a JSON string and validates it against a compiled schema. Returns `{ok: true, value: <parsed>}` or `{ok: false, errors: [{path, message}]}`.
+
+**`validateObject(name, object)`** - Validates an existing JS object against a compiled schema. Same return shape as `validateJson`.
+
+**`coerceJson(name, jsonString)`** - Like `validateJson` but applies type coercion before validation (string-to-number, string-to-boolean, number-to-string).
+
+**`schemaDrop(name)`** - Removes a compiled schema from the registry. Returns `true` if the schema existed.
+
+### zigttp:cache
+
+**`cacheGet(namespace, key)`** - Retrieves a cached value. Returns the string value or `null` if not found or expired.
+
+**`cacheSet(namespace, key, value, ttl?)`** - Stores a string value with optional TTL in seconds. LRU eviction occurs when limits are exceeded (default: 10,000 entries, 16MB). Returns `true`.
+
+**`cacheDelete(namespace, key)`** - Removes an entry from the cache. Returns `true` if the entry existed.
+
+**`cacheIncr(namespace, key, delta?, ttl?)`** - Atomically increments a numeric counter. Creates the key with value 0 if it does not exist. Default delta is 1. Returns the new value as a number.
+
+**`cacheStats(namespace?)`** - Returns cache statistics: `{hits, misses, entries, bytes}`. If namespace is omitted, returns aggregate stats.
+
+See [User Guide](user-guide.md#virtual-modules) for complete usage examples.
+
 ## Console Methods
 
 ```javascript
