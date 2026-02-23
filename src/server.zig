@@ -587,6 +587,21 @@ fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     }
 }
 
+fn createUnixSocketPair() ![2]std.posix.fd_t {
+    if (@TypeOf(std.posix.system.socketpair) == void) {
+        return error.OperationUnsupported;
+    }
+
+    var fds: [2]std.posix.fd_t = undefined;
+    while (true) switch (std.posix.errno(
+        std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    )) {
+        .SUCCESS => return fds,
+        .INTR => continue,
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+}
+
 /// Write multiple buffers to fd using writev() scatter-gather I/O.
 /// Avoids copying multiple buffers into one before writing.
 fn writevAllFd(fd: std.posix.fd_t, iovecs: []std.posix.iovec_const) !void {
@@ -2347,7 +2362,7 @@ test "threaded readRequestData handles partial headers" {
         .allocator = allocator,
     };
 
-    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    const fds = try createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
 
     try writeAllFd(fds[1], "GET / HTTP/1.1\r\nHost: example.com\r\n");
@@ -2475,7 +2490,7 @@ test "parseRequest rejects long header lines (streaming)" {
     var server: Server = undefined;
     server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = 1024, .max_headers = 64 };
 
-    const fds = try std.posix.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0);
+    const fds = try createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
 
     const long_value = try allocator.alloc(u8, 9000);
