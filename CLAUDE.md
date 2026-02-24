@@ -146,19 +146,18 @@ const etag = comptime(hash("content-v1"));     // -> const etag = "a1b2c3d4";
 
 **Disallowed**: Variables, `Date.now()`, `Math.random()`, closures, assignments.
 
-See [docs/typescript-comptime-spec.md](docs/typescript-comptime-spec.md) for full specification.
+See [docs/typescript.md](docs/typescript.md) for full specification.
 
 ## Unsupported Feature Detection
 
 zigttp uses a two-layer fail-fast validation system to detect unsupported JavaScript and TypeScript features as early as possible:
 
-1. **TypeScript Stripper** ([zts/stripper.zig](zts/stripper.zig)): Catches TypeScript-specific syntax before parsing
-   - enum, namespace, implements, decorators, access modifiers
+1. **TypeScript Stripper** ([zts/stripper.zig](zts/stripper.zig)): Catches TypeScript-specific type-position syntax before parsing
+   - Only detects `any` type (in annotations, assertions, nested positions)
    - Only runs for .ts/.tsx files
-   - Logs helpful error messages with source location and suggested alternatives
 
-2. **Parser** ([zts/parser/parse.zig](zts/parser/parse.zig)): Catches unsupported JavaScript features
-   - 48 features including class, while, throw, try/catch, var, ==, ++, compound assignments, etc.
+2. **Parser** ([zts/parser/parse.zig](zts/parser/parse.zig)): Catches all other unsupported features
+   - 53 features including class, enum, namespace, while, throw, try/catch, var, ==, ++, compound assignments, decorators, access modifiers, etc.
    - Runs for all files (after stripping for TS files)
    - Provides consistent error messages regardless of file type
 
@@ -173,9 +172,9 @@ All error messages follow the pattern: "'feature' is not supported; use X instea
 
 ## JavaScript Runtime
 
-**Supported**: ES5 + `for...of` (arrays), typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`.
+**Supported**: ES5 + arrow functions, template literals, destructuring, spread operator, `for...of` (arrays), optional chaining, nullish coalescing, typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`.
 
-**Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API.
+**Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API. Classes, async/await, Promises, `var`, `while`/`do-while`, `this`, `new`, `try/catch`, regular expressions are all detected at parse time with helpful error messages.
 
 **Response helpers**:
 - `Response.json(data, init?)`

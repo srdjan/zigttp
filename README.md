@@ -6,20 +6,20 @@ A high-performance serverless JavaScript runtime for FaaS deployments, powered b
 
 ## Why zigttp?
 
-### Langugage Goals: Light Functional TypeScript subset
+### Language Goals: Light Functional TypeScript subset
 - Support 'light functional programming style' with the strict subset of TypeScript
 - make JSX first class citizen in zts.
 - Native TypeScript "comptime" support, a-la Zig
 - Use Zig asynchronous I/O behind the scenes 
 
 ### Runtime Goals:
-- Experimient with AOT compilation for TypeScript/JavaScript handlers in zigttp, while preserving the JIT/interpreter for strictly dynamic runtime scenarios.
+- Experiment with AOT compilation for TypeScript/JavaScript handlers in zigttp, while preserving the JIT/interpreter for strictly dynamic runtime scenarios.
 - **Fast cold starts**: 3ms runtime init, ~100ms total on macOS (2-3x faster than Deno)
 - **Future Linux target**: Sub-20ms cold starts via static linking (planned)
 - **Small footprint**: 1.2MB binary, 4MB memory, zero runtime dependencies
 - Request isolation via pre-warmed handler pool
 
-### Perfomance
+### Performance
 
 <img src="docs/bench.jpg" alt="Performance benchmark" width="90%">
 
@@ -196,7 +196,7 @@ Options:
   -p, --port <PORT>     Port (default: 8080)
   -h, --host <HOST>     Host (default: 127.0.0.1)
   -e, --eval <CODE>     Inline JavaScript handler
-  -m, --memory <SIZE>   JS runtime memory limit (default: 256k)
+  -m, --memory <SIZE>   JS runtime memory limit (default: 0 = no limit)
   -n, --pool <N>        Runtime pool size (default: auto)
   --cors                Enable CORS headers
   --static <DIR>        Serve static files
@@ -290,17 +290,18 @@ See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detai
 - [User Guide](docs/user-guide.md) - Complete handler API reference, routing patterns, examples
 - [Architecture](docs/architecture.md) - System design, runtime model, project structure
 - [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
-- [Performance](docs/performance.md) - Benchmarks, optimizations, deployment patterns
-- [API Reference](docs/api-reference.md) - Advanced configuration, extending with native functions
-- [TypeScript comptime Spec](docs/typescript-comptime-spec.md) - Compile-time evaluation reference
+- [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation
+- [Performance](docs/performance.md) - Benchmarks, cold starts, optimizations, deployment patterns
+- [Feature Detection](docs/feature-detection.md) - Unsupported feature detection matrix
+- [API Reference](docs/api-reference.md) - Zig embedding API, extending with native functions
 
 ## JavaScript Subset
 
 zts implements ES5 with select ES6+ extensions:
 
-**Supported**: Strict mode, let/const, for...of (arrays), typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`.
+**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`.
 
-**Not Supported**: Arrow functions, template literals, destructuring, spread operator, classes, async/await, Promises.
+**Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, regular expressions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives.
 
 See [User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
 

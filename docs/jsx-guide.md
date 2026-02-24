@@ -257,7 +257,7 @@ function ProductList(props) {
 }
 ```
 
-Note: Since arrow functions are not supported, use `function` syntax for callbacks.
+Both arrow functions and `function` syntax work for callbacks.
 
 ## Conditional Rendering
 
@@ -374,36 +374,24 @@ function handler(request: Request): Response {
 }
 ```
 
-## Limitations
+## Supported Language Features in JSX
 
-Since zts implements ES5 with select ES6 extensions:
+zts supports ES5 plus these ES6+ extensions in JSX/TSX files:
 
-**Not Supported**:
-- Arrow functions (use `function` syntax)
-- Template literals (use string concatenation)
-- Destructuring (access props directly: `props.title`)
-- Spread operator (pass props individually)
-- Classes (use function components)
+**Supported**:
+- Arrow functions: `const MyComponent = (props) => <div>{props.title}</div>`
+- Template literals: `` `Hello ${name}` ``
+- Destructuring: `const { title, children } = props`
+- Spread operator: `{...obj}`, `[...arr]`
+- `for...of` loops, optional chaining, nullish coalescing
 
-**Example of ES5-compatible JSX**:
+**Not Supported** (detected at parse time with helpful errors):
+- Classes (use function components and factory functions)
+- `var` (use `let` or `const`)
+- `while` / `do-while` loops (use `for...of` with a finite collection)
+- `this` keyword (pass context explicitly)
 
-```jsx
-// AVOID (ES6+ syntax):
-const MyComponent = ({title, children}) => (
-    <div className={`container-${title}`}>
-        {...children}
-    </div>
-);
-
-// USE (ES5 syntax):
-function MyComponent(props) {
-    return (
-        <div class={"container-" + props.title}>
-            {props.children}
-        </div>
-    );
-}
-```
+Use `class` (not `className`) for HTML class attributes in JSX.
 
 ## Examples
 

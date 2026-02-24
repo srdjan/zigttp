@@ -121,7 +121,7 @@ OPTIONS:
                         Example: -e "function handler(r) { return Response.json({ok:true}) }"
 
   -m, --memory <SIZE>   JavaScript runtime memory limit
-                        Default: 256k
+                        Default: 0 (no limit)
                         Supports: k/kb, m/mb, g/gb suffixes
                         Example: -m 512k, -m 1m
 
