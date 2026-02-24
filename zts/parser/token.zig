@@ -144,6 +144,16 @@ pub const TokenType = enum(u8) {
     kw_debugger,
     kw_with,
 
+    // TypeScript keywords (unsupported but tokenized for detection)
+    kw_enum,
+    kw_implements,
+    kw_public,
+    kw_private,
+    kw_protected,
+
+    // Decorator
+    at_sign, // @
+
     // Special
     eof,
     newline, // Significant for ASI
@@ -198,7 +208,7 @@ pub const Token = struct {
     /// Check if this token is a keyword
     pub fn isKeyword(self: Token) bool {
         return @intFromEnum(self.type) >= @intFromEnum(TokenType.kw_var) and
-            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_with);
+            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_protected);
     }
 
     /// Check if this token is an assignment operator
@@ -309,6 +319,11 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "set", .kw_set },
     .{ "debugger", .kw_debugger },
     .{ "with", .kw_with },
+    .{ "enum", .kw_enum },
+    .{ "implements", .kw_implements },
+    .{ "public", .kw_public },
+    .{ "private", .kw_private },
+    .{ "protected", .kw_protected },
     .{ "true", .true_lit },
     .{ "false", .false_lit },
     .{ "null", .null_lit },

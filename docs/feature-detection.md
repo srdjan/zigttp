@@ -6,27 +6,18 @@ This document catalogs all unsupported JavaScript and TypeScript features detect
 
 zigttp uses a two-layer validation system:
 
-1. **TypeScript Stripper** (`zts/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax
-2. **Parser** (`zts/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript features
+1. **TypeScript Stripper** (`zts/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
+2. **Parser** (`zts/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
 
 **Principle**: Each feature should be detected at exactly one layer to avoid duplicate error reporting and ensure consistent error messages regardless of file type.
 
 ## TypeScript Stripper Features
 
-These features are TypeScript-specific and have no JavaScript equivalent. They are detected during the stripping phase before parsing.
+These features exist only in TypeScript type annotation positions that are stripped before parsing. The parser never sees them.
 
-| Feature | Line | Error Type | Suggested Alternative |
-|---------|------|------------|----------------------|
-| `enum` / `const enum` | 1002-1014 | UnsupportedEnum | Use object literals or discriminated unions |
-| `namespace` / `module` | 1016-1017 | UnsupportedNamespace | Use ES6 modules |
-| ~~`class`~~ | ~~1020-1022~~ | ~~UnsupportedClass~~ | **MOVED TO PARSER** (Stage 3) |
-| ~~`abstract class`~~ | ~~1023-1033~~ | ~~UnsupportedClass~~ | **MOVED TO PARSER** (Stage 3) |
-| `implements` | 1034-1035 | UnsupportedClass | Use duck typing or runtime checks |
-| `@decorator` syntax | 995-996 | UnsupportedDecorator | Use function composition |
-| Access modifiers (`public`, `private`, `protected`) | 1038-1057 | UnsupportedClass | Use naming conventions (e.g., `_private`) |
-| `any` type (all positions: annotations, assertions, nested) | 1057-1072 | UnsupportedAnyType | Use specific types (string, number, object) or union types |
-
-**Note**: After Stage 3 implementation, `class` and `abstract class` will be handled by the parser to ensure consistent error messages for both .ts and .js files.
+| Feature | Error Type | Suggested Alternative |
+|---------|------------|----------------------|
+| `any` type (all positions: annotations, assertions, nested) | UnsupportedAnyType | Use specific types (string, number, object) or union types |
 
 ## Supported Module Syntax
 
@@ -64,122 +55,134 @@ These produce helpful error messages directing users to named imports/exports:
 | `export { x } from "mod"` | Re-exports not supported; use named exports |
 | `export * from "mod"` | Export star not supported; use named exports |
 
-## Parser Features (48 total)
+## Parser Features (53 total)
 
-These are JavaScript language features that are syntactically valid but unsupported in zigttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".
+These are JavaScript and TypeScript language features that are syntactically valid but unsupported in zigttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".
+
+### TypeScript Features (detected by parser)
+
+These were previously detected by the stripper but moved to the parser for consistent error messages across .ts and .js files.
+
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `enum` / `const enum` | Use object literals or discriminated unions |
+| `namespace` / `module` | Use ES6 modules |
+| `implements` keyword | Use duck typing or runtime checks |
+| `@decorator` syntax | Use function composition |
+| Access modifiers (`public`, `private`, `protected`) | Use naming conventions (e.g., `_private`) |
 
 ### Loop Constructs
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `while` loops | 170-177 | Use `for-of` with a finite collection |
-| `do-while` loops | 170-177 | Use `for-of` with a finite collection |
-| `for-in` loops | 862-864 | Use `for-of` to iterate over values |
-| C-style `for` loops (init; cond; update) | 915-918 | Use `for (let x of array)` or `for (let i of range(n))` |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `while` loops | Use `for-of` with a finite collection |
+| `do-while` loops | Use `for-of` with a finite collection |
+| `for-in` loops | Use `for-of` to iterate over values |
+| C-style `for` loops (init; cond; update) | Use `for (let x of array)` or `for (let i of range(n))` |
 
 ### Loop Control Flow
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `break` statement | 180-186 | Use early return or filter |
-| `continue` statement | 180-186 | Use filter or conditional logic |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `break` statement | Use early return or filter |
+| `continue` statement | Use filter or conditional logic |
 
 ### Error Handling
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `throw` statement | 188-194 | Use Result types for error handling |
-| `try/catch/finally` | 188-194 | Use Result types for error handling |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `throw` statement | Use Result types for error handling |
+| `try/catch/finally` | Use Result types for error handling |
 
 ### Classes and OOP
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `class` declarations (statement context) | 197-198 | Use plain objects and functions |
-| `class` expressions (expression context) | 1271-1272 | Use plain objects and functions |
-| `this` keyword | 1245-1285 | Pass context explicitly as a parameter |
-| `super` keyword | 1245-1285 | Use explicit function calls |
-| `new` operator | 1263-1265 | Use factory functions |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `class` declarations (statement context) | Use plain objects and functions |
+| `class` expressions (expression context) | Use plain objects and functions |
+| `this` keyword | Pass context explicitly as a parameter |
+| `super` keyword | Use explicit function calls |
+| `new` operator | Use factory functions |
 
 ### Variable Declarations
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `var` keyword (statement context) | 210-211 | Use `let` or `const` |
-| `var` keyword (for-loop context) | 838-839 | Use `let` or `const` |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `var` keyword (statement context) | Use `let` or `const` |
+| `var` keyword (for-loop context) | Use `let` or `const` |
 
 ### Equality Operators
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `==` (loose equality) | 1324-1330 | Use `===` for strict equality |
-| `!=` (loose inequality) | 1324-1330 | Use `!==` for strict inequality |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `==` (loose equality) | Use `===` for strict equality |
+| `!=` (loose inequality) | Use `!==` for strict inequality |
 
 ### Unary Increment/Decrement
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `++x` (prefix increment) | 1299-1304 | Use `x = x + 1` |
-| `--x` (prefix decrement) | 1299-1304 | Use `x = x - 1` |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `++x` (prefix increment) | Use `x = x + 1` |
+| `--x` (prefix decrement) | Use `x = x - 1` |
 
 ### Postfix Increment/Decrement
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `x++` (postfix increment) | 1566-1572 | Use `x = x + 1` |
-| `x--` (postfix decrement) | 1566-1572 | Use `x = x - 1` |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `x++` (postfix increment) | Use `x = x + 1` |
+| `x--` (postfix decrement) | Use `x = x - 1` |
 
 ### Compound Assignment Operators (15 total)
 
 All compound assignments follow the pattern: "use `x = x [op] value`"
 
-| Feature | Line(s) | Binary Equivalent |
-|---------|---------|-------------------|
-| `+=` | 1388-1446 | `x = x + value` |
-| `-=` | 1388-1446 | `x = x - value` |
-| `*=` | 1388-1446 | `x = x * value` |
-| `/=` | 1388-1446 | `x = x / value` |
-| `%=` | 1388-1446 | `x = x % value` |
-| `**=` | 1388-1446 | `x = x ** value` |
-| `&=` | 1388-1446 | `x = x & value` |
-| `|=` | 1388-1446 | `x = x | value` |
-| `^=` | 1388-1446 | `x = x ^ value` |
-| `<<=` | 1388-1446 | `x = x << value` |
-| `>>=` | 1388-1446 | `x = x >> value` |
-| `>>>=` | 1388-1446 | `x = x >>> value` |
-| `&&=` | 1388-1446 | `x = x && value` |
-| `||=` | 1388-1446 | `x = x || value` |
-| `??=` | 1388-1446 | `x = x ?? value` |
+| Feature | Binary Equivalent |
+|---------|-------------------|
+| `+=` | `x = x + value` |
+| `-=` | `x = x - value` |
+| `*=` | `x = x * value` |
+| `/=` | `x = x / value` |
+| `%=` | `x = x % value` |
+| `**=` | `x = x ** value` |
+| `&=` | `x = x & value` |
+| `\|=` | `x = x \| value` |
+| `^=` | `x = x ^ value` |
+| `<<=` | `x = x << value` |
+| `>>=` | `x = x >> value` |
+| `>>>=` | `x = x >>> value` |
+| `&&=` | `x = x && value` |
+| `\|\|=` | `x = x \|\| value` |
+| `??=` | `x = x ?? value` |
 
 ### Type-checking Operator
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `instanceof` | 1366-1369 | Use discriminated unions with tag property |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `instanceof` | Use discriminated unions with tag property |
 
 ### Expression-level Features
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| Regular expressions `/.../ ` | 1245-1285 | Use string methods |
-| Function expressions (named & anonymous) | 1267-1269 | Use arrow functions `(x) => x * 2` or function declarations |
-| `yield` expressions | 1276-1278 | Generators are not available |
-| `delete` operator | 1283-1285 | Use object spread to omit properties |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| Regular expressions `/.../ ` | Use string methods |
+| Function expressions (named & anonymous) | Use arrow functions `(x) => x * 2` or function declarations |
+| `yield` expressions | Generators are not available |
+| `delete` operator | Use object spread to omit properties |
 
 ### Global Identifiers
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `Promise` (as unbound global) | 1764-1771 | Use Result types or callbacks |
-| `RegExp` (as unbound global) | 1764-1771 | Use string methods |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `Promise` (as unbound global) | Use Result types or callbacks |
+| `RegExp` (as unbound global) | Use string methods |
 
 ### Object Built-in Methods
 
-| Feature | Line(s) | Suggested Alternative |
-|---------|---------|----------------------|
-| `Object.assign()` | 1478-1488 | Use object spread `{...obj1, ...obj2}` |
-| `Object.freeze()` | 1478-1488 | Objects are mutable by design |
-| `Object.isFrozen()` | 1478-1488 | Objects are mutable by design |
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `Object.assign()` | Use object spread `{...obj1, ...obj2}` |
+| `Object.freeze()` | Objects are mutable by design |
+| `Object.isFrozen()` | Objects are mutable by design |
 
 ## Error Message Pattern
 
@@ -193,14 +196,15 @@ Examples:
 - `'class' is not supported; use plain objects and functions instead`
 - `'while' loops are not supported; use 'for-of' with a finite collection instead`
 - `'throw' is not supported; use Result types for error handling instead`
+- `'enum' is not supported; use object literals or discriminated unions instead`
 
 ## Adding New Unsupported Features
 
 When adding detection for a new unsupported feature:
 
 1. **Determine Layer**:
-   - TypeScript-only syntax (no JS equivalent) → Stripper
-   - JavaScript feature → Parser
+   - TypeScript type-position-only syntax (e.g., `any` type) -> Stripper
+   - Everything else (JS features, TS keywords that exist as statements) -> Parser
 
 2. **Add Detection Code**:
    - Follow existing error reporting pattern for that layer
@@ -209,12 +213,11 @@ When adding detection for a new unsupported feature:
 
 3. **Add Tests**:
    - Stripper: Add test in `zts/stripper.zig` test section
-   - Parser: Add test in `zts/parser/test_unsupported.zig`
+   - Parser: Add test in `zts/parser/parse.zig` test section
    - Verify error message content, not just error type
 
 4. **Update This Document**:
    - Add row to appropriate table
-   - Include line number, error type, and suggested alternative
    - Update count if adding to parser features
 
 5. **Run Tests**:
@@ -225,9 +228,9 @@ When adding detection for a new unsupported feature:
 
 ### Why Two Layers?
 
-**TypeScript Stripper**: Handles TypeScript-specific syntax that has no JavaScript equivalent. Running before the parser allows clean separation - the parser can focus on JavaScript semantics without TS knowledge.
+**TypeScript Stripper**: Handles TypeScript syntax that exists only in type annotation positions (e.g., `any` type). These are stripped before parsing, so the parser never sees them.
 
-**Parser**: Handles all JavaScript syntax validation. Running after stripping ensures consistent error reporting for both .ts and .js files.
+**Parser**: Handles all other feature detection - both JavaScript features and TypeScript keywords that appear as statements (enum, namespace, implements, decorators, access modifiers). Running detection in the parser ensures consistent error reporting for both .ts and .js files.
 
 ### Why Not Runtime Detection?
 
@@ -239,16 +242,15 @@ Fail-fast at parse time provides:
 
 Runtime checks should only exist as defensive programming (e.g., `UnimplementedOpcode`), not primary feature detection.
 
-### Why Duplicate Checks Were Problematic
+### Why Move Detection to the Parser?
 
-Before consolidation, `class` was detected in both stripper and parser:
-- .ts files: Stripper caught it first with generic error
-- .js files: Parser caught it with helpful error message
+Before consolidation, features like `class` and `enum` were detected in the stripper for .ts files but only in the parser for .js files. This created inconsistent developer experience based on file extension. Moving all keyword-level detection to the parser ensures all developers see the same helpful error with rich formatting (source context, underlines) regardless of file type.
 
-This created inconsistent developer experience based on file extension. Moving `class` detection entirely to the parser ensures all developers see the same helpful error regardless of file type.
+The only feature remaining in the stripper is `any` type detection, because `any` only appears in type annotation positions that are stripped before the parser runs.
 
 ## Migration History
 
-- **Stage 3 (pending)**: Moved `class` and `abstract class` from stripper to parser for consistent error messages
-- **Stage 2 (pending)**: Enhanced stripper error logging to include helpful alternatives
+- **Stage 4 (complete)**: Moved enum, namespace, implements, decorators, access modifiers from stripper to parser
+- **Stage 3 (complete)**: Moved `class` and `abstract class` from stripper to parser
+- **Stage 2 (complete)**: Enhanced stripper error logging to include helpful alternatives
 - **Initial state**: 48 parser features, 7 stripper features (with class duplication)

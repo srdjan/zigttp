@@ -207,12 +207,43 @@ pub const Parser = struct {
                 self.advance();
                 return error.ParseError;
             },
+            .kw_enum => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'enum' is not supported; use object literals or discriminated unions instead");
+                self.advance();
+                return error.ParseError;
+            },
+            .kw_implements => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'implements' is not supported; use duck typing or runtime checks instead");
+                self.advance();
+                return error.ParseError;
+            },
+            .kw_public, .kw_private, .kw_protected => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "access modifiers are not supported; use naming conventions (e.g., _private) instead");
+                self.advance();
+                return error.ParseError;
+            },
+            .at_sign => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'@decorator' syntax is not supported; use function composition instead");
+                self.advance();
+                return error.ParseError;
+            },
             .kw_import => self.parseImportDeclaration(),
             .kw_export => self.parseExportDeclaration(),
             .lbrace => self.parseBlock(),
             .semicolon => self.parseEmptyStatement(),
             .kw_debugger => self.parseDebuggerStatement(),
-            else => self.parseExpressionStatement(),
+            else => {
+                // Check for TypeScript namespace/module declarations
+                if (self.current.type == .identifier) {
+                    const name = self.current.text(self.source);
+                    if (std.mem.eql(u8, name, "namespace") or std.mem.eql(u8, name, "module")) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "'namespace' is not supported; use ES6 modules instead");
+                        self.advance();
+                        return error.ParseError;
+                    }
+                }
+                return self.parseExpressionStatement();
+            },
         };
     }
 
@@ -231,6 +262,13 @@ pub const Parser = struct {
         };
         const loc = self.current.location();
         self.advance();
+
+        // Check for const enum (TypeScript)
+        if (kind == .@"const" and self.check(.kw_enum)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'const enum' is not supported; use object literals or discriminated unions instead");
+            self.advance();
+            return error.ParseError;
+        }
 
         // Check for destructuring pattern
         if (self.check(.lbrace)) {
@@ -371,7 +409,7 @@ pub const Parser = struct {
         }
 
         // Property name (could be renamed: { name: localName })
-        const key_name = try self.expectIdentifier("property name in object pattern");
+        const key_name = try self.expectPropertyIdentifier("property name in object pattern");
         // Use addString for consistency with object literals (which also use string constants for keys)
         const key_str_idx = try self.addString(key_name.text(self.source));
         const key_atom_for_binding = try self.addAtom(key_name.text(self.source));
@@ -1341,6 +1379,23 @@ pub const Parser = struct {
             return error.ParseError;
         }
 
+        // export enum - not supported
+        if (self.check(.kw_enum)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'enum' is not supported; use object literals or discriminated unions instead");
+            self.advance();
+            return error.ParseError;
+        }
+
+        // export namespace - not supported (namespace tokenizes as identifier)
+        if (self.current.type == .identifier) {
+            const name = self.current.text(self.source);
+            if (std.mem.eql(u8, name, "namespace")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'namespace' is not supported; use ES6 modules instead");
+                self.advance();
+                return error.ParseError;
+            }
+        }
+
         // export function X() {}
         if (self.check(.kw_function)) {
             const decl = try self.parseFunctionDeclaration();
@@ -1660,7 +1715,7 @@ pub const Parser = struct {
             // Member access
             .dot => {
                 self.advance();
-                const prop = try self.expectIdentifier("property name");
+                const prop = try self.expectPropertyIdentifier("property name");
                 const prop_name = prop.text(self.source);
 
                 // Check for removed Object methods
@@ -1735,7 +1790,7 @@ pub const Parser = struct {
                     // Optional call
                     return self.parseCallArgs(left, loc, true);
                 } else {
-                    const prop = try self.expectIdentifier("property name");
+                    const prop = try self.expectPropertyIdentifier("property name");
                     const prop_atom = try self.addAtom(prop.text(self.source));
                     return try self.nodes.add(.{
                         .tag = .optional_chain,
@@ -2828,6 +2883,18 @@ pub const Parser = struct {
         return error.UnexpectedToken;
     }
 
+    /// Like expectIdentifier but also accepts keywords (for property names).
+    /// JavaScript allows reserved words as property names: obj.class, {public: x}
+    fn expectPropertyIdentifier(self: *Parser, ctx_label: []const u8) !Token {
+        if (self.check(.identifier) or self.isKeyword(self.current.type)) {
+            const tok = self.current;
+            self.advance();
+            return tok;
+        }
+        self.errors.addExpectedError(self.current, ctx_label);
+        return error.UnexpectedToken;
+    }
+
     fn peekIsPropertyName(self: *Parser) bool {
         const state = self.tokenizer.saveState();
         const tok = self.tokenizer.next();
@@ -2883,6 +2950,12 @@ pub const Parser = struct {
             .kw_of,
             .kw_from,
             .kw_as,
+            // TypeScript keywords (allowed as property names)
+            .kw_enum,
+            .kw_implements,
+            .kw_public,
+            .kw_private,
+            .kw_protected,
             // Literals that look like keywords
             .true_lit,
             .false_lit,
@@ -2965,7 +3038,7 @@ pub const Parser = struct {
             }
 
             switch (self.current.type) {
-                .kw_class, .kw_function, .kw_var, .kw_let, .kw_const, .kw_for, .kw_if, .kw_while, .kw_return, .kw_try => {
+                .kw_class, .kw_function, .kw_var, .kw_let, .kw_const, .kw_for, .kw_if, .kw_while, .kw_return, .kw_try, .kw_enum => {
                     self.errors.exitPanicMode();
                     return;
                 },
@@ -3868,4 +3941,254 @@ test "unsupported: export star" {
     };
 
     try std.testing.expect(false);
+}
+
+// ============ TypeScript Feature Detection (moved from stripper) ============
+
+test "unsupported: enum statement" {
+    const allocator = std.testing.allocator;
+    const source = "enum Color { Red, Blue }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "enum") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "object literals") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: const enum" {
+    const allocator = std.testing.allocator;
+    const source = "const enum Color { Red }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "const enum") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: export enum" {
+    const allocator = std.testing.allocator;
+    const source = "export enum Color { Red }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "enum") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: namespace statement" {
+    const allocator = std.testing.allocator;
+    const source = "namespace N { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "namespace") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "ES6 modules") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: export namespace" {
+    const allocator = std.testing.allocator;
+    const source = "export namespace N { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "namespace") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: implements keyword" {
+    const allocator = std.testing.allocator;
+    const source = "implements Foo { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "implements") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: public modifier" {
+    const allocator = std.testing.allocator;
+    const source = "public foo() { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "access modifiers") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: private modifier" {
+    const allocator = std.testing.allocator;
+    const source = "private x = 1;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "access modifiers") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: protected modifier" {
+    const allocator = std.testing.allocator;
+    const source = "protected foo() { }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "access modifiers") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: decorator before class" {
+    const allocator = std.testing.allocator;
+    const source = "@sealed class X {}";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "@decorator") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: decorator before function" {
+    const allocator = std.testing.allocator;
+    const source = "@log function f() {}";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "@decorator") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "keyword as property name: obj.enum" {
+    const allocator = std.testing.allocator;
+    const source = "const x = obj.enum;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    // Should parse successfully - enum is valid as property name
+    try std.testing.expect(!parser.hasErrors());
+    _ = result catch unreachable;
+}
+
+test "keyword in destructuring: {public: x}" {
+    const allocator = std.testing.allocator;
+    const source = "const {public: x} = obj;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    // Should parse successfully - public is valid as property key in destructuring
+    try std.testing.expect(!parser.hasErrors());
+    _ = result catch unreachable;
 }

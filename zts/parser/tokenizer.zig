@@ -106,6 +106,8 @@ pub const Tokenizer = struct {
             '`' => self.scanTemplateLiteral(start, start_col, start_line),
             '0'...'9' => self.scanNumber(start, start_col, start_line),
 
+            '@' => self.tok1(start, start_col, start_line, .at_sign),
+
             else => blk: {
                 if (isIdentifierStart(c)) {
                     break :blk self.scanIdentifier(start, start_col, start_line);
