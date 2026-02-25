@@ -1,27 +1,26 @@
-# zigttp - Serverless JavaScript Runtime
+# zigttp
 
-> **Note**: THIS PROJECT IS EXPERIMENTAL AND UNDER ACTIVE DEVELOPMENT.
+A JavaScript runtime built from scratch in Zig for serverless workloads. One binary, no dependencies, instant cold starts.
 
-A high-performance serverless JavaScript runtime for FaaS deployments, powered by **zts** - a pure Zig JavaScript engine. Designed for AWS Lambda, Azure Functions, Cloudflare Workers, and edge computing.
+Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
 
-## Why zigttp?
+> Experimental - under active development.
 
-### Language Goals: Light Functional TypeScript subset
-- Support 'light functional programming style' with the strict subset of TypeScript
-- make JSX first class citizen in zts.
-- Native TypeScript "comptime" support, a-la Zig
-- Use Zig asynchronous I/O behind the scenes 
+### What makes it different
 
-### Runtime Goals:
-- Experiment with AOT compilation for TypeScript/JavaScript handlers in zigttp, while preserving the JIT/interpreter for strictly dynamic runtime scenarios.
-- **Fast cold starts**: 3ms runtime init, ~100ms total on macOS (2-3x faster than Deno)
-- **Future Linux target**: Sub-20ms cold starts via static linking (planned)
-- **Small footprint**: 1.2MB binary, 4MB memory, zero runtime dependencies
-- Request isolation via pre-warmed handler pool
+**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops - just functions, `let`/`const`, arrow functions, destructuring, and `for...of`. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace.
 
-### Performance
+**JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
 
-<img src="docs/bench.jpg" alt="Performance benchmark" width="90%">
+**Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
+
+**Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
+
+### Numbers
+
+<img src="docs/bench.jpg" alt="Benchmark: zigttp vs QuickJS vs Deno" width="90%">
+
+3ms runtime init. 1.2MB binary. 4MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for cold start breakdowns and deployment patterns.
 
 ## Quick Start
 
@@ -283,7 +282,7 @@ Benefits:
 - **Linux**: Production target (sub-10ms goal via static linking)
 - **Pre-fork/daemon**: Alternative for sub-millisecond response times
 
-See [docs/cold-start-optimization.md](docs/cold-start-optimization.md) for detailed profiling analysis and static linking investigation.
+See [Performance](docs/performance.md) for detailed profiling analysis and deployment patterns.
 
 ## Documentation
 
