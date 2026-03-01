@@ -481,7 +481,7 @@ pub const Interpreter = struct {
         }
 
         // Try to compile with optimized tier
-        const compiled = jit.compileOptimized(self.ctx.allocator, code_alloc, func) catch |err| {
+        const compiled = jit.compileOptimized(self.ctx.allocator, code_alloc, func, self.ctx.hidden_class_pool) catch |err| {
             switch (err) {
                 jit.CompileError.UnsupportedOpcode => {
                     // No optimizable loops found - stay at baseline

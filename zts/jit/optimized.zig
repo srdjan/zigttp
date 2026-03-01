@@ -37,6 +37,7 @@ const CTX_SP_OFF: i32 = @intCast(@offsetOf(Context, "sp"));
 const CTX_FP_OFF: i32 = @intCast(@offsetOf(Context, "fp"));
 
 const JSObject = object.JSObject;
+const OBJ_HIDDEN_CLASS_OFF: i32 = @intCast(@offsetOf(JSObject, "hidden_class_idx"));
 const OBJ_CLASS_ID_OFF: i32 = @intCast(@offsetOf(JSObject, "class_id"));
 const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
 const OBJ_RANGE_START_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_START)) * 8;
@@ -60,9 +61,20 @@ const jitDeoptimize = deopt.jitDeoptimize;
 
 // Extern JIT helper functions (defined in context.zig)
 extern fn jitCall(ctx: *Context, argc: u8, is_method: u8) value_mod.JSValue;
+extern fn jitGetFieldIC(ctx: *Context, obj: value_mod.JSValue, atom_idx: u16, cache_idx: u16) value_mod.JSValue;
 
 /// Maximum number of loops we can optimize in a single function
 pub const MAX_OPTIMIZED_LOOPS: usize = 8;
+/// Maximum number of hoisted `get_field_ic` guards tracked per loop.
+pub const MAX_HOISTED_FIELD_GUARDS: usize = 16;
+
+const HoistedFieldGuard = struct {
+    get_field_bc_offset: u32,
+    local_idx: u8,
+    hidden_class_idx: object.HiddenClassIndex,
+    slot_offset: u16,
+    atom_idx: u16,
+};
 
 /// Maximum number of locals that can be register-allocated for a loop
 pub const MAX_LOOP_REG_LOCALS: usize = if (is_x86_64) 4 else 6;
@@ -88,8 +100,15 @@ pub const OptimizedLoop = struct {
     local_to_reg: [16]?u8,
     /// Number of locals allocated to registers
     reg_local_count: u8,
+    /// Locals written inside the loop body (used to validate hoisted guards).
+    local_write_mask: u16,
+    /// Hoisted hidden-class guards for loop-invariant `get_field_ic` sites.
+    hoisted_field_guards: [MAX_HOISTED_FIELD_GUARDS]HoistedFieldGuard,
+    hoisted_field_guard_count: u8,
     /// Whether this loop was successfully optimized
     is_optimized: bool,
+    /// Whether this loop uses SMI unboxing (register allocation + unguarded int arithmetic)
+    smi_optimized: bool,
 
     pub fn init(info: type_feedback.LoopInfo) OptimizedLoop {
         return .{
@@ -98,7 +117,11 @@ pub const OptimizedLoop = struct {
             .deopt_stub_offset = 0,
             .local_to_reg = .{null} ** 16,
             .reg_local_count = 0,
+            .local_write_mask = 0,
+            .hoisted_field_guards = undefined,
+            .hoisted_field_guard_count = 0,
             .is_optimized = false,
+            .smi_optimized = false,
         };
     }
 
@@ -135,6 +158,13 @@ pub const OptimizedLoop = struct {
         }
         self.reg_local_count = assigned;
     }
+
+    pub fn getHoistedFieldGuard(self: *const OptimizedLoop, bc_offset: u32) ?*const HoistedFieldGuard {
+        for (self.hoisted_field_guards[0..self.hoisted_field_guard_count]) |*guard| {
+            if (guard.get_field_bc_offset == bc_offset) return guard;
+        }
+        return null;
+    }
 };
 
 /// Optimized tier compiler state
@@ -158,6 +188,7 @@ pub const OptimizedCompiler = struct {
     /// Type feedback data
     tf: ?*type_feedback.TypeFeedback,
     feedback_site_map: ?[]u16,
+    hidden_class_pool: ?*object.HiddenClassPool,
 
     /// Label management
     labels: std.AutoHashMapUnmanaged(u32, u32),
@@ -184,6 +215,7 @@ pub const OptimizedCompiler = struct {
         allocator: std.mem.Allocator,
         code_alloc: *CodeAllocator,
         func: *const bytecode.FunctionBytecode,
+        hidden_class_pool: ?*object.HiddenClassPool,
     ) OptimizedCompiler {
         var emitter = Emitter.init(allocator);
         const estimated_size = func.code.len * 8; // Optimized code may be larger
@@ -199,6 +231,7 @@ pub const OptimizedCompiler = struct {
             .current_loop_idx = null,
             .tf = func.type_feedback_ptr,
             .feedback_site_map = func.feedback_site_map,
+            .hidden_class_pool = hidden_class_pool,
             .labels = .{},
             .pending_jumps = .{},
             .jump_targets = .{},
@@ -240,12 +273,24 @@ pub const OptimizedCompiler = struct {
 
                             // Create loop info and analyze it
                             var loop_info = type_feedback.LoopInfo.init(header_offset, back_edge_offset);
-                            self.analyzeLoop(&loop_info, header_offset, back_edge_offset);
+                            var local_write_mask: u16 = 0;
+                            var hoisted_guards: [MAX_HOISTED_FIELD_GUARDS]HoistedFieldGuard = undefined;
+                            var hoisted_guard_count: u8 = 0;
+                            self.analyzeLoop(&loop_info, header_offset, back_edge_offset, &local_write_mask, &hoisted_guards, &hoisted_guard_count);
 
-                            // Check if loop is suitable for optimization
-                            if (self.isLoopOptimizable(&loop_info)) {
+                            // Accept loop if it qualifies for SMI optimization or has hoisted guards.
+                            const smi_ok = self.isLoopOptimizable(&loop_info);
+                            if (smi_ok or hoisted_guard_count > 0) {
                                 self.loops[self.loop_count] = OptimizedLoop.init(loop_info);
-                                self.loops[self.loop_count].assignRegisters();
+                                self.loops[self.loop_count].local_write_mask = local_write_mask;
+                                self.loops[self.loop_count].hoisted_field_guard_count = hoisted_guard_count;
+                                for (hoisted_guards[0..hoisted_guard_count], 0..) |guard, idx| {
+                                    self.loops[self.loop_count].hoisted_field_guards[idx] = guard;
+                                }
+                                if (smi_ok) {
+                                    self.loops[self.loop_count].smi_optimized = true;
+                                    self.loops[self.loop_count].assignRegisters();
+                                }
                                 self.loop_count += 1;
                             }
                         }
@@ -282,9 +327,53 @@ pub const OptimizedCompiler = struct {
         loop_info: *type_feedback.LoopInfo,
         header: u32,
         back_edge: u32,
+        local_write_mask: *u16,
+        hoisted_guards: *[MAX_HOISTED_FIELD_GUARDS]HoistedFieldGuard,
+        hoisted_guard_count: *u8,
     ) void {
         const code = self.func.code;
         const site_map = self.feedback_site_map orelse return;
+        var pending_guards: [MAX_HOISTED_FIELD_GUARDS]HoistedFieldGuard = undefined;
+        var pending_guard_count: u8 = 0;
+        var writes: u16 = 0;
+
+        const maybeRecordHoisted = struct {
+            fn record(
+                compiler: *OptimizedCompiler,
+                info: *type_feedback.LoopInfo,
+                pending: *[MAX_HOISTED_FIELD_GUARDS]HoistedFieldGuard,
+                pending_count: *u8,
+                local_idx: u8,
+                next_op_offset: u32,
+                code_bytes: []const u8,
+            ) void {
+                if (next_op_offset + 5 > code_bytes.len or @as(Opcode, @enumFromInt(code_bytes[next_op_offset])) != .get_field_ic) {
+                    info.markLocalAccessed(local_idx);
+                    return;
+                }
+
+                const atom_idx = readU16(code_bytes, next_op_offset + 1);
+                if (pending_count.* >= MAX_HOISTED_FIELD_GUARDS) {
+                    // Guard array full - skip this guard but don't block SMI optimization.
+                    info.markLocalAccessed(local_idx);
+                    return;
+                }
+                if (compiler.getMonomorphicPropertyInfo(atom_idx, next_op_offset)) |prop| {
+                    pending[pending_count.*] = .{
+                        .get_field_bc_offset = next_op_offset,
+                        .local_idx = local_idx,
+                        .hidden_class_idx = prop.hc_idx,
+                        .slot_offset = prop.slot,
+                        .atom_idx = atom_idx,
+                    };
+                    pending_count.* += 1;
+                } else {
+                    // Non-monomorphic property - can't hoist but doesn't affect SMI arithmetic.
+                    info.markLocalAccessed(local_idx);
+                }
+            }
+        }.record;
+
         var pc = header;
 
         while (pc <= back_edge and pc < code.len) {
@@ -303,13 +392,44 @@ pub const OptimizedCompiler = struct {
                     }
                 },
                 // Local variable access
-                .get_loc_0, .put_loc_0 => loop_info.markLocalAccessed(0),
-                .get_loc_1, .put_loc_1 => loop_info.markLocalAccessed(1),
-                .get_loc_2, .put_loc_2 => loop_info.markLocalAccessed(2),
-                .get_loc_3, .put_loc_3 => loop_info.markLocalAccessed(3),
-                .get_loc, .put_loc => {
+                .get_loc_0 => maybeRecordHoisted(self, loop_info, &pending_guards, &pending_guard_count, 0, pc, code),
+                .get_loc_1 => maybeRecordHoisted(self, loop_info, &pending_guards, &pending_guard_count, 1, pc, code),
+                .get_loc_2 => maybeRecordHoisted(self, loop_info, &pending_guards, &pending_guard_count, 2, pc, code),
+                .get_loc_3 => maybeRecordHoisted(self, loop_info, &pending_guards, &pending_guard_count, 3, pc, code),
+                .put_loc_0 => {
+                    loop_info.markLocalAccessed(0);
+                    writes |= 1 << 0;
+                },
+                .put_loc_1 => {
+                    loop_info.markLocalAccessed(1);
+                    writes |= 1 << 1;
+                },
+                .put_loc_2 => {
+                    loop_info.markLocalAccessed(2);
+                    writes |= 1 << 2;
+                },
+                .put_loc_3 => {
+                    loop_info.markLocalAccessed(3);
+                    writes |= 1 << 3;
+                },
+                .get_loc => {
                     if (pc < code.len) {
-                        loop_info.markLocalAccessed(code[pc]);
+                        const local_idx = code[pc];
+                        maybeRecordHoisted(self, loop_info, &pending_guards, &pending_guard_count, local_idx, pc + 1, code);
+                        pc += 1;
+                    }
+                },
+                .put_loc => {
+                    if (pc < code.len) {
+                        const local_idx = code[pc];
+                        loop_info.markLocalAccessed(local_idx);
+                        if (local_idx < 16) {
+                            writes |= @as(u16, 1) << @intCast(local_idx);
+                        } else {
+                            // We only track write invariants for low locals in the u16 mask.
+                            // Be conservative to avoid hoisting across untracked writes.
+                            loop_info.has_side_effects = true;
+                        }
                         pc += 1;
                     }
                 },
@@ -345,13 +465,18 @@ pub const OptimizedCompiler = struct {
                     loop_info.has_side_effects = true;
                     pc += 1;
                 },
-                .get_field, .put_field, .get_field_ic, .put_field_ic => {
+                .get_field, .put_field, .put_field_ic => {
                     loop_info.has_side_effects = true;
                     pc += switch (op) {
                         .get_field, .put_field => 2,
-                        .get_field_ic, .put_field_ic => 4,
+                        .put_field_ic => 4,
                         else => 0,
                     };
+                },
+                .get_field_ic => {
+                    // Non-hoisted get_field_ic is handled by baseline emitGetFieldIC fallback.
+                    // Don't set has_side_effects - it doesn't affect SMI arithmetic.
+                    pc += 4;
                 },
                 .make_closure => {
                     loop_info.has_side_effects = true;
@@ -373,6 +498,50 @@ pub const OptimizedCompiler = struct {
                 else => {},
             }
         }
+
+        // Finalize hoisted guards after seeing all loop-local writes.
+        local_write_mask.* = writes;
+        hoisted_guard_count.* = 0;
+        for (pending_guards[0..pending_guard_count]) |guard| {
+            if (guard.local_idx < 16 and (writes & (@as(u16, 1) << @intCast(guard.local_idx))) != 0) {
+                // Local changed inside loop - guard is not loop-invariant. Skip it.
+                continue;
+            }
+            if (hoisted_guard_count.* < MAX_HOISTED_FIELD_GUARDS) {
+                hoisted_guards[hoisted_guard_count.*] = guard;
+                hoisted_guard_count.* += 1;
+            }
+            // If array is full, just skip the guard - don't block SMI optimization.
+        }
+    }
+
+    fn getPropertyFeedback(self: *OptimizedCompiler, bytecode_offset: u32) ?*type_feedback.TypeFeedbackSite {
+        const tf = self.tf orelse return null;
+        const site_map = self.feedback_site_map orelse return null;
+
+        if (bytecode_offset >= site_map.len) return null;
+        const site_idx = site_map[bytecode_offset];
+        if (site_idx == 0xFFFF) return null;
+        if (site_idx >= tf.sites.len) return null;
+        return &tf.sites[site_idx];
+    }
+
+    fn getMonomorphicHiddenClass(self: *OptimizedCompiler, bytecode_offset: u32) ?object.HiddenClassIndex {
+        const fb = self.getPropertyFeedback(bytecode_offset) orelse return null;
+        if (!fb.isMonomorphic()) return null;
+
+        const dominant = fb.dominantType() orelse return null;
+        if (dominant != .object and dominant != .array) return null;
+        return fb.getMonomorphicHiddenClass();
+    }
+
+    fn getMonomorphicPropertyInfo(self: *OptimizedCompiler, atom_idx: u16, bytecode_offset: u32) ?struct { hc_idx: object.HiddenClassIndex, slot: u16 } {
+        const hc_idx = self.getMonomorphicHiddenClass(bytecode_offset) orelse return null;
+        const pool = self.hidden_class_pool orelse return null;
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        const slot = pool.findProperty(hc_idx, atom) orelse return null;
+        if (slot >= JSObject.INLINE_SLOT_COUNT) return null;
+        return .{ .hc_idx = hc_idx, .slot = slot };
     }
 
     /// Check if a loop is suitable for optimized compilation
@@ -485,11 +654,12 @@ pub const OptimizedCompiler = struct {
                 }
             }
 
+            const op_offset = pc;
             const op: Opcode = @enumFromInt(code[pc]);
             pc += 1;
 
             // Compile the opcode
-            pc = self.compileOpcode(op, pc, code) catch |err| {
+            pc = self.compileOpcode(op, op_offset, pc, code) catch |err| {
                 return err;
             };
         }
@@ -591,46 +761,79 @@ pub const OptimizedCompiler = struct {
         loop.deopt_stub_offset = deopt_label;
         loop.entry_offset = @intCast(self.emitter.buffer.items.len);
 
-        if (is_x86_64) {
-            // Check all accessed locals are SMI
-            var local_idx: u8 = 0;
-            while (local_idx < 16) : (local_idx += 1) {
-                if (loop.info.isLocalAccessed(local_idx)) {
-                    // Load local from stack
-                    const offset = @as(i32, @intCast(local_idx)) * 8;
-                    const fp_reg = getFramePointerReg();
-                    self.emitter.movRegMem(.rax, fp_reg, offset) catch return CompileError.OutOfMemory;
+        if (loop.smi_optimized) {
+            if (is_x86_64) {
+                // Check all accessed locals are SMI
+                var local_idx: u8 = 0;
+                while (local_idx < 16) : (local_idx += 1) {
+                    if (loop.info.isLocalAccessed(local_idx)) {
+                        // Load local from stack
+                        const offset = @as(i32, @intCast(local_idx)) * 8;
+                        const fp_reg = getFramePointerReg();
+                        self.emitter.movRegMem(.rax, fp_reg, offset) catch return CompileError.OutOfMemory;
 
-                    // Check SMI tag (LSB == 0)
-                    self.emitter.testRegImm32(.rax, 1) catch return CompileError.OutOfMemory;
-                    try self.emitJccToLabel(.ne, deopt_label);
+                        // Check SMI tag (LSB == 0)
+                        self.emitter.testRegImm32(.rax, 1) catch return CompileError.OutOfMemory;
+                        try self.emitJccToLabel(.ne, deopt_label);
 
-                    // Unbox and store in assigned register if allocated
-                    if (loop.getLocalReg(local_idx)) |reg| {
-                        self.emitter.movRegReg(reg, .rax) catch return CompileError.OutOfMemory;
-                        self.emitter.sarRegImm(reg, 1) catch return CompileError.OutOfMemory;
+                        // Unbox and store in assigned register if allocated
+                        if (loop.getLocalReg(local_idx)) |reg| {
+                            self.emitter.movRegReg(reg, .rax) catch return CompileError.OutOfMemory;
+                            self.emitter.sarRegImm(reg, 1) catch return CompileError.OutOfMemory;
+                        }
+                    }
+                }
+            } else if (is_aarch64) {
+                var local_idx: u8 = 0;
+                while (local_idx < 16) : (local_idx += 1) {
+                    if (loop.info.isLocalAccessed(local_idx)) {
+                        const offset: i12 = @intCast(@as(i32, @intCast(local_idx)) * 8);
+                        const fp_reg = getFramePointerReg();
+                        self.emitter.ldrImm(.x9, fp_reg, offset) catch return CompileError.OutOfMemory;
+
+                        // Check SMI tag
+                        self.emitter.andRegImm(.x10, .x9, 1) catch return CompileError.OutOfMemory;
+                        self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
+                        try self.emitBcondToLabel(.ne, deopt_label);
+
+                        // Unbox and store in assigned register
+                        if (loop.getLocalReg(local_idx)) |reg| {
+                            self.emitter.movRegReg(reg, .x9) catch return CompileError.OutOfMemory;
+                            self.emitter.asrRegImm(reg, reg, 1) catch return CompileError.OutOfMemory;
+                        }
                     }
                 }
             }
-        } else if (is_aarch64) {
-            var local_idx: u8 = 0;
-            while (local_idx < 16) : (local_idx += 1) {
-                if (loop.info.isLocalAccessed(local_idx)) {
-                    const offset: i12 = @intCast(@as(i32, @intCast(local_idx)) * 8);
-                    const fp_reg = getFramePointerReg();
-                    self.emitter.ldrImm(.x9, fp_reg, offset) catch return CompileError.OutOfMemory;
+        }
 
-                    // Check SMI tag
-                    self.emitter.andRegImm(.x10, .x9, 1) catch return CompileError.OutOfMemory;
-                    self.emitter.cmpRegImm12(.x10, 0) catch return CompileError.OutOfMemory;
-                    try self.emitBcondToLabel(.ne, deopt_label);
+        // Hoisted hidden-class guards for loop-invariant get_field_ic sites.
+        for (loop.hoisted_field_guards[0..loop.hoisted_field_guard_count]) |guard| {
+            const local_offset = @as(i32, @intCast(guard.local_idx)) * 8;
+            if (is_x86_64) {
+                const fp_reg = getFramePointerReg();
+                self.emitter.movRegMem(.rax, fp_reg, local_offset) catch return CompileError.OutOfMemory;
+                self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
+                self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+                try self.emitJccToLabel(.ne, deopt_label);
 
-                    // Unbox and store in assigned register
-                    if (loop.getLocalReg(local_idx)) |reg| {
-                        self.emitter.movRegReg(reg, .x9) catch return CompileError.OutOfMemory;
-                        self.emitter.asrRegImm(reg, reg, 1) catch return CompileError.OutOfMemory;
-                    }
-                }
+                try self.emitExtractPtr(.r10, .rax);
+                self.emitter.movRegMem32(.r11, .r10, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegImm32(.r11, @bitCast(@intFromEnum(guard.hidden_class_idx))) catch return CompileError.OutOfMemory;
+                try self.emitJccToLabel(.ne, deopt_label);
+            } else if (is_aarch64) {
+                const fp_reg = getFramePointerReg();
+                const local_off_i12: i12 = @intCast(local_offset);
+                self.emitter.ldrImm(.x9, fp_reg, local_off_i12) catch return CompileError.OutOfMemory;
+                self.emitter.andRegImm(.x10, .x9, 0x7) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+                try self.emitBcondToLabel(.ne, deopt_label);
+
+                try self.emitExtractPtr(.x10, .x9);
+                self.emitter.ldrImmW(.x11, .x10, OBJ_HIDDEN_CLASS_OFF) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.x12, @intFromEnum(guard.hidden_class_idx)) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x11, .x12) catch return CompileError.OutOfMemory;
+                try self.emitBcondToLabel(.ne, deopt_label);
             }
         }
 
@@ -641,7 +844,7 @@ pub const OptimizedCompiler = struct {
     fn emitLoopEpilogue(self: *OptimizedCompiler, loop_idx: u8) CompileError!void {
         const loop = &self.loops[loop_idx];
 
-        if (!loop.is_optimized) return;
+        if (!loop.smi_optimized) return;
 
         if (is_x86_64) {
             var local_idx: u8 = 0;
@@ -710,13 +913,13 @@ pub const OptimizedCompiler = struct {
 
     /// Compile a single opcode - delegates to baseline for non-loop code,
     /// uses optimized paths for arithmetic inside loops
-    fn compileOpcode(self: *OptimizedCompiler, op: Opcode, pc: u32, code: []const u8) CompileError!u32 {
+    fn compileOpcode(self: *OptimizedCompiler, op: Opcode, opcode_offset: u32, pc: u32, code: []const u8) CompileError!u32 {
         var new_pc = pc;
 
-        // If we're inside an optimized loop and this is a binary op, use unguarded path
+        // If we're inside an SMI-optimized loop and this is a binary op, use unguarded path
         if (self.current_loop_idx) |loop_idx| {
             const loop = &self.loops[loop_idx];
-            if (loop.is_optimized) {
+            if (loop.is_optimized and loop.smi_optimized) {
                 switch (op) {
                     .add => {
                         try self.emitUnguardedIntBinaryOp(.add, loop_idx);
@@ -813,6 +1016,21 @@ pub const OptimizedCompiler = struct {
                 const local_b = code[new_pc + 1];
                 new_pc += 2;
                 try self.emitGetLocGetLocAdd(local_a, local_b);
+            },
+            .get_field_ic => {
+                const atom_idx = readU16(code, new_pc);
+                const cache_idx = readU16(code, new_pc + 2);
+                new_pc += 4;
+                if (self.current_loop_idx) |loop_idx| {
+                    const loop = &self.loops[loop_idx];
+                    if (loop.is_optimized) {
+                        if (loop.getHoistedFieldGuard(opcode_offset)) |guard| {
+                            try self.emitHoistedGetFieldFast(guard.slot_offset);
+                            return new_pc;
+                        }
+                    }
+                }
+                try self.emitGetFieldIC(atom_idx, cache_idx);
             },
             .for_of_next => {
                 const end_offset: i16 = @bitCast(readU16(code, new_pc));
@@ -917,6 +1135,56 @@ pub const OptimizedCompiler = struct {
         }
 
         return new_pc;
+    }
+
+    fn emitExtractPtr(self: *OptimizedCompiler, dst_reg: Register, src_reg: Register) CompileError!void {
+        if (is_x86_64) {
+            const scratch: Register = if (dst_reg == .r10) .r11 else .r10;
+            if (dst_reg != src_reg) {
+                self.emitter.movRegReg(dst_reg, src_reg) catch return CompileError.OutOfMemory;
+            }
+            self.emitter.movRegImm64(scratch, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(dst_reg, scratch) catch return CompileError.OutOfMemory;
+        } else if (is_aarch64) {
+            self.emitter.movRegImm64(.x12, PTR_EXTRACT_MASK) catch return CompileError.OutOfMemory;
+            self.emitter.andRegReg(dst_reg, src_reg, .x12) catch return CompileError.OutOfMemory;
+        }
+    }
+
+    fn emitGetFieldIC(self: *OptimizedCompiler, atom_idx: u16, cache_idx: u16) CompileError!void {
+        const fn_ptr = @intFromPtr(&jitGetFieldIC);
+        if (is_x86_64) {
+            try self.emitPopReg(.rsi);
+            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rdx, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm32(.rcx, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.callReg(.rax) catch return CompileError.OutOfMemory;
+            try self.emitPushReg(.rax);
+        } else if (is_aarch64) {
+            try self.emitPopReg(.x1);
+            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x2, atom_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x3, cache_idx) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+            self.emitter.blr(.x9) catch return CompileError.OutOfMemory;
+            try self.emitPushReg(.x0);
+        }
+    }
+
+    fn emitHoistedGetFieldFast(self: *OptimizedCompiler, slot: u16) CompileError!void {
+        const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot) * 8;
+        if (is_x86_64) {
+            try self.emitPopReg(.rax);
+            try self.emitExtractPtr(.rax, .rax);
+            self.emitter.movRegMem(.rax, .rax, slot_offset) catch return CompileError.OutOfMemory;
+            try self.emitPushReg(.rax);
+        } else if (is_aarch64) {
+            try self.emitPopReg(.x9);
+            try self.emitExtractPtr(.x9, .x9);
+            self.emitter.ldrImm(.x9, .x9, slot_offset) catch return CompileError.OutOfMemory;
+            try self.emitPushReg(.x9);
+        }
     }
 
     /// Emit unguarded integer binary operation (no type checks, only overflow)
@@ -2203,8 +2471,9 @@ pub fn compileOptimized(
     allocator: std.mem.Allocator,
     code_alloc: *CodeAllocator,
     func: *const bytecode.FunctionBytecode,
+    hidden_class_pool: ?*object.HiddenClassPool,
 ) CompileError!CompiledCode {
-    var compiler = OptimizedCompiler.init(allocator, code_alloc, func);
+    var compiler = OptimizedCompiler.init(allocator, code_alloc, func, hidden_class_pool);
     defer compiler.deinit();
     return compiler.compile();
 }
