@@ -15,11 +15,24 @@ const zruntime = @import("zruntime.zig");
 const Runtime = zruntime.Runtime;
 const HandlerPool = zruntime.HandlerPool;
 const RuntimeConfig = zruntime.RuntimeConfig;
+const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
 const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
+
+const RequestLine = http_parser.RequestLine;
+const QueryParseResult = http_parser.QueryParseResult;
+const FastHeaderSlots = http_parser.FastHeaderSlots;
+const findHeaderEnd = http_parser.findHeaderEnd;
+const parseRequestLine = http_parser.parseRequestLine;
+const parseRequestLineBorrowed = http_parser.parseRequestLineBorrowed;
+const parseHeadersFromLines = http_parser.parseHeadersFromLines;
+const parseHeadersFromLinesBorrowed = http_parser.parseHeadersFromLinesBorrowed;
+const parseQueryString = http_parser.parseQueryString;
+const splitHeaderLine = http_parser.splitHeaderLine;
+const parseContentLength = http_parser.parseContentLength;
 
 /// Read a file synchronously using posix operations (for use before Io is initialized)
 fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
@@ -42,58 +55,6 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
     }
 
     return buffer.toOwnedSlice(allocator);
-}
-
-// ============================================================================
-// Fast Header Normalization
-// ============================================================================
-
-/// Comptime lookup table for O(1) ASCII lowercase conversion.
-/// Eliminates branch-per-character overhead in header normalization.
-const LowerTable = blk: {
-    var t: [256]u8 = undefined;
-    for (&t, 0..) |*b, i| {
-        b.* = if (i >= 'A' and i <= 'Z') @intCast(i + 32) else @intCast(i);
-    }
-    break :blk t;
-};
-
-/// Fast lowercase string conversion using comptime lookup table.
-/// Returns slice into dest buffer.
-fn lowerStringFast(dest: []u8, src: []const u8) []u8 {
-    const len = @min(dest.len, src.len);
-    for (dest[0..len], src[0..len]) |*d, s| {
-        d.* = LowerTable[s];
-    }
-    return dest[0..len];
-}
-
-/// SIMD-accelerated search for HTTP header terminator (\r\n\r\n).
-/// Returns offset to start of terminator, or null if not found.
-/// Uses 16-byte vector operations when buffer is large enough.
-fn findHeaderEnd(buf: []const u8) ?usize {
-    const Vec = @Vector(16, u8);
-    const cr: Vec = @splat('\r');
-    const lf: Vec = @splat('\n');
-    var i: usize = 0;
-
-    // SIMD path: scan 16 bytes at a time (use align(1) for unaligned loads)
-    while (i + 16 <= buf.len) : (i += 16) {
-        const chunk: Vec = @as(*align(1) const [16]u8, @ptrCast(buf.ptr + i)).*;
-        // Quick check: any CR or LF in this chunk?
-        if (@reduce(.Or, chunk == cr) or @reduce(.Or, chunk == lf)) {
-            // Found potential match - do precise search
-            if (std.mem.indexOf(u8, buf[i..], "\r\n\r\n")) |offset| {
-                return i + offset;
-            }
-        }
-    }
-
-    // Scalar tail: search remaining bytes
-    if (std.mem.indexOf(u8, buf[i..], "\r\n\r\n")) |offset| {
-        return i + offset;
-    }
-    return null;
 }
 
 // ============================================================================
@@ -1200,7 +1161,7 @@ pub const Server = struct {
         try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 
         // Find end of headers
-        const header_end = findHeaderEnd(data) orelse std.mem.indexOf(u8, data, "\r\n\r\n") orelse return error.InvalidRequest;
+        const header_end = findHeaderEnd(data) orelse return error.InvalidRequest;
         const header_section = data[0..header_end];
         const body_start = header_end + 4;
 
@@ -1511,13 +1472,6 @@ pub const Server = struct {
 // HTTP Parsing Helpers (shared between streaming and buffer-based paths)
 // ============================================================================
 
-const RequestLine = struct {
-    method: []const u8,
-    url: []const u8,
-    path: []const u8,
-    query_string: []const u8,
-};
-
 const HeaderLineReader = struct {
     reader: *BufferedReader,
 
@@ -1533,249 +1487,6 @@ const HeaderLineIterator = struct {
         return self.iter.next();
     }
 };
-
-fn parseRequestLine(storage: []u8, offset: *usize, request_line: []const u8) !RequestLine {
-    var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method_slice = parts.next() orelse return error.InvalidRequest;
-    const url_slice = parts.next() orelse return error.InvalidRequest;
-
-    const method = try copyToStorage(storage, offset, method_slice);
-    const url = try copyToStorage(storage, offset, url_slice);
-
-    const query_start = std.mem.indexOf(u8, url, "?");
-    const path = if (query_start) |idx| url[0..idx] else url;
-    const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
-
-    return .{
-        .method = method,
-        .url = url,
-        .path = path,
-        .query_string = query_string,
-    };
-}
-
-fn parseRequestLineBorrowed(request_line: []const u8) !RequestLine {
-    var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method = parts.next() orelse return error.InvalidRequest;
-    const url = parts.next() orelse return error.InvalidRequest;
-
-    const query_start = std.mem.indexOf(u8, url, "?");
-    const path = if (query_start) |idx| url[0..idx] else url;
-    const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
-
-    return .{
-        .method = method,
-        .url = url,
-        .path = path,
-        .query_string = query_string,
-    };
-}
-
-fn parseHeadersFromLines(
-    allocator: std.mem.Allocator,
-    max_headers: usize,
-    storage: []u8,
-    offset: *usize,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-    fast_slots: *FastHeaderSlots,
-    line_source: anytype,
-) !void {
-    var header_count: usize = 0;
-    while (try line_source.next()) |line| {
-        if (line.len == 0) break;
-        if (header_count >= max_headers) return error.TooManyHeaders;
-        try processHeaderLine(line, storage, offset, headers, allocator, fast_slots);
-        header_count += 1;
-    }
-}
-
-fn parseHeadersFromLinesBorrowed(
-    allocator: std.mem.Allocator,
-    max_headers: usize,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-    fast_slots: *FastHeaderSlots,
-    line_source: anytype,
-) !void {
-    var header_count: usize = 0;
-    while (try line_source.next()) |line| {
-        if (line.len == 0) break;
-        if (header_count >= max_headers) return error.TooManyHeaders;
-        try processHeaderLineBorrowed(line, headers, allocator, fast_slots);
-        header_count += 1;
-    }
-}
-
-/// Copy a string into a pre-allocated batch storage buffer.
-/// Returns a slice into the storage buffer.
-fn copyToStorage(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
-    if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
-    const dest = storage[offset.*..][0..src.len];
-    @memcpy(dest, src);
-    offset.* += src.len;
-    return dest;
-}
-
-/// Result of query parameter parsing.
-const QueryParseResult = struct {
-    storage: ?[]QueryParam,
-    params: []const QueryParam,
-    /// Backing buffer for percent-decoded key/value strings.
-    decoded_storage: ?[]u8,
-};
-
-/// Decode percent-encoded bytes and '+' (as space) from `src` into `dest`.
-/// Returns the slice of `dest` actually written.
-fn percentDecode(dest: []u8, src: []const u8) []u8 {
-    var di: usize = 0;
-    var si: usize = 0;
-    while (si < src.len) {
-        if (src[si] == '+') {
-            dest[di] = ' ';
-            di += 1;
-            si += 1;
-        } else if (src[si] == '%' and si + 2 < src.len) {
-            const hi = hexVal(src[si + 1]);
-            const lo = hexVal(src[si + 2]);
-            if (hi != null and lo != null) {
-                dest[di] = (@as(u8, hi.?) << 4) | @as(u8, lo.?);
-                di += 1;
-                si += 3;
-            } else {
-                dest[di] = src[si];
-                di += 1;
-                si += 1;
-            }
-        } else {
-            dest[di] = src[si];
-            di += 1;
-            si += 1;
-        }
-    }
-    return dest[0..di];
-}
-
-fn hexVal(c: u8) ?u4 {
-    return switch (c) {
-        '0'...'9' => @intCast(c - '0'),
-        'a'...'f' => @intCast(c - 'a' + 10),
-        'A'...'F' => @intCast(c - 'A' + 10),
-        else => null,
-    };
-}
-
-/// Parse query parameters from a query string (the part after '?').
-/// Allocates storage for parameters; caller owns the returned storage.
-fn parseQueryString(allocator: std.mem.Allocator, query_string: []const u8) !QueryParseResult {
-    if (query_string.len == 0) return .{ .storage = null, .params = &.{}, .decoded_storage = null };
-
-    // Count parameters first
-    var param_count: usize = 1;
-    for (query_string) |c| {
-        if (c == '&') param_count += 1;
-    }
-
-    const qps = try allocator.alloc(QueryParam, param_count);
-    errdefer allocator.free(qps);
-
-    // Decoded strings are always <= original length; one buffer suffices.
-    const decode_buf = try allocator.alloc(u8, query_string.len);
-    errdefer allocator.free(decode_buf);
-    var decode_offset: usize = 0;
-
-    var qp_idx: usize = 0;
-    var pairs = std.mem.splitScalar(u8, query_string, '&');
-    while (pairs.next()) |pair| {
-        if (std.mem.indexOf(u8, pair, "=")) |eq_idx| {
-            const raw_key = pair[0..eq_idx];
-            const raw_val = pair[eq_idx + 1 ..];
-
-            const key_dest = decode_buf[decode_offset..];
-            const decoded_key = percentDecode(key_dest, raw_key);
-            decode_offset += decoded_key.len;
-
-            const val_dest = decode_buf[decode_offset..];
-            const decoded_val = percentDecode(val_dest, raw_val);
-            decode_offset += decoded_val.len;
-
-            qps[qp_idx] = .{
-                .key = decoded_key,
-                .value = decoded_val,
-            };
-            qp_idx += 1;
-        }
-    }
-    return .{ .storage = qps, .params = qps[0..qp_idx], .decoded_storage = decode_buf };
-}
-
-/// Fast header slots populated during parsing to avoid O(n) lookups later.
-const FastHeaderSlots = struct {
-    connection: ?[]const u8 = null,
-    content_length: ?usize = null,
-    content_type: ?[]const u8 = null,
-};
-
-/// Process a single header line: normalize key to lowercase, copy into storage,
-/// append to header list, and update fast slots.
-fn processHeaderLine(
-    line: []const u8,
-    storage: []u8,
-    offset: *usize,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-    allocator: std.mem.Allocator,
-    fast_slots: *FastHeaderSlots,
-) !void {
-    const header = splitHeaderLine(line) orelse return;
-    const key = header.key;
-    const value = header.value;
-
-    // Normalize key to lowercase using comptime lookup table
-    var key_lower_buf: [256]u8 = undefined;
-    if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
-    const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
-    const key_dup = try copyToStorage(storage, offset, key_lower);
-    const value_dup = try copyToStorage(storage, offset, value);
-    try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
-
-    // Populate fast header slots during parsing
-    if (std.mem.eql(u8, key_lower, "content-length")) {
-        const parsed = try parseContentLengthValue(value);
-        if (fast_slots.content_length) |existing| {
-            if (existing != parsed) return error.DuplicateContentLength;
-        } else {
-            fast_slots.content_length = parsed;
-        }
-    } else if (std.mem.eql(u8, key_lower, "connection")) {
-        fast_slots.connection = value_dup;
-    } else if (std.mem.eql(u8, key_lower, "content-type")) {
-        fast_slots.content_type = value_dup;
-    }
-}
-
-/// Process a single header line without copying key/value slices.
-fn processHeaderLineBorrowed(
-    line: []const u8,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-    allocator: std.mem.Allocator,
-    fast_slots: *FastHeaderSlots,
-) !void {
-    const header = splitHeaderLine(line) orelse return;
-    const key = header.key;
-    const value = header.value;
-    try headers.append(allocator, .{ .key = key, .value = value });
-
-    if (std.ascii.eqlIgnoreCase(key, "content-length")) {
-        const parsed = try parseContentLengthValue(value);
-        if (fast_slots.content_length) |existing| {
-            if (existing != parsed) return error.DuplicateContentLength;
-        } else {
-            fast_slots.content_length = parsed;
-        }
-    } else if (std.ascii.eqlIgnoreCase(key, "connection")) {
-        fast_slots.connection = value;
-    } else if (std.ascii.eqlIgnoreCase(key, "content-type")) {
-        fast_slots.content_type = value;
-    }
-}
 
 const ParsedRequest = struct {
     method: []const u8,
@@ -2086,44 +1797,6 @@ fn findHeaderValue(headers: []const HttpHeader, name: []const u8) ?[]const u8 {
         }
     }
     return null;
-}
-
-fn splitHeaderLine(line: []const u8) ?struct { key: []const u8, value: []const u8 } {
-    const idx = std.mem.indexOfScalar(u8, line, ':') orelse return null;
-    const key = line[0..idx];
-    var value = line[idx + 1 ..];
-    if (value.len > 0 and value[0] == ' ') {
-        value = value[1..];
-    }
-    return .{ .key = key, .value = value };
-}
-
-fn parseContentLengthValue(value: []const u8) !usize {
-    const trimmed = std.mem.trim(u8, value, " \t");
-    if (trimmed.len == 0) return error.InvalidContentLength;
-    for (trimmed) |c| {
-        if (c < '0' or c > '9') return error.InvalidContentLength;
-    }
-    return std.fmt.parseInt(usize, trimmed, 10) catch return error.InvalidContentLength;
-}
-
-fn parseContentLength(header_section: []const u8) !?usize {
-    var lines = std.mem.splitSequence(u8, header_section, "\r\n");
-    _ = lines.next() orelse return null; // request line
-    var found: ?usize = null;
-    while (lines.next()) |line| {
-        if (line.len == 0) break;
-        const header = splitHeaderLine(line) orelse continue;
-        if (std.ascii.eqlIgnoreCase(header.key, "content-length")) {
-            const parsed = try parseContentLengthValue(header.value);
-            if (found) |existing| {
-                if (existing != parsed) return error.DuplicateContentLength;
-            } else {
-                found = parsed;
-            }
-        }
-    }
-    return found;
 }
 
 fn getStatusText(status: u16) []const u8 {
@@ -2471,6 +2144,30 @@ test "parseRequestFromBuffer rejects oversized body" {
         "hello";
 
     try std.testing.expectError(error.FileTooBig, server.parseRequestFromBuffer(allocator, data));
+}
+
+test "findHeaderEnd finds terminator across SIMD boundary" {
+    var buf: [64]u8 = [_]u8{'A'} ** 64;
+    // Place terminator so it crosses a 16-byte boundary (starts at index 15).
+    buf[15] = '\r';
+    buf[16] = '\n';
+    buf[17] = '\r';
+    buf[18] = '\n';
+
+    const idx = findHeaderEnd(&buf);
+    try std.testing.expect(idx != null);
+    try std.testing.expectEqual(@as(usize, 15), idx.?);
+}
+
+test "findHeaderEnd returns null when terminator absent" {
+    const data = "GET / HTTP/1.1\r\nHost: example.com\r\n";
+    try std.testing.expectEqual(@as(?usize, null), findHeaderEnd(data));
+}
+
+test "findHeaderEnd handles short buffers" {
+    try std.testing.expectEqual(@as(?usize, null), findHeaderEnd(""));
+    try std.testing.expectEqual(@as(?usize, null), findHeaderEnd("\r\n\r"));
+    try std.testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
 }
 
 test "parseRequest rejects long header lines (streaming)" {
