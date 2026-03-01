@@ -1922,10 +1922,15 @@ fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
 }
 
 fn useEventedBackend() bool {
-    // Zig 0.16.0 nightly: both kqueue and io_uring backends have stdlib bugs
-    // - macOS kqueue: ~40 @panic("TODO") stubs (netListenIp, netAccept, netWrite, etc.)
-    // - Linux io_uring: VTable.cancelRequested missing, Mutex.State type mismatch
-    // TODO: Re-enable when Zig stdlib Io backends stabilize
+    // Last checked: 0.16.0-dev.2682+02142a54d (2026-03-01)
+    //
+    // Evented backends lack networking support:
+    // - macOS Dispatch: all net* functions return error.NetworkDown (only netClose works)
+    // - macOS/BSD Kqueue: netAccept is @panic("TODO"), netListenIp delegates to Threaded
+    // - Linux Uring: all net* functions return error.NetworkDown
+    //
+    // When netAccept/netRead/netWrite are implemented in Kqueue and Uring,
+    // flip this to check builtin.os.tag and delete ConnectionPool (~470 lines).
     _ = builtin.os.tag;
     return false;
 }
