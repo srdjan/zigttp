@@ -18,6 +18,7 @@ const context = @import("context.zig");
 const HandlerPattern = bytecode.HandlerPattern;
 const PatternDispatchTable = bytecode.PatternDispatchTable;
 const PatternType = bytecode.PatternType;
+const ResponseBodySource = bytecode.ResponseBodySource;
 const HandlerFlags = bytecode.HandlerFlags;
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -36,6 +37,8 @@ pub const HandlerAnalyzer = struct {
     route_binding_slot: ?u16, // Local slot of `url` or `path` variable
     route_atom: object.Atom, // Which request field is bound (`url` or `path`)
     request_binding_slot: ?u16, // Local slot of request parameter
+    body_binding_slot: ?u16, // Local slot of `body` variable bound to request.body
+    enable_json_body_parse: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -50,7 +53,15 @@ pub const HandlerAnalyzer = struct {
             .route_binding_slot = null,
             .route_atom = .url,
             .request_binding_slot = null,
+            .body_binding_slot = null,
+            .enable_json_body_parse = false,
         };
+    }
+
+    /// Enable detection for `Response.json(JSON.parse(request.body))` patterns.
+    /// This is intended for AOT precompile paths.
+    pub fn enableJsonBodyParsePatterns(self: *HandlerAnalyzer) void {
+        self.enable_json_body_parse = true;
     }
 
     pub fn deinit(self: *HandlerAnalyzer) void {
@@ -65,6 +76,15 @@ pub const HandlerAnalyzer = struct {
 
         // Handler must have exactly 1 parameter (request)
         if (func.params_count != 1) return null;
+
+        self.patterns.clearRetainingCapacity();
+        self.route_binding_slot = null;
+        self.route_atom = .url;
+        self.request_binding_slot = null;
+        self.body_binding_slot = null;
+
+        self.findRequestBinding(func);
+        self.findBodyBinding(func.body);
 
         // Find route binding in function body:
         //   const url = request.url
@@ -95,6 +115,62 @@ pub const HandlerAnalyzer = struct {
         }
 
         return dispatch;
+    }
+
+    /// Find `const route = request.url` or `const route = request.path` binding.
+    fn findRequestBinding(self: *HandlerAnalyzer, func: Node.FunctionExpr) void {
+        if (func.params_count == 0) return;
+        const req_param = self.ir.getListIndex(func.params_start, 0);
+        const req_tag = self.ir.getTag(req_param) orelse return;
+        if (req_tag == .identifier) {
+            const binding = self.ir.getBinding(req_param) orelse return;
+            if (binding.kind == .local or binding.kind == .argument) {
+                self.request_binding_slot = binding.slot;
+            }
+            return;
+        }
+        if (req_tag == .pattern_element) {
+            const elem = self.ir.getPatternElem(req_param) orelse return;
+            if (elem.binding.kind == .local or elem.binding.kind == .argument) {
+                self.request_binding_slot = elem.binding.slot;
+            }
+        }
+    }
+
+    /// Find `const body = request.body` binding for JSON.parse detection.
+    fn findBodyBinding(self: *HandlerAnalyzer, body_node: NodeIndex) void {
+        const tag = self.ir.getTag(body_node) orelse return;
+
+        if (tag == .block or tag == .program) {
+            const block = self.ir.getBlock(body_node) orelse return;
+            var i: u16 = 0;
+            while (i < block.stmts_count) : (i += 1) {
+                const stmt_idx = self.ir.getListIndex(block.stmts_start, i);
+                const stmt_tag = self.ir.getTag(stmt_idx) orelse continue;
+                if (stmt_tag != .var_decl) continue;
+
+                const decl = self.ir.getVarDecl(stmt_idx) orelse continue;
+                if (decl.init == null_node) continue;
+                const init_tag = self.ir.getTag(decl.init) orelse continue;
+                if (init_tag != .member_access) continue;
+
+                const member = self.ir.getMember(decl.init) orelse continue;
+                if (member.property != @intFromEnum(object.Atom.body)) continue;
+
+                // Body binding must come from request.body.
+                const obj_tag = self.ir.getTag(member.object) orelse continue;
+                if (obj_tag != .identifier) continue;
+                const obj_binding = self.ir.getBinding(member.object) orelse continue;
+                if (self.request_binding_slot) |req_slot| {
+                    if (obj_binding.slot != req_slot) continue;
+                }
+
+                if (decl.binding.kind == .local or decl.binding.kind == .argument) {
+                    self.body_binding_slot = decl.binding.slot;
+                    return;
+                }
+            }
+        }
     }
 
     /// Find `const route = request.url` or `const route = request.path` binding.
@@ -129,6 +205,14 @@ pub const HandlerAnalyzer = struct {
             if (member.property == @intFromEnum(object.Atom.url) or
                 member.property == @intFromEnum(object.Atom.path))
             {
+                // Route binding must come from request.url/path.
+                const obj_tag = self.ir.getTag(member.object) orelse return;
+                if (obj_tag != .identifier) return;
+                const obj_binding = self.ir.getBinding(member.object) orelse return;
+                if (self.request_binding_slot) |req_slot| {
+                    if (obj_binding.slot != req_slot) return;
+                }
+
                 // This is `const route = something.url/path`
                 // Store the binding slot
                 if (decl.binding.kind == .local or decl.binding.kind == .argument) {
@@ -153,12 +237,18 @@ pub const HandlerAnalyzer = struct {
         }
     }
 
-    /// Extract pattern from a single if statement
+    /// Extract pattern from a single statement (`if` or `switch`).
     fn extractPatternFromStmt(self: *HandlerAnalyzer, stmt_node: NodeIndex) !void {
         const tag = self.ir.getTag(stmt_node) orelse return;
 
-        if (tag != .if_stmt) return;
+        switch (tag) {
+            .if_stmt => try self.extractPatternFromIfStmt(stmt_node),
+            .switch_stmt => try self.extractPatternFromSwitchStmt(stmt_node),
+            else => return,
+        }
+    }
 
+    fn extractPatternFromIfStmt(self: *HandlerAnalyzer, stmt_node: NodeIndex) !void {
         const if_stmt = self.ir.getIfStmt(stmt_node) orelse return;
 
         // Analyze condition for route pattern
@@ -176,6 +266,7 @@ pub const HandlerAnalyzer = struct {
                     .static_body = "", // Not used for templates
                     .status = t.status,
                     .content_type_idx = t.content_type_idx,
+                    .body_source = .static,
                     .response_template_prefix = t.prefix,
                     .response_template_suffix = t.suffix,
                 });
@@ -185,7 +276,10 @@ pub const HandlerAnalyzer = struct {
 
         // Analyze then branch for static response (exact matches)
         const static_response = try self.analyzeStaticReturn(if_stmt.then_branch);
-        if (static_response == null) return;
+        if (static_response == null) {
+            self.allocator.free(route_pattern.url_bytes);
+            return;
+        }
 
         // Found a static pattern!
         const response = static_response.?;
@@ -196,7 +290,70 @@ pub const HandlerAnalyzer = struct {
             .static_body = response.body,
             .status = response.status,
             .content_type_idx = response.content_type_idx,
+            .body_source = response.body_source,
         });
+    }
+
+    fn extractPatternFromSwitchStmt(self: *HandlerAnalyzer, stmt_node: NodeIndex) !void {
+        const switch_stmt = self.ir.getSwitchStmt(stmt_node) orelse return;
+
+        // We only optimize switch(route) where route is the discovered url/path binding.
+        const discr_tag = self.ir.getTag(switch_stmt.discriminant) orelse return;
+        if (discr_tag != .identifier) return;
+        const discr_binding = self.ir.getBinding(switch_stmt.discriminant) orelse return;
+        if (self.route_binding_slot == null) return;
+        if (discr_binding.slot != self.route_binding_slot.?) return;
+
+        var i: u8 = 0;
+        while (i < switch_stmt.cases_count) : (i += 1) {
+            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
+            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
+            if (case_clause.test_expr == null_node) continue; // default case
+
+            const route_pattern = self.analyzeSwitchCaseExact(case_clause.test_expr) orelse continue;
+            const static_response = try self.analyzeCaseClauseReturn(case_clause);
+            if (static_response == null) {
+                self.allocator.free(route_pattern.url_bytes);
+                continue;
+            }
+
+            const response = static_response.?;
+            try self.patterns.append(self.allocator, .{
+                .pattern_type = route_pattern.pattern_type,
+                .url_atom = route_pattern.url_atom,
+                .url_bytes = route_pattern.url_bytes,
+                .static_body = response.body,
+                .status = response.status,
+                .content_type_idx = response.content_type_idx,
+                .body_source = response.body_source,
+            });
+        }
+    }
+
+    fn analyzeSwitchCaseExact(self: *HandlerAnalyzer, test_expr: NodeIndex) ?UrlPatternInfo {
+        const test_tag = self.ir.getTag(test_expr) orelse return null;
+        if (test_tag != .lit_string) return null;
+        const str_idx = self.ir.getStringIdx(test_expr) orelse return null;
+        const route_str = self.ir.getString(str_idx) orelse return null;
+        const url_bytes = self.allocator.dupe(u8, route_str) catch return null;
+        return .{
+            .pattern_type = .exact,
+            .url_atom = self.route_atom,
+            .url_bytes = url_bytes,
+        };
+    }
+
+    fn analyzeCaseClauseReturn(self: *HandlerAnalyzer, case_clause: Node.CaseClause) !?StaticResponseInfo {
+        if (case_clause.body_count == 0 or case_clause.body_start == null_node) return null;
+        var i: u16 = 0;
+        while (i < case_clause.body_count) : (i += 1) {
+            const stmt_idx = self.ir.getListIndex(case_clause.body_start, i);
+            const stmt_tag = self.ir.getTag(stmt_idx) orelse continue;
+            if (stmt_tag == .return_stmt) {
+                return try self.analyzeReturnStmt(stmt_idx);
+            }
+        }
+        return null;
     }
 
     const UrlPatternInfo = struct {
@@ -318,6 +475,7 @@ pub const HandlerAnalyzer = struct {
         body: []const u8,
         status: u16,
         content_type_idx: u8,
+        body_source: ResponseBodySource = .static,
     };
 
     const TemplateInfo = struct {
@@ -384,7 +542,7 @@ pub const HandlerAnalyzer = struct {
         if (obj_tag != .identifier) return null;
 
         const binding = self.ir.getBinding(member.object) orelse return null;
-        if (binding.kind != .global) return null;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
         if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
 
         // Check method is rawJson
@@ -474,6 +632,10 @@ pub const HandlerAnalyzer = struct {
     /// Returns null if the body is not a static Response.* return.
     pub fn analyzeDirectReturn(self: *HandlerAnalyzer, func_node: NodeIndex) !?StaticResponseInfo {
         const func = self.ir.getFunction(func_node) orelse return null;
+        self.request_binding_slot = null;
+        self.body_binding_slot = null;
+        self.findRequestBinding(func);
+        self.findBodyBinding(func.body);
         return try self.analyzeStaticReturn(func.body);
     }
 
@@ -503,7 +665,7 @@ pub const HandlerAnalyzer = struct {
         if (obj_tag != .identifier) return null;
 
         const binding = self.ir.getBinding(member.object) orelse return null;
-        if (binding.kind != .global) return null;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
         if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
 
         const response_kind: ResponseKind = if (member.property == @intFromEnum(object.Atom.json))
@@ -529,10 +691,6 @@ pub const HandlerAnalyzer = struct {
         // Try to serialize the argument
         switch (response_kind) {
             .json_obj => {
-                // JSON - serialize object literal
-                const body = try self.serializeObjectLiteral(arg_idx);
-                if (body == null) return null;
-
                 // Check for status in second arg (options object)
                 var status: u16 = 200;
                 if (call.args_count >= 2) {
@@ -540,11 +698,28 @@ pub const HandlerAnalyzer = struct {
                     status = self.extractStatusFromOptions(opts_idx) orelse 200;
                 }
 
-                return .{
-                    .body = body.?,
-                    .status = status,
-                    .content_type_idx = content_type_idx,
-                };
+                // JSON - serialize object literal when possible.
+                const body = try self.serializeObjectLiteral(arg_idx);
+                if (body != null) {
+                    return .{
+                        .body = body.?,
+                        .status = status,
+                        .content_type_idx = content_type_idx,
+                        .body_source = .static,
+                    };
+                }
+
+                // AOT-only dynamic pattern: Response.json(JSON.parse(request.body))
+                if (self.enable_json_body_parse and self.isJsonParseOfRequestBody(arg_idx)) {
+                    return .{
+                        .body = "",
+                        .status = status,
+                        .content_type_idx = content_type_idx,
+                        .body_source = .request_json_parse,
+                    };
+                }
+
+                return null;
             },
             .raw_json, .text, .html => {
                 // Raw JSON/text/html - first arg must be a static string literal
@@ -565,12 +740,60 @@ pub const HandlerAnalyzer = struct {
                     .body = body,
                     .status = status,
                     .content_type_idx = content_type_idx,
+                    .body_source = .static,
                 };
             },
         }
 
         // Unreachable with current response_kind variants
         return null;
+    }
+
+    fn isJsonParseOfRequestBody(self: *HandlerAnalyzer, node: NodeIndex) bool {
+        const tag = self.ir.getTag(node) orelse return false;
+        if (tag != .call) return false;
+
+        const call = self.ir.getCall(node) orelse return false;
+        if (call.args_count != 1) return false;
+
+        const callee_tag = self.ir.getTag(call.callee) orelse return false;
+        if (callee_tag != .member_access) return false;
+        const member = self.ir.getMember(call.callee) orelse return false;
+        if (member.property != @intFromEnum(object.Atom.parse)) return false;
+
+        // Must be JSON.parse(...)
+        const obj_tag = self.ir.getTag(member.object) orelse return false;
+        if (obj_tag != .identifier) return false;
+        const obj_binding = self.ir.getBinding(member.object) orelse return false;
+        if (obj_binding.kind != .global and obj_binding.kind != .undeclared_global) return false;
+        if (obj_binding.slot != @intFromEnum(object.Atom.JSON)) return false;
+
+        // Argument must be request.body or a local bound from request.body
+        const arg_idx = self.ir.getListIndex(call.args_start, 0);
+        return self.isRequestBodySource(arg_idx);
+    }
+
+    fn isRequestBodySource(self: *HandlerAnalyzer, node: NodeIndex) bool {
+        const tag = self.ir.getTag(node) orelse return false;
+        if (tag == .identifier) {
+            const binding = self.ir.getBinding(node) orelse return false;
+            if (self.body_binding_slot) |slot| {
+                return binding.slot == slot;
+            }
+            return false;
+        }
+        if (tag != .member_access) return false;
+
+        const member = self.ir.getMember(node) orelse return false;
+        if (member.property != @intFromEnum(object.Atom.body)) return false;
+
+        const obj_tag = self.ir.getTag(member.object) orelse return false;
+        if (obj_tag != .identifier) return false;
+        const obj_binding = self.ir.getBinding(member.object) orelse return false;
+        if (self.request_binding_slot) |req_slot| {
+            return obj_binding.slot == req_slot;
+        }
+        return false;
     }
 
     /// Extract status from options object: {status: 404}
@@ -640,9 +863,18 @@ pub const HandlerAnalyzer = struct {
             }
             first = false;
 
-            // Write key
+            // Write key (with JSON escaping)
             try buf.append(self.allocator, '"');
-            try buf.appendSlice(self.allocator, key_str);
+            for (key_str) |c| {
+                switch (c) {
+                    '"' => try buf.appendSlice(self.allocator, "\\\""),
+                    '\\' => try buf.appendSlice(self.allocator, "\\\\"),
+                    '\n' => try buf.appendSlice(self.allocator, "\\n"),
+                    '\r' => try buf.appendSlice(self.allocator, "\\r"),
+                    '\t' => try buf.appendSlice(self.allocator, "\\t"),
+                    else => try buf.append(self.allocator, c),
+                }
+            }
             try buf.appendSlice(self.allocator, "\":");
 
             // Serialize value
@@ -753,4 +985,124 @@ test "HandlerAnalyzer init and deinit" {
     defer analyzer.deinit();
 
     try std.testing.expect(analyzer.route_binding_slot == null);
+}
+
+fn findHandlerFunctionForTest(ir_view: IrView, root: NodeIndex) ?NodeIndex {
+    const tag = ir_view.getTag(root) orelse return null;
+    if (tag != .program and tag != .block) return null;
+    const block = ir_view.getBlock(root) orelse return null;
+
+    var i: u16 = 0;
+    while (i < block.stmts_count) : (i += 1) {
+        const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
+        const stmt_tag = ir_view.getTag(stmt_idx) orelse continue;
+        if (stmt_tag != .function_decl and stmt_tag != .var_decl) continue;
+
+        const decl = ir_view.getVarDecl(stmt_idx) orelse continue;
+        if (decl.binding.kind != .global) continue;
+        if (decl.binding.slot != @intFromEnum(object.Atom.handler)) continue;
+
+        const init_tag = ir_view.getTag(decl.init) orelse continue;
+        if (init_tag == .function_expr or init_tag == .arrow_function) {
+            return decl.init;
+        }
+    }
+
+    return null;
+}
+
+test "HandlerAnalyzer extracts switch route patterns" {
+    const allocator = std.testing.allocator;
+
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    const source =
+        \\function handler(request) {
+        \\  const url = request.url;
+        \\  switch (url) {
+        \\    case '/api/a':
+        \\      return Response.json({ ok: true });
+        \\    case '/api/b':
+        \\      return Response.text('plain');
+        \\    default:
+        \\      return Response.json({ error: 'nf' }, { status: 404 });
+        \\  }
+        \\}
+    ;
+
+    var js_parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+
+    const root = try js_parser.parse();
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const handler_fn = findHandlerFunctionForTest(ir_view, root) orelse return error.InvalidRequest;
+
+    var analyzer = HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+
+    const dispatch_opt = try analyzer.analyze(handler_fn);
+    try std.testing.expect(dispatch_opt != null);
+
+    const dispatch = dispatch_opt.?;
+    defer {
+        dispatch.deinit();
+        allocator.destroy(dispatch);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), dispatch.patterns.len);
+    try std.testing.expectEqual(PatternType.exact, dispatch.patterns[0].pattern_type);
+    try std.testing.expectEqualStrings("/api/a", dispatch.patterns[0].url_bytes);
+    try std.testing.expectEqualStrings("{\"ok\":true}", dispatch.patterns[0].static_body);
+    try std.testing.expectEqual(PatternType.exact, dispatch.patterns[1].pattern_type);
+    try std.testing.expectEqualStrings("/api/b", dispatch.patterns[1].url_bytes);
+    try std.testing.expectEqualStrings("plain", dispatch.patterns[1].static_body);
+}
+
+test "HandlerAnalyzer detects Response.json(JSON.parse(request.body))" {
+    const allocator = std.testing.allocator;
+
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    const source =
+        \\function handler(request) {
+        \\  const url = request.url;
+        \\  const body = request.body;
+        \\  if (url === '/api/echo') {
+        \\    return Response.json(JSON.parse(body), { status: 201 });
+        \\  }
+        \\}
+    ;
+
+    var js_parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+
+    const root = try js_parser.parse();
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const handler_fn = findHandlerFunctionForTest(ir_view, root) orelse return error.InvalidRequest;
+
+    var analyzer = HandlerAnalyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+    analyzer.enableJsonBodyParsePatterns();
+
+    const dispatch_opt = try analyzer.analyze(handler_fn);
+    try std.testing.expect(dispatch_opt != null);
+
+    const dispatch = dispatch_opt.?;
+    defer {
+        dispatch.deinit();
+        allocator.destroy(dispatch);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), dispatch.patterns.len);
+    const p = dispatch.patterns[0];
+    try std.testing.expectEqual(PatternType.exact, p.pattern_type);
+    try std.testing.expectEqualStrings("/api/echo", p.url_bytes);
+    try std.testing.expectEqual(ResponseBodySource.request_json_parse, p.body_source);
+    try std.testing.expectEqual(@as(u16, 201), p.status);
+    try std.testing.expectEqual(@as(u8, 0), p.content_type_idx);
+    try std.testing.expectEqual(@as(usize, 0), p.static_body.len);
 }

@@ -1938,10 +1938,11 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
+                const list_ref = unpackListRef(d.b);
                 break :blk .{
                     .discriminant = d.a,
-                    .cases_start = @truncate(d.b),
-                    .cases_count = @truncate(d.b >> 16),
+                    .cases_start = list_ref.start,
+                    .cases_count = @truncate(list_ref.count),
                 };
             },
         };
@@ -1954,10 +1955,11 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
+                const list_ref = unpackListRef(d.b);
                 break :blk .{
                     .test_expr = d.a,
-                    .body_start = @truncate(d.b),
-                    .body_count = @truncate(d.b >> 16),
+                    .body_start = list_ref.start,
+                    .body_count = list_ref.count,
                 };
             },
         };

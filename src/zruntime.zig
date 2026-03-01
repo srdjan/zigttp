@@ -873,6 +873,7 @@ pub const Runtime = struct {
         if (pattern.pattern_type != .exact) return null;
         if (pattern.url_atom != route_atom) return null;
         if (!std.mem.eql(u8, target, pattern.url_bytes)) return null;
+        if (pattern.body_source != .static) return null;
 
         return self.buildFastResponse(pattern, borrow_body) catch null;
     }

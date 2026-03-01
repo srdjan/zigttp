@@ -456,6 +456,7 @@ fn analyzeAot(
 
     var analyzer = zts.HandlerAnalyzer.init(allocator, ir_view, atoms);
     defer analyzer.deinit();
+    analyzer.enableJsonBodyParsePatterns();
 
     var dispatch = try analyzer.analyze(handler_fn);
     const default_response = try analyzer.analyzeDirectReturn(handler_fn);
@@ -605,36 +606,78 @@ fn writeZigFile(
         try writer.writeAll("    if (!req_val.isObject()) return error.AotBail;\n");
         try writer.writeAll("    const req_obj = req_val.toPtr(zq.JSObject);\n");
         try writer.writeAll("    const pool = ctx.hidden_class_pool orelse return error.AotBail;\n");
-        try writer.writeAll("    var url_val: zq.JSValue = undefined;\n");
+        try writer.writeAll("    var url_val: zq.JSValue = zq.JSValue.undefined_val;\n");
+        try writer.writeAll("    var path_val: zq.JSValue = zq.JSValue.undefined_val;\n");
         try writer.writeAll("    if (ctx.http_shapes) |shapes| {\n");
         try writer.writeAll("        if (req_obj.hidden_class_idx == shapes.request.class_idx) {\n");
         try writer.writeAll("            url_val = req_obj.getSlot(shapes.request.url_slot);\n");
+        try writer.writeAll("            path_val = req_obj.getSlot(shapes.request.path_slot);\n");
         try writer.writeAll("        } else if (req_obj.getOwnProperty(pool, zq.Atom.url)) |val| {\n");
         try writer.writeAll("            url_val = val;\n");
+        try writer.writeAll("            if (req_obj.getOwnProperty(pool, zq.Atom.path)) |path_prop| {\n");
+        try writer.writeAll("                path_val = path_prop;\n");
+        try writer.writeAll("            }\n");
         try writer.writeAll("        } else {\n");
         try writer.writeAll("            return error.AotBail;\n");
         try writer.writeAll("        }\n");
         try writer.writeAll("    } else if (req_obj.getOwnProperty(pool, zq.Atom.url)) |val| {\n");
         try writer.writeAll("        url_val = val;\n");
+        try writer.writeAll("        if (req_obj.getOwnProperty(pool, zq.Atom.path)) |path_prop| {\n");
+        try writer.writeAll("            path_val = path_prop;\n");
+        try writer.writeAll("        }\n");
         try writer.writeAll("    } else {\n");
         try writer.writeAll("        return error.AotBail;\n");
         try writer.writeAll("    }\n");
         try writer.writeAll("    if (!url_val.isString()) return error.AotBail;\n");
         try writer.writeAll("    const url = url_val.toPtr(zq.JSString).data();\n");
+        try writer.writeAll("    const path = if (path_val.isString()) path_val.toPtr(zq.JSString).data() else url;\n");
 
         if (compiled.aot.?.dispatch) |dispatch| {
             for (dispatch.patterns) |pattern| {
                 switch (pattern.pattern_type) {
                     .exact => {
-                        try writer.writeAll("    if (std.mem.eql(u8, url, ");
+                        const route_target = if (pattern.url_atom == .path) "path" else "url";
+                        try writer.writeAll("    if (std.mem.eql(u8, ");
+                        try writer.writeAll(route_target);
+                        try writer.writeAll(", ");
                         try writeZigStringLiteral(writer, pattern.url_bytes);
                         try writer.writeAll(")) {\n");
-                        try writer.writeAll("        return zq.http.createResponse(ctx, ");
-                        try writeZigStringLiteral(writer, pattern.static_body);
-                        try writer.writeAll(", ");
-                        try writer.print("{d}, ", .{pattern.status});
-                        try writeZigStringLiteral(writer, contentTypeFor(pattern.content_type_idx));
-                        try writer.writeAll(");\n");
+                        switch (pattern.body_source) {
+                            .static => {
+                                try writer.writeAll("        return zq.http.createResponse(ctx, ");
+                                try writeZigStringLiteral(writer, pattern.static_body);
+                                try writer.writeAll(", ");
+                                try writer.print("{d}, ", .{pattern.status});
+                                try writeZigStringLiteral(writer, contentTypeFor(pattern.content_type_idx));
+                                try writer.writeAll(");\n");
+                            },
+                            .request_json_parse => {
+                                try writer.writeAll("        var body_val: zq.JSValue = zq.JSValue.undefined_val;\n");
+                                try writer.writeAll("        if (ctx.http_shapes) |shapes| {\n");
+                                try writer.writeAll("            if (req_obj.hidden_class_idx == shapes.request.class_idx) {\n");
+                                try writer.writeAll("                body_val = req_obj.getSlot(shapes.request.body_slot);\n");
+                                try writer.writeAll("            } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");
+                                try writer.writeAll("                body_val = val;\n");
+                                try writer.writeAll("            } else {\n");
+                                try writer.writeAll("                return error.AotBail;\n");
+                                try writer.writeAll("            }\n");
+                                try writer.writeAll("        } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");
+                                try writer.writeAll("            body_val = val;\n");
+                                try writer.writeAll("        } else {\n");
+                                try writer.writeAll("            return error.AotBail;\n");
+                                try writer.writeAll("        }\n");
+                                try writer.writeAll("        if (!body_val.isString()) return error.AotBail;\n");
+                                try writer.writeAll("        const parse_args = [_]zq.JSValue{body_val};\n");
+                                try writer.writeAll("        const parsed = zq.builtins.jsonParse(ctx, zq.JSValue.undefined_val, &parse_args);\n");
+                                try writer.writeAll("        if (parsed.isUndefined()) return error.AotBail;\n");
+                                try writer.writeAll("        const json_body = zq.http.valueToJsonString(ctx, parsed) catch return error.AotBail;\n");
+                                try writer.writeAll("        return zq.http.createResponseFromString(ctx, json_body, ");
+                                try writer.print("{d}", .{pattern.status});
+                                try writer.writeAll(", ");
+                                try writeZigStringLiteral(writer, contentTypeFor(pattern.content_type_idx));
+                                try writer.writeAll(");\n");
+                            },
+                        }
                         try writer.writeAll("    }\n");
                     },
                     .prefix => {
@@ -642,10 +685,15 @@ fn writeZigFile(
                         const prefix = pattern.url_bytes;
                         const tpl_prefix = pattern.response_template_prefix.?;
                         const tpl_suffix = pattern.response_template_suffix orelse "";
-                        try writer.writeAll("    if (std.mem.startsWith(u8, url, ");
+                        const route_target = if (pattern.url_atom == .path) "path" else "url";
+                        try writer.writeAll("    if (std.mem.startsWith(u8, ");
+                        try writer.writeAll(route_target);
+                        try writer.writeAll(", ");
                         try writeZigStringLiteral(writer, prefix);
                         try writer.writeAll(")) {\n");
-                        try writer.writeAll("        const param = url[");
+                        try writer.writeAll("        const param = ");
+                        try writer.writeAll(route_target);
+                        try writer.writeAll("[");
                         try writer.print("{d}", .{prefix.len});
                         try writer.writeAll("..];\n");
                         try writer.writeAll("        const body_len = ");
