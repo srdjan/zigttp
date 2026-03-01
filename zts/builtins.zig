@@ -36,16 +36,6 @@ pub const ClassId = enum(u8) {
 };
 
 // ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Get root hidden class from context. Panics if context not properly initialized.
-/// This eliminates the repeated `ctx.root_class orelse unreachable` pattern.
-pub inline fn getRootClass(ctx: *context.Context) *object.HiddenClass {
-    return ctx.root_class orelse unreachable;
-}
-
-// ============================================================================
 // Generic Native Function Wrapper
 // ============================================================================
 

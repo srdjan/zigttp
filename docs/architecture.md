@@ -113,7 +113,7 @@ const Result = union(enum) {
 
 ### Hidden Classes
 
-V8-style hidden class transitions for inline caching. Enables fast property access through predictable object shapes.
+V8-style hidden class transitions for inline caching. The index-based `HiddenClassPool` (`zts/object.zig`) stores shapes as compact u32 indices with Structure-of-Arrays (SoA) layout for cache-friendly property lookups. Transitions use a hash map keyed on `(from_class << 32 | atom)` for O(1) lookup.
 
 **Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`zts/context.zig:352-434`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
 
@@ -132,7 +132,7 @@ Request-scoped arena with O(1) bulk reset. Write barriers detect arena escape. G
 zts uses a **generational garbage collector** with:
 
 1. **NaN-boxing** for efficient value representation (64-bit tagged values)
-2. **Hidden classes** for inline caching (V8-style optimization)
+2. **Hidden classes** for inline caching (index-based `HiddenClassPool` with SoA layout)
 3. **LockFreePool-backed handler pool** for request isolation in FaaS environments
 4. **Hybrid arena allocation** for request-scoped memory with O(1) reset
 

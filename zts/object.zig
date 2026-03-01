@@ -904,32 +904,14 @@ pub const PropertyFlags = packed struct {
     _reserved: u4 = 0,
 };
 
-/// Property slot in hidden class
-pub const PropertySlot = struct {
-    name: Atom,
-    offset: u16,
-    flags: PropertyFlags,
-};
-
 // ============================================================================
 // Index-Based Hidden Class System (Zig Compiler Pattern)
 // ============================================================================
-//
-// STATUS: Infrastructure ready, not yet integrated with JSObject
 //
 // This index-based system provides better memory efficiency than pointer-based:
 // - 4 bytes per reference vs 8 bytes (50% savings)
 // - Structure-of-Arrays (SoA) layout for cache-friendly property lookups
 // - Suitable for serialization/caching
-//
-// MIGRATION PATH (not yet implemented):
-// 1. Change JSObject.hidden_class from *HiddenClass to HiddenClassIndex
-// 2. Add pool reference to JSObject or pass through method parameters
-// 3. Update InlineCacheEntry to use HiddenClassIndex
-// 4. Remove legacy HiddenClass struct after migration complete
-//
-// The legacy pointer-based HiddenClass (below) is currently used by JSObject
-// and the interpreter's inline cache.
 // ============================================================================
 
 /// Index into HiddenClassPool - uses u32 for 50% memory savings vs pointers
@@ -965,7 +947,7 @@ pub const HiddenClassPool = struct {
     properties_starts: std.ArrayListUnmanaged(u32),
     prototype_indices: std.ArrayListUnmanaged(HiddenClassIndex),
 
-    /// Shared property storage using true structure-of-arrays (Phase 2 optimization)
+    /// Shared property storage using structure-of-arrays
     /// 7 bytes per property vs 8 bytes in AoS format (12.5% memory savings)
     /// Better cache locality for name lookups (most common operation)
     property_names: std.ArrayListUnmanaged(Atom),
@@ -977,17 +959,12 @@ pub const HiddenClassPool = struct {
     sorted_property_offsets: std.ArrayListUnmanaged(u16),
     sorted_starts: std.ArrayListUnmanaged(u32),
 
-    /// Transition table: flat array with entries [from_class: u32, atom: u32, to_class: u32]
-    /// Kept for serialization, but lookups use transition_map
-    transitions: std.ArrayListUnmanaged(u32),
-
     /// Fast O(1) transition lookup: (from_class << 32 | atom) -> to_class
     transition_map: std.AutoHashMapUnmanaged(u64, HiddenClassIndex),
 
     /// Number of allocated classes
     count: u32,
 
-    const TRANSITION_ENTRY_SIZE = 3; // from, atom, to
     const SORTED_START_INVALID: u32 = std.math.maxInt(u32);
     const BINARY_SEARCH_THRESHOLD: u16 = 8;
 
@@ -1006,7 +983,6 @@ pub const HiddenClassPool = struct {
             .sorted_property_names = .empty,
             .sorted_property_offsets = .empty,
             .sorted_starts = .empty,
-            .transitions = .empty,
             .transition_map = .empty,
             .count = 0,
         };
@@ -1035,7 +1011,6 @@ pub const HiddenClassPool = struct {
         self.sorted_property_names.deinit(self.allocator);
         self.sorted_property_offsets.deinit(self.allocator);
         self.sorted_starts.deinit(self.allocator);
-        self.transitions.deinit(self.allocator);
         self.transition_map.deinit(self.allocator);
         self.allocator.destroy(self);
     }
@@ -1158,10 +1133,7 @@ pub const HiddenClassPool = struct {
         try self.property_offsets.append(self.allocator, old_prop_count); // offset = old count
         try self.property_flags.append(self.allocator, .{}); // default flags
 
-        // Record transition in both flat array (for serialization) and hash map (for O(1) lookup)
-        try self.transitions.append(self.allocator, from);
-        try self.transitions.append(self.allocator, @intFromEnum(name));
-        try self.transitions.append(self.allocator, new_idx.toInt());
+        // Record transition for O(1) lookup
         try self.transition_map.put(self.allocator, key, new_idx);
 
         if (new_prop_count >= BINARY_SEARCH_THRESHOLD) {
@@ -1261,13 +1233,9 @@ pub const HiddenClassPool = struct {
         const reserved0: Atom = @enumFromInt(0xFFFE);
         const reserved1: Atom = @enumFromInt(0xFFFF);
 
-        // Check for existing transition
-        const trans = self.transitions.items;
-        var i: usize = 0;
-        while (i + TRANSITION_ENTRY_SIZE <= trans.len) : (i += TRANSITION_ENTRY_SIZE) {
-            if (trans[i] == from and trans[i + 1] == @intFromEnum(reserved0)) {
-                return HiddenClassIndex.fromInt(trans[i + 2]);
-            }
+        const key: u64 = (@as(u64, from) << 32) | @intFromEnum(reserved0);
+        if (self.transition_map.get(key)) |to_idx| {
+            return to_idx;
         }
 
         // Create function class with 2 reserved slots
@@ -1283,159 +1251,10 @@ pub const HiddenClassPool = struct {
         try self.property_offsets.append(self.allocator, 1);
         try self.property_flags.append(self.allocator, .{});
 
-        // Record transition
-        try self.transitions.append(self.allocator, from);
-        try self.transitions.append(self.allocator, @intFromEnum(reserved0));
-        try self.transitions.append(self.allocator, new_idx.toInt());
+        // Record transition for O(1) lookup
+        try self.transition_map.put(self.allocator, key, new_idx);
 
         return new_idx;
-    }
-};
-
-// ============================================================================
-// Pointer-Based Hidden Class (Currently Active)
-// ============================================================================
-//
-// This is the active hidden class implementation used by JSObject.
-// It uses pointer-based transitions and is integrated with the inline cache.
-//
-// Pros: Simple, works with existing JSObject design, fast pointer comparison
-// Cons: 8 bytes per reference, not suitable for serialization
-//
-// See HiddenClassPool above for the index-based alternative.
-// ============================================================================
-
-/// Hidden class (shape) for objects - pointer-based implementation
-/// Used by JSObject for property storage layout and inline caching
-pub const HiddenClass = struct {
-    properties: []const PropertySlot,
-    transitions: TransitionMap,
-    prototype: ?*HiddenClass,
-    property_count: u16,
-
-    const TransitionMap = std.AutoHashMap(Atom, *HiddenClass);
-
-    pub fn init(allocator: std.mem.Allocator) !*HiddenClass {
-        const class = try allocator.create(HiddenClass);
-        class.* = .{
-            .properties = &.{},
-            .transitions = TransitionMap.init(allocator),
-            .prototype = null,
-            .property_count = 0,
-        };
-        return class;
-    }
-
-    pub fn deinit(self: *HiddenClass, allocator: std.mem.Allocator) void {
-        self.transitions.deinit();
-        allocator.destroy(self);
-    }
-
-    /// Clear all cached transitions to free memory
-    /// Call during GC or context reset to prevent memory leaks
-    pub fn clearTransitions(self: *HiddenClass, allocator: std.mem.Allocator) void {
-        // Free all transitioned hidden classes recursively
-        var it = self.transitions.valueIterator();
-        while (it.next()) |child_class| {
-            // Recursively clear children's transitions first
-            child_class.*.clearTransitions(allocator);
-            // Free child's properties array if allocated
-            if (child_class.*.properties.len > 0) {
-                allocator.free(child_class.*.properties);
-            }
-            // Free the child class itself
-            allocator.destroy(child_class.*);
-        }
-        // Clear our transitions map (releases hash map memory)
-        self.transitions.clearAndFree();
-    }
-
-    /// Full cleanup including self - use when destroying entire class hierarchy
-    pub fn deinitRecursive(self: *HiddenClass, allocator: std.mem.Allocator) void {
-        // Clear all child transitions first (this frees child classes and clears the map)
-        self.clearTransitions(allocator);
-        // Free our own properties if allocated
-        if (self.properties.len > 0) {
-            allocator.free(self.properties);
-        }
-        // Free self (transitions map already cleared by clearTransitions via clearAndFree)
-        allocator.destroy(self);
-    }
-
-    /// Get or create transition to new shape with added property
-    pub fn addProperty(self: *HiddenClass, allocator: std.mem.Allocator, name: Atom) !*HiddenClass {
-        // Check for existing transition
-        if (self.transitions.get(name)) |existing| {
-            return existing;
-        }
-
-        // Create new hidden class
-        const new_class = try allocator.create(HiddenClass);
-        errdefer allocator.destroy(new_class);
-
-        // Copy properties and add new one
-        var new_props = try allocator.alloc(PropertySlot, self.property_count + 1);
-        @memcpy(new_props[0..self.property_count], self.properties);
-        new_props[self.property_count] = .{
-            .name = name,
-            .offset = self.property_count,
-            .flags = .{},
-        };
-
-        new_class.* = .{
-            .properties = new_props,
-            .transitions = TransitionMap.init(allocator),
-            .prototype = self.prototype,
-            .property_count = self.property_count + 1,
-        };
-
-        // Cache transition
-        try self.transitions.put(name, new_class);
-
-        return new_class;
-    }
-
-    /// Find property slot by name
-    pub fn findProperty(self: *HiddenClass, name: Atom) ?*const PropertySlot {
-        for (self.properties) |*slot| {
-            if (slot.name == name) return slot;
-        }
-        return null;
-    }
-
-    /// Get or create a hidden class for functions with 2 reserved slots
-    /// This prevents property additions from overwriting internal function data
-    /// stored in inline_slots[0] and inline_slots[1]
-    pub fn getOrCreateFunctionClass(self: *HiddenClass, allocator: std.mem.Allocator) !*HiddenClass {
-        // Use special atom for function class transition (slot 0 reserved)
-        const reserved0: Atom = @enumFromInt(0xFFFE);
-        const reserved1: Atom = @enumFromInt(0xFFFF);
-
-        // Check for cached transition
-        if (self.transitions.get(reserved0)) |existing| {
-            return existing;
-        }
-
-        // Create function class with 2 reserved slots
-        const func_class = try allocator.create(HiddenClass);
-        errdefer allocator.destroy(func_class);
-
-        // Allocate properties array with 2 reserved entries
-        var props = try allocator.alloc(PropertySlot, 2);
-        props[0] = .{ .name = reserved0, .offset = 0, .flags = .{} };
-        props[1] = .{ .name = reserved1, .offset = 1, .flags = .{} };
-
-        func_class.* = .{
-            .properties = props,
-            .property_count = 2, // Start new properties at offset 2
-            .prototype = self,
-            .transitions = TransitionMap.init(allocator),
-        };
-
-        // Cache this transition
-        try self.transitions.put(reserved0, func_class);
-
-        return func_class;
     }
 };
 
@@ -2488,53 +2307,6 @@ test "Atom predefined check" {
     try std.testing.expect(Atom.length.isPredefined());
     try std.testing.expect(Atom.prototype.isPredefined());
     try std.testing.expect(!(@as(Atom, @enumFromInt(Atom.FIRST_DYNAMIC)).isPredefined()));
-}
-
-test "HiddenClass property transitions" {
-    const allocator = std.testing.allocator;
-
-    var root = try HiddenClass.init(allocator);
-    defer root.deinit(allocator);
-
-    // Add 'length' property
-    var class_x = try root.addProperty(allocator, .length);
-    defer {
-        allocator.free(class_x.properties);
-        class_x.deinit(allocator);
-    }
-
-    try std.testing.expectEqual(@as(u16, 1), class_x.property_count);
-
-    // Same transition should return cached class
-    const class_x2 = try root.addProperty(allocator, .length);
-    try std.testing.expectEqual(class_x, class_x2);
-}
-
-test "HiddenClass multiple properties" {
-    const allocator = std.testing.allocator;
-
-    var root = try HiddenClass.init(allocator);
-    defer root.deinit(allocator);
-
-    // Add 'x' then 'y'
-    var class_x = try root.addProperty(allocator, .length);
-    defer {
-        allocator.free(class_x.properties);
-        class_x.deinit(allocator);
-    }
-
-    var class_xy = try class_x.addProperty(allocator, .prototype);
-    defer {
-        allocator.free(class_xy.properties);
-        class_xy.deinit(allocator);
-    }
-
-    try std.testing.expectEqual(@as(u16, 2), class_xy.property_count);
-
-    // Find properties
-    try std.testing.expect(class_xy.findProperty(.length) != null);
-    try std.testing.expect(class_xy.findProperty(.prototype) != null);
-    try std.testing.expect(class_xy.findProperty(.constructor) == null);
 }
 
 test "InlineCache hit tracking" {

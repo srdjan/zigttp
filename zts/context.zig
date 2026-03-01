@@ -213,9 +213,7 @@ pub const Context = struct {
     global: value.JSValue,
     /// Global object (as JSObject pointer for fast access)
     global_obj: ?*object.JSObject,
-    /// Root hidden class for new objects
-    root_class: ?*object.HiddenClass,
-    /// Index-based hidden class pool (Phase 1 migration)
+    /// Index-based hidden class pool with SoA layout
     hidden_class_pool: ?*object.HiddenClassPool,
     /// Root class index in the pool
     root_class_idx: object.HiddenClassIndex,
@@ -289,10 +287,6 @@ pub const Context = struct {
         // Clear global JSON shape cache to avoid stale references from previous contexts
         builtins.clearJsonShapeCache();
 
-        // Create root hidden class for all objects (legacy - to be removed)
-        const root_class = try object.HiddenClass.init(allocator);
-        errdefer root_class.deinit(allocator);
-
         // Create global object using pool-based class
         const global_obj = try object.JSObject.create(allocator, hidden_class_pool.getEmptyClass(), null, hidden_class_pool);
         errdefer global_obj.destroy(allocator);
@@ -311,7 +305,6 @@ pub const Context = struct {
             .call_depth = 0,
             .global = global_obj.toValue(),
             .global_obj = global_obj,
-            .root_class = root_class,
             .hidden_class_pool = hidden_class_pool,
             .root_class_idx = hidden_class_pool.getEmptyClass(),
             .array_prototype = null,
@@ -846,7 +839,6 @@ pub const Context = struct {
             string.freeString(self.allocator, cache.method_head);
         }
         self.small_int_cache.deinit(self.allocator);
-        if (self.root_class) |root| root.deinitRecursive(self.allocator);
         if (self.hidden_class_pool) |p| p.deinit();
 
         // Clean up JIT code allocator
@@ -1501,7 +1493,7 @@ pub const Context = struct {
     }
 
     // ========================================================================
-    // Index-Based Hidden Class Operations (Phase 1)
+    // Index-Based Hidden Class Operations
     // ========================================================================
 
     /// Get a hidden class with an additional property

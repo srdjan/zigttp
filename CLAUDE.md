@@ -69,7 +69,7 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 
 **NaN-Boxing**: 64-bit tagged values storing integers, floats, and pointers in a single word.
 
-**Hidden Classes**: V8-style hidden class transitions for inline caching. Enables fast property access.
+**Hidden Classes**: V8-style hidden class transitions for inline caching. Index-based `HiddenClassPool` with SoA layout stores shapes as compact u32 indices (50% vs pointers). O(1) transition lookups via hash map keyed on `(from_class << 32 | atom)`.
 
 **Hybrid Arena Allocation**: Request-scoped arena with O(1) bulk reset. Write barriers detect arena escape. GC disabled in hybrid mode.
 

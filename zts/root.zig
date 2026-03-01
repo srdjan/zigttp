@@ -67,7 +67,6 @@ pub const Opcode = bytecode.Opcode;
 pub const FunctionBytecode = bytecode.FunctionBytecode;
 pub const FunctionBytecodeCompact = bytecode.FunctionBytecodeCompact;
 pub const Atom = object.Atom;
-pub const HiddenClass = object.HiddenClass;
 pub const HiddenClassIndex = object.HiddenClassIndex;
 pub const HiddenClassPool = object.HiddenClassPool;
 pub const JSObject = object.JSObject;

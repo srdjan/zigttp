@@ -334,15 +334,6 @@ pub const PolymorphicInlineCache = struct {
     }
 };
 
-/// Legacy monomorphic inline cache entry (kept for reference)
-/// Caches the hidden class pointer and slot offset for fast subsequent lookups
-pub const InlineCacheEntry = struct {
-    /// Cached hidden class pointer (null = cache miss/uninitialized)
-    hidden_class: ?*object.HiddenClass = null,
-    /// Cached slot offset for direct property access
-    slot_offset: u16 = 0,
-};
-
 /// Maximum number of inline cache slots per compilation unit.
 /// Each get_field_ic/put_field_ic instruction references a cache index.
 /// Must match codegen.IC_CACHE_SIZE. IC indices are globally unique across
