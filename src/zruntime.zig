@@ -1313,6 +1313,8 @@ pub const Runtime = struct {
             if (used > threshold) {
                 self.gc_state.minorGC();
             }
+            // Interleave major-GC sweep work between requests to reduce pause spikes.
+            self.gc_state.runIncrementalGCStep(self.gc_state.config.sweep_chunk_size);
         }
         self.last_request_body_len = 0;
 

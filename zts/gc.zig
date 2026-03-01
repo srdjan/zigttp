@@ -22,7 +22,7 @@ pub const GCConfig = struct {
     advancing_wavefront: bool = true,
     /// Enable soft handshakes (future: for concurrent pools)
     soft_handshakes: bool = false,
-    /// Objects per SIMD sweep batch
+    /// Objects per incremental sweep step (also used as SIMD batch hint)
     sweep_chunk_size: usize = 4096,
     /// Gray stack initial capacity
     gray_stack_capacity: usize = 1024,
@@ -259,6 +259,44 @@ pub const TenuredHeap = struct {
             }
             self.mark_bitvector[word_idx] = 0;
         }
+    }
+
+    /// Incremental scalar sweep step with bounded work.
+    /// Processes at most `word_budget` mark words starting at `word_cursor`.
+    /// Returns true when sweep of the current bitvector is complete.
+    pub fn incrementalSweepStep(
+        self: *TenuredHeap,
+        word_cursor: *usize,
+        limit_words: usize,
+        word_budget: usize,
+        free_callback: ?*const fn (*anyopaque) void,
+        heap_ptr: ?*heap.Heap,
+    ) bool {
+        const limit = @min(limit_words, self.mark_bitvector.len);
+        if (word_cursor.* >= limit) return true;
+
+        const budget = @max(@as(usize, 1), word_budget);
+        const end = @min(limit, word_cursor.* + budget);
+
+        var i = word_cursor.*;
+        while (i < end) : (i += 1) {
+            const obj_start = i * 64;
+            if (obj_start >= self.objects.items.len) {
+                // No tracked objects in this word; just clear stale marks.
+                self.mark_bitvector[i] = 0;
+                continue;
+            }
+
+            const mark_word = self.mark_bitvector[i];
+            const free_mask = ~mark_word;
+            if (free_mask != 0) {
+                self.processUnmarkedWord(i, free_mask, free_callback, heap_ptr);
+            }
+            self.mark_bitvector[i] = 0;
+        }
+
+        word_cursor.* = end;
+        return word_cursor.* >= limit;
     }
 };
 
@@ -533,8 +571,12 @@ pub const GC = struct {
     /// Threshold for automatic major GC (number of tenured objects)
     major_gc_threshold: usize = 10000,
 
-    /// Current GC phase (for incremental GC, future)
+    /// Current GC phase.
     phase: GCPhase = .idle,
+    /// Cursor for incremental sweeping (word index into mark_bitvector).
+    incremental_sweep_word: usize = 0,
+    /// Exclusive end word for current incremental sweep cycle.
+    incremental_sweep_limit_word: usize = 0,
     /// Set when GC cannot complete due to allocation failure.
     gc_oom: bool = false,
 
@@ -865,10 +907,17 @@ pub const GC = struct {
         try self.setForwardingPointer(ptr, new_ptr);
 
         // Register in tenured heap for tracking
-        _ = self.tenured.registerObject(new_ptr) catch |err| {
+        const idx = self.tenured.registerObject(new_ptr) catch |err| {
             self.gc_oom = true;
             return err;
         };
+
+        // If an incremental sweep is in progress, mark the new object as live
+        // so it survives the current cycle. Without this, a promoted object
+        // registered into an un-swept slot would appear unmarked and be freed.
+        if (self.phase == .sweeping) {
+            self.tenured.setMark(idx);
+        }
 
         self.total_bytes_allocated += size;
 
@@ -1000,15 +1049,26 @@ pub const GC = struct {
     /// Skipped in hybrid mode
     pub fn maybeDoMajorGC(self: *GC) void {
         if (self.hybrid_mode) return;
-        if (self.tenured.objects.items.len > self.major_gc_threshold) {
-            self.majorGC();
+        self.runIncrementalGCStep(self.config.sweep_chunk_size);
+    }
+
+    /// Run one incremental major-GC step.
+    /// - If idle and above threshold: starts marking + enters sweeping.
+    /// - If sweeping: processes bounded sweep work.
+    pub fn runIncrementalGCStep(self: *GC, object_budget: usize) void {
+        if (self.hybrid_mode) return;
+
+        if (self.phase == .idle and self.tenured.objects.items.len > self.major_gc_threshold) {
+            self.beginIncrementalMajorGC();
+            if (self.phase != .sweeping) return;
+        }
+
+        if (self.phase == .sweeping) {
+            self.continueIncrementalMajorGCSweep(object_budget);
         }
     }
 
-    /// Major GC with explicit heap reference for memory deallocation
-    /// Skipped in hybrid mode
-    pub fn majorGCWithHeap(self: *GC, heap_ptr: ?*heap.Heap) void {
-        if (self.hybrid_mode) return;
+    fn beginIncrementalMajorGC(self: *GC) void {
         self.gc_oom = false;
         self.major_gc_count += 1;
         self.phase = .marking;
@@ -1026,8 +1086,49 @@ pub const GC = struct {
             return;
         }
 
-        // 4. Sweep unmarked and FREE memory (CRITICAL fix for memory leak)
+        // 4. Enter sweeping phase and process incrementally.
         self.phase = .sweeping;
+        self.incremental_sweep_word = 0;
+        self.incremental_sweep_limit_word = if (self.tenured.objects.items.len == 0)
+            0
+        else
+            (self.tenured.objects.items.len - 1) / 64 + 1;
+        // Clear trailing words eagerly so stale marks cannot survive across cycles.
+        if (self.incremental_sweep_limit_word < self.tenured.mark_bitvector.len) {
+            @memset(self.tenured.mark_bitvector[self.incremental_sweep_limit_word..], 0);
+        }
+        self.tenured.last_sweep_freed_bytes = 0;
+    }
+
+    fn continueIncrementalMajorGCSweep(self: *GC, object_budget: usize) void {
+        const words_budget = @max(@as(usize, 1), object_budget / 64);
+        const done = self.tenured.incrementalSweepStep(
+            &self.incremental_sweep_word,
+            self.incremental_sweep_limit_word,
+            words_budget,
+            null,
+            self.heap_ptr,
+        );
+        if (!done) return;
+
+        self.total_bytes_freed += self.tenured.last_sweep_freed_bytes;
+        self.phase = .idle;
+        self.incremental_sweep_word = 0;
+        self.incremental_sweep_limit_word = 0;
+
+        // Grow threshold to avoid thrashing when the live set legitimately grows.
+        const live_count = self.tenured.objects.items.len - self.tenured.free_indices.items.len;
+        self.major_gc_threshold = @max(self.major_gc_threshold, live_count * 2);
+    }
+
+    /// Major GC with explicit heap reference for memory deallocation
+    /// Skipped in hybrid mode
+    pub fn majorGCWithHeap(self: *GC, heap_ptr: ?*heap.Heap) void {
+        if (self.hybrid_mode) return;
+        self.beginIncrementalMajorGC();
+        if (self.phase != .sweeping) return;
+
+        // 4. Sweep unmarked and FREE memory (CRITICAL fix for memory leak)
         if (self.config.simd_sweep) {
             self.tenured.simdSweep(null, heap_ptr);
         } else {
@@ -1036,6 +1137,8 @@ pub const GC = struct {
 
         self.total_bytes_freed += self.tenured.last_sweep_freed_bytes;
         self.phase = .idle;
+        self.incremental_sweep_word = 0;
+        self.incremental_sweep_limit_word = 0;
     }
 
     fn currentBytes(self: *const GC) usize {
@@ -1059,6 +1162,8 @@ pub const GC = struct {
         @memset(self.tenured.mark_bitvector, 0);
         self.gray_stack.clear();
         self.phase = .idle;
+        self.incremental_sweep_word = 0;
+        self.incremental_sweep_limit_word = 0;
     }
 
     /// Mark all root values
@@ -1671,6 +1776,47 @@ test "GC maybeDoMajorGC below threshold" {
     gc_state.maybeDoMajorGC();
 
     try std.testing.expectEqual(@as(u64, 0), gc_state.major_gc_count);
+}
+
+test "GC incremental major sweep progresses across steps" {
+    const allocator = std.testing.allocator;
+    var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+    gc_state.setMajorGCThreshold(0); // Force major collection when any tenured object exists
+
+    const TestObj = struct {
+        header: heap.MemBlockHeader,
+        payload: u64,
+    };
+    const size = @sizeOf(TestObj);
+
+    // Register enough tenured objects to require multiple sweep words.
+    for (0..130) |i| {
+        const ptr = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+        const obj: *TestObj = @ptrCast(@alignCast(ptr));
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, size),
+            .payload = @intCast(i),
+        };
+        _ = try gc_state.tenured.registerObject(obj);
+    }
+
+    // Start and run one tiny step (1 object budget => 1 mark word).
+    gc_state.runIncrementalGCStep(1);
+    try std.testing.expectEqual(@as(u64, 1), gc_state.major_gc_count);
+    try std.testing.expectEqual(GC.GCPhase.sweeping, gc_state.phase);
+
+    // Keep stepping until completion.
+    var guard: usize = 0;
+    while (gc_state.phase != .idle and guard < 16) : (guard += 1) {
+        gc_state.runIncrementalGCStep(1);
+    }
+
+    try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
 }
 
 test "GC multiple minor collections" {
