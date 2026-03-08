@@ -4,7 +4,8 @@ A JavaScript runtime built from scratch in Zig for serverless workloads. One bin
 
 Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
 
-> Experimental - under active development.
+[![status: experimental](https://github.com/GIScience/badges/raw/master/status/experimental.svg)](https://github.com/GIScience/badges#experimental)
+> Not Ready (yet)! Still under active development.
 
 ### What makes it different
 
