@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/zigttp-logo.png" alt="zigttp" width="600">
+  <img src="docs/zigttp-logo.jpg" alt="zigttp" width="600">
 </p>
 
 A JavaScript runtime built from scratch in Zig for serverless workloads. One binary, no dependencies, instant cold starts.
