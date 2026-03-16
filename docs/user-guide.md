@@ -551,6 +551,37 @@ function handler(request) {
 }
 ```
 
+### Match Expression Routing
+
+The `match` expression provides declarative pattern matching for request dispatch. Each arm tests a pattern against the discriminant and returns a single expression.
+
+```typescript
+function handler(req: Request): Response {
+    return match (req) {
+        when { method: "GET", path: "/health" }:
+            Response.json({ ok: true })
+        when { method: "GET", path: "/version" }:
+            Response.json({ version: "1.0.0" })
+        when { method: "POST", path: "/echo" }:
+            Response.json(req.body)
+        default:
+            Response.text("Not Found", { status: 404 })
+    };
+}
+```
+
+Match is an expression - it always produces a value. You can assign it to a variable, return it, or pass it as an argument.
+
+**Pattern types:**
+- **Object patterns**: `when { key: "value" }` - tests properties of the discriminant with strict equality
+- **Literal patterns**: `when "GET"` - tests the discriminant directly
+- **Wildcard**: `when _` - matches anything (equivalent to `default`)
+- **default**: catch-all arm
+
+Arms are tested top-to-bottom. The first matching arm's expression is returned. If no arm matches and there is no default, the result is `undefined`.
+
+The `-Dverify` flag will warn about match expressions without a default arm, since they may not produce a value. The `-Dcontract` flag extracts route patterns from match arms with `method`/`path` properties.
+
 ---
 
 ## Working with JSON
@@ -983,6 +1014,13 @@ Math.trunc(), Math.log2(); // ✓
 "".trimStart(), "".trimEnd(); // ✓ String methods
 "".codePointAt(); // ✓
 2 ** 10; // ✓ Exponentiation
+
+// Match Expression
+let result = match (x) {   // ✓ Pattern matching
+    when "a": 1,
+    when { key: "val" }: 2,
+    when _: 0               // wildcard
+};
 ```
 
 ### NOT Supported

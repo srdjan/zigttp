@@ -12,7 +12,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 ### What makes it different
 
-**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops - just functions, `let`/`const`, arrow functions, destructuring, and `for...of`. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace.
+**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops - just functions, `let`/`const`, arrow functions, destructuring, `for...of`, and `match` expressions. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace.
 
 **JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
 
@@ -391,7 +391,7 @@ See [Performance](docs/performance.md) for detailed profiling analysis and deplo
 
 zts implements ES5 with select ES6+ extensions:
 
-**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`.
+**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching with literal and object patterns).
 
 **Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, regular expressions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives.
 

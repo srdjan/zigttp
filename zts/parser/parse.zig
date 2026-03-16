@@ -1182,6 +1182,162 @@ pub const Parser = struct {
         });
     }
 
+    fn parseMatchExpression(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume 'match'
+
+        try self.expect(.lparen, "'('");
+        const discriminant = try self.parseExpression(.none);
+        try self.expect(.rparen, "')'");
+        try self.expect(.lbrace, "'{'");
+
+        var arms: [255]NodeIndex = undefined;
+        var arms_len: u8 = 0;
+
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            const arm_loc = self.current.location();
+            var pattern: NodeIndex = null_node;
+
+            if (self.match(.kw_when)) {
+                pattern = try self.parseMatchPattern();
+            } else if (self.match(.kw_default)) {
+                // default arm - pattern stays null_node
+            } else {
+                self.errorAtCurrent("expected 'when' or 'default'");
+                break;
+            }
+            try self.expect(.colon, "':'");
+
+            const body = try self.parseExpression(.none);
+
+            const arm_node = try self.nodes.add(.{
+                .tag = .match_arm,
+                .loc = arm_loc,
+                .data = .{ .match_arm = .{
+                    .pattern = pattern,
+                    .body = body,
+                } },
+            });
+            arms[arms_len] = arm_node;
+            arms_len += 1;
+
+            if (!self.check(.rbrace)) {
+                _ = self.match(.comma);
+            }
+        }
+
+        try self.expect(.rbrace, "'}'");
+
+        if (arms_len == 0) {
+            self.errorAt(loc, "match expression must have at least one arm");
+            return error.ParseError;
+        }
+
+        const arms_start = try self.addNodeList(arms[0..arms_len]);
+
+        return try self.nodes.add(.{
+            .tag = .match_expr,
+            .loc = loc,
+            .data = .{ .match_expr = .{
+                .discriminant = discriminant,
+                .arms_start = arms_start,
+                .arms_count = arms_len,
+            } },
+        });
+    }
+
+    fn parseMatchPattern(self: *Parser) anyerror!NodeIndex {
+        // Object pattern: { key: value, ... }
+        if (self.check(.lbrace)) {
+            return self.parseMatchObjectPattern();
+        }
+
+        // Wildcard: _
+        if (self.check(.identifier)) {
+            const text = self.current.text(self.source);
+            if (std.mem.eql(u8, text, "_")) {
+                self.advance();
+                return null_node;
+            }
+        }
+
+        // Literal pattern: string, number, boolean, null, undefined
+        return switch (self.current.type) {
+            .string_literal => self.parseString(),
+            .number => self.parseNumber(),
+            .true_lit => self.parseBoolLiteral(true),
+            .false_lit => self.parseBoolLiteral(false),
+            .null_lit => self.parseNullLiteral(),
+            .undefined_lit => self.parseUndefinedLiteral(),
+            else => {
+                self.errorAtCurrent("expected pattern (literal, object, or '_' wildcard)");
+                return error.ParseError;
+            },
+        };
+    }
+
+    fn parseMatchObjectPattern(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume '{'
+
+        var props: [255]NodeIndex = undefined;
+        var props_len: u8 = 0;
+
+        while (!self.check(.rbrace) and !self.check(.eof)) {
+            const prop_loc = self.current.location();
+
+            const key = switch (self.current.type) {
+                .identifier => blk: {
+                    const text = self.current.text(self.source);
+                    const str_idx = try self.constants.addString(text);
+                    self.advance();
+                    break :blk try self.nodes.add(Node.litString(prop_loc, str_idx));
+                },
+                .string_literal => try self.parseString(),
+                else => {
+                    self.errorAtCurrent("expected property name");
+                    return error.ParseError;
+                },
+            };
+
+            try self.expect(.colon, "':'");
+            const value = try self.parseMatchPattern();
+
+            const prop_node = try self.nodes.add(.{
+                .tag = .object_property,
+                .loc = prop_loc,
+                .data = .{ .property = .{
+                    .key = key,
+                    .value = value,
+                    .is_computed = false,
+                    .is_shorthand = false,
+                } },
+            });
+            props[props_len] = prop_node;
+            props_len += 1;
+
+            if (!self.check(.rbrace)) {
+                _ = self.match(.comma);
+            }
+        }
+
+        try self.expect(.rbrace, "'}'");
+
+        const props_start = if (props_len > 0)
+            try self.addNodeList(props[0..props_len])
+        else
+            null_node;
+
+        return try self.nodes.add(.{
+            .tag = .match_pattern,
+            .loc = loc,
+            .data = .{ .match_pattern = .{
+                .props_start = props_start,
+                .props_count = props_len,
+            } },
+        });
+    }
+
     fn parseBlock(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         try self.expect(.lbrace, "'{'");
@@ -1516,6 +1672,7 @@ pub const Parser = struct {
             },
             // class keyword in expression context: const X = class { }
             // Catches class expressions (both .js and .ts files after stripping)
+            .kw_match => self.parseMatchExpression(),
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
                 self.advance();
@@ -2956,6 +3113,9 @@ pub const Parser = struct {
             .kw_public,
             .kw_private,
             .kw_protected,
+            // Match keywords (allowed as property names)
+            .kw_match,
+            .kw_when,
             // Literals that look like keywords
             .true_lit,
             .false_lit,
@@ -4191,4 +4351,72 @@ test "keyword in destructuring: {public: x}" {
     // Should parse successfully - public is valid as property key in destructuring
     try std.testing.expect(!parser.hasErrors());
     _ = result catch unreachable;
+}
+
+test "parse match expression with literals" {
+    var parser = Parser.init(std.testing.allocator,
+        \\const x = match (y) {
+        \\  when "a": 1,
+        \\  when "b": 2,
+        \\  default: 0
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse match expression with object pattern" {
+    var parser = Parser.init(std.testing.allocator,
+        \\const r = match (req) {
+        \\  when { method: "GET", path: "/health" }: 200,
+        \\  default: 404
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse match expression with wildcard" {
+    var parser = Parser.init(std.testing.allocator,
+        \\const x = match (v) {
+        \\  when 1: "one",
+        \\  when _: "other"
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "match as property name" {
+    var parser = Parser.init(std.testing.allocator, "const obj = { match: 42 };");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }

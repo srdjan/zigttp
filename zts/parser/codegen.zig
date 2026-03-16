@@ -372,6 +372,7 @@ pub const CodeGen = struct {
             .object_literal => try self.emitObjectLiteral(self.ir.getObject(index).?),
             .function_expr, .arrow_function => try self.emitFunctionExpr(index, self.ir.getFunction(index).?),
             .template_literal => try self.emitTemplateLiteral(self.ir.getTemplate(index).?),
+            .match_expr => try self.emitMatchExpr(self.ir.getMatchExpr(index).?),
 
             // Statements
             .expr_stmt => {
@@ -1296,14 +1297,7 @@ pub const CodeGen = struct {
             const key_str_idx = self.ir.getStringIdx(prop.key).?;
             const key_str = self.ir.getString(key_str_idx) orelse "";
 
-            // Intern atom
-            const atom: js_object.Atom = if (js_object.lookupPredefinedAtom(key_str)) |a|
-                a
-            else if (self.atoms) |atoms|
-                try atoms.intern(key_str)
-            else
-                @enumFromInt(js_object.Atom.FIRST_DYNAMIC + key_str_idx);
-
+            const atom = try self.resolveKeyAtom(key_str, key_str_idx);
             try static_atoms.append(self.allocator, atom);
         }
 
@@ -1369,15 +1363,9 @@ pub const CodeGen = struct {
                     const key_str_idx = self.ir.getStringIdx(prop.key).?;
                     // Key is a string constant, use put_field with atom
                     try self.emitNode(prop.value);
-                    // Get string from IR constant pool and look up/intern atom
                     const key_str = self.ir.getString(key_str_idx) orelse "";
-                    const atom_idx: u16 = if (js_object.lookupPredefinedAtom(key_str)) |atom|
-                        @intCast(@intFromEnum(atom))
-                    else if (self.atoms) |atoms|
-                        @intCast(@intFromEnum(try atoms.intern(key_str)))
-                    else
-                        @intCast(js_object.Atom.FIRST_DYNAMIC + key_str_idx);
-                    try self.emitPutField(atom_idx);
+                    const atom = try self.resolveKeyAtom(key_str, key_str_idx);
+                    try self.emitPutField(@truncate(@intFromEnum(atom)));
                     self.popStack(2);
                 } else {
                     // Computed key
@@ -1919,13 +1907,7 @@ pub const CodeGen = struct {
             const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
 
             if (case_clause.test_expr != null_node) {
-                try self.emit(.dup);
-                self.pushStack(1);
-                try self.emitNode(case_clause.test_expr);
-                try self.emit(.strict_eq);
-                self.popStack(1);
-                try self.emitJump(.if_true, case_labels.items[i]);
-                self.popStack(1);
+                try self.emitEqTest(case_clause.test_expr, case_labels.items[i]);
             }
         }
 
@@ -1956,6 +1938,111 @@ pub const CodeGen = struct {
         }
 
         try self.placeLabel(end_label);
+    }
+
+    fn emitMatchExpr(self: *CodeGen, match_expr: Node.MatchExpr) !void {
+        // Emit discriminant (stays on stack during pattern testing)
+        try self.emitNode(match_expr.discriminant);
+
+        const end_label = try self.createLabel();
+        var body_labels: [255]u32 = undefined;
+        var default_idx: ?u8 = null;
+
+        // Create labels and emit pattern tests in a single pass
+        var i: u8 = 0;
+        while (i < match_expr.arms_count) : (i += 1) {
+            body_labels[i] = try self.createLabel();
+
+            const arm_idx = self.ir.getListIndex(match_expr.arms_start, i);
+            const arm = self.ir.getMatchArm(arm_idx) orelse continue;
+
+            if (arm.pattern == null_node) {
+                default_idx = i;
+                continue; // default/wildcard - no test needed
+            }
+
+            const pattern_tag = self.ir.getTag(arm.pattern) orelse continue;
+
+            if (pattern_tag == .match_pattern) {
+                try self.emitObjectPatternTest(arm.pattern, body_labels[i]);
+            } else {
+                try self.emitEqTest(arm.pattern, body_labels[i]);
+            }
+        }
+
+        // After all tests: jump to default or push undefined
+        if (default_idx) |di| {
+            try self.emitJump(.goto, body_labels[di]);
+        } else {
+            try self.emit(.drop);
+            self.popStack(1);
+            try self.emit(.push_undefined);
+            self.pushStack(1);
+            try self.emitJump(.goto, end_label);
+        }
+
+        // Emit arm bodies
+        i = 0;
+        while (i < match_expr.arms_count) : (i += 1) {
+            try self.placeLabel(body_labels[i]);
+
+            const arm_idx = self.ir.getListIndex(match_expr.arms_start, i);
+            const arm = self.ir.getMatchArm(arm_idx) orelse continue;
+
+            try self.emit(.drop);
+            self.popStack(1);
+            try self.emitNode(arm.body);
+
+            if (i + 1 < match_expr.arms_count) {
+                try self.emitJump(.goto, end_label);
+            }
+        }
+
+        try self.placeLabel(end_label);
+    }
+
+    fn emitObjectPatternTest(self: *CodeGen, pattern_node: NodeIndex, target_label: u32) !void {
+        const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
+        if (pattern.props_count == 0) {
+            // Empty pattern always matches
+            try self.emitJump(.goto, target_label);
+            return;
+        }
+
+        // For multi-property patterns, we need to test all properties.
+        // If any fails, skip to after this arm's test block.
+        const skip_label = try self.createLabel();
+
+        var j: u8 = 0;
+        while (j < pattern.props_count) : (j += 1) {
+            const prop_idx = self.ir.getListIndex(pattern.props_start, j);
+            const prop = self.ir.getProperty(prop_idx) orelse continue;
+
+            const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
+            const key_str = self.ir.getString(key_str_idx) orelse continue;
+            const atom = self.resolveKeyAtom(key_str, key_str_idx) catch continue;
+
+            try self.emit(.dup);
+            self.pushStack(1);
+            try self.emitGetField(@truncate(@intFromEnum(atom)));
+
+            if (prop.value == null_node) {
+                // Wildcard value - just pop the field value, this property always matches
+                try self.emit(.drop);
+                self.popStack(1);
+            } else {
+                try self.emitNode(prop.value);
+                try self.emit(.strict_eq);
+                self.popStack(1); // strict_eq consumes two, pushes one
+                try self.emitJump(.if_false, skip_label);
+                self.popStack(1); // if_false consumes condition
+            }
+        }
+
+        // All properties matched - jump to body
+        try self.emitJump(.goto, target_label);
+
+        try self.placeLabel(skip_label);
     }
 
     fn emitBlock(self: *CodeGen, block: Node.BlockData) !void {
@@ -2135,6 +2222,25 @@ pub const CodeGen = struct {
     fn emitPushConst(self: *CodeGen, idx: u16) !void {
         try self.emit(.push_const);
         try self.emitU16(idx);
+    }
+
+    /// Resolve a property key string to an Atom via predefined lookup, intern, or fallback.
+    fn resolveKeyAtom(self: *CodeGen, key_str: []const u8, key_str_idx: u16) !js_object.Atom {
+        if (js_object.lookupPredefinedAtom(key_str)) |a| return a;
+        if (self.atoms) |atoms| return try atoms.intern(key_str);
+        return @enumFromInt(js_object.Atom.FIRST_DYNAMIC + key_str_idx);
+    }
+
+    /// Emit dup + value + strict_eq + conditional jump for discriminant testing.
+    /// Used by both switch and match for case/arm equality checks.
+    fn emitEqTest(self: *CodeGen, test_expr: NodeIndex, label: u32) !void {
+        try self.emit(.dup);
+        self.pushStack(1);
+        try self.emitNode(test_expr);
+        try self.emit(.strict_eq);
+        self.popStack(1);
+        try self.emitJump(.if_true, label);
+        self.popStack(1);
     }
 
     /// Emit get_field with inline cache if cache slots available

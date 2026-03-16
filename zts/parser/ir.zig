@@ -167,6 +167,11 @@ pub const NodeTag = enum(u8) {
     sequence_expr,
     comma_expr,
 
+    // Match expression
+    match_expr,
+    match_arm,
+    match_pattern,
+
     // Statements
     expr_stmt,
     var_decl,
@@ -289,6 +294,15 @@ pub const Node = struct {
 
         // Case clause
         case_clause: CaseClause,
+
+        // Match expression
+        match_expr: MatchExpr,
+
+        // Match arm
+        match_arm: MatchArm,
+
+        // Match pattern (object pattern)
+        match_pattern: MatchPatternObj,
 
         // Return/throw with optional value
         opt_value: ?NodeIndex,
@@ -446,6 +460,22 @@ pub const Node = struct {
         test_expr: NodeIndex, // null_node for default
         body_start: NodeIndex,
         body_count: u16,
+    };
+
+    pub const MatchExpr = struct {
+        discriminant: NodeIndex,
+        arms_start: NodeIndex, // index into list storage
+        arms_count: u8,
+    };
+
+    pub const MatchArm = struct {
+        pattern: NodeIndex, // literal node, match_pattern, or null_node (default/wildcard)
+        body: NodeIndex, // single expression
+    };
+
+    pub const MatchPatternObj = struct {
+        props_start: NodeIndex, // index into list storage
+        props_count: u8,
     };
 
     pub const TryStmt = struct {
@@ -1158,6 +1188,27 @@ pub const IRStore = struct {
                 break :blk self.addNode(.case_clause, loc, .{
                     .a = c.test_expr,
                     .b = @as(u32, @as(u16, @truncate(c.body_start))) | (@as(u32, c.body_count) << 16),
+                });
+            },
+            .match_expr => blk: {
+                const m = node.data.match_expr;
+                break :blk self.addNode(.match_expr, loc, .{
+                    .a = m.discriminant,
+                    .b = @as(u32, @as(u16, @truncate(m.arms_start))) | (@as(u32, m.arms_count) << 16),
+                });
+            },
+            .match_arm => blk: {
+                const a = node.data.match_arm;
+                break :blk self.addNode(.match_arm, loc, .{
+                    .a = a.pattern,
+                    .b = a.body,
+                });
+            },
+            .match_pattern => blk: {
+                const p = node.data.match_pattern;
+                break :blk self.addNode(.match_pattern, loc, .{
+                    .a = p.props_start,
+                    .b = @as(u32, p.props_count),
                 });
             },
             .return_stmt, .throw_stmt => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
@@ -1960,6 +2011,53 @@ pub const IrView = struct {
                     .test_expr = d.a,
                     .body_start = list_ref.start,
                     .body_count = list_ref.count,
+                };
+            },
+        };
+    }
+
+    /// Get match expression data
+    pub fn getMatchExpr(self: IrView, idx: NodeIndex) ?Node.MatchExpr {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_expr else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                const list_ref = unpackListRef(d.b);
+                break :blk .{
+                    .discriminant = d.a,
+                    .arms_start = list_ref.start,
+                    .arms_count = @truncate(list_ref.count),
+                };
+            },
+        };
+    }
+
+    /// Get match arm data
+    pub fn getMatchArm(self: IrView, idx: NodeIndex) ?Node.MatchArm {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_arm else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .pattern = d.a,
+                    .body = d.b,
+                };
+            },
+        };
+    }
+
+    /// Get match pattern (object pattern) data
+    pub fn getMatchPattern(self: IrView, idx: NodeIndex) ?Node.MatchPatternObj {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_pattern else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .props_start = d.a,
+                    .props_count = @truncate(d.b),
                 };
             },
         };

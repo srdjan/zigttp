@@ -151,6 +151,10 @@ pub const TokenType = enum(u8) {
     kw_private,
     kw_protected,
 
+    // Match expression keywords
+    kw_match,
+    kw_when,
+
     // Decorator
     at_sign, // @
 
@@ -208,7 +212,7 @@ pub const Token = struct {
     /// Check if this token is a keyword
     pub fn isKeyword(self: Token) bool {
         return @intFromEnum(self.type) >= @intFromEnum(TokenType.kw_var) and
-            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_protected);
+            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_when);
     }
 
     /// Check if this token is an assignment operator
@@ -268,6 +272,7 @@ pub const Token = struct {
             .kw_await,
             .kw_class,
             .kw_super,
+            .kw_match,
             .lt, // JSX element start
             => true,
             else => false,
@@ -324,6 +329,8 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "public", .kw_public },
     .{ "private", .kw_private },
     .{ "protected", .kw_protected },
+    .{ "match", .kw_match },
+    .{ "when", .kw_when },
     .{ "true", .true_lit },
     .{ "false", .false_lit },
     .{ "null", .null_lit },

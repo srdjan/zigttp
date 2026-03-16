@@ -244,6 +244,7 @@ pub const HandlerAnalyzer = struct {
         switch (tag) {
             .if_stmt => try self.extractPatternFromIfStmt(stmt_node),
             .switch_stmt => try self.extractPatternFromSwitchStmt(stmt_node),
+            .return_stmt => try self.extractPatternFromReturnMatch(stmt_node),
             else => return,
         }
     }
@@ -328,6 +329,87 @@ pub const HandlerAnalyzer = struct {
                 .body_source = response.body_source,
             });
         }
+    }
+
+    fn extractPatternFromReturnMatch(self: *HandlerAnalyzer, stmt_node: NodeIndex) !void {
+        // Check if this return statement returns a match expression
+        const return_val = self.ir.getOptValue(stmt_node) orelse return;
+        if (return_val == null_node) return;
+        const val_tag = self.ir.getTag(return_val) orelse return;
+        if (val_tag != .match_expr) return;
+
+        const match_e = self.ir.getMatchExpr(return_val) orelse return;
+
+        // Check if discriminant is the request binding
+        const discr_tag = self.ir.getTag(match_e.discriminant) orelse return;
+        if (discr_tag != .identifier) return;
+
+        var i: u8 = 0;
+        while (i < match_e.arms_count) : (i += 1) {
+            const arm_idx = self.ir.getListIndex(match_e.arms_start, i);
+            const arm = self.ir.getMatchArm(arm_idx) orelse continue;
+            if (arm.pattern == null_node) continue; // default arm
+
+            const pattern_tag = self.ir.getTag(arm.pattern) orelse continue;
+
+            if (pattern_tag == .match_pattern) {
+                // Object pattern: extract method/path from properties
+                try self.extractPatternFromMatchObject(arm.pattern, arm.body);
+            } else if (pattern_tag == .lit_string) {
+                // Literal pattern on request - treat as route match
+                const route_info = self.analyzeSwitchCaseExact(arm.pattern) orelse continue;
+                const response = (try self.analyzeResponseCall(arm.body)) orelse {
+                    self.allocator.free(route_info.url_bytes);
+                    continue;
+                };
+                try self.patterns.append(self.allocator, .{
+                    .pattern_type = route_info.pattern_type,
+                    .url_atom = route_info.url_atom,
+                    .url_bytes = route_info.url_bytes,
+                    .static_body = response.body,
+                    .status = response.status,
+                    .content_type_idx = response.content_type_idx,
+                    .body_source = response.body_source,
+                });
+            }
+        }
+    }
+
+    fn extractPatternFromMatchObject(self: *HandlerAnalyzer, pattern_node: NodeIndex, body: NodeIndex) !void {
+        const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
+        var path_str: ?[]const u8 = null;
+
+        var j: u8 = 0;
+        while (j < pattern.props_count) : (j += 1) {
+            const prop_idx = self.ir.getListIndex(pattern.props_start, j);
+            const prop = self.ir.getProperty(prop_idx) orelse continue;
+            const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
+            const key_str = self.ir.getString(key_str_idx) orelse continue;
+
+            if (std.mem.eql(u8, key_str, "path") or std.mem.eql(u8, key_str, "url")) {
+                if (prop.value != null_node) {
+                    const val_tag = self.ir.getTag(prop.value) orelse continue;
+                    if (val_tag == .lit_string) {
+                        const val_str_idx = self.ir.getStringIdx(prop.value) orelse continue;
+                        path_str = self.ir.getString(val_str_idx);
+                    }
+                }
+                break;
+            }
+        }
+
+        const route_str = path_str orelse return;
+        const response = (try self.analyzeResponseCall(body)) orelse return;
+        const url_bytes = self.allocator.dupe(u8, route_str) catch return;
+        try self.patterns.append(self.allocator, .{
+            .pattern_type = .exact,
+            .url_atom = self.route_atom,
+            .url_bytes = url_bytes,
+            .static_body = response.body,
+            .status = response.status,
+            .content_type_idx = response.content_type_idx,
+            .body_source = response.body_source,
+        });
     }
 
     fn analyzeSwitchCaseExact(self: *HandlerAnalyzer, test_expr: NodeIndex) ?UrlPatternInfo {

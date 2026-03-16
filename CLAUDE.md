@@ -178,7 +178,7 @@ All error messages follow the pattern: "'feature' is not supported; use X instea
 
 ## JavaScript Runtime
 
-**Supported**: ES5 + arrow functions, template literals, destructuring, spread operator, `for...of` (arrays), optional chaining, nullish coalescing, typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`.
+**Supported**: ES5 + arrow functions, template literals, destructuring, spread operator, `for...of` (arrays), optional chaining, nullish coalescing, typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching).
 
 **Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API. Classes, async/await, Promises, `var`, `while`/`do-while`, `this`, `new`, `try/catch`, regular expressions are all detected at parse time with helpful error messages.
 

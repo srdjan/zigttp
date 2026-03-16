@@ -54,6 +54,9 @@ pub const DiagnosticKind = enum {
     // Dead variables (Check 4)
     unused_variable,
     unused_import,
+
+    // Match expression (Check 5)
+    non_exhaustive_match,
 };
 
 pub const Diagnostic = struct {
@@ -585,6 +588,27 @@ pub const HandlerVerifier = struct {
                 self.walkExprForRefs(ternary.then_branch);
                 self.walkExprForRefs(ternary.else_branch);
             },
+            .match_expr => {
+                const match_e = self.ir_view.getMatchExpr(node) orelse return;
+                self.walkExprForRefs(match_e.discriminant);
+                var has_default = false;
+                var mi: u8 = 0;
+                while (mi < match_e.arms_count) : (mi += 1) {
+                    const arm_idx = self.ir_view.getListIndex(match_e.arms_start, mi);
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    if (arm.pattern == null_node) has_default = true;
+                    self.walkExprForRefs(arm.body);
+                }
+                if (!has_default) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .non_exhaustive_match,
+                        .node = node,
+                        .message = "match expression without default arm may not produce a value",
+                        .help = "add 'default:' or 'when _:' arm to handle all cases",
+                    });
+                }
+            },
             .assignment => {
                 const assign = self.ir_view.getAssignment(node) orelse return;
                 self.walkExprForRefs(assign.target);
@@ -986,6 +1010,7 @@ test "DiagnosticKind enum values" {
         .unreachable_after_return,
         .unused_variable,
         .unused_import,
+        .non_exhaustive_match,
     };
     for (kinds, 0..) |k, i| {
         for (kinds, 0..) |k2, j| {
