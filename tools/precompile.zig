@@ -441,17 +441,12 @@ fn compileHandler(
     // even if the transpiler succeeded (transpiler doesn't produce a dispatch table).
     var contract: ?HandlerContract = null;
     if (emit_contract) {
-        var contract_aot = aot;
-        var owns_contract_aot = false;
-        if (contract_aot == null) {
-            contract_aot = try analyzeAot(allocator, &js_parser, &atoms, root);
-            owns_contract_aot = true;
-        }
-        contract = try buildContract(allocator, &js_parser, &atoms, filename, root, contract_aot, verify_info);
-        // Free the AOT analysis if we created it just for the contract
-        if (owns_contract_aot) {
-            if (contract_aot) |*ca| ca.deinit(allocator);
-        }
+        // Run AOT analysis for route extraction if not already done
+        var temp_aot = if (aot == null) try analyzeAot(allocator, &js_parser, &atoms, root) else null;
+        defer if (temp_aot) |*t| t.deinit(allocator);
+        const effective_aot = aot orelse temp_aot;
+
+        contract = try buildContract(allocator, &js_parser, &atoms, filename, root, effective_aot, verify_info);
     }
 
     return .{
@@ -601,9 +596,6 @@ fn analyzeAot(
     }
 
     if (dispatch == null and default_response == null) {
-        if (default_response) |resp| {
-            if (resp.body.len > 0) allocator.free(resp.body);
-        }
         return null;
     }
 
@@ -633,30 +625,8 @@ fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
     return count;
 }
 
-fn findHandlerFunction(ir_view: ir.IrView, root: ir.NodeIndex) ?ir.NodeIndex {
-    const tag = ir_view.getTag(root) orelse return null;
-    if (tag != .program and tag != .block) return null;
-    const block = ir_view.getBlock(root) orelse return null;
-
-    var i: u16 = 0;
-    while (i < block.stmts_count) : (i += 1) {
-        const stmt_idx = ir_view.getListIndex(block.stmts_start, i);
-        const stmt_tag = ir_view.getTag(stmt_idx) orelse continue;
-
-        if (stmt_tag == .function_decl or stmt_tag == .var_decl) {
-            const decl = ir_view.getVarDecl(stmt_idx) orelse continue;
-            if (decl.binding.kind != .global) continue;
-            if (decl.binding.slot != @intFromEnum(zts.Atom.handler)) continue;
-
-            const init_tag = ir_view.getTag(decl.init) orelse continue;
-            if (init_tag == .function_expr or init_tag == .arrow_function) {
-                return decl.init;
-            }
-        }
-    }
-
-    return null;
-}
+// findHandlerFunction is defined in handler_verifier.zig and exported via zts.
+const findHandlerFunction = zts.handler_verifier.findHandlerFunction;
 
 /// Build a contract manifest from the parsed IR.
 fn buildContract(

@@ -16,7 +16,11 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
 
+**Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges, no exceptions, and no non-local jumps - the IR tree IS the control flow graph. See [verification docs](docs/verification.md).
+
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
+
+**Contract manifests.** `-Dcontract` emits a machine-readable `contract.json` describing what your handler is allowed to do: which modules it imports, which env vars it reads, which hosts it calls, which cache namespaces it uses. Non-literal arguments honestly report `"dynamic": true`. No other JS runtime can do this because full JS is not statically analyzable.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 
@@ -215,6 +219,8 @@ Options:
 
 **HTTP/FaaS Optimizations**: Shape preallocation for Request/Response objects, pre-interned HTTP atoms, HTTP string caching, LockFreePool handler isolation, zero-copy response mode.
 
+**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract manifests (`-Dcontract`) enumerate capabilities. Build-time precompilation eliminates runtime parsing.
+
 **Language Support**: ES5 + select ES6 features (for...of, typed arrays, exponentiation), native TypeScript/TSX stripping, compile-time evaluation with `comptime()`, direct JSX parsing.
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
@@ -260,9 +266,9 @@ const raw = httpRequest(JSON.stringify({
 `httpRequest` returns JSON with either `{ ok: true, status, reason, body, content_type? }` or `{ ok: false, error, details }`.
 Use `--outbound-host` to restrict egress to a single host.
 
-## Build-Time Precompilation
+## Compile-Time Toolchain
 
-For production deployments, precompile handlers at build time to eliminate all runtime parsing and achieve the fastest cold starts:
+zigttp's compile-time toolchain goes beyond precompilation. It can verify your handler is correct, extract a contract manifest of its capabilities, and embed optimized bytecode - all at build time.
 
 ```bash
 # Development build (runtime handler loading)
@@ -270,7 +276,68 @@ zig build -Doptimize=ReleaseFast
 
 # Production build (embedded bytecode, 16% faster cold starts)
 zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
+
+# Verify handler correctness at compile time
+zig build -Dhandler=handler.ts -Dverify
+
+# Emit contract manifest (what the handler is allowed to do)
+zig build -Dhandler=handler.ts -Dcontract
+
+# Combine all passes
+zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Daot
 ```
+
+### Handler Verification (`-Dverify`)
+
+The verifier statically proves three properties of your handler at compile time:
+
+1. **Every code path returns a Response.** Missing `else` branches, `switch` cases without `default`, and paths that fall through without returning are all caught.
+2. **Result values are checked before access.** Calls like `jwtVerify` and `validateJson` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
+3. **No unreachable code.** Statements after an unconditional return produce a warning.
+
+This works because zigttp's JS subset eliminates all non-trivial control flow - no `while`, no `try/catch`, no `break/continue`. The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+
+```
+$ zig build -Dhandler=handler.ts -Dverify
+
+verify error: not all code paths return a Response
+  --> handler.ts:2:17
+   |
+  2 | function handler(req) {
+   |                 ^
+   = help: ensure every branch (if/else, switch/default) ends with a return statement
+```
+
+See [docs/verification.md](docs/verification.md) for the full specification.
+
+### Contract Manifest (`-Dcontract`)
+
+The contract describes what your handler does before it runs. It extracts:
+
+- **Virtual modules** imported and which functions are used
+- **Environment variables** accessed via `env("NAME")` - literal names are enumerated, dynamic access is flagged
+- **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
+- **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
+- **Verification results** (when combined with `-Dverify`)
+- **Route patterns** (when combined with `-Daot`)
+
+```json
+{
+  "version": 1,
+  "modules": ["zigttp:auth", "zigttp:cache"],
+  "functions": {
+    "zigttp:auth": ["jwtVerify", "parseBearer"],
+    "zigttp:cache": ["cacheGet", "cacheSet"]
+  },
+  "env": { "literal": ["JWT_SECRET"], "dynamic": false },
+  "egress": { "hosts": ["api.example.com"], "dynamic": false },
+  "cache": { "namespaces": ["sessions"], "dynamic": false }
+}
+```
+
+The `"dynamic": false` fields are the key signal. They mean "we can enumerate every value statically." When a handler uses a variable instead of a string literal (`env(someVar)` instead of `env("JWT_SECRET")`), the contract honestly reports `"dynamic": true`.
+
+### Precompiled Bytecode
 
 **Cold Start Performance**:
 
@@ -312,6 +379,7 @@ See [Performance](docs/performance.md) for detailed profiling analysis and deplo
 ## Documentation
 
 - [User Guide](docs/user-guide.md) - Complete handler API reference, routing patterns, examples
+- [Verification](docs/verification.md) - Compile-time handler verification: checks, diagnostics, examples
 - [Architecture](docs/architecture.md) - System design, runtime model, project structure
 - [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
 - [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation

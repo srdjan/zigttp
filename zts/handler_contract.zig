@@ -171,12 +171,26 @@ pub const ContractBuilder = struct {
         };
     }
 
+    /// Free all builder-owned resources. Safe to call whether or not build()
+    /// was called: if build() moved the lists into a HandlerContract, the
+    /// items slices are empty and these loops are no-ops.
     pub fn deinit(self: *ContractBuilder) void {
         self.env_binding_slots.deinit(self.allocator);
         self.cache_binding_slots.deinit(self.allocator);
-        // Note: collected string lists are moved into the HandlerContract
-        // and freed there. Only free them here if build() was never called
-        // or if we need to clean up on error.
+        for (self.env_literals.items) |s| self.allocator.free(s);
+        self.env_literals.deinit(self.allocator);
+        for (self.egress_hosts.items) |s| self.allocator.free(s);
+        self.egress_hosts.deinit(self.allocator);
+        for (self.cache_namespaces.items) |s| self.allocator.free(s);
+        self.cache_namespaces.deinit(self.allocator);
+        for (self.modules_list.items) |s| self.allocator.free(s);
+        self.modules_list.deinit(self.allocator);
+        for (self.functions_map.items) |*entry| {
+            self.allocator.free(entry.module);
+            for (entry.names.items) |n| self.allocator.free(n);
+            entry.names.deinit(self.allocator);
+        }
+        self.functions_map.deinit(self.allocator);
     }
 
     /// Build the contract from the IR. Single-pass walk over all nodes.
@@ -197,6 +211,10 @@ pub const ContractBuilder = struct {
 
         // Build routes from dispatch table
         var routes: std.ArrayList(RouteInfo) = .empty;
+        errdefer {
+            for (routes.items) |r| self.allocator.free(r.pattern);
+            routes.deinit(self.allocator);
+        }
         if (dispatch) |d| {
             for (d.patterns) |pattern| {
                 const is_aot = switch (pattern.pattern_type) {
@@ -246,7 +264,7 @@ pub const ContractBuilder = struct {
             };
         }
 
-        return .{
+        const contract = HandlerContract{
             .handler = .{
                 .path = try self.allocator.dupe(u8, handler_path),
                 .line = if (handler_loc) |loc| loc.line else 0,
@@ -270,6 +288,15 @@ pub const ContractBuilder = struct {
             .verification = verification,
             .aot = aot_info,
         };
+
+        // Clear moved lists so deinit() won't double-free
+        self.modules_list = .empty;
+        self.functions_map = .empty;
+        self.env_literals = .empty;
+        self.egress_hosts = .empty;
+        self.cache_namespaces = .empty;
+
+        return contract;
     }
 
     // -----------------------------------------------------------------
@@ -292,6 +319,7 @@ pub const ContractBuilder = struct {
             // Add module to list (deduplicated, duped)
             if (!containsString(self.modules_list.items, module_str)) {
                 const duped = try self.allocator.dupe(u8, module_str);
+                errdefer self.allocator.free(duped);
                 try self.modules_list.append(self.allocator, duped);
             }
 
@@ -306,6 +334,7 @@ pub const ContractBuilder = struct {
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
 
                 const name_duped = try self.allocator.dupe(u8, imported_name);
+                errdefer self.allocator.free(name_duped);
                 try func_names.append(self.allocator, name_duped);
                 func_module_str = module_str;
 
@@ -346,6 +375,7 @@ pub const ContractBuilder = struct {
                 }
                 if (!merged) {
                     const module_duped = try self.allocator.dupe(u8, func_module_str);
+                    errdefer self.allocator.free(module_duped);
                     try self.functions_map.append(self.allocator, .{
                         .module = module_duped,
                         .names = func_names,
@@ -380,27 +410,37 @@ pub const ContractBuilder = struct {
                 if (binding.kind == .undeclared_global) {
                     const name = self.resolveAtomName(binding.slot) orelse continue;
                     if (std.mem.eql(u8, name, "fetchSync")) {
-                        try self.extractEgressFromCall(call);
+                        try self.extractLiteralArg(call, &self.egress_hosts, &self.egress_dynamic, &extractHost);
                         continue;
                     }
                 }
 
                 // Check for env() calls
                 if (self.isEnvBinding(binding.slot)) {
-                    try self.extractEnvFromCall(call);
+                    try self.extractLiteralArg(call, &self.env_literals, &self.env_dynamic, null);
                     continue;
                 }
 
                 // Check for cache calls
                 if (self.isCacheBindingWithNamespace(binding.slot)) {
-                    try self.extractCacheFromCall(call);
+                    try self.extractLiteralArg(call, &self.cache_namespaces, &self.cache_dynamic, null);
                     continue;
                 }
             }
         }
     }
 
-    fn extractEnvFromCall(self: *ContractBuilder, call: Node.CallExpr) !void {
+    /// Extract a literal string from the first argument of a call and append
+    /// it (deduped, owned) to `target`. If the argument is non-literal, set
+    /// `dynamic_flag`. An optional `transform` narrows the extracted string
+    /// (e.g. extractHost for URLs) - returning empty means "treat as dynamic".
+    fn extractLiteralArg(
+        self: *ContractBuilder,
+        call: Node.CallExpr,
+        target: *std.ArrayList([]const u8),
+        dynamic_flag: *bool,
+        transform: ?*const fn ([]const u8) []const u8,
+    ) !void {
         if (call.args_count < 1) return;
 
         const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
@@ -408,54 +448,19 @@ pub const ContractBuilder = struct {
 
         if (arg_tag == .lit_string) {
             const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
-            const str = self.ir_view.getString(str_idx) orelse return;
-            if (!containsString(self.env_literals.items, str)) {
-                const duped = try self.allocator.dupe(u8, str);
-                try self.env_literals.append(self.allocator, duped);
-            }
-        } else {
-            self.env_dynamic = true;
-        }
-    }
-
-    fn extractEgressFromCall(self: *ContractBuilder, call: Node.CallExpr) !void {
-        if (call.args_count < 1) return;
-
-        const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
-        const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
-
-        if (arg_tag == .lit_string) {
-            const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
-            const url_str = self.ir_view.getString(str_idx) orelse return;
-            const host = extractHost(url_str);
-            if (host.len > 0) {
-                if (!containsString(self.egress_hosts.items, host)) {
-                    const duped = try self.allocator.dupe(u8, host);
-                    try self.egress_hosts.append(self.allocator, duped);
+            const raw = self.ir_view.getString(str_idx) orelse return;
+            const value = if (transform) |t| t(raw) else raw;
+            if (value.len > 0) {
+                if (!containsString(target.items, value)) {
+                    const duped = try self.allocator.dupe(u8, value);
+                    errdefer self.allocator.free(duped);
+                    try target.append(self.allocator, duped);
                 }
             } else {
-                self.egress_dynamic = true;
+                dynamic_flag.* = true;
             }
         } else {
-            self.egress_dynamic = true;
-        }
-    }
-
-    fn extractCacheFromCall(self: *ContractBuilder, call: Node.CallExpr) !void {
-        if (call.args_count < 1) return;
-
-        const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
-        const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
-
-        if (arg_tag == .lit_string) {
-            const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
-            const ns = self.ir_view.getString(str_idx) orelse return;
-            if (!containsString(self.cache_namespaces.items, ns)) {
-                const duped = try self.allocator.dupe(u8, ns);
-                try self.cache_namespaces.append(self.allocator, duped);
-            }
-        } else {
-            self.cache_dynamic = true;
+            dynamic_flag.* = true;
         }
     }
 
@@ -668,7 +673,7 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
             '\r' => try writer.writeAll("\\r"),
             '\t' => try writer.writeAll("\\t"),
             0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
-                try writer.print("\\u{d:0>4}", .{@as(u16, c)});
+                try writer.print("\\u{x:0>4}", .{@as(u16, c)});
             },
             else => try writer.writeByte(c),
         }

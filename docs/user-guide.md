@@ -20,8 +20,10 @@ Functions, Cloudflare Workers), powered by Zig and zts.
 11. [JavaScript Subset Reference](#javascript-subset-reference)
 12. [TypeScript Support](#typescript-support)
 13. [Complete Examples](#complete-examples)
-14. [Performance Tuning](#performance-tuning)
-15. [Troubleshooting](#troubleshooting)
+14. [Performance Tuning](#performance-tuning-for-faas)
+15. [Compile-Time Verification](#compile-time-verification)
+16. [Contract Manifest](#contract-manifest)
+17. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1651,6 +1653,62 @@ aws lambda create-function --function-name my-function \
 #### Cloudflare Workers (via Wasm)
 
 Build with wasm32 target for edge deployment (experimental).
+
+---
+
+## Compile-Time Verification
+
+zigttp can statically prove your handler is correct at build time. Add `-Dverify` to any build command:
+
+```bash
+zig build -Dhandler=handler.ts -Dverify
+```
+
+The verifier checks three properties:
+
+1. **Exhaustive returns** - every code path through the handler returns a Response
+2. **Result safety** - Result values from `jwtVerify`, `validateJson`, etc. have `.ok` checked before `.value` is accessed
+3. **Unreachable code** - statements after unconditional returns are flagged (warning)
+
+This is possible because zigttp's JS subset bans all non-trivial control flow (`while`, `try/catch`, `break/continue`). The IR tree is the control flow graph.
+
+Example diagnostic:
+
+```
+verify error: not all code paths return a Response
+  --> handler.ts:2:17
+   |
+  2 | function handler(req) {
+   |                 ^
+   = help: ensure every branch (if/else, switch/default) ends with a return statement
+```
+
+See [verification.md](verification.md) for the full specification, recognized patterns, and test fixtures.
+
+## Contract Manifest
+
+Add `-Dcontract` to emit a `contract.json` describing your handler's capabilities:
+
+```bash
+zig build -Dhandler=handler.ts -Dcontract
+```
+
+The contract extracts from the handler's IR:
+
+- Which `zigttp:*` virtual modules are imported and which functions are used
+- Literal env var names from `env("NAME")` calls
+- Outbound hosts from `fetchSync("https://...")` URL arguments
+- Cache namespace strings from `cacheGet`/`cacheSet`/etc.
+- Verification results (when combined with `-Dverify`)
+
+Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an honest signal that static analysis cannot enumerate all values.
+
+```bash
+# Combine verification and contract
+zig build -Dhandler=handler.ts -Dverify -Dcontract
+```
+
+The contract is written to `src/generated/contract.json` alongside the embedded bytecode.
 
 ---
 
