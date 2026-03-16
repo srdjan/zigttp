@@ -203,7 +203,7 @@ Options:
   -n, --pool <N>        Runtime pool size (default: auto)
   --cors                Enable CORS headers
   --static <DIR>        Serve static files
-  --outbound-http       Enable native outbound bridge (httpRequest)
+  --outbound-http       Enable native outbound bridge (fetchSync/httpRequest)
   --outbound-host <H>   Restrict outbound bridge to exact host H
   --outbound-timeout-ms Connect timeout for outbound bridge (ms)
   --outbound-max-response <SIZE>
@@ -221,7 +221,7 @@ Options:
 
 **Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
-**Developer Experience**: Fetch-like HTTP surface (`Response.*`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
+**Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
 ## Native Outbound Bridge
 
@@ -237,6 +237,15 @@ const data = resp.json();
 ```
 
 `fetchSync()` returns a response-shaped object with `status`, `ok`, `headers.get(name)`, `text()`, and `json()`.
+
+Current helper semantics:
+- `headers.get(name)` is case-insensitive and returns the last observed value for that header name, or `null`.
+- `Headers(init?)`, `Request(url, init?)`, and `Response(body, init?)` are available as factory-style HTTP types. `new` is not supported by the parser, so call them as plain functions.
+- `Headers` instances support `get(name)`, `set(name, value)`, `append(name, value)`, `has(name)`, and `delete(name)`.
+- `text()` returns the raw body string, or `""` when no body is present.
+- `json()` returns parsed JSON, or `undefined` when the body is empty or invalid JSON.
+- Body readers are single-use. Once `text()` or `json()` is called on a request/response object, subsequent body reads throw. Use `request.body` if you need the raw body string without consuming it.
+- Validation, allowlist, network, timeout, and size-limit failures do not throw into handler code; `fetchSync()` returns a `599` response with a JSON body containing `error` and `details`.
 
 The lower-level `httpRequest(jsonString)` bridge remains available:
 

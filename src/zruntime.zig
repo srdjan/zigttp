@@ -11,6 +11,7 @@ const ascii = std.ascii;
 // Import zts module
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
+const http_parser = @import("http_parser.zig");
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
@@ -161,11 +162,14 @@ pub const Runtime = struct {
     cached_handler_obj: ?*zq.JSObject,
     cached_dispatch: ?*const zq.bytecode.PatternDispatchTable,
     config: RuntimeConfig,
+    outbound_io_backend: ?std.Io.Threaded,
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
     last_request_body_len: usize,
-    body_reader_prototype: ?*zq.JSObject,
+    request_prototype: ?*zq.JSObject,
+    response_prototype: ?*zq.JSObject,
     headers_prototype: ?*zq.JSObject,
+    consumed_body_objects: std.AutoHashMapUnmanaged(*zq.JSObject, void),
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
@@ -232,11 +236,17 @@ pub const Runtime = struct {
             .cached_handler_obj = null,
             .cached_dispatch = null,
             .config = config,
+            .outbound_io_backend = if (config.outbound_http_enabled)
+                std.Io.Threaded.init(allocator, .{ .environ = .empty })
+            else
+                null,
             .owns_resources = true,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
-            .body_reader_prototype = null,
+            .request_prototype = null,
+            .response_prototype = null,
             .headers_prototype = null,
+            .consumed_body_objects = .{},
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
@@ -266,11 +276,17 @@ pub const Runtime = struct {
             .cached_handler_obj = null,
             .cached_dispatch = null,
             .config = config,
+            .outbound_io_backend = if (config.outbound_http_enabled)
+                std.Io.Threaded.init(allocator, .{ .environ = .empty })
+            else
+                null,
             .owns_resources = false,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
-            .body_reader_prototype = null,
+            .request_prototype = null,
+            .response_prototype = null,
             .headers_prototype = null,
+            .consumed_body_objects = .{},
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
@@ -290,6 +306,10 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Self) void {
         self.strings.deinit();
+        self.consumed_body_objects.deinit(self.allocator);
+        if (self.outbound_io_backend) |*io_backend| {
+            io_backend.deinit();
+        }
         if (self.owns_resources) {
             // Clean up hybrid allocation state
             if (self.arena_state) |a| {
@@ -316,7 +336,7 @@ pub const Runtime = struct {
         self.cached_handler_obj = null;
         self.cached_dispatch = null;
 
-        try self.installHttpHelperPrototypes();
+        try self.installHttpConstructors();
         // Install console object
         try self.installConsole();
         try self.installHttpRequest();
@@ -331,20 +351,73 @@ pub const Runtime = struct {
         // Don't re-register them here as it would overwrite the proper constructor
     }
 
-    fn installHttpHelperPrototypes(self: *Self) !void {
+    fn installHttpConstructors(self: *Self) !void {
         const root_class_idx = self.ctx.root_class_idx;
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
-        const body_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
-        try self.addDynamicMethod(body_proto, "text", bodyTextNative, 0);
-        try self.addDynamicMethod(body_proto, "json", bodyJsonNative, 0);
-        try self.ctx.builtin_objects.append(self.allocator, body_proto);
+        const request_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        try self.addDynamicMethod(request_proto, "text", bodyTextNative, 0);
+        try self.addDynamicMethod(request_proto, "json", bodyJsonNative, 0);
+        try self.ctx.builtin_objects.append(self.allocator, request_proto);
+
+        const response_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        try self.addDynamicMethod(response_proto, "text", bodyTextNative, 0);
+        try self.addDynamicMethod(response_proto, "json", bodyJsonNative, 0);
+        try self.ctx.builtin_objects.append(self.allocator, response_proto);
 
         const headers_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
         try self.addDynamicMethod(headers_proto, "get", headersGetNative, 1);
+        try self.addDynamicMethod(headers_proto, "set", headersSetNative, 2);
+        try self.addDynamicMethod(headers_proto, "append", headersAppendNative, 2);
+        try self.addDynamicMethod(headers_proto, "has", headersHasNative, 1);
+        try self.addDynamicMethod(headers_proto, "delete", headersDeleteNative, 1);
         try self.ctx.builtin_objects.append(self.allocator, headers_proto);
 
-        self.body_reader_prototype = body_proto;
+        const headers_ctor_atom = try self.ctx.atoms.intern("Headers");
+        const headers_ctor = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            headersConstructorNative,
+            headers_ctor_atom,
+            1,
+        );
+        try self.ctx.setPropertyChecked(headers_ctor, .prototype, headers_proto.toValue());
+        try self.ctx.builtin_objects.append(self.allocator, headers_ctor);
+        try self.ctx.setGlobal(headers_ctor_atom, headers_ctor.toValue());
+
+        const request_ctor_atom = try self.ctx.atoms.intern("Request");
+        const request_ctor = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            requestConstructorNative,
+            request_ctor_atom,
+            2,
+        );
+        try self.ctx.setPropertyChecked(request_ctor, .prototype, request_proto.toValue());
+        try self.ctx.builtin_objects.append(self.allocator, request_ctor);
+        try self.ctx.setGlobal(request_ctor_atom, request_ctor.toValue());
+
+        const response_ctor = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            responseConstructorNative,
+            .Response,
+            2,
+        );
+        try self.ctx.setPropertyChecked(response_ctor, .prototype, response_proto.toValue());
+        try self.addMethod(response_ctor, .json, responseJsonStaticNative, 1);
+        try self.addMethod(response_ctor, .text, responseTextStaticNative, 1);
+        try self.addMethod(response_ctor, .html, responseHtmlStaticNative, 1);
+        try self.addDynamicMethod(response_ctor, "redirect", responseRedirectStaticNative, 1);
+        try self.addMethod(response_ctor, .rawJson, responseRawJsonStaticNative, 1);
+        try self.ctx.builtin_objects.append(self.allocator, response_ctor);
+        try self.ctx.setGlobal(.Response, response_ctor.toValue());
+
+        self.request_prototype = request_proto;
+        self.response_prototype = response_proto;
         self.headers_prototype = headers_proto;
     }
 
@@ -1066,7 +1139,7 @@ pub const Runtime = struct {
         // If not available, fall back to dynamic object creation.
         const shapes = self.ctx.http_shapes orelse return self.createRequestObjectDynamic(request);
 
-        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, self.body_reader_prototype);
+        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, self.request_prototype);
 
         // URL
         const url_str = try self.ctx.createString(request.url);
@@ -1088,15 +1161,7 @@ pub const Runtime = struct {
         req_obj.setSlot(shapes.request.path_slot, path_val);
 
         // Query - create object from parsed query parameters
-        const query_obj = try self.ctx.createObject(null);
-        for (request.query_params) |param| {
-            const key_atom = try self.ctx.atoms.intern(param.key);
-            const param_val = if (parseQueryInt(param.value)) |int_val|
-                zq.JSValue.fromInt(int_val)
-            else
-                try self.ctx.createString(param.value);
-            try self.ctx.setPropertyChecked(query_obj, key_atom, param_val);
-        }
+        const query_obj = try buildQueryObject(self.ctx, request.query_params);
         req_obj.setSlot(shapes.request.query_slot, query_obj.toValue());
 
         // Body
@@ -1132,7 +1197,7 @@ pub const Runtime = struct {
     /// Fallback for creating request objects when http_shapes is not available.
     /// This is slower than the shaped path but handles edge cases.
     fn createRequestObjectDynamic(self: *Self, request: HttpRequestView) !zq.JSValue {
-        const req_obj = try self.ctx.createObject(self.body_reader_prototype);
+        const req_obj = try self.ctx.createObject(self.request_prototype);
 
         const url_str = try self.ctx.createString(request.url);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.url, url_str);
@@ -1150,15 +1215,7 @@ pub const Runtime = struct {
             try self.ctx.createString(path_slice);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.path, path_val);
 
-        const query_obj = try self.ctx.createObject(null);
-        for (request.query_params) |param| {
-            const key_atom = try self.ctx.atoms.intern(param.key);
-            const param_val = if (parseQueryInt(param.value)) |int_val|
-                zq.JSValue.fromInt(int_val)
-            else
-                try self.ctx.createString(param.value);
-            try self.ctx.setPropertyChecked(query_obj, key_atom, param_val);
-        }
+        const query_obj = try buildQueryObject(self.ctx, request.query_params);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.query, query_obj.toValue());
 
         if (request.body) |body| {
@@ -1356,6 +1413,7 @@ pub const Runtime = struct {
         self.ctx.sp = 0;
         self.ctx.call_depth = 0;
         self.ctx.clearException();
+        self.consumed_body_objects.clearRetainingCapacity();
 
         // Reset ephemeral allocations when hybrid allocation is enabled
         if (self.hybrid_state) |h| {
@@ -1447,11 +1505,278 @@ fn getDynamicProperty(ctx: *zq.Context, obj: *zq.JSObject, pool: *const zq.Hidde
     return obj.getProperty(pool, atom);
 }
 
+fn getObjectProperty(ctx: *zq.Context, obj: *zq.JSObject, pool: *const zq.HiddenClassPool, atom: zq.Atom, name: []const u8) ?zq.JSValue {
+    if (obj.getProperty(pool, atom)) |value| return value;
+    if (getDynamicProperty(ctx, obj, pool, name)) |value| return value;
+
+    const keys = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return null;
+    defer ctx.allocator.free(keys);
+    for (keys) |key_atom| {
+        const key_name = ctx.atoms.getName(key_atom) orelse continue;
+        if (!std.mem.eql(u8, key_name, name)) continue;
+        return obj.getOwnProperty(pool, key_atom);
+    }
+    return null;
+}
+
 fn getHeaderAtom(ctx: *zq.Context, name: []const u8) !zq.Atom {
     if (ascii.eqlIgnoreCase(name, "content-type")) {
         return try ctx.atoms.intern("Content-Type");
     }
     return Runtime.headerKeyToAtom(name) orelse try ctx.atoms.intern(name);
+}
+
+const HeaderAssignMode = enum {
+    replace,
+    append,
+};
+
+fn statusTextFor(status: u16) []const u8 {
+    return switch (status) {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        599 => "Network Connect Timeout Error",
+        else => "Unknown",
+    };
+}
+
+fn normalizeStatus(status_val: zq.JSValue, default_status: u16) u16 {
+    if (!status_val.isInt()) return default_status;
+    const raw = status_val.getInt();
+    if (raw < 100 or raw > 599) return 500;
+    return @intCast(raw);
+}
+
+fn getGlobalPrototype(ctx: *zq.Context, ctor_atom: zq.Atom) ?*zq.JSObject {
+    const ctor_val = ctx.getGlobal(ctor_atom) orelse return null;
+    if (!ctor_val.isObject()) return null;
+    const pool = ctx.hidden_class_pool orelse return null;
+    const ctor_obj = ctor_val.toPtr(zq.JSObject);
+    const proto_val = ctor_obj.getProperty(pool, zq.Atom.prototype) orelse return null;
+    if (!proto_val.isObject()) return null;
+    return proto_val.toPtr(zq.JSObject);
+}
+
+fn getNamedGlobalPrototype(ctx: *zq.Context, name: []const u8) ?*zq.JSObject {
+    const atom = ctx.atoms.intern(name) catch return null;
+    return getGlobalPrototype(ctx, atom);
+}
+
+fn throwTypeError(ctx: *zq.Context, message: []const u8) zq.JSValue {
+    const message_val = ctx.createString(message) catch {
+        ctx.throwException(zq.JSValue.exception_val);
+        return zq.JSValue.exception_val;
+    };
+    const args = [_]zq.JSValue{message_val};
+    const err_obj = zq.builtins.typeErrorConstructor(ctx, zq.JSValue.undefined_val, &args);
+    ctx.throwException(err_obj);
+    return zq.JSValue.exception_val;
+}
+
+fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
+    if (!this.isObject()) {
+        return throwTypeError(ctx, "Body reader target must be an object");
+    }
+    const obj = this.toPtr(zq.JSObject);
+    if (current_runtime) |rt| {
+        if (rt.consumed_body_objects.contains(obj)) {
+            return throwTypeError(ctx, "Body has already been consumed");
+        }
+        rt.consumed_body_objects.put(rt.allocator, obj, {}) catch {
+            return throwTypeError(ctx, "Failed to track body consumption");
+        };
+    }
+    return getBodyValue(ctx, this) orelse zq.JSValue.null_val;
+}
+
+fn findHeaderPropertyAtom(
+    ctx: *zq.Context,
+    headers_obj: *zq.JSObject,
+    pool: *const zq.HiddenClassPool,
+    wanted: []const u8,
+) ?zq.Atom {
+    if (Runtime.headerKeyToAtom(wanted)) |known_atom| {
+        if (headers_obj.getOwnProperty(pool, known_atom) != null) return known_atom;
+    }
+    if (ascii.eqlIgnoreCase(wanted, "content-type")) {
+        const ct_atom = ctx.atoms.intern("Content-Type") catch return null;
+        if (headers_obj.getOwnProperty(pool, ct_atom) != null) return ct_atom;
+    }
+    const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return null;
+    defer ctx.allocator.free(keys);
+    for (keys) |key_atom| {
+        const key_name = ctx.atoms.getName(key_atom) orelse continue;
+        if (ascii.eqlIgnoreCase(key_name, wanted)) return key_atom;
+    }
+    return null;
+}
+
+fn getHeaderValueCaseInsensitive(
+    ctx: *zq.Context,
+    headers_obj: *zq.JSObject,
+    pool: *const zq.HiddenClassPool,
+    wanted: []const u8,
+) ?zq.JSValue {
+    const atom = findHeaderPropertyAtom(ctx, headers_obj, pool, wanted) orelse return null;
+    const value = headers_obj.getOwnProperty(pool, atom) orelse return null;
+    if (value.isUndefined() or value.isNull()) return null;
+    return value;
+}
+
+fn validateHeaderPair(name: []const u8, value: []const u8) bool {
+    if (name.len == 0) return false;
+    if (std.mem.indexOfAny(u8, name, "\r\n") != null) return false;
+    if (std.mem.indexOfAny(u8, value, "\r\n") != null) return false;
+    return true;
+}
+
+fn setHeaderValue(
+    ctx: *zq.Context,
+    headers_obj: *zq.JSObject,
+    name: []const u8,
+    value: []const u8,
+    mode: HeaderAssignMode,
+) !void {
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const target_atom = findHeaderPropertyAtom(ctx, headers_obj, pool, name) orelse try getHeaderAtom(ctx, name);
+
+    const final_value = switch (mode) {
+        .replace => try ctx.createString(value),
+        .append => blk: {
+            if (getHeaderValueCaseInsensitive(ctx, headers_obj, pool, name)) |existing_val| {
+                if (getStringData(existing_val)) |existing_str| {
+                    const combined = try std.fmt.allocPrint(ctx.allocator, "{s}, {s}", .{ existing_str, value });
+                    defer ctx.allocator.free(combined);
+                    break :blk try ctx.createString(combined);
+                }
+            }
+            break :blk try ctx.createString(value);
+        },
+    };
+    try ctx.setPropertyChecked(headers_obj, target_atom, final_value);
+}
+
+fn createHeadersObjectDynamic(ctx: *zq.Context) !*zq.JSObject {
+    return ctx.createObject(getNamedGlobalPrototype(ctx, "Headers"));
+}
+
+fn copyHeadersIntoObject(ctx: *zq.Context, src_val: zq.JSValue, dst_obj: *zq.JSObject) !void {
+    if (!src_val.isObject()) return error.InvalidHeaders;
+
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const src_obj = src_val.toPtr(zq.JSObject);
+    const keys = try src_obj.getOwnEnumerableKeys(ctx.allocator, pool);
+    defer ctx.allocator.free(keys);
+
+    for (keys) |key_atom| {
+        const key_name = ctx.atoms.getName(key_atom) orelse continue;
+        const value = src_obj.getOwnProperty(pool, key_atom) orelse continue;
+        if (value.isUndefined() or value.isNull()) continue;
+        const header_str = getStringData(value) orelse return error.InvalidHeaders;
+        if (!validateHeaderPair(key_name, header_str)) return error.InvalidHeaders;
+        try setHeaderValue(ctx, dst_obj, key_name, header_str, .replace);
+    }
+}
+
+fn splitPathAndQuery(url: []const u8) struct {
+    path: []const u8,
+    query_string: []const u8,
+} {
+    if (std.mem.indexOfScalar(u8, url, '?')) |idx| {
+        return .{
+            .path = url[0..idx],
+            .query_string = url[idx + 1 ..],
+        };
+    }
+    return .{
+        .path = url,
+        .query_string = "",
+    };
+}
+
+fn buildQueryObject(ctx: *zq.Context, query_params: []const QueryParam) !*zq.JSObject {
+    const query_obj = try ctx.createObject(null);
+    for (query_params) |param| {
+        const key_atom = try ctx.atoms.intern(param.key);
+        const param_val = if (Runtime.parseQueryInt(param.value)) |int_val|
+            zq.JSValue.fromInt(int_val)
+        else
+            try ctx.createString(param.value);
+        try ctx.setPropertyChecked(query_obj, key_atom, param_val);
+    }
+    return query_obj;
+}
+
+fn upgradeResponseValue(ctx: *zq.Context, value: zq.JSValue) !zq.JSValue {
+    if (!value.isObject()) return value;
+
+    const response_obj = value.toPtr(zq.JSObject);
+    response_obj.prototype = getGlobalPrototype(ctx, .Response);
+
+    const pool = ctx.hidden_class_pool orelse return value;
+    if (response_obj.getProperty(pool, zq.Atom.headers)) |headers_val| {
+        if (headers_val.isObject()) {
+            headers_val.toPtr(zq.JSObject).prototype = getNamedGlobalPrototype(ctx, "Headers");
+        }
+    }
+    return value;
+}
+
+const OwnedResponseHeader = struct {
+    name: []u8,
+    value: []u8,
+};
+
+const OwnedResponseHead = struct {
+    reason: []u8,
+    headers: std.ArrayListUnmanaged(OwnedResponseHeader) = .{},
+
+    fn deinit(self: *OwnedResponseHead, allocator: std.mem.Allocator) void {
+        allocator.free(self.reason);
+        for (self.headers.items) |header| {
+            allocator.free(header.name);
+            allocator.free(header.value);
+        }
+        self.headers.deinit(allocator);
+    }
+
+    fn contentType(self: *const OwnedResponseHead) ?[]const u8 {
+        for (self.headers.items) |header| {
+            if (ascii.eqlIgnoreCase(header.name, "content-type")) {
+                return header.value;
+            }
+        }
+        return null;
+    }
+};
+
+fn snapshotResponseHead(allocator: std.mem.Allocator, head: anytype) !OwnedResponseHead {
+    var owned = OwnedResponseHead{
+        .reason = try allocator.dupe(u8, head.reason),
+    };
+    errdefer owned.deinit(allocator);
+
+    var header_it = head.iterateHeaders();
+    while (header_it.next()) |header| {
+        const name = try allocator.dupe(u8, header.name);
+        errdefer allocator.free(name);
+        const value = try allocator.dupe(u8, header.value);
+        errdefer allocator.free(value);
+        try owned.headers.append(allocator, .{
+            .name = name,
+            .value = value,
+        });
+    }
+
+    return owned;
 }
 
 fn createResponseHeadersObject(rt: *Runtime) !*zq.JSObject {
@@ -1471,7 +1796,7 @@ fn createFetchResponse(rt: *Runtime, status: u16, status_text: []const u8, body:
         content_type orelse "application/octet-stream",
     );
     const response_obj = response_val.toPtr(zq.JSObject);
-    if (rt.body_reader_prototype) |proto| {
+    if (rt.response_prototype) |proto| {
         response_obj.prototype = proto;
     }
 
@@ -1521,7 +1846,8 @@ fn getBodyValue(ctx: *zq.Context, this: zq.JSValue) ?zq.JSValue {
 
 fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = getBodyValue(ctx, this) orelse return ctx.createString("");
+    const body_val = beginBodyRead(ctx, this);
+    if (ctx.hasException()) return zq.JSValue.exception_val;
     if (body_val.isNull() or body_val.isUndefined()) {
         return ctx.createString("");
     }
@@ -1533,7 +1859,8 @@ fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) 
 
 fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = getBodyValue(ctx, this) orelse return zq.JSValue.undefined_val;
+    const body_val = beginBodyRead(ctx, this);
+    if (ctx.hasException()) return zq.JSValue.exception_val;
     if (body_val.isNull() or body_val.isUndefined()) {
         return zq.JSValue.undefined_val;
     }
@@ -1548,25 +1875,194 @@ fn headersGetNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSVa
     const wanted = getStringData(args[0]) orelse return zq.JSValue.null_val;
     const pool = ctx.hidden_class_pool orelse return zq.JSValue.null_val;
     const headers_obj = this.toPtr(zq.JSObject);
-    if (Runtime.headerKeyToAtom(wanted)) |known_atom| {
-        if (headers_obj.getProperty(pool, known_atom)) |value| {
-            return value;
-        }
+    return getHeaderValueCaseInsensitive(ctx, headers_obj, pool, wanted) orelse zq.JSValue.null_val;
+}
+
+fn headersHasNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (!this.isObject() or args.len == 0) return zq.JSValue.false_val;
+
+    const wanted = getStringData(args[0]) orelse return zq.JSValue.false_val;
+    const pool = ctx.hidden_class_pool orelse return zq.JSValue.false_val;
+    const headers_obj = this.toPtr(zq.JSObject);
+    return zq.JSValue.fromBool(getHeaderValueCaseInsensitive(ctx, headers_obj, pool, wanted) != null);
+}
+
+fn headersSetLikeNative(
+    ctx: *zq.Context,
+    this: zq.JSValue,
+    args: []const zq.JSValue,
+    mode: HeaderAssignMode,
+) !zq.JSValue {
+    if (!this.isObject()) return throwTypeError(ctx, "Headers target must be an object");
+    if (args.len < 2) return throwTypeError(ctx, "Headers mutation requires name and value");
+
+    const name = getStringData(args[0]) orelse return throwTypeError(ctx, "Header name must be string");
+    const value = getStringData(args[1]) orelse return throwTypeError(ctx, "Header value must be string");
+    if (!validateHeaderPair(name, value)) {
+        return throwTypeError(ctx, "Header name/value is invalid");
     }
-    if (ascii.eqlIgnoreCase(wanted, "content-type")) {
-        if (getDynamicProperty(ctx, headers_obj, pool, "Content-Type")) |value| {
-            return value;
-        }
-    }
-    const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return zq.JSValue.null_val;
+    try setHeaderValue(ctx, this.toPtr(zq.JSObject), name, value, mode);
+    return zq.JSValue.undefined_val;
+}
+
+fn headersSetNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return headersSetLikeNative(ctx, this, args, .replace);
+}
+
+fn headersAppendNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return headersSetLikeNative(ctx, this, args, .append);
+}
+
+fn headersDeleteNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (!this.isObject() or args.len == 0) return zq.JSValue.undefined_val;
+
+    const wanted = getStringData(args[0]) orelse return zq.JSValue.undefined_val;
+    const pool = ctx.hidden_class_pool orelse return zq.JSValue.undefined_val;
+    const headers_obj = this.toPtr(zq.JSObject);
+    const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return zq.JSValue.undefined_val;
     defer ctx.allocator.free(keys);
 
     for (keys) |key_atom| {
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
         if (!ascii.eqlIgnoreCase(key_name, wanted)) continue;
-        return headers_obj.getOwnProperty(pool, key_atom) orelse zq.JSValue.null_val;
+        _ = headers_obj.deleteProperty(pool, key_atom);
     }
-    return zq.JSValue.null_val;
+    return zq.JSValue.undefined_val;
+}
+
+fn headersConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const headers_obj = try createHeadersObjectDynamic(ctx);
+
+    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) {
+        copyHeadersIntoObject(ctx, args[0], headers_obj) catch |err| switch (err) {
+            error.InvalidHeaders => return throwTypeError(ctx, "Headers(init) expects object<string,string>"),
+            else => return err,
+        };
+    }
+
+    return headers_obj.toValue();
+}
+
+fn requestConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+
+    const url = if (args.len > 0) getStringData(args[0]) else null;
+    if (url == null or url.?.len == 0) {
+        return throwTypeError(ctx, "Request(url, init?) expects a non-empty string url");
+    }
+
+    var method: []const u8 = "GET";
+    var body: ?[]const u8 = null;
+    const headers_obj = try createHeadersObjectDynamic(ctx);
+
+    if (args.len > 1 and args[1].isObject()) {
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const init = args[1].toPtr(zq.JSObject);
+
+        if (getObjectProperty(ctx, init, pool, zq.Atom.method, "method")) |method_val| {
+            method = getStringData(method_val) orelse return throwTypeError(ctx, "Request method must be string");
+        }
+        if (getObjectProperty(ctx, init, pool, zq.Atom.body, "body")) |body_val| {
+            if (body_val.isNull() or body_val.isUndefined()) {
+                body = null;
+            } else {
+                body = getStringData(body_val) orelse return throwTypeError(ctx, "Request body must be string|null");
+            }
+        }
+        if (getObjectProperty(ctx, init, pool, zq.Atom.headers, "headers")) |headers_val| {
+            copyHeadersIntoObject(ctx, headers_val, headers_obj) catch |err| switch (err) {
+                error.InvalidHeaders => return throwTypeError(ctx, "Request headers must be object<string,string>"),
+                else => return err,
+            };
+        }
+    }
+
+    const split = splitPathAndQuery(url.?);
+    const parsed_query = try http_parser.parseQueryString(ctx.allocator, split.query_string);
+    defer if (parsed_query.storage) |storage| ctx.allocator.free(storage);
+    defer if (parsed_query.decoded_storage) |storage| ctx.allocator.free(storage);
+
+    const req_obj = try ctx.createObject(getNamedGlobalPrototype(ctx, "Request"));
+    const url_val = try ctx.createString(url.?);
+    try ctx.setPropertyChecked(req_obj, zq.Atom.url, url_val);
+    try ctx.setPropertyChecked(req_obj, zq.Atom.method, try ctx.createString(method));
+    try ctx.setPropertyChecked(req_obj, zq.Atom.path, try ctx.createString(split.path));
+    try ctx.setPropertyChecked(req_obj, zq.Atom.query, (try buildQueryObject(ctx, parsed_query.params)).toValue());
+    if (body) |body_str| {
+        try ctx.setPropertyChecked(req_obj, zq.Atom.body, try ctx.createString(body_str));
+    } else {
+        try ctx.setPropertyChecked(req_obj, zq.Atom.body, zq.JSValue.null_val);
+    }
+    try ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
+
+    return req_obj.toValue();
+}
+
+fn responseConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const response_val = try zq.http.responseConstructor(ctx, zq.JSValue.undefined_val, args);
+    if (ctx.hasException()) return error.NativeFunctionError;
+
+    const upgraded = try upgradeResponseValue(ctx, response_val);
+    if (args.len < 2 or !args[1].isObject()) return upgraded;
+
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const init = args[1].toPtr(zq.JSObject);
+    const headers_val = getObjectProperty(ctx, init, pool, zq.Atom.headers, "headers") orelse return upgraded;
+
+    const response_obj = upgraded.toPtr(zq.JSObject);
+    const headers_obj = try createHeadersObjectDynamic(ctx);
+    if (response_obj.getProperty(pool, zq.Atom.headers)) |existing_headers_val| {
+        if (existing_headers_val.isObject()) {
+            try copyHeadersIntoObject(ctx, existing_headers_val, headers_obj);
+        }
+    }
+    copyHeadersIntoObject(ctx, headers_val, headers_obj) catch |err| switch (err) {
+        error.InvalidHeaders => return throwTypeError(ctx, "Response headers must be object<string,string>"),
+        else => return err,
+    };
+    try ctx.setPropertyChecked(response_obj, zq.Atom.headers, headers_obj.toValue());
+    return upgraded;
+}
+
+fn wrapResponseStatic(
+    ctx: *zq.Context,
+    this: zq.JSValue,
+    args: []const zq.JSValue,
+    func: *const fn (*anyopaque, zq.JSValue, []const zq.JSValue) anyerror!zq.JSValue,
+) !zq.JSValue {
+    const result = try func(ctx, this, args);
+    return upgradeResponseValue(ctx, result);
+}
+
+fn responseJsonStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return wrapResponseStatic(ctx, this, args, zq.http.responseJson);
+}
+
+fn responseTextStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return wrapResponseStatic(ctx, this, args, zq.http.responseText);
+}
+
+fn responseHtmlStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return wrapResponseStatic(ctx, this, args, zq.http.responseHtml);
+}
+
+fn responseRawJsonStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return wrapResponseStatic(ctx, this, args, zq.http.responseRawJson);
+}
+
+fn responseRedirectStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    return wrapResponseStatic(ctx, this, args, zq.http.responseRedirect);
 }
 
 fn fetchSyncNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
@@ -1590,7 +2086,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     const url = blk: {
         if (args[0].isObject()) {
             init_obj = args[0].toPtr(zq.JSObject);
-            const url_val = init_obj.?.getProperty(pool, zq.Atom.url) orelse {
+            const url_val = getObjectProperty(rt.ctx, init_obj.?, pool, zq.Atom.url, "url") orelse {
                 return createFetchErrorResponse(rt, "InvalidUrl", "missing url field");
             };
             const url = getStringData(url_val) orelse {
@@ -1635,7 +2131,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     defer headers.deinit();
 
     if (init_obj) |init| {
-        if (init.getProperty(pool, zq.Atom.method)) |method_val| {
+        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.method, "method")) |method_val| {
             const method_name = getStringData(method_val) orelse {
                 return createFetchErrorResponse(rt, "InvalidMethod", "method must be string");
             };
@@ -1644,7 +2140,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
             };
         }
 
-        if (init.getProperty(pool, zq.Atom.body)) |body_val| {
+        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body")) |body_val| {
             if (body_val.isNull() or body_val.isUndefined()) {
                 body = null;
             } else {
@@ -1672,7 +2168,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
             max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
         }
 
-        if (init.getProperty(pool, zq.Atom.headers)) |headers_val| {
+        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.headers, "headers")) |headers_val| {
             if (!headers_val.isObject()) {
                 return createFetchErrorResponse(rt, "InvalidHeaders", "headers must be object<string,string>");
             }
@@ -1702,7 +2198,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
 
     var client = std.http.Client{
         .allocator = rt.allocator,
-        .io = std.Options.debug_io,
+        .io = rt.outbound_io_backend.?.io(),
     };
     defer client.deinit();
 
@@ -1759,6 +2255,9 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     var response = req.receiveHead(&.{}) catch |err| {
         return createFetchErrorResponse(rt, "ResponseHeadFailed", @errorName(err));
     };
+    const status = @intFromEnum(response.head.status);
+    var owned_head = try snapshotResponseHead(rt.allocator, response.head);
+    defer owned_head.deinit(rt.allocator);
 
     var body_transfer: [64]u8 = undefined;
     var response_reader = response.reader(&body_transfer);
@@ -1768,15 +2267,8 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     };
     defer rt.allocator.free(response_body);
 
-    const created = try createFetchResponse(
-        rt,
-        @intFromEnum(response.head.status),
-        response.head.reason,
-        response_body,
-        response.head.content_type,
-    );
-    var header_it = response.head.iterateHeaders();
-    while (header_it.next()) |header| {
+    const created = try createFetchResponse(rt, status, owned_head.reason, response_body, owned_head.contentType());
+    for (owned_head.headers.items) |header| {
         const key_atom = try getHeaderAtom(rt.ctx, header.name);
         const value_str = try rt.ctx.createString(header.value);
         try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
@@ -1900,7 +2392,7 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
 
     var client = std.http.Client{
         .allocator = a,
-        .io = std.Options.debug_io,
+        .io = rt.outbound_io_backend.?.io(),
     };
     defer client.deinit();
 
@@ -1957,6 +2449,10 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     var response = req.receiveHead(&.{}) catch |err| {
         return try httpRequestErrorJsonAlloc(a, "ResponseHeadFailed", @errorName(err));
     };
+    const status = @intFromEnum(response.head.status);
+    const ok = response.head.status.class() != .server_error and response.head.status.class() != .client_error;
+    var owned_head = try snapshotResponseHead(a, response.head);
+    defer owned_head.deinit(a);
 
     var body_transfer: [64]u8 = undefined;
     var response_reader = response.reader(&body_transfer);
@@ -1971,12 +2467,12 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     var stream: std.json.Stringify = .{ .writer = &aw.writer };
     try stream.beginObject();
     try stream.objectField("ok");
-    try stream.write(response.head.status.class() != .server_error and response.head.status.class() != .client_error);
+    try stream.write(ok);
     try stream.objectField("status");
-    try stream.write(@intFromEnum(response.head.status));
+    try stream.write(status);
     try stream.objectField("reason");
-    try stream.write(response.head.reason);
-    if (response.head.content_type) |ct| {
+    try stream.write(owned_head.reason);
+    if (owned_head.contentType()) |ct| {
         try stream.objectField("content_type");
         try stream.write(ct);
     }
@@ -2692,6 +3188,339 @@ pub const HandlerPool = struct {
 // Tests
 // ============================================================================
 
+const TestErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+
+const TestCapturedHeader = struct {
+    name: []u8,
+    value: []u8,
+};
+
+const TestCapturedRequest = struct {
+    method: []u8,
+    path: []u8,
+    headers: std.ArrayListUnmanaged(TestCapturedHeader) = .{},
+    body: []u8,
+    raw: []u8,
+
+    fn deinit(self: *TestCapturedRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.method);
+        allocator.free(self.path);
+        for (self.headers.items) |header| {
+            allocator.free(header.name);
+            allocator.free(header.value);
+        }
+        self.headers.deinit(allocator);
+        allocator.free(self.body);
+        allocator.free(self.raw);
+    }
+
+    fn getHeader(self: *const TestCapturedRequest, name: []const u8) ?[]const u8 {
+        var i = self.headers.items.len;
+        while (i > 0) {
+            i -= 1;
+            const item = self.headers.items[i];
+            if (ascii.eqlIgnoreCase(item.name, name)) {
+                return item.value;
+            }
+        }
+        return null;
+    }
+};
+
+const TestHttpServer = struct {
+    allocator: std.mem.Allocator,
+    io_backend: std.Io.Threaded,
+    listener: std.Io.net.Server,
+    port: u16,
+    mode: Mode,
+    thread: ?std.Thread = null,
+    closed: bool = false,
+    thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
+
+    const Mode = enum {
+        echo_request_json,
+        large_plain_text,
+    };
+
+    fn init(allocator: std.mem.Allocator, mode: Mode) !TestHttpServer {
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        const io = io_backend.io();
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        const listener = try address.listen(io, .{ .reuse_address = true });
+        return .{
+            .allocator = allocator,
+            .io_backend = io_backend,
+            .listener = listener,
+            .port = listener.socket.address.getPort(),
+            .mode = mode,
+        };
+    }
+
+    fn start(self: *TestHttpServer) !void {
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn url(self: *const TestHttpServer, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
+    }
+
+    fn join(self: *TestHttpServer) !void {
+        if (self.closed) return;
+        self.closed = true;
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+        const io = self.io_backend.io();
+        self.listener.deinit(io);
+        self.io_backend.deinit();
+        const err_int = self.thread_error.swap(0, .acq_rel);
+        if (err_int != 0) {
+            return @errorFromInt(err_int);
+        }
+    }
+
+    fn run(self: *TestHttpServer) void {
+        self.runInner() catch |err| {
+            self.thread_error.store(@intFromError(err), .release);
+        };
+    }
+
+    fn runInner(self: *TestHttpServer) !void {
+        const io = self.io_backend.io();
+        var stream = while (true) {
+            break self.listener.accept(io) catch |err| switch (err) {
+                error.ConnectionAborted => continue,
+                error.SocketNotListening => return,
+                else => return err,
+            };
+        };
+        defer stream.close(io);
+
+        switch (self.mode) {
+            .echo_request_json => try self.respondWithEcho(&stream, io),
+            .large_plain_text => try self.respondWithLargeBody(&stream, io),
+        }
+    }
+
+    fn respondWithEcho(self: *TestHttpServer, stream: *std.Io.net.Stream, io: std.Io) !void {
+        var captured = try captureRequest(self.allocator, stream, io);
+        defer captured.deinit(self.allocator);
+
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        var json: std.json.Stringify = .{ .writer = &aw.writer };
+        try json.beginObject();
+        try json.objectField("method");
+        try json.write(captured.method);
+        try json.objectField("path");
+        try json.write(captured.path);
+        try json.objectField("contentType");
+        try json.write(captured.getHeader("content-type") orelse "");
+        try json.objectField("xTest");
+        try json.write(captured.getHeader("x-test") orelse "");
+        try json.objectField("contentLength");
+        try json.write(captured.getHeader("content-length") orelse "");
+        try json.objectField("transferEncoding");
+        try json.write(captured.getHeader("transfer-encoding") orelse "");
+        try json.objectField("body");
+        try json.write(captured.body);
+        try json.objectField("raw");
+        try json.write(captured.raw);
+        try json.endObject();
+        const body = try aw.toOwnedSlice();
+        defer self.allocator.free(body);
+
+        try writeTestResponse(stream, io, 201, "Created", &.{
+            "Content-Type: application/json",
+            "x-reply: ok",
+        }, body);
+    }
+
+    fn respondWithLargeBody(self: *TestHttpServer, stream: *std.Io.net.Stream, io: std.Io) !void {
+        _ = self;
+        try writeTestResponse(
+            stream,
+            io,
+            200,
+            "OK",
+            &.{"Content-Type: text/plain"},
+            "0123456789abcdef0123456789abcdef",
+        );
+    }
+};
+
+fn captureRequest(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io: std.Io) !TestCapturedRequest {
+    const raw = try readRawRequestBytes(allocator, stream, io);
+    errdefer allocator.free(raw);
+    const header_sep = findTestHeaderEnd(raw) orelse return error.InvalidTestRequest;
+    const header_end = header_sep + 4;
+    const request_head = raw[0..header_sep];
+    const line_end = std.mem.indexOf(u8, request_head, "\r\n") orelse return error.InvalidTestRequest;
+    const request_line = request_head[0..line_end];
+    const first_space = std.mem.indexOfScalar(u8, request_line, ' ') orelse return error.InvalidTestRequest;
+    const rest = request_line[first_space + 1 ..];
+    const second_space_rel = std.mem.indexOfScalar(u8, rest, ' ') orelse return error.InvalidTestRequest;
+
+    const method = try allocator.dupe(u8, request_line[0..first_space]);
+    errdefer allocator.free(method);
+    const path = try allocator.dupe(u8, rest[0..second_space_rel]);
+    errdefer allocator.free(path);
+
+    var headers = std.ArrayListUnmanaged(TestCapturedHeader){};
+    errdefer {
+        for (headers.items) |header| {
+            allocator.free(header.name);
+            allocator.free(header.value);
+        }
+        headers.deinit(allocator);
+    }
+    var line_start = line_end + 2;
+    while (line_start < request_head.len) {
+        const next_line_end = std.mem.indexOfPos(u8, request_head, line_start, "\r\n") orelse request_head.len;
+        if (next_line_end == line_start) break;
+        const line = request_head[line_start..next_line_end];
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        const name_copy = try allocator.dupe(u8, name);
+        errdefer allocator.free(name_copy);
+        const value_copy = try allocator.dupe(u8, value);
+        errdefer allocator.free(value_copy);
+        try headers.append(allocator, .{
+            .name = name_copy,
+            .value = value_copy,
+        });
+        line_start = next_line_end + 2;
+    }
+
+    const body = try allocator.dupe(u8, raw[header_end..]);
+    errdefer allocator.free(body);
+
+    return .{
+        .method = method,
+        .path = path,
+        .headers = headers,
+        .body = body,
+        .raw = raw,
+    };
+}
+
+fn readRawRequestBytes(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io: std.Io) ![]u8 {
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(allocator);
+
+    while (true) {
+        var chunk: [1024]u8 = undefined;
+        var vecs: [1][]u8 = .{chunk[0..]};
+        const n = io.vtable.netRead(io.userdata, stream.socket.handle, &vecs) catch |err| switch (err) {
+            error.ConnectionResetByPeer => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        try raw.appendSlice(allocator, chunk[0..n]);
+        if (requestMessageLength(raw.items)) |message_len| {
+            if (message_len < raw.items.len) {
+                try raw.resize(allocator, message_len);
+            }
+            break;
+        }
+    }
+
+    return try raw.toOwnedSlice(allocator);
+}
+
+fn findTestHeaderEnd(raw: []const u8) ?usize {
+    return std.mem.indexOf(u8, raw, "\r\n\r\n") orelse null;
+}
+
+fn requestMessageLength(raw: []const u8) ?usize {
+    const header_sep = findTestHeaderEnd(raw) orelse return null;
+    const header_end = header_sep + 4;
+    const header_block = raw[0..header_sep];
+
+    var content_length: ?usize = null;
+    var chunked = false;
+    var line_start: usize = 0;
+    while (line_start < header_block.len) {
+        const line_end = std.mem.indexOfPos(u8, header_block, line_start, "\r\n") orelse header_block.len;
+        const line = header_block[line_start..line_end];
+        line_start = line_end + 2;
+        if (line.len == 0) continue;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        const name = std.mem.trim(u8, line[0..colon], " \t");
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+
+        if (ascii.eqlIgnoreCase(name, "content-length")) {
+            content_length = std.fmt.parseInt(usize, value, 10) catch return null;
+        } else if (ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            chunked = ascii.indexOfIgnoreCase(value, "chunked") != null;
+        }
+    }
+
+    if (chunked) {
+        const body_len = chunkedBodyLength(raw[header_end..]) orelse return null;
+        return header_end + body_len;
+    }
+    if (content_length) |len| {
+        if (raw.len < header_end + len) return null;
+        return header_end + len;
+    }
+    return header_end;
+}
+
+fn chunkedBodyLength(body: []const u8) ?usize {
+    var idx: usize = 0;
+    while (true) {
+        const line_end = std.mem.indexOfPos(u8, body, idx, "\r\n") orelse return null;
+        const size_line = body[idx..line_end];
+        const semi = std.mem.indexOfScalar(u8, size_line, ';') orelse size_line.len;
+        const size_text = std.mem.trim(u8, size_line[0..semi], " \t");
+        const chunk_len = std.fmt.parseInt(usize, size_text, 16) catch return null;
+        idx = line_end + 2;
+
+        if (chunk_len == 0) {
+            while (true) {
+                const trailer_end = std.mem.indexOfPos(u8, body, idx, "\r\n") orelse return null;
+                if (trailer_end == idx) return trailer_end + 2;
+                idx = trailer_end + 2;
+            }
+        }
+
+        if (body.len < idx + chunk_len + 2) return null;
+        idx += chunk_len;
+        if (!std.mem.eql(u8, body[idx .. idx + 2], "\r\n")) return null;
+        idx += 2;
+    }
+}
+
+fn writeTestResponse(
+    stream: *std.Io.net.Stream,
+    io: std.Io,
+    status: u16,
+    reason: []const u8,
+    headers: []const []const u8,
+    body: []const u8,
+) !void {
+    var out_buf: [4096]u8 = undefined;
+    var writer = stream.writer(io, &out_buf);
+    const out = &writer.interface;
+
+    try out.print("HTTP/1.1 {d} {s}\r\n", .{ status, reason });
+    try out.print("Content-Length: {d}\r\n", .{body.len});
+    for (headers) |header| {
+        try out.writeAll(header);
+        try out.writeAll("\r\n");
+    }
+    try out.writeAll("Connection: close\r\n\r\n");
+    if (body.len > 0) {
+        try out.writeAll(body);
+    }
+    try writer.interface.flush();
+}
+
 test "Runtime creation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2819,40 +3648,162 @@ test "request helpers expose body parsing and case-insensitive headers" {
 
     const handler_code =
         \\function handler(req) {
+        \\  const body = req.body || "";
         \\  const data = req.json();
         \\  return Response.json({
         \\    contentType: req.headers.get("content-type"),
         \\    auth: req.headers.get("AUTHORIZATION"),
         \\    missing: req.headers.get("x-missing"),
-        \\    body: req.text(),
+        \\    body: body,
         \\    name: data.name,
         \\  });
         \\}
     ;
     try rt.loadHandler(handler_code, "<request-helpers>");
 
-    var headers = std.ArrayListUnmanaged(HttpHeader){};
-    errdefer {
-        for (headers.items) |header| {
-            allocator.free(header.key);
-            allocator.free(header.value);
-        }
-        headers.deinit(allocator);
-    }
-    try headers.append(allocator, .{
-        .key = try allocator.dupe(u8, "Content-Type"),
-        .value = try allocator.dupe(u8, "application/json"),
-    });
-    try headers.append(allocator, .{
-        .key = try allocator.dupe(u8, "Authorization"),
-        .value = try allocator.dupe(u8, "Bearer test-token"),
-    });
-
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = headers,
+        .headers = .{},
         .body = try allocator.dupe(u8, "{\"name\":\"zigttp\"}"),
+    };
+    defer request.deinit(allocator);
+
+    try request.headers.append(allocator, .{
+        .key = try allocator.dupe(u8, "Content-Type"),
+        .value = try allocator.dupe(u8, "application/json"),
+    });
+    try request.headers.append(allocator, .{
+        .key = try allocator.dupe(u8, "Authorization"),
+        .value = try allocator.dupe(u8, "Bearer test-token"),
+    });
+    try request.headers.append(allocator, .{
+        .key = try allocator.dupe(u8, "authorization"),
+        .value = try allocator.dupe(u8, "Bearer override"),
+    });
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
+    try std.testing.expectEqualStrings("Bearer override", obj.get("auth").?.string);
+    try std.testing.expect(obj.get("missing").? == .null);
+    try std.testing.expectEqualStrings("{\"name\":\"zigttp\"}", obj.get("body").?.string);
+    try std.testing.expectEqualStrings("zigttp", obj.get("name").?.string);
+}
+
+test "request helpers define empty and invalid body semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.json({
+        \\    body: req.body || "",
+        \\    jsonIsUndefined: req.json() === undefined,
+        \\    missingIsNull: req.headers.get("x-missing") === null,
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<request-body-semantics>");
+
+    var empty_request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer empty_request.deinit(allocator);
+
+    var empty_response = try rt.executeHandler(empty_request.asView());
+    defer empty_response.deinit();
+
+    var empty_parsed = try std.json.parseFromSlice(std.json.Value, allocator, empty_response.body, .{});
+    defer empty_parsed.deinit();
+    const empty_obj = empty_parsed.value.object;
+    try std.testing.expectEqualStrings("", empty_obj.get("body").?.string);
+    try std.testing.expectEqual(true, empty_obj.get("jsonIsUndefined").?.bool);
+    try std.testing.expectEqual(true, empty_obj.get("missingIsNull").?.bool);
+
+    var invalid_request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = try allocator.dupe(u8, "{invalid json"),
+    };
+    defer invalid_request.deinit(allocator);
+
+    var invalid_response = try rt.executeHandler(invalid_request.asView());
+    defer invalid_response.deinit();
+
+    var invalid_parsed = try std.json.parseFromSlice(std.json.Value, allocator, invalid_response.body, .{});
+    defer invalid_parsed.deinit();
+    const invalid_obj = invalid_parsed.value.object;
+    try std.testing.expectEqualStrings("{invalid json", invalid_obj.get("body").?.string);
+    try std.testing.expectEqual(true, invalid_obj.get("jsonIsUndefined").?.bool);
+    try std.testing.expectEqual(true, invalid_obj.get("missingIsNull").?.bool);
+}
+
+test "Headers Request and Response factories share the HTTP model" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const headers = Headers({
+        \\    "Content-Type": "application/json",
+        \\    "X-Test": "one"
+        \\  });
+        \\  headers.append("X-Test", "two");
+        \\  headers.set("X-Mode", "fast");
+        \\  const beforeDelete = headers.has("x-mode");
+        \\  headers.delete("x-mode");
+        \\  const request = Request("/items?id=41&name=zigttp", {
+        \\    method: "POST",
+        \\    headers: headers,
+        \\    body: "{\"ok\":true}"
+        \\  });
+        \\  const data = request.json();
+        \\  const response = Response("done", {
+        \\    status: 201,
+        \\    headers: { "X-Reply": "ok" }
+        \\  });
+        \\  return Response.json({
+        \\    combinedHeader: headers.get("x-test"),
+        \\    beforeDelete: beforeDelete,
+        \\    afterDelete: headers.has("x-mode"),
+        \\    requestMethod: request.method,
+        \\    requestPath: request.path,
+        \\    requestId: request.query.id,
+        \\    requestName: request.query.name,
+        \\    requestType: request.headers.get("content-type"),
+        \\    requestOk: data.ok,
+        \\    responseStatus: response.status,
+        \\    responseOk: response.ok,
+        \\    responseReply: response.headers.get("x-reply"),
+        \\    responseType: response.headers.get("content-type"),
+        \\    responseText: response.text()
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<http-factories>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
     };
     defer request.deinit(allocator);
 
@@ -2862,11 +3813,62 @@ test "request helpers expose body parsing and case-insensitive headers" {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
-    try std.testing.expectEqualStrings("Bearer test-token", obj.get("auth").?.string);
-    try std.testing.expect(obj.get("missing").? == .null);
-    try std.testing.expectEqualStrings("{\"name\":\"zigttp\"}", obj.get("body").?.string);
-    try std.testing.expectEqualStrings("zigttp", obj.get("name").?.string);
+    try std.testing.expectEqualStrings("one, two", obj.get("combinedHeader").?.string);
+    try std.testing.expectEqual(true, obj.get("beforeDelete").?.bool);
+    try std.testing.expectEqual(false, obj.get("afterDelete").?.bool);
+    try std.testing.expectEqualStrings("POST", obj.get("requestMethod").?.string);
+    try std.testing.expectEqualStrings("/items", obj.get("requestPath").?.string);
+    try std.testing.expectEqual(@as(i64, 41), obj.get("requestId").?.integer);
+    try std.testing.expectEqualStrings("zigttp", obj.get("requestName").?.string);
+    try std.testing.expectEqualStrings("application/json", obj.get("requestType").?.string);
+    try std.testing.expectEqual(true, obj.get("requestOk").?.bool);
+    try std.testing.expectEqual(@as(i64, 201), obj.get("responseStatus").?.integer);
+    try std.testing.expectEqual(true, obj.get("responseOk").?.bool);
+    try std.testing.expectEqualStrings("ok", obj.get("responseReply").?.string);
+    try std.testing.expectEqualStrings("text/plain; charset=utf-8", obj.get("responseType").?.string);
+    try std.testing.expectEqualStrings("done", obj.get("responseText").?.string);
+}
+
+test "body readers are single-use for inbound and constructed HTTP objects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    try rt.loadHandler(
+        \\function handler(req) {
+        \\  req.text();
+        \\  return Response.text(req.text());
+        \\}
+    , "<request-body-reuse>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = try allocator.dupe(u8, "ping"),
+    };
+    defer request.deinit(allocator);
+
+    const request_val = try rt.createRequestObject(request.asView());
+    current_runtime = rt;
+    defer current_runtime = null;
+    try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
+    rt.resetForNextRequest();
+
+    try rt.loadHandler(
+        \\function handler(req) {
+        \\  const built = Response("pong");
+        \\  built.text();
+        \\  return Response.text(built.text());
+        \\}
+    , "<response-body-reuse>");
+
+    const request_val_two = try rt.createRequestObject(request.asView());
+    try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val_two}));
+    rt.resetForNextRequest();
 }
 
 test "fetchSync returns response helpers and direct response objects" {
@@ -2917,6 +3919,207 @@ test "fetchSync returns response helpers and direct response objects" {
 
     try std.testing.expectEqual(@as(u16, 599), direct_response.status);
     try std.testing.expect(std.mem.indexOf(u8, direct_response.body, "\"error\":\"OutboundHttpDisabled\"") != null);
+}
+
+test "fetchSync returns structured errors for invalid init and allowlist failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "localhost",
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const badHeadersResp = fetchSync("http://localhost", {
+        \\    headers: { "X-Test": 42 }
+        \\  });
+        \\  const badHeaders = badHeadersResp.json();
+        \\  return Response.json({
+        \\    badHeadersStatus: badHeadersResp.status,
+        \\    badHeadersOk: badHeadersResp.ok,
+        \\    badHeadersStatusText: badHeadersResp.statusText,
+        \\    badHeadersError: badHeaders.error,
+        \\    badMethodError: fetchSync({ url: "http://localhost", method: "BOGUS" }).json().error,
+        \\    badBodyError: fetchSync("http://localhost", { body: 42 }).json().error,
+        \\    missingUrlError: fetchSync({ method: "GET" }).json().error,
+        \\    hostBlockedError: fetchSync("http://example.com").json().error,
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<fetchsync-invalid>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 599), obj.get("badHeadersStatus").?.integer);
+    try std.testing.expectEqual(false, obj.get("badHeadersOk").?.bool);
+    try std.testing.expectEqualStrings("InvalidHeaders", obj.get("badHeadersStatusText").?.string);
+    try std.testing.expectEqualStrings("InvalidHeaders", obj.get("badHeadersError").?.string);
+    try std.testing.expectEqualStrings("InvalidMethod", obj.get("badMethodError").?.string);
+    try std.testing.expectEqualStrings("InvalidBody", obj.get("badBodyError").?.string);
+    try std.testing.expectEqualStrings("InvalidUrl", obj.get("missingUrlError").?.string);
+    try std.testing.expectEqualStrings("HostNotAllowed", obj.get("hostBlockedError").?.string);
+}
+
+test "fetchSync sends request data and exposes response helpers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server = try TestHttpServer.init(allocator, .echo_request_json);
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/inspect?mode=1");
+    defer allocator.free(url);
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "127.0.0.1",
+    });
+    defer rt.deinit();
+
+    const handler_code = try std.fmt.allocPrint(
+        allocator,
+        \\function handler(req) {{
+        \\  const init = {{
+        \\    method: "POST",
+        \\    headers: {{
+        \\      "Content-Type": "text/plain",
+        \\      "X-Test": "alpha"
+        \\    }},
+        \\    body: "ping"
+        \\  }};
+        \\  const resp = fetchSync("{s}", init);
+        \\  const rawBody = resp.text();
+        \\  const data = JSON.parse(rawBody);
+        \\  return Response.json({{
+        \\    status: resp.status,
+        \\    ok: resp.ok,
+        \\    contentType: resp.headers.get("content-type"),
+        \\    reply: resp.headers.get("X-Reply"),
+        \\    rawBody: rawBody,
+        \\    method: data.method,
+        \\    path: data.path,
+        \\    requestType: data.contentType,
+        \\    requestHeader: data.xTest,
+        \\    requestBody: data.body,
+        \\    requestLength: data.contentLength,
+        \\    transferEncoding: data.transferEncoding,
+        \\    requestRaw: data.raw
+        \\  }});
+        \\}}
+    ,
+        .{url},
+    );
+    defer allocator.free(handler_code);
+    try rt.loadHandler(handler_code, "<fetchsync-success>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try server.join();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 201), obj.get("status").?.integer);
+    try std.testing.expectEqual(true, obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
+    try std.testing.expectEqualStrings("ok", obj.get("reply").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, obj.get("rawBody").?.string, "\"method\":\"POST\"") != null);
+    try std.testing.expectEqualStrings("POST", obj.get("method").?.string);
+    try std.testing.expectEqualStrings("/inspect?mode=1", obj.get("path").?.string);
+    try std.testing.expectEqualStrings("text/plain", obj.get("requestType").?.string);
+    try std.testing.expectEqualStrings("alpha", obj.get("requestHeader").?.string);
+    try std.testing.expectEqualStrings("ping", obj.get("requestBody").?.string);
+    try std.testing.expectEqualStrings("4", obj.get("requestLength").?.string);
+    try std.testing.expectEqualStrings("", obj.get("transferEncoding").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "POST /inspect?mode=1 HTTP/1.1\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "content-length: 4\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "Content-Type: text/plain\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "X-Test: alpha\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "\r\n\r\nping") != null);
+}
+
+test "fetchSync enforces response byte limits" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var server = try TestHttpServer.init(allocator, .large_plain_text);
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/too-large");
+    defer allocator.free(url);
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "127.0.0.1",
+        .outbound_max_response_bytes = 64,
+    });
+    defer rt.deinit();
+
+    const handler_code = try std.fmt.allocPrint(
+        allocator,
+        \\function handler(req) {{
+        \\  const resp = fetchSync("{s}", {{ max_response_bytes: 8 }});
+        \\  const data = resp.json();
+        \\  return Response.json({{
+        \\    status: resp.status,
+        \\    ok: resp.ok,
+        \\    error: data.error,
+        \\    details: data.details
+        \\  }});
+        \\}}
+    ,
+        .{url},
+    );
+    defer allocator.free(handler_code);
+    try rt.loadHandler(handler_code, "<fetchsync-too-large>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try server.join();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 599), obj.get("status").?.integer);
+    try std.testing.expectEqual(false, obj.get("ok").?.bool);
+    try std.testing.expectEqualStrings("ResponseTooLarge", obj.get("error").?.string);
+    try std.testing.expectEqualStrings("response exceeded max_response_bytes", obj.get("details").?.string);
 }
 
 test "HandlerPool basic operations" {

@@ -13,7 +13,7 @@
 //!   -q, --quiet           Disable request logging
 //!   --cors                Enable CORS headers
 //!   --static <DIR>        Serve static files from directory
-//!   --outbound-http       Enable native outbound HTTP bridge (httpRequest)
+//!   --outbound-http       Enable native outbound HTTP bridge (fetchSync/httpRequest)
 //!   --outbound-host <H>   Restrict outbound bridge to exact host H
 //!   --outbound-timeout-ms Connect timeout for outbound bridge (default: 10000)
 //!   --outbound-max-response <SIZE>  Max captured response bytes (default: 1mb)
@@ -28,8 +28,10 @@
 //! Available APIs:
 //!   - console.log/error/warn/info/debug
 //!   - Response.json/text/html/redirect helpers
+//!   - Response(body, init?), Request(url, init?), Headers(init?)
 //!   - Math, String, Array, Object builtins
 //!   - JSON.parse/stringify
+//!   - fetchSync(url, init?) when outbound bridge is enabled
 //!   - httpRequest(jsonString) when outbound bridge is enabled
 
 const std = @import("std");
@@ -194,7 +196,7 @@ fn printHelp() void {
         \\  -q, --quiet           Disable request logging
         \\  --cors                Enable CORS headers
         \\  --static <DIR>        Serve static files from directory
-        \\  --outbound-http       Enable native outbound HTTP bridge (httpRequest)
+        \\  --outbound-http       Enable native outbound HTTP bridge (fetchSync/httpRequest)
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H
         \\  --outbound-timeout-ms Connect timeout for outbound bridge in ms
         \\  --outbound-max-response <SIZE>
@@ -210,11 +212,14 @@ fn printHelp() void {
         \\      method: string,    // HTTP method (GET, POST, etc.)
         \\      url: string,       // URL path
         \\      query: object,     // Parsed query parameters
-        \\      headers: object,   // HTTP headers (supports headers.get(name))
-        \\      body: string|null  // Request body (supports text()/json())
+        \\      headers: object,   // HTTP headers (supports get/set/append/has/delete)
+        \\      body: string|null  // Request body (supports single-use text()/json())
         \\    }
         \\
-        \\  Response helpers:
+        \\  HTTP factories and helpers:
+        \\    Headers(init?)
+        \\    Request(url, init?)
+        \\    Response(body, init?)
         \\    Response.json(data, init?)
         \\    Response.text(text, init?)
         \\    Response.html(html, init?)

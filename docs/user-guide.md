@@ -211,11 +211,18 @@ function handler(request) {
         console.log(request.body); // Raw body string
     }
     console.log(request.text()); // Raw body string or ""
+    // request.json() reads the same body stream, so call either text() or json()
     console.log(request.json()); // Parsed JSON or undefined
 
     return Response.text("OK");
 }
 ```
+
+Current helper semantics:
+- `request.headers.get(name)` is case-insensitive and returns the last observed value for that header name, or `null`.
+- `request.text()` returns the raw body string, or `""` when no body is present.
+- `request.json()` returns parsed JSON, or `undefined` when the body is empty or invalid JSON.
+- `request.text()` and `request.json()` are single-use body readers. After either one runs, further body reads throw. Use `request.body` if you need the raw string without consuming it.
 
 ### Common Header Access
 
@@ -238,12 +245,34 @@ function handler(request) {
 
 ## Response Object
 
+Factory-style HTTP types are also available:
+
+```javascript
+const headers = Headers({ "Content-Type": "application/json" });
+headers.append("X-Trace", "abc123");
+
+const request = Request("/items?id=1", {
+    method: "POST",
+    headers: headers,
+    body: "{\"ok\":true}",
+});
+
+const response = Response("Created", {
+    status: 201,
+    headers: { "X-Reply": "ok" },
+});
+```
+
+`new` is not supported by zigttp's parser, so `Headers`, `Request`, and `Response`
+are called as plain factory functions.
+
 ### Response Helpers
 
 #### `Response.text(body, init?)`
 
-Create a basic response with optional configuration. (`new Response(...)` is not
-supported.)
+Create a basic response with optional configuration. `Response(body, init?)`
+creates the same response-shaped object for local composition, while
+`Response.text/json/html` remain the primary direct-return helpers.
 
 ```javascript
 // Simple text response
