@@ -10,6 +10,11 @@ const std = @import("std");
 const zts = @import("zts");
 const ir = zts.parser;
 const IrTranspiler = @import("transpiler.zig").IrTranspiler;
+const handler_contract = zts.handler_contract;
+const ContractBuilder = handler_contract.ContractBuilder;
+const writeContractJson = handler_contract.writeContractJson;
+const HandlerContract = handler_contract.HandlerContract;
+const VerificationInfo = handler_contract.VerificationInfo;
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -36,6 +41,8 @@ const CompiledHandler = struct {
     /// Additional dependency module bytecodes (for file imports).
     /// Stored in execution order, entry module is NOT included.
     dep_bytecodes: ?[]const []const u8 = null,
+    /// Contract manifest (when --contract is passed)
+    contract: ?HandlerContract = null,
 
     fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.aot) |*analysis| {
@@ -46,6 +53,9 @@ const CompiledHandler = struct {
                 allocator.free(dep);
             }
             allocator.free(deps);
+        }
+        if (self.contract) |*c| {
+            c.deinit(allocator);
         }
         if (self.bytecode.len > 0) {
             allocator.free(self.bytecode);
@@ -114,12 +124,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
     _ = args.skip();
 
     var emit_aot = false;
+    var emit_verify = false;
+    var emit_contract = false;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--aot")) {
             emit_aot = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--verify")) {
+            emit_verify = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--contract")) {
+            emit_contract = true;
             continue;
         }
 
@@ -137,13 +157,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -157,8 +177,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     std.debug.print("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
-    // Compile the handler to bytecode (+ optional AOT analysis)
-    var compiled = compileHandler(allocator, source, handler_path_final, emit_aot) catch |err| {
+    // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
+    var compiled = compileHandler(allocator, source, handler_path_final, emit_aot, emit_verify, emit_contract) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
     };
@@ -176,6 +196,32 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
 
     std.debug.print("Wrote embedded handler to: {s}\n", .{output_path_final});
+
+    // Write contract.json alongside the output if requested
+    if (compiled.contract) |*contract| {
+        const contract_path = deriveContractPath(allocator, output_path_final) catch |err| {
+            std.debug.print("Error deriving contract path: {}\n", .{err});
+            return err;
+        };
+        defer allocator.free(contract_path);
+
+        var json_output: std.ArrayList(u8) = .empty;
+        defer json_output.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
+
+        writeContractJson(contract, &aw.writer) catch |err| {
+            std.debug.print("Error serializing contract: {}\n", .{err});
+            return err;
+        };
+        json_output = aw.toArrayList();
+
+        writeFilePosix(contract_path, json_output.items, allocator) catch |err| {
+            std.debug.print("Error writing contract file '{s}': {}\n", .{ contract_path, err });
+            return err;
+        };
+
+        std.debug.print("Wrote contract manifest to: {s}\n", .{contract_path});
+    }
 }
 
 fn compileHandler(
@@ -183,6 +229,8 @@ fn compileHandler(
     source: []const u8,
     filename: []const u8,
     emit_aot: bool,
+    emit_verify: bool,
+    emit_contract: bool,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
     var strip_result: ?zts.StripResult = null;
@@ -262,6 +310,61 @@ fn compileHandler(
         root,
     ) catch {};
 
+    // Run handler verification if requested
+    var verify_info: ?VerificationInfo = null;
+    if (emit_verify) {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
+
+        if (handler_fn) |hf| {
+            var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms);
+            defer verifier.deinit();
+
+            const error_count = try verifier.verify(hf);
+            const diags = verifier.getDiagnostics();
+
+            if (diags.len > 0) {
+                std.debug.print("\n", .{});
+                // Format diagnostics to a buffer and print via debug.print
+                var diag_output: std.ArrayList(u8) = .empty;
+                defer diag_output.deinit(allocator);
+                var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_output);
+                verifier.formatDiagnostics(source_to_parse, &diag_aw.writer) catch {};
+                diag_output = diag_aw.toArrayList();
+                if (diag_output.items.len > 0) {
+                    std.debug.print("{s}", .{diag_output.items});
+                }
+                std.debug.print("{d} error(s), {d} warning(s)\n", .{
+                    error_count,
+                    diags.len - error_count,
+                });
+            }
+
+            if (error_count > 0) {
+                std.debug.print("\nVerification failed for {s}\n", .{filename});
+                return error.VerificationFailed;
+            }
+
+            // Track verification results for contract
+            var has_unreachable = false;
+            for (diags) |d| {
+                if (d.kind == .unreachable_after_return) {
+                    has_unreachable = true;
+                    break;
+                }
+            }
+            verify_info = .{
+                .exhaustive_returns = true,
+                .results_safe = error_count == 0,
+                .unreachable_code = has_unreachable,
+            };
+
+            std.debug.print("Verification passed\n", .{});
+        } else {
+            std.debug.print("Warning: no handler function found for verification\n", .{});
+        }
+    }
+
     var code_gen = zts.parser.CodeGen.initWithIRStore(
         allocator,
         &js_parser.nodes,
@@ -298,17 +401,25 @@ fn compileHandler(
 
     if (emit_aot) {
         // Try transpiler first (general-purpose IR-to-Zig)
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var transpiler = IrTranspiler.init(allocator, ir_view, &atoms);
+        const ir_view_aot = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        var transpiler = IrTranspiler.init(allocator, ir_view_aot, &atoms);
         // Note: transpiler is NOT deferred deinit - its output is borrowed
 
         const result = transpiler.transpileHandler(root) catch |err| {
             std.debug.print("Transpiler error: {}, falling back to pattern matcher\n", .{err});
             transpiler.deinit();
             aot = try analyzeAot(allocator, &js_parser, &atoms, root);
+
+            // Build contract if requested (transpiler fallback path)
+            const contract = if (emit_contract)
+                try buildContract(allocator, &js_parser, &atoms, filename, root, aot, verify_info)
+            else
+                null;
+
             return .{
                 .bytecode = bytecode_data,
                 .aot = aot,
+                .contract = contract,
             };
         };
 
@@ -325,10 +436,29 @@ fn compileHandler(
         }
     }
 
+    // Build contract if requested
+    // When contract is enabled, always run AOT analysis for route extraction
+    // even if the transpiler succeeded (transpiler doesn't produce a dispatch table).
+    var contract: ?HandlerContract = null;
+    if (emit_contract) {
+        var contract_aot = aot;
+        var owns_contract_aot = false;
+        if (contract_aot == null) {
+            contract_aot = try analyzeAot(allocator, &js_parser, &atoms, root);
+            owns_contract_aot = true;
+        }
+        contract = try buildContract(allocator, &js_parser, &atoms, filename, root, contract_aot, verify_info);
+        // Free the AOT analysis if we created it just for the contract
+        if (owns_contract_aot) {
+            if (contract_aot) |*ca| ca.deinit(allocator);
+        }
+    }
+
     return .{
         .bytecode = bytecode_data,
         .aot = aot,
         .transpiled_source = transpiled_source,
+        .contract = contract,
     };
 }
 
@@ -528,6 +658,58 @@ fn findHandlerFunction(ir_view: ir.IrView, root: ir.NodeIndex) ?ir.NodeIndex {
     return null;
 }
 
+/// Build a contract manifest from the parsed IR.
+fn buildContract(
+    allocator: std.mem.Allocator,
+    js_parser: *zts.parser.JsParser,
+    atoms: *zts.context.AtomTable,
+    filename: []const u8,
+    root: ir.NodeIndex,
+    aot: ?AotAnalysis,
+    verify_info: ?VerificationInfo,
+) !HandlerContract {
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+
+    // Get handler location
+    var handler_loc: ?ir.SourceLocation = null;
+    const handler_fn = findHandlerFunction(ir_view, root);
+    if (handler_fn) |hf| {
+        if (hf < js_parser.nodes.locs.items.len) {
+            handler_loc = js_parser.nodes.locs.items[hf];
+        }
+    }
+
+    var builder = ContractBuilder.init(allocator, ir_view, atoms);
+    defer builder.deinit();
+
+    const dispatch = if (aot) |a| a.dispatch else null;
+    const has_default = if (aot) |a| a.default_response != null else false;
+
+    return builder.build(
+        filename,
+        handler_loc,
+        dispatch,
+        has_default,
+        verify_info,
+    );
+}
+
+/// Derive contract.json path from the output .zig path.
+/// e.g. "src/generated/embedded_handler.zig" -> "src/generated/contract.json"
+fn deriveContractPath(allocator: std.mem.Allocator, output_path: []const u8) ![]u8 {
+    // Find the last '/' to get the directory
+    var dir_end: usize = 0;
+    for (output_path, 0..) |c, i| {
+        if (c == '/') dir_end = i + 1;
+    }
+
+    const dir = output_path[0..dir_end];
+    const result = try allocator.alloc(u8, dir.len + "contract.json".len);
+    @memcpy(result[0..dir.len], dir);
+    @memcpy(result[dir.len..], "contract.json");
+    return result;
+}
+
 fn writeZigFile(
     path: []const u8,
     compiled: CompiledHandler,
@@ -548,6 +730,10 @@ fn writeZigFile(
         try writer.writeAll("\npub const bytecode = [_]u8{\n");
         try writeBytecodeArray(writer, compiled.bytecode);
         try writer.writeAll("};\n");
+
+        // Append dependency module declarations (required by zruntime.zig)
+        try writer.writeAll("\npub const dep_count: u16 = 0;\n");
+        try writer.writeAll("pub const dep_bytecodes = [_][]const u8{};\n");
 
         output = aw.toArrayList();
         try writeFilePosix(path, output.items, allocator);

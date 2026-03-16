@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     // Handler path option (required for main build)
     const handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)");
     const aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false;
+    const verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false;
+    const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -67,11 +69,17 @@ pub fn build(b: *std.Build) void {
         if (aot_enabled) {
             run_precompile.addArg("--aot");
         }
+        if (verify_enabled) {
+            run_precompile.addArg("--verify");
+        }
+        if (contract_enabled) {
+            run_precompile.addArg("--contract");
+        }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");
 
         // Create the generated directory if it doesn't exist
-        const mkdir_step = b.addSystemCommand(&.{ "mkdir", "-p", "src/generated" });
+        const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "src/generated" });
         run_precompile.step.dependOn(&mkdir_step.step);
 
         // Main exe depends on precompile completing

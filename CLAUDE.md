@@ -19,6 +19,8 @@ Requires Zig 0.16.0+ (nightly).
 zig build                           # Debug build
 zig build -Doptimize=ReleaseFast   # Optimized build
 zig build -Dhandler=handler.jsx    # Precompile handler at build time
+zig build -Dhandler=handler.jsx -Dverify  # Verify handler at compile time
+zig build -Dhandler=handler.jsx -Dcontract  # Emit contract.json manifest
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
@@ -127,6 +129,10 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 **Handler Precompilation** (`tools/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely. This provides the fastest possible cold start for production deployments.
 
 Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
+
+**Handler Verification** (`zts/handler_verifier.zig`): The `-Dverify` build option enables compile-time correctness verification. The verifier statically proves: (1) every code path returns a Response, (2) Result values from virtual modules are checked before access, (3) no unreachable code after returns. This is possible because zigttp's JS subset eliminates all non-trivial control flow - the IR tree IS the control flow graph. See [docs/verification.md](docs/verification.md).
+
+**Handler Contract Manifest** (`zts/handler_contract.zig`): The `-Dcontract` build option emits `contract.json` alongside the embedded bytecode, describing what the handler is allowed to do. The contract extracts: virtual module imports and function names, literal env var names (`env.dynamic: false` when all calls use string literals), outbound hosts from `fetchSync` URL arguments, cache namespace strings, route patterns (when AOT pattern analysis detects them), and verification results (when `-Dverify` is also set). Non-literal arguments set `dynamic: true` as an honest signal that static analysis cannot enumerate all values. This is v1 (emission only) - runtime enforcement is v2 scope.
 
 ## TypeScript/TSX Support
 
