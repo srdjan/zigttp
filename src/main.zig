@@ -209,14 +209,16 @@ fn printHelp() void {
         \\    {
         \\      method: string,    // HTTP method (GET, POST, etc.)
         \\      url: string,       // URL path
-        \\      headers: object,   // HTTP headers
-        \\      body: string|null  // Request body
+        \\      query: object,     // Parsed query parameters
+        \\      headers: object,   // HTTP headers (supports headers.get(name))
+        \\      body: string|null  // Request body (supports text()/json())
         \\    }
         \\
         \\  Response helpers:
         \\    Response.json(data, init?)
         \\    Response.text(text, init?)
         \\    Response.html(html, init?)
+        \\    fetchSync(url, init?)         // when outbound bridge is enabled
         \\    httpRequest(jsonString)        // when outbound bridge is enabled
         \\
         \\Example handler.js:

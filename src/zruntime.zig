@@ -164,6 +164,8 @@ pub const Runtime = struct {
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
     last_request_body_len: usize,
+    body_reader_prototype: ?*zq.JSObject,
+    headers_prototype: ?*zq.JSObject,
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
@@ -233,6 +235,8 @@ pub const Runtime = struct {
             .owns_resources = true,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
+            .body_reader_prototype = null,
+            .headers_prototype = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
@@ -265,6 +269,8 @@ pub const Runtime = struct {
             .owns_resources = false,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
+            .body_reader_prototype = null,
+            .headers_prototype = null,
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
@@ -310,9 +316,11 @@ pub const Runtime = struct {
         self.cached_handler_obj = null;
         self.cached_dispatch = null;
 
+        try self.installHttpHelperPrototypes();
         // Install console object
         try self.installConsole();
         try self.installHttpRequest();
+        try self.installFetchSync();
 
         // Register all virtual module native functions eagerly.
         // This ensures import bindings resolve correctly whether the handler
@@ -321,6 +329,41 @@ pub const Runtime = struct {
 
         // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
         // Don't re-register them here as it would overwrite the proper constructor
+    }
+
+    fn installHttpHelperPrototypes(self: *Self) !void {
+        const root_class_idx = self.ctx.root_class_idx;
+        const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+        const body_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        try self.addDynamicMethod(body_proto, "text", bodyTextNative, 0);
+        try self.addDynamicMethod(body_proto, "json", bodyJsonNative, 0);
+        try self.ctx.builtin_objects.append(self.allocator, body_proto);
+
+        const headers_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
+        try self.addDynamicMethod(headers_proto, "get", headersGetNative, 1);
+        try self.ctx.builtin_objects.append(self.allocator, headers_proto);
+
+        self.body_reader_prototype = body_proto;
+        self.headers_prototype = headers_proto;
+    }
+
+    fn addMethod(self: *Self, obj: *zq.JSObject, atom: zq.Atom, func: zq.NativeFn, arg_count: u8) !void {
+        const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const fn_obj = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            self.ctx.root_class_idx,
+            func,
+            atom,
+            arg_count,
+        );
+        try self.ctx.setPropertyChecked(obj, atom, fn_obj.toValue());
+    }
+
+    fn addDynamicMethod(self: *Self, obj: *zq.JSObject, name: []const u8, func: zq.NativeFn, arg_count: u8) !void {
+        const atom = try self.ctx.atoms.intern(name);
+        try self.addMethod(obj, atom, func, arg_count);
     }
 
     fn installConsole(self: *Self) !void {
@@ -407,6 +450,23 @@ pub const Runtime = struct {
             pool,
             root_class_idx,
             httpRequestNative,
+            fn_atom,
+            1,
+        );
+        try self.ctx.builtin_objects.append(self.allocator, fn_obj);
+        try self.ctx.setGlobal(fn_atom, fn_obj.toValue());
+    }
+
+    fn installFetchSync(self: *Self) !void {
+        const root_class_idx = self.ctx.root_class_idx;
+        const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+        const fn_atom = try self.ctx.atoms.intern("fetchSync");
+        const fn_obj = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            root_class_idx,
+            fetchSyncNative,
             fn_atom,
             1,
         );
@@ -659,7 +719,7 @@ pub const Runtime = struct {
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
         // Deserialize bytecode with atoms and shapes - skips parsing entirely
-        var result = try bytecode_cache.deserializeBytecodeWithAtomsAndShapes(
+        const result = try bytecode_cache.deserializeBytecodeWithAtomsAndShapes(
             &reader,
             &self.ctx.atoms,
             self.allocator,
@@ -1006,7 +1066,7 @@ pub const Runtime = struct {
         // If not available, fall back to dynamic object creation.
         const shapes = self.ctx.http_shapes orelse return self.createRequestObjectDynamic(request);
 
-        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, null);
+        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, self.body_reader_prototype);
 
         // URL
         const url_str = try self.ctx.createString(request.url);
@@ -1048,25 +1108,23 @@ pub const Runtime = struct {
         }
 
         // Headers
-        if (request.headers.items.len > 0) {
-            const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, null);
-            for (request.headers.items) |header| {
-                const key_atom = headerKeyToAtom(header.key) orelse
-                    try self.ctx.atoms.intern(header.key);
-                const value_str = try self.ctx.createString(header.value);
-                switch (key_atom) {
-                    .authorization => headers_obj.setSlot(shapes.request_headers.authorization_slot, value_str),
-                    .@"content-type" => headers_obj.setSlot(shapes.request_headers.content_type_slot, value_str),
-                    .accept => headers_obj.setSlot(shapes.request_headers.accept_slot, value_str),
-                    .host => headers_obj.setSlot(shapes.request_headers.host_slot, value_str),
-                    .@"user-agent" => headers_obj.setSlot(shapes.request_headers.user_agent_slot, value_str),
-                    .@"accept-encoding" => headers_obj.setSlot(shapes.request_headers.accept_encoding_slot, value_str),
-                    .connection => headers_obj.setSlot(shapes.request_headers.connection_slot, value_str),
-                    else => try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str),
-                }
+        const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, self.headers_prototype);
+        for (request.headers.items) |header| {
+            const key_atom = headerKeyToAtom(header.key) orelse
+                try self.ctx.atoms.intern(header.key);
+            const value_str = try self.ctx.createString(header.value);
+            switch (key_atom) {
+                .authorization => headers_obj.setSlot(shapes.request_headers.authorization_slot, value_str),
+                .@"content-type" => headers_obj.setSlot(shapes.request_headers.content_type_slot, value_str),
+                .accept => headers_obj.setSlot(shapes.request_headers.accept_slot, value_str),
+                .host => headers_obj.setSlot(shapes.request_headers.host_slot, value_str),
+                .@"user-agent" => headers_obj.setSlot(shapes.request_headers.user_agent_slot, value_str),
+                .@"accept-encoding" => headers_obj.setSlot(shapes.request_headers.accept_encoding_slot, value_str),
+                .connection => headers_obj.setSlot(shapes.request_headers.connection_slot, value_str),
+                else => try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str),
             }
-            req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
         }
+        req_obj.setSlot(shapes.request.headers_slot, headers_obj.toValue());
 
         return req_obj.toValue();
     }
@@ -1074,7 +1132,7 @@ pub const Runtime = struct {
     /// Fallback for creating request objects when http_shapes is not available.
     /// This is slower than the shaped path but handles edge cases.
     fn createRequestObjectDynamic(self: *Self, request: HttpRequestView) !zq.JSValue {
-        const req_obj = try self.ctx.createObject(null);
+        const req_obj = try self.ctx.createObject(self.body_reader_prototype);
 
         const url_str = try self.ctx.createString(request.url);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.url, url_str);
@@ -1108,16 +1166,14 @@ pub const Runtime = struct {
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
         }
 
-        if (request.headers.items.len > 0) {
-            const headers_obj = try self.ctx.createObject(null);
-            for (request.headers.items) |header| {
-                const key_atom = headerKeyToAtom(header.key) orelse
-                    try self.ctx.atoms.intern(header.key);
-                const value_str = try self.ctx.createString(header.value);
-                try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
-            }
-            try self.ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
+        const headers_obj = try self.ctx.createObject(self.headers_prototype);
+        for (request.headers.items) |header| {
+            const key_atom = headerKeyToAtom(header.key) orelse
+                try self.ctx.atoms.intern(header.key);
+            const value_str = try self.ctx.createString(header.value);
+            try self.ctx.setPropertyChecked(headers_obj, key_atom, value_str);
         }
+        try self.ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
 
         return req_obj.toValue();
     }
@@ -1363,6 +1419,371 @@ pub const Runtime = struct {
 // ============================================================================
 // Native Function Implementations
 // ============================================================================
+
+const FetchResponseObjects = struct {
+    value: zq.JSValue,
+    response: *zq.JSObject,
+    headers: *zq.JSObject,
+};
+
+fn getStringData(val: zq.JSValue) ?[]const u8 {
+    if (val.isString()) {
+        return val.toPtr(zq.JSString).data();
+    }
+    if (val.isStringSlice()) {
+        return val.toPtr(zq.string.SliceString).data();
+    }
+    if (val.isRope()) {
+        const rope = val.toPtr(zq.string.RopeNode);
+        if (rope.kind == .leaf) {
+            return rope.payload.leaf.data();
+        }
+    }
+    return null;
+}
+
+fn getDynamicProperty(ctx: *zq.Context, obj: *zq.JSObject, pool: *const zq.HiddenClassPool, name: []const u8) ?zq.JSValue {
+    const atom = ctx.atoms.intern(name) catch return null;
+    return obj.getProperty(pool, atom);
+}
+
+fn getHeaderAtom(ctx: *zq.Context, name: []const u8) !zq.Atom {
+    if (ascii.eqlIgnoreCase(name, "content-type")) {
+        return try ctx.atoms.intern("Content-Type");
+    }
+    return Runtime.headerKeyToAtom(name) orelse try ctx.atoms.intern(name);
+}
+
+fn createResponseHeadersObject(rt: *Runtime) !*zq.JSObject {
+    if (rt.ctx.http_shapes) |shapes| {
+        return rt.ctx.createObjectWithClass(shapes.response_headers.class_idx, rt.headers_prototype);
+    }
+    return rt.ctx.createObject(rt.headers_prototype);
+}
+
+fn createFetchResponse(rt: *Runtime, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
+    const body_val = try rt.ctx.createString(body);
+    const body_str = body_val.toPtr(zq.JSString);
+    const response_val = try zq.http.createResponseFromString(
+        rt.ctx,
+        body_str,
+        status,
+        content_type orelse "application/octet-stream",
+    );
+    const response_obj = response_val.toPtr(zq.JSObject);
+    if (rt.body_reader_prototype) |proto| {
+        response_obj.prototype = proto;
+    }
+
+    const status_text_atom = if (rt.ctx.http_strings) |cache|
+        cache.status_text_atom
+    else
+        try rt.ctx.atoms.intern("statusText");
+    const status_text_val = try rt.ctx.createString(status_text);
+    try rt.ctx.setPropertyChecked(response_obj, status_text_atom, status_text_val);
+
+    const headers_obj = try createResponseHeadersObject(rt);
+    try rt.ctx.setPropertyChecked(response_obj, zq.Atom.headers, headers_obj.toValue());
+
+    if (content_type) |ct| {
+        const ct_atom = try getHeaderAtom(rt.ctx, "content-type");
+        const ct_val = try rt.ctx.createString(ct);
+        try rt.ctx.setPropertyChecked(headers_obj, ct_atom, ct_val);
+    }
+
+    return .{
+        .value = response_val,
+        .response = response_obj,
+        .headers = headers_obj,
+    };
+}
+
+fn createFetchErrorResponse(rt: *Runtime, err_code: []const u8, details: []const u8) !zq.JSValue {
+    const error_body = try httpRequestErrorJsonAlloc(rt.allocator, err_code, details);
+    defer rt.allocator.free(error_body);
+
+    const created = try createFetchResponse(rt, 599, err_code, error_body, "application/json");
+    const error_atom = try rt.ctx.atoms.intern("error");
+    const details_atom = try rt.ctx.atoms.intern("details");
+    const error_val = try rt.ctx.createString(err_code);
+    const details_val = try rt.ctx.createString(details);
+    try rt.ctx.setPropertyChecked(created.response, error_atom, error_val);
+    try rt.ctx.setPropertyChecked(created.response, details_atom, details_val);
+    return created.value;
+}
+
+fn getBodyValue(ctx: *zq.Context, this: zq.JSValue) ?zq.JSValue {
+    if (!this.isObject()) return null;
+    const pool = ctx.hidden_class_pool orelse return null;
+    const obj = this.toPtr(zq.JSObject);
+    return obj.getProperty(pool, zq.Atom.body);
+}
+
+fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const body_val = getBodyValue(ctx, this) orelse return ctx.createString("");
+    if (body_val.isNull() or body_val.isUndefined()) {
+        return ctx.createString("");
+    }
+    if (body_val.isAnyString()) {
+        return body_val;
+    }
+    return ctx.createString("");
+}
+
+fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const body_val = getBodyValue(ctx, this) orelse return zq.JSValue.undefined_val;
+    if (body_val.isNull() or body_val.isUndefined()) {
+        return zq.JSValue.undefined_val;
+    }
+    const body = getStringData(body_val) orelse return zq.JSValue.undefined_val;
+    return zq.builtins.parseJsonValue(ctx, body) catch zq.JSValue.undefined_val;
+}
+
+fn headersGetNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (!this.isObject() or args.len == 0) return zq.JSValue.null_val;
+
+    const wanted = getStringData(args[0]) orelse return zq.JSValue.null_val;
+    const pool = ctx.hidden_class_pool orelse return zq.JSValue.null_val;
+    const headers_obj = this.toPtr(zq.JSObject);
+    if (Runtime.headerKeyToAtom(wanted)) |known_atom| {
+        if (headers_obj.getProperty(pool, known_atom)) |value| {
+            return value;
+        }
+    }
+    if (ascii.eqlIgnoreCase(wanted, "content-type")) {
+        if (getDynamicProperty(ctx, headers_obj, pool, "Content-Type")) |value| {
+            return value;
+        }
+    }
+    const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return zq.JSValue.null_val;
+    defer ctx.allocator.free(keys);
+
+    for (keys) |key_atom| {
+        const key_name = ctx.atoms.getName(key_atom) orelse continue;
+        if (!ascii.eqlIgnoreCase(key_name, wanted)) continue;
+        return headers_obj.getOwnProperty(pool, key_atom) orelse zq.JSValue.null_val;
+    }
+    return zq.JSValue.null_val;
+}
+
+fn fetchSyncNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const rt = current_runtime orelse return error.RuntimeUnavailable;
+    return fetchSyncResult(rt, args) catch |err| {
+        return createFetchErrorResponse(rt, "InternalError", @errorName(err));
+    };
+}
+
+fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
+    if (!rt.config.outbound_http_enabled) {
+        return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
+    }
+    if (args.len == 0) {
+        return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
+    }
+
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    var init_obj: ?*zq.JSObject = null;
+    const url = blk: {
+        if (args[0].isObject()) {
+            init_obj = args[0].toPtr(zq.JSObject);
+            const url_val = init_obj.?.getProperty(pool, zq.Atom.url) orelse {
+                return createFetchErrorResponse(rt, "InvalidUrl", "missing url field");
+            };
+            const url = getStringData(url_val) orelse {
+                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+            };
+            if (url.len == 0) {
+                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+            }
+            break :blk url;
+        }
+
+        const url = getStringData(args[0]) orelse {
+            return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
+        };
+        if (url.len == 0) {
+            return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+        }
+        if (args.len > 1 and args[1].isObject()) {
+            init_obj = args[1].toPtr(zq.JSObject);
+        }
+        break :blk url;
+    };
+
+    const uri = std.Uri.parse(url) catch {
+        return createFetchErrorResponse(rt, "InvalidUrl", "url parse failed");
+    };
+
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch {
+        return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
+    };
+    if (rt.config.outbound_allow_host) |allowed_host| {
+        if (!ascii.eqlIgnoreCase(host.bytes, allowed_host)) {
+            return createFetchErrorResponse(rt, "HostNotAllowed", allowed_host);
+        }
+    }
+
+    var method = std.http.Method.GET;
+    var body: ?[]const u8 = null;
+    var max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);
+    var headers = std.array_list.Managed(std.http.Header).init(rt.allocator);
+    defer headers.deinit();
+
+    if (init_obj) |init| {
+        if (init.getProperty(pool, zq.Atom.method)) |method_val| {
+            const method_name = getStringData(method_val) orelse {
+                return createFetchErrorResponse(rt, "InvalidMethod", "method must be string");
+            };
+            method = parseHttpMethod(method_name) orelse {
+                return createFetchErrorResponse(rt, "InvalidMethod", method_name);
+            };
+        }
+
+        if (init.getProperty(pool, zq.Atom.body)) |body_val| {
+            if (body_val.isNull() or body_val.isUndefined()) {
+                body = null;
+            } else {
+                body = getStringData(body_val) orelse {
+                    return createFetchErrorResponse(rt, "InvalidBody", "body must be string|null");
+                };
+            }
+        }
+
+        if (getDynamicProperty(rt.ctx, init, pool, "maxResponseBytes")) |max_val| {
+            if (!max_val.isInt()) {
+                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "maxResponseBytes must be integer");
+            }
+            const req_max = std.math.cast(usize, max_val.getInt()) orelse {
+                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "maxResponseBytes out of range");
+            };
+            max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
+        } else if (getDynamicProperty(rt.ctx, init, pool, "max_response_bytes")) |max_val| {
+            if (!max_val.isInt()) {
+                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "max_response_bytes must be integer");
+            }
+            const req_max = std.math.cast(usize, max_val.getInt()) orelse {
+                return createFetchErrorResponse(rt, "InvalidMaxResponseBytes", "max_response_bytes out of range");
+            };
+            max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
+        }
+
+        if (init.getProperty(pool, zq.Atom.headers)) |headers_val| {
+            if (!headers_val.isObject()) {
+                return createFetchErrorResponse(rt, "InvalidHeaders", "headers must be object<string,string>");
+            }
+            const headers_obj = headers_val.toPtr(zq.JSObject);
+            const keys = try headers_obj.getOwnEnumerableKeys(rt.allocator, pool);
+            defer rt.allocator.free(keys);
+
+            for (keys) |key_atom| {
+                const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
+                const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
+                const header_str = getStringData(header_val) orelse {
+                    return createFetchErrorResponse(rt, "InvalidHeaders", "header values must be strings");
+                };
+                if (key_name.len == 0) {
+                    return createFetchErrorResponse(rt, "InvalidHeaders", "header name must be non-empty");
+                }
+                if (std.mem.indexOfAny(u8, key_name, "\r\n") != null) {
+                    return createFetchErrorResponse(rt, "InvalidHeaders", "header name contains newline");
+                }
+                if (std.mem.indexOfAny(u8, header_str, "\r\n") != null) {
+                    return createFetchErrorResponse(rt, "InvalidHeaders", "header value contains newline");
+                }
+                try headers.append(.{ .name = key_name, .value = header_str });
+            }
+        }
+    }
+
+    var client = std.http.Client{
+        .allocator = rt.allocator,
+        .io = std.Options.debug_io,
+    };
+    defer client.deinit();
+
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
+        return createFetchErrorResponse(rt, "InvalidUrl", "unsupported URI scheme");
+    };
+    const timeout: std.Io.Timeout = if (rt.config.outbound_timeout_ms == 0) .none else blk: {
+        const duration = std.Io.Duration.fromMilliseconds(@intCast(rt.config.outbound_timeout_ms));
+        break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
+    };
+    const connection = client.connectTcpOptions(.{
+        .host = host,
+        .port = uri.port orelse switch (protocol) {
+            .plain => 80,
+            .tls => 443,
+        },
+        .protocol = protocol,
+        .timeout = timeout,
+    }) catch |err| {
+        return createFetchErrorResponse(rt, "ConnectFailed", @errorName(err));
+    };
+
+    var req = client.request(method, uri, .{
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+        .connection = connection,
+        .extra_headers = headers.items,
+    }) catch |err| {
+        client.connection_pool.release(connection, client.io);
+        return createFetchErrorResponse(rt, "RequestInitFailed", @errorName(err));
+    };
+    defer req.deinit();
+
+    if (body) |payload| {
+        req.transfer_encoding = .{ .content_length = payload.len };
+        var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
+            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+        };
+        request_body.writer.writeAll(payload) catch |err| {
+            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+        };
+        request_body.end() catch |err| {
+            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+        };
+        req.connection.?.flush() catch |err| {
+            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+        };
+    } else {
+        req.sendBodiless() catch |err| {
+            return createFetchErrorResponse(rt, "RequestSendFailed", @errorName(err));
+        };
+    }
+
+    var response = req.receiveHead(&.{}) catch |err| {
+        return createFetchErrorResponse(rt, "ResponseHeadFailed", @errorName(err));
+    };
+
+    var body_transfer: [64]u8 = undefined;
+    var response_reader = response.reader(&body_transfer);
+    const response_body = response_reader.allocRemaining(rt.allocator, std.Io.Limit.limited(max_response_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => return createFetchErrorResponse(rt, "ResponseTooLarge", "response exceeded max_response_bytes"),
+        else => return createFetchErrorResponse(rt, "ResponseReadFailed", @errorName(err)),
+    };
+    defer rt.allocator.free(response_body);
+
+    const created = try createFetchResponse(
+        rt,
+        @intFromEnum(response.head.status),
+        response.head.reason,
+        response_body,
+        response.head.content_type,
+    );
+    var header_it = response.head.iterateHeaders();
+    while (header_it.next()) |header| {
+        const key_atom = try getHeaderAtom(rt.ctx, header.name);
+        const value_str = try rt.ctx.createString(header.value);
+        try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
+    }
+
+    return created.value;
+}
 
 fn httpRequestNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const rt = current_runtime orelse return error.RuntimeUnavailable;
@@ -2386,6 +2807,116 @@ test "httpRequest native binding enforces allowlisted host before dialing" {
     const err_v = obj.get("error") orelse return error.BadGolden;
     try std.testing.expect(err_v == .string);
     try std.testing.expectEqualStrings("HostNotAllowed", err_v.string);
+}
+
+test "request helpers expose body parsing and case-insensitive headers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const data = req.json();
+        \\  return Response.json({
+        \\    contentType: req.headers.get("content-type"),
+        \\    auth: req.headers.get("AUTHORIZATION"),
+        \\    missing: req.headers.get("x-missing"),
+        \\    body: req.text(),
+        \\    name: data.name,
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<request-helpers>");
+
+    var headers = std.ArrayListUnmanaged(HttpHeader){};
+    errdefer {
+        for (headers.items) |header| {
+            allocator.free(header.key);
+            allocator.free(header.value);
+        }
+        headers.deinit(allocator);
+    }
+    try headers.append(allocator, .{
+        .key = try allocator.dupe(u8, "Content-Type"),
+        .value = try allocator.dupe(u8, "application/json"),
+    });
+    try headers.append(allocator, .{
+        .key = try allocator.dupe(u8, "Authorization"),
+        .value = try allocator.dupe(u8, "Bearer test-token"),
+    });
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = headers,
+        .body = try allocator.dupe(u8, "{\"name\":\"zigttp\"}"),
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
+    try std.testing.expectEqualStrings("Bearer test-token", obj.get("auth").?.string);
+    try std.testing.expect(obj.get("missing").? == .null);
+    try std.testing.expectEqualStrings("{\"name\":\"zigttp\"}", obj.get("body").?.string);
+    try std.testing.expectEqualStrings("zigttp", obj.get("name").?.string);
+}
+
+test "fetchSync returns response helpers and direct response objects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const inspect_handler =
+        \\function handler(req) {
+        \\  const resp = fetchSync("http://example.com");
+        \\  const data = resp.json();
+        \\  return Response.json({
+        \\    status: resp.status,
+        \\    ok: resp.ok,
+        \\    contentType: resp.headers.get("Content-Type"),
+        \\    error: data.error,
+        \\    details: data.details,
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(inspect_handler, "<fetchsync-inspect>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, 599), obj.get("status").?.integer);
+    try std.testing.expect(obj.get("ok").?.bool == false);
+    try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
+    try std.testing.expectEqualStrings("OutboundHttpDisabled", obj.get("error").?.string);
+
+    try rt.loadHandler("function handler(req) { return fetchSync('http://example.com'); }", "<fetchsync-direct>");
+    var direct_response = try rt.executeHandler(request.asView());
+    defer direct_response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 599), direct_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, direct_response.body, "\"error\":\"OutboundHttpDisabled\"") != null);
 }
 
 test "HandlerPool basic operations" {

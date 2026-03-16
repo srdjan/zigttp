@@ -178,8 +178,10 @@ The request object contains all information about the incoming HTTP request:
 ```javascript
 {
     method: string,      // HTTP method: "GET", "POST", "PUT", "DELETE", etc.
+    url: string,         // Full URL including query string
     path: string,        // URL path: "/api/users", "/", "/search"
-    headers: object,     // HTTP headers as key-value pairs
+    query: object,       // Parsed query parameters
+    headers: object,     // HTTP headers as key-value pairs, plus headers.get(name)
     body: string | null  // Request body (for POST, PUT, PATCH) or null
 }
 ```
@@ -197,17 +199,19 @@ function handler(request) {
     // Path (without query string)
     console.log(request.path); // "/api/users"
 
-    // Query string (empty string if none)
-    console.log(request.query); // "id=1"
+    // Parsed query parameters
+    console.log(request.query.id); // 1
 
     // Headers
-    console.log(request.headers["Content-Type"]); // "application/json"
-    console.log(request.headers["Authorization"]); // "Bearer xxx"
+    console.log(request.headers.get("Content-Type")); // "application/json"
+    console.log(request.headers.get("Authorization")); // "Bearer xxx"
 
     // Body (may be null for GET requests)
     if (request.body) {
         console.log(request.body); // Raw body string
     }
+    console.log(request.text()); // Raw body string or ""
+    console.log(request.json()); // Parsed JSON or undefined
 
     return Response.text("OK");
 }
@@ -217,10 +221,10 @@ function handler(request) {
 
 ```javascript
 function handler(request) {
-    let contentType = request.headers["Content-Type"] || "";
-    let auth = request.headers["Authorization"] || "";
-    let userAgent = request.headers["User-Agent"] || "";
-    let accept = request.headers["Accept"] || "";
+    let contentType = request.headers.get("Content-Type") || "";
+    let auth = request.headers.get("Authorization") || "";
+    let userAgent = request.headers.get("User-Agent") || "";
+    let accept = request.headers.get("Accept") || "";
 
     return Response.json({
         contentType: contentType,

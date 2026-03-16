@@ -221,11 +221,24 @@ Options:
 
 **Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
-**Developer Experience**: Fetch-like Response API (Response.json, Response.text, Response.html), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
+**Developer Experience**: Fetch-like HTTP surface (`Response.*`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
 ## Native Outbound Bridge
 
-When enabled with `--outbound-http`, handlers can call:
+When enabled with `--outbound-http`, handlers can call the higher-level `fetchSync()` helper:
+
+```javascript
+const resp = fetchSync("http://127.0.0.1:8787/v1/ops?view=state", {
+  method: "GET",
+  headers: { Authorization: "Bearer ..." }
+});
+
+const data = resp.json();
+```
+
+`fetchSync()` returns a response-shaped object with `status`, `ok`, `headers.get(name)`, `text()`, and `json()`.
+
+The lower-level `httpRequest(jsonString)` bridge remains available:
 
 ```javascript
 const raw = httpRequest(JSON.stringify({
@@ -233,7 +246,6 @@ const raw = httpRequest(JSON.stringify({
   method: "GET",
   headers: { Authorization: "Bearer ..." }
 }));
-const resp = JSON.parse(raw);
 ```
 
 `httpRequest` returns JSON with either `{ ok: true, status, reason, body, content_type? }` or `{ ok: false, error, details }`.
