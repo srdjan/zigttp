@@ -91,8 +91,22 @@ pub const BoolChecker = struct {
     }
 
     pub fn deinit(self: *BoolChecker) void {
+        // Free dynamically allocated diagnostic messages
+        for (self.diagnostics.items) |diag| {
+            if (isAllocatedMessage(diag.message)) {
+                self.allocator.free(diag.message);
+            }
+        }
         self.diagnostics.deinit(self.allocator);
         self.const_types.deinit(self.allocator);
+    }
+
+    /// Check if a diagnostic message was dynamically allocated vs static string.
+    /// Allocated messages start with "non-boolean value (" and contain "' operator".
+    fn isAllocatedMessage(msg: []const u8) bool {
+        return msg.len > 30 and
+            std.mem.startsWith(u8, msg, "non-boolean value (") and
+            std.mem.endsWith(u8, msg, "' operator");
     }
 
     /// Run the checker on the given root node. Returns the number of errors.
@@ -179,8 +193,9 @@ pub const BoolChecker = struct {
                 // Walk the initializer expression for nested checks
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
-                    // Track const binding types
-                    if (vd.kind == .@"const") {
+                    // Track const and let binding types
+                    // Let bindings are invalidated on reassignment (see .assignment handler)
+                    if (vd.kind == .@"const" or vd.kind == .let) {
                         const inferred = self.inferType(vd.init);
                         // Key: pack scope_id and slot into a single u32
                         const key = (@as(u32, vd.binding.scope_id) << 16) | @as(u32, vd.binding.slot);
@@ -325,6 +340,20 @@ pub const BoolChecker = struct {
             .assignment => {
                 const asgn = self.ir_view.getAssignment(node) orelse return;
                 self.walkExpr(asgn.value);
+                // Invalidate let binding type on reassignment, then re-track
+                const target_tag = self.ir_view.getTag(asgn.target) orelse return;
+                if (target_tag == .identifier) {
+                    const binding = self.ir_view.getBinding(asgn.target) orelse return;
+                    const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+                    // Re-infer from the new value (simple assignment only)
+                    if (asgn.op == null) {
+                        const new_type = self.inferType(asgn.value);
+                        self.const_types.put(self.allocator, key, new_type) catch {};
+                    } else {
+                        // Compound assignment - invalidate to unknown
+                        _ = self.const_types.remove(key);
+                    }
+                }
             },
 
             .array_literal => {
@@ -490,25 +519,61 @@ pub const BoolChecker = struct {
             else => unreachable,
         };
 
-        const message = switch (inferred) {
-            .number => "non-boolean value (number) used in boolean context",
-            .string => "non-boolean value (string) used in boolean context",
-            .null_type => "non-boolean value (null) used in boolean context",
-            .undefined => "non-boolean value (undefined) used in boolean context",
-            .object => "non-boolean value (object) used in boolean context",
-            .function => "non-boolean value (function) used in boolean context",
+        const type_name: []const u8 = switch (inferred) {
+            .number => "number",
+            .string => "string",
+            .null_type => "null",
+            .undefined => "undefined",
+            .object => "object",
+            .function => "function",
             else => unreachable,
         };
 
-        _ = context_name; // context embedded in the diagnostic kind
+        // Select diagnostic kind based on operator context
+        const kind: DiagnosticKind = if (std.mem.eql(u8, context_name, "&&") or std.mem.eql(u8, context_name, "||"))
+            .logical_operand_not_boolean
+        else if (std.mem.eql(u8, context_name, "!"))
+            .not_operand_not_boolean
+        else
+            .condition_not_boolean;
 
-        self.addDiagnostic(.{
-            .severity = .err,
-            .kind = .condition_not_boolean,
-            .node = node,
-            .message = message,
-            .help = help,
-        });
+        // Build message with context: "non-boolean value (number) in '&&' operator"
+        var msg_buf: [80]u8 = undefined;
+        const prefix = "non-boolean value (";
+        const mid = ") in '";
+        const suffix = "' operator";
+        const msg_len = prefix.len + type_name.len + mid.len + context_name.len + suffix.len;
+        if (msg_len <= msg_buf.len) {
+            var pos: usize = 0;
+            @memcpy(msg_buf[pos..][0..prefix.len], prefix);
+            pos += prefix.len;
+            @memcpy(msg_buf[pos..][0..type_name.len], type_name);
+            pos += type_name.len;
+            @memcpy(msg_buf[pos..][0..mid.len], mid);
+            pos += mid.len;
+            @memcpy(msg_buf[pos..][0..context_name.len], context_name);
+            pos += context_name.len;
+            @memcpy(msg_buf[pos..][0..suffix.len], suffix);
+            pos += suffix.len;
+            // Allocate to get a stable pointer for the diagnostic
+            const message = self.allocator.dupe(u8, msg_buf[0..pos]) catch
+                "non-boolean value used in boolean context";
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = kind,
+                .node = node,
+                .message = message,
+                .help = help,
+            });
+        } else {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = kind,
+                .node = node,
+                .message = "non-boolean value used in boolean context",
+                .help = help,
+            });
+        }
     }
 
     fn addDiagnostic(self: *BoolChecker, diag: Diagnostic) void {
@@ -679,4 +744,47 @@ test "sound: complex boolean expression passes" {
         \\const c = 3;
         \\if (a > 0 && b !== c || a === b) { let x = 1; }
     , 0);
+}
+
+// Let variable tracking
+
+test "sound: tracked let number in if fails" {
+    try checkSource("let count = 0; if (count) { let x = 1; }", 1);
+}
+
+test "sound: let reassigned to boolean passes" {
+    try checkSource(
+        \\let flag = 0;
+        \\flag = 1 > 0;
+        \\if (flag) { let x = 1; }
+    , 0);
+}
+
+test "sound: let reassigned to number fails" {
+    try checkSource(
+        \\let flag = true;
+        \\flag = 42;
+        \\if (flag) { let x = 1; }
+    , 1);
+}
+
+// Diagnostic context messages
+
+test "sound: diagnostic includes operator context" {
+    const allocator = std.testing.allocator;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "if (0) { let x = 1; }");
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = BoolChecker.init(allocator, ir_view, null);
+    defer checker.deinit();
+
+    _ = try checker.check(root);
+    const diags = checker.getDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diags.len);
+    // Message should include the operator context
+    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "number") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "if") != null);
 }

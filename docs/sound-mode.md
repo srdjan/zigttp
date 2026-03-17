@@ -92,7 +92,6 @@ The BoolChecker performs lightweight type inference by walking the IR tree. When
 - Function parameters
 - Function call results
 - Property accesses (e.g., `obj.flag`)
-- Let variables (mutable, could be reassigned)
 - Computed accesses (e.g., `arr[i]`)
 
 When `unknown` appears in a boolean context, no diagnostic is emitted. The static checker only rejects code it can prove is non-boolean. Runtime VM assertions catch the remaining cases when the code actually executes.
@@ -119,6 +118,7 @@ When `unknown` appears in a boolean context, no diagnostic is emitted. The stati
 | `typeof` | string |
 | `void` | undefined |
 | `const x = expr; ... x` | same as expr |
+| `let x = expr; ... x` | same as expr (invalidated on reassignment) |
 | `cond ? a : b` | type of a (if a and b match) |
 | function calls, property access | unknown |
 
@@ -159,3 +159,5 @@ When sound mode is enabled, the VM enforces boolean values at three opcode sites
 If a non-boolean value reaches these opcodes at runtime, an exception is set: `sound mode: condition must be boolean, got <type>`.
 
 Performance impact is negligible: `isBool()` is two u64 comparisons against constants, and the branch predictor nearly always takes the non-error path.
+
+**JIT suppression**: Sound mode disables JIT tier promotion. The JIT compiles conditional jumps to native branches without `isBool()` guards, so all execution stays in the interpreter where assertions are enforced. For FaaS workloads this is typically not a concern since most handlers run below the JIT threshold anyway.

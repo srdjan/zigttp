@@ -228,12 +228,15 @@ pub const Runtime = struct {
             }
         }
 
+        var interp = zq.Interpreter.init(ctx);
+        interp.sound_mode = config.sound_mode;
+
         self.* = .{
             .allocator = allocator,
             .ctx = ctx,
             .gc_state = gc_state,
             .heap = heap_state,
-            .interpreter = zq.Interpreter.init(ctx),
+            .interpreter = interp,
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,
@@ -268,12 +271,15 @@ pub const Runtime = struct {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
+        var interp = zq.Interpreter.init(pool_rt.ctx);
+        interp.sound_mode = config.sound_mode;
+
         self.* = .{
             .allocator = allocator,
             .ctx = pool_rt.ctx,
             .gc_state = pool_rt.gc_state,
             .heap = pool_rt.heap_state,
-            .interpreter = zq.Interpreter.init(pool_rt.ctx),
+            .interpreter = interp,
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,

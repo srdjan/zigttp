@@ -770,7 +770,9 @@ pub const Interpreter = struct {
         const func_mut = @constCast(func);
 
         // Profile function entry and potentially trigger JIT compilation
-        const is_candidate = profileFunctionEntry(func_mut);
+        // Sound mode suppresses JIT: the JIT fast path for conditional jumps
+        // does not include isBool() guards, so we stay in the interpreter.
+        const is_candidate = if (self.sound_mode) false else profileFunctionEntry(func_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
             self.allocateTypeFeedback(func_mut) catch {};
@@ -993,7 +995,8 @@ pub const Interpreter = struct {
         const func_bc_mut = @constCast(func_bc);
 
         // Profile function entry and potentially trigger JIT compilation
-        const is_candidate = profileFunctionEntry(func_bc_mut);
+        // Sound mode suppresses JIT (see comment in run())
+        const is_candidate = if (self.sound_mode) false else profileFunctionEntry(func_bc_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
             self.allocateTypeFeedback(func_bc_mut) catch {};
