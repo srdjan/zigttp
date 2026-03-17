@@ -35,7 +35,65 @@ pub const ExprType = enum(u8) {
     object, // object/array literals
     function, // function/arrow expressions
     unknown, // cannot determine statically (params, fn calls, let vars, property access)
+    // Nullable variants: T | null | undefined
+    nullable_string, // e.g. env(), parseBearer(), cacheGet()
+    nullable_object, // e.g. routerMatch()
+
+    /// Returns true if this type is known to never be null or undefined.
+    pub fn isNonNullable(self: ExprType) bool {
+        return switch (self) {
+            .boolean, .number, .string, .object, .function => true,
+            else => false,
+        };
+    }
 };
+
+/// Unify two types into a single type. Returns .unknown if they're incompatible.
+/// Handles nullable promotion: string + null -> nullable_string, etc.
+fn unifyTypes(a: ExprType, b: ExprType) ExprType {
+    if (a == b) return a;
+    // Nullable promotion: T + null/undefined -> nullable_T
+    const null_like = ExprType.null_type;
+    const undef = ExprType.undefined;
+    if (a == null_like or a == undef) return makeNullable(b);
+    if (b == null_like or b == undef) return makeNullable(a);
+    // nullable_T + T -> nullable_T
+    if (a == .nullable_string and b == .string) return .nullable_string;
+    if (a == .string and b == .nullable_string) return .nullable_string;
+    if (a == .nullable_object and b == .object) return .nullable_object;
+    if (a == .object and b == .nullable_object) return .nullable_object;
+    return .unknown;
+}
+
+/// Promote a type to its nullable variant. Returns .unknown for types without nullable variants.
+fn makeNullable(t: ExprType) ExprType {
+    return switch (t) {
+        .string, .nullable_string => .nullable_string,
+        .object, .nullable_object => .nullable_object,
+        // null + null, undefined + undefined stay as-is
+        .null_type => .null_type,
+        .undefined => .undefined,
+        else => .unknown,
+    };
+}
+
+/// Merge a new return type into an accumulator. Returns null if incompatible.
+fn mergeReturnType(current: ?ExprType, new: ExprType) ?ExprType {
+    if (current) |c| {
+        if (c == new) return c;
+        const unified = unifyTypes(c, new);
+        return if (unified == .unknown) null else unified;
+    }
+    return new;
+}
+
+fn packBindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
+    return (@as(u32, scope_id) << 16) | @as(u32, slot);
+}
+
+fn bindingKey(binding: ir.BindingRef) u32 {
+    return packBindingKey(binding.scope_id, binding.slot);
+}
 
 // ---------------------------------------------------------------------------
 // Diagnostic types
@@ -85,6 +143,15 @@ pub const BoolChecker = struct {
     /// Checked before const_types in inferType for ALL binding kinds.
     /// Entries are temporary: installed before walking a branch, removed after.
     narrowed_types: std.AutoHashMapUnmanaged(u32, ExprType),
+    /// Virtual module import binding tracking: local slot -> return type.
+    /// Populated by scanImports before the main walk.
+    module_fn_types: std.AutoHashMapUnmanaged(u16, ExprType),
+    /// Local slots bound to Result-producing module functions (jwtVerify, etc.).
+    /// Used in walkStmt to detect `const r = jwtVerify(...)` and track result_bindings.
+    module_result_fn_slots: std.AutoHashMapUnmanaged(u16, void),
+    /// Binding slots that hold Result objects (from jwtVerify, validateJson, etc.).
+    /// Used to infer result.ok as boolean. Key: packed(scope_id, slot).
+    result_bindings: std.AutoHashMapUnmanaged(u32, void),
 
     const TypeofGuard = struct {
         binding_key: u32,
@@ -103,6 +170,9 @@ pub const BoolChecker = struct {
             .const_types = .empty,
             .fn_return_types = .empty,
             .narrowed_types = .empty,
+            .module_fn_types = .empty,
+            .module_result_fn_slots = .empty,
+            .result_bindings = .empty,
         };
     }
 
@@ -117,6 +187,9 @@ pub const BoolChecker = struct {
         self.const_types.deinit(self.allocator);
         self.fn_return_types.deinit(self.allocator);
         self.narrowed_types.deinit(self.allocator);
+        self.module_fn_types.deinit(self.allocator);
+        self.module_result_fn_slots.deinit(self.allocator);
+        self.result_bindings.deinit(self.allocator);
     }
 
     /// Check if a diagnostic message was dynamically allocated vs static string.
@@ -129,6 +202,7 @@ pub const BoolChecker = struct {
 
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *BoolChecker, root: NodeIndex) !u32 {
+        self.scanImports();
         self.walkStmt(root);
         var error_count: u32 = 0;
         for (self.diagnostics.items) |diag| {
@@ -207,25 +281,17 @@ pub const BoolChecker = struct {
                 var is_negated = false;
                 const guard_count = self.extractTypeofGuards(if_s.condition, &guards, &is_negated);
                 const active = guards[0..guard_count];
+                const saved_active = saved[0..guard_count];
 
-                if (active.len > 0 and !is_negated) {
-                    // === guard: narrow in then-branch
-                    self.installGuards(active, saved[0..guard_count]);
-                    self.walkStmt(if_s.then_branch);
-                    self.restoreGuards(active, saved[0..guard_count]);
-                    if (if_s.else_branch != null_node) {
-                        self.walkStmt(if_s.else_branch);
-                    }
-                } else if (active.len > 0) {
-                    // !== guard: narrow in else-branch
+                if (active.len > 0 and is_negated) {
+                    // !== guard: narrow in else-branch only
                     self.walkStmt(if_s.then_branch);
                     if (if_s.else_branch != null_node) {
-                        self.installGuards(active, saved[0..guard_count]);
-                        self.walkStmt(if_s.else_branch);
-                        self.restoreGuards(active, saved[0..guard_count]);
+                        self.walkStmtWithGuards(if_s.else_branch, active, saved_active);
                     }
                 } else {
-                    self.walkStmt(if_s.then_branch);
+                    // === guard or no guard (install/restore are no-ops on empty slice)
+                    self.walkStmtWithGuards(if_s.then_branch, active, saved_active);
                     if (if_s.else_branch != null_node) {
                         self.walkStmt(if_s.else_branch);
                     }
@@ -241,8 +307,7 @@ pub const BoolChecker = struct {
                     // Let bindings are invalidated on reassignment (see .assignment handler)
                     if (vd.kind == .@"const" or vd.kind == .let) {
                         const inferred = self.inferType(vd.init);
-                        // Key: pack scope_id and slot into a single u32
-                        const key = (@as(u32, vd.binding.scope_id) << 16) | @as(u32, vd.binding.slot);
+                        const key = bindingKey(vd.binding);
                         self.const_types.put(self.allocator, key, inferred) catch {};
 
                         // If binding is a function, try to infer its return type
@@ -250,6 +315,13 @@ pub const BoolChecker = struct {
                             const ret_type = self.inferFunctionReturnType(vd.init);
                             if (ret_type != .unknown) {
                                 self.fn_return_types.put(self.allocator, key, ret_type) catch {};
+                            }
+                        }
+
+                        // Track Result bindings: const r = jwtVerify(...)
+                        if (inferred == .object) {
+                            if (self.isResultCall(vd.init)) {
+                                self.result_bindings.put(self.allocator, key, {}) catch {};
                             }
                         }
                     }
@@ -315,8 +387,14 @@ pub const BoolChecker = struct {
             },
 
             // Expression-position tags that can appear as statements
-            .binary_op, .unary_op, .ternary, .call, .method_call,
-            .assignment, .match_expr, .template_literal,
+            .binary_op,
+            .unary_op,
+            .ternary,
+            .call,
+            .method_call,
+            .assignment,
+            .match_expr,
+            .template_literal,
             => {
                 self.walkExpr(node);
             },
@@ -346,10 +424,7 @@ pub const BoolChecker = struct {
                     // S4: ?? LHS warning for non-nullable
                     .nullish => {
                         const lhs_type = self.inferType(bin.left);
-                        if (lhs_type == .number or lhs_type == .string or
-                            lhs_type == .boolean or lhs_type == .object or
-                            lhs_type == .function)
-                        {
+                        if (lhs_type.isNonNullable()) {
                             self.addDiagnostic(.{
                                 .severity = .warning,
                                 .kind = .nullish_on_non_nullable,
@@ -387,19 +462,13 @@ pub const BoolChecker = struct {
                 var is_negated = false;
                 const guard_count = self.extractTypeofGuards(t.condition, &guards, &is_negated);
                 const active = guards[0..guard_count];
+                const saved_active = saved[0..guard_count];
 
-                if (active.len > 0 and !is_negated) {
-                    self.installGuards(active, saved[0..guard_count]);
+                if (active.len > 0 and is_negated) {
                     self.walkExpr(t.then_branch);
-                    self.restoreGuards(active, saved[0..guard_count]);
-                    self.walkExpr(t.else_branch);
-                } else if (active.len > 0) {
-                    self.walkExpr(t.then_branch);
-                    self.installGuards(active, saved[0..guard_count]);
-                    self.walkExpr(t.else_branch);
-                    self.restoreGuards(active, saved[0..guard_count]);
+                    self.walkExprWithGuards(t.else_branch, active, saved_active);
                 } else {
-                    self.walkExpr(t.then_branch);
+                    self.walkExprWithGuards(t.then_branch, active, saved_active);
                     self.walkExpr(t.else_branch);
                 }
             },
@@ -491,9 +560,17 @@ pub const BoolChecker = struct {
             },
 
             // Leaf expressions - no children to walk
-            .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null,
-            .lit_undefined, .identifier, .member_access, .computed_access,
-            .optional_chain, .spread,
+            .lit_int,
+            .lit_float,
+            .lit_string,
+            .lit_bool,
+            .lit_null,
+            .lit_undefined,
+            .identifier,
+            .member_access,
+            .computed_access,
+            .optional_chain,
+            .spread,
             => {},
 
             else => {},
@@ -525,12 +602,12 @@ pub const BoolChecker = struct {
                 const t = self.ir_view.getTernary(node) orelse return .unknown;
                 const then_type = self.inferType(t.then_branch);
                 const else_type = self.inferType(t.else_branch);
-                return if (then_type == else_type) then_type else .unknown;
+                return unifyTypes(then_type, else_type);
             },
 
             .identifier => {
                 const binding = self.ir_view.getBinding(node) orelse return .unknown;
-                const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+                const key = bindingKey(binding);
                 // Branch-scoped narrowing (applies to ALL binding kinds including .argument)
                 if (self.narrowed_types.get(key)) |t| return t;
                 // Existing: const/let tracking (local/global only)
@@ -540,13 +617,18 @@ pub const BoolChecker = struct {
                 return .unknown;
             },
 
-            .match_expr => .unknown,
+            .match_expr => self.inferMatchType(node),
 
             .call => self.inferCallReturnType(node),
 
-            // Method calls, property access - cannot determine statically
-            .method_call, .member_access, .computed_access,
-            .optional_chain, .optional_call, .spread,
+            .member_access => self.inferMemberAccessType(node),
+
+            // Method calls, computed access - cannot determine statically
+            .method_call,
+            .computed_access,
+            .optional_chain,
+            .optional_call,
+            .spread,
             => .unknown,
 
             else => .unknown,
@@ -578,8 +660,19 @@ pub const BoolChecker = struct {
             // Bitwise ops
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => .number,
 
-            // Nullish coalescing: depends on operands
-            .nullish => .unknown,
+            // Nullish coalescing: if LHS is nullable_T and RHS matches T, result is T
+            .nullish => {
+                const left_type = self.inferType(bin.left);
+                const right_type = self.inferType(bin.right);
+                // nullable_string ?? string -> string
+                if (left_type == .nullable_string and right_type == .string) return .string;
+                if (left_type == .nullable_object and right_type == .object) return .object;
+                // Non-nullable ?? anything -> non-nullable (the RHS is dead code, warned above)
+                if (left_type.isNonNullable()) return left_type;
+                // null/undefined ?? T -> T
+                if (left_type == .null_type or left_type == .undefined) return right_type;
+                return .unknown;
+            },
 
             // Legacy eq/neq (banned by parser, but handle gracefully)
             .eq, .neq => .boolean,
@@ -595,6 +688,20 @@ pub const BoolChecker = struct {
             .typeof_op => .string,
             .void_op => .undefined,
         };
+    }
+
+    /// Infer the type of a match expression by unifying arm body types.
+    fn inferMatchType(self: *BoolChecker, node: NodeIndex) ExprType {
+        const me = self.ir_view.getMatchExpr(node) orelse return .unknown;
+        if (me.arms_count == 0) return .unknown;
+        var result: ?ExprType = null;
+        for (0..me.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse return .unknown;
+            const arm_type = self.inferType(arm.body);
+            result = mergeReturnType(result, arm_type) orelse return .unknown;
+        }
+        return result orelse .unknown;
     }
 
     // -----------------------------------------------------------------------
@@ -641,39 +748,21 @@ pub const BoolChecker = struct {
                 .return_stmt => {
                     const ret_val = self.ir_view.getOptValue(stmt_idx) orelse {
                         // bare return -> undefined
-                        if (return_type) |rt| {
-                            if (rt != .undefined) return .unknown;
-                        } else {
-                            return_type = .undefined;
-                        }
+                        return_type = mergeReturnType(return_type, .undefined) orelse return .unknown;
                         continue;
                     };
                     const this_type = self.inferType(ret_val);
-                    if (return_type) |rt| {
-                        if (rt != this_type) return .unknown;
-                    } else {
-                        return_type = this_type;
-                    }
+                    return_type = mergeReturnType(return_type, this_type) orelse return .unknown;
                 },
                 .if_stmt => {
                     // Recurse into if branches
                     const if_s = self.ir_view.getIfStmt(stmt_idx) orelse continue;
-                    const then_type = self.inferBranchReturnType(if_s.then_branch);
-                    if (then_type) |tt| {
-                        if (return_type) |rt| {
-                            if (rt != tt) return .unknown;
-                        } else {
-                            return_type = tt;
-                        }
+                    if (self.inferBranchReturnType(if_s.then_branch)) |tt| {
+                        return_type = mergeReturnType(return_type, tt) orelse return .unknown;
                     }
                     if (if_s.else_branch != null_node) {
-                        const else_type = self.inferBranchReturnType(if_s.else_branch);
-                        if (else_type) |et| {
-                            if (return_type) |rt| {
-                                if (rt != et) return .unknown;
-                            } else {
-                                return_type = et;
-                            }
+                        if (self.inferBranchReturnType(if_s.else_branch)) |et| {
+                            return_type = mergeReturnType(return_type, et) orelse return .unknown;
                         }
                     }
                 },
@@ -705,8 +794,56 @@ pub const BoolChecker = struct {
 
         if (callee_tag == .identifier) {
             const binding = self.ir_view.getBinding(call.callee) orelse return .unknown;
-            const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+
+            // Check virtual module import bindings first
+            if (self.module_fn_types.get(binding.slot)) |ret_type| return ret_type;
+
+            // Then check locally-inferred function return types
+            const key = bindingKey(binding);
             if (self.fn_return_types.get(key)) |ret_type| return ret_type;
+        }
+
+        return .unknown;
+    }
+
+    /// Check if a call node invokes a Result-producing function.
+    fn isResultCall(self: *const BoolChecker, node: NodeIndex) bool {
+        const call_tag = self.ir_view.getTag(node) orelse return false;
+        if (call_tag != .call) return false;
+        const call = self.ir_view.getCall(node) orelse return false;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return false;
+        if (callee_tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(call.callee) orelse return false;
+        return self.module_result_fn_slots.contains(binding.slot);
+    }
+
+    // -----------------------------------------------------------------------
+    // Property access type inference (Phase 4)
+    // -----------------------------------------------------------------------
+
+    /// Known property types for Result objects: { ok: boolean, value: unknown, error: string }
+    fn resultPropertyType(self: *const BoolChecker, prop_atom: u16) ExprType {
+        const name = self.resolveAtomName(prop_atom) orelse return .unknown;
+        if (std.mem.eql(u8, name, "ok")) return .boolean;
+        if (std.mem.eql(u8, name, "error")) return .string;
+        if (std.mem.eql(u8, name, "value")) return .unknown;
+        return .unknown;
+    }
+
+    /// Infer the type of a member access expression (obj.prop).
+    fn inferMemberAccessType(self: *BoolChecker, node: NodeIndex) ExprType {
+        const member = self.ir_view.getMember(node) orelse return .unknown;
+
+        // Check if the object is an identifier with known shape
+        const obj_tag = self.ir_view.getTag(member.object) orelse return .unknown;
+        if (obj_tag != .identifier) return .unknown;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return .unknown;
+        const key = bindingKey(binding);
+
+        // Pattern B: Result object property access (result.ok -> boolean)
+        if (self.result_bindings.contains(key)) {
+            return self.resultPropertyType(member.property);
         }
 
         return .unknown;
@@ -729,6 +866,8 @@ pub const BoolChecker = struct {
             .undefined => "undefined is not boolean; this condition is always false",
             .object => "objects are not boolean; this condition is always true",
             .function => "functions are not boolean; this condition is always true",
+            .nullable_string => "use explicit null check: val !== null && val !== undefined",
+            .nullable_object => "use explicit null check: val !== null && val !== undefined",
             else => unreachable,
         };
 
@@ -739,6 +878,8 @@ pub const BoolChecker = struct {
             .undefined => "undefined",
             .object => "object",
             .function => "function",
+            .nullable_string => "string?",
+            .nullable_object => "object?",
             else => unreachable,
         };
 
@@ -906,6 +1047,7 @@ pub const BoolChecker = struct {
         if (bin.op != .and_op) return;
 
         self.collectAndGuards(bin.left, guards, count);
+        if (count.* >= MAX_NARROWINGS) return;
         self.collectAndGuards(bin.right, guards, count);
     }
 
@@ -930,6 +1072,128 @@ pub const BoolChecker = struct {
                 _ = self.narrowed_types.remove(g.binding_key);
             }
         }
+    }
+
+    fn walkStmtWithGuards(
+        self: *BoolChecker,
+        node: NodeIndex,
+        guards: []const TypeofGuard,
+        saved: []?ExprType,
+    ) void {
+        self.installGuards(guards, saved);
+        self.walkStmt(node);
+        self.restoreGuards(guards, saved);
+    }
+
+    fn walkExprWithGuards(
+        self: *BoolChecker,
+        node: NodeIndex,
+        guards: []const TypeofGuard,
+        saved: []?ExprType,
+    ) void {
+        self.installGuards(guards, saved);
+        self.walkExpr(node);
+        self.restoreGuards(guards, saved);
+    }
+
+    // -----------------------------------------------------------------------
+    // Import scanning for virtual module return types
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Virtual module return type table
+    // -----------------------------------------------------------------------
+
+    /// Static table of known return types for virtual module functions.
+    /// Matches are by (module_specifier, function_name) -> ExprType.
+    /// Functions not listed here (or with nullable returns) default to .unknown.
+    const ModuleReturnEntry = struct {
+        module: []const u8,
+        name: []const u8,
+        ret: ExprType,
+        is_result: bool = false, // true for functions returning {ok, value, error} Result objects
+    };
+    const module_return_types = [_]ModuleReturnEntry{
+        // zigttp:auth
+        .{ .module = "zigttp:auth", .name = "verifyWebhookSignature", .ret = .boolean },
+        .{ .module = "zigttp:auth", .name = "timingSafeEqual", .ret = .boolean },
+        .{ .module = "zigttp:auth", .name = "jwtVerify", .ret = .object, .is_result = true },
+        .{ .module = "zigttp:auth", .name = "jwtSign", .ret = .string },
+        .{ .module = "zigttp:auth", .name = "parseBearer", .ret = .nullable_string },
+        // zigttp:crypto
+        .{ .module = "zigttp:crypto", .name = "sha256", .ret = .string },
+        .{ .module = "zigttp:crypto", .name = "hmacSha256", .ret = .string },
+        .{ .module = "zigttp:crypto", .name = "base64Encode", .ret = .string },
+        .{ .module = "zigttp:crypto", .name = "base64Decode", .ret = .string },
+        // zigttp:validate
+        .{ .module = "zigttp:validate", .name = "schemaCompile", .ret = .boolean },
+        .{ .module = "zigttp:validate", .name = "validateJson", .ret = .object, .is_result = true },
+        .{ .module = "zigttp:validate", .name = "validateObject", .ret = .object, .is_result = true },
+        .{ .module = "zigttp:validate", .name = "coerceJson", .ret = .object, .is_result = true },
+        .{ .module = "zigttp:validate", .name = "schemaDrop", .ret = .boolean },
+        // zigttp:cache
+        .{ .module = "zigttp:cache", .name = "cacheSet", .ret = .boolean },
+        .{ .module = "zigttp:cache", .name = "cacheDelete", .ret = .boolean },
+        .{ .module = "zigttp:cache", .name = "cacheIncr", .ret = .number },
+        .{ .module = "zigttp:cache", .name = "cacheStats", .ret = .object },
+        .{ .module = "zigttp:cache", .name = "cacheGet", .ret = .nullable_string },
+        // zigttp:env
+        .{ .module = "zigttp:env", .name = "env", .ret = .nullable_string },
+        // zigttp:router
+        .{ .module = "zigttp:router", .name = "routerMatch", .ret = .nullable_object },
+    };
+
+    fn findModuleReturnEntry(module_str: []const u8, func_name: []const u8) ?*const ModuleReturnEntry {
+        for (&module_return_types) |*entry| {
+            if (std.mem.eql(u8, entry.module, module_str) and
+                std.mem.eql(u8, entry.name, func_name)) return entry;
+        }
+        return null;
+    }
+
+    /// Scan all import declarations to map local binding slots to known return types.
+    fn scanImports(self: *BoolChecker) void {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .import_decl) continue;
+
+            const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
+            const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
+
+            // Only process zigttp:* virtual modules
+            if (!std.mem.startsWith(u8, module_str, "zigttp:")) continue;
+
+            var j: u8 = 0;
+            while (j < import_decl.specifiers_count) : (j += 1) {
+                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
+                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
+                const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
+                const entry = findModuleReturnEntry(module_str, imported_name) orelse continue;
+
+                self.module_fn_types.put(self.allocator, spec.local_binding.slot, entry.ret) catch {};
+                if (entry.is_result) {
+                    self.module_result_fn_slots.put(self.allocator, spec.local_binding.slot, {}) catch {};
+                }
+            }
+        }
+    }
+
+    fn resolveAtomName(self: *const BoolChecker, atom_idx: u16) ?[]const u8 {
+        if (self.atoms) |table| {
+            // With atom table: predefined atoms first, then dynamic table
+            const atom: object.Atom = @enumFromInt(atom_idx);
+            if (atom.toPredefinedName()) |name| return name;
+            return table.getName(atom);
+        }
+        // Without atom table (standalone parser): predefined atoms and string
+        // constants share the u16 index space. String constants take priority
+        // because import specifiers (the main use case) go through addString.
+        // Predefined atom names are keywords/builtins, never import specifier names.
+        if (self.ir_view.getString(atom_idx)) |name| return name;
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        return atom.toPredefinedName();
     }
 
     fn addDiagnostic(self: *BoolChecker, diag: Diagnostic) void {
@@ -1235,6 +1499,24 @@ test "sound: typeof negated guard narrows else-branch" {
     , 1);
 }
 
+test "sound: typeof guard narrows ternary then branch" {
+    try checkSource(
+        \\const f = (x) => {
+        \\  typeof x === "number" ? (x ? 1 : 0) : 0;
+        \\  return true;
+        \\};
+    , 1);
+}
+
+test "sound: typeof negated guard narrows ternary else branch" {
+    try checkSource(
+        \\const f = (x) => {
+        \\  typeof x !== "number" ? 0 : (x ? 1 : 0);
+        \\  return true;
+        \\};
+    , 1);
+}
+
 test "sound: typeof narrowing does not leak outside branch" {
     // Outside the typeof branch, x should revert to unknown (passes)
     try checkSource(
@@ -1281,5 +1563,152 @@ test "sound: non-typeof condition does not narrow" {
         \\  }
         \\  return true;
         \\};
+    , 0);
+}
+
+// Virtual module return type inference (Phase 1)
+
+test "sound: virtual module boolean return type catches non-boolean use" {
+    // verifyWebhookSignature returns boolean - using it in if is fine
+    try checkSource(
+        \\import { verifyWebhookSignature } from "zigttp:auth";
+        \\const ok = verifyWebhookSignature("payload", "secret", "sig");
+        \\if (ok) { let x = 1; }
+    , 0);
+}
+
+test "sound: virtual module number return type fails in boolean context" {
+    // cacheIncr returns number
+    try checkSource(
+        \\import { cacheIncr } from "zigttp:cache";
+        \\const count = cacheIncr("ns", "key");
+        \\if (count) { let x = 1; }
+    , 1);
+}
+
+test "sound: virtual module string return type fails in boolean context" {
+    // sha256 returns string
+    try checkSource(
+        \\import { sha256 } from "zigttp:crypto";
+        \\const hash = sha256("data");
+        \\if (hash) { let x = 1; }
+    , 1);
+}
+
+test "sound: virtual module object return type fails in boolean context" {
+    // jwtVerify returns object (Result)
+    try checkSource(
+        \\import { jwtVerify } from "zigttp:auth";
+        \\const result = jwtVerify("token", "secret");
+        \\if (result) { let x = 1; }
+    , 1);
+}
+
+test "sound: virtual module nullable return type fails in boolean context" {
+    // env returns nullable_string - truthiness check is not safe
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY");
+        \\if (val) { let x = 1; }
+    , 1);
+}
+
+test "sound: virtual module direct call in boolean context" {
+    // timingSafeEqual returns boolean - direct call in if is fine
+    try checkSource(
+        \\import { timingSafeEqual } from "zigttp:auth";
+        \\if (timingSafeEqual("a", "b")) { let x = 1; }
+    , 0);
+}
+
+test "sound: virtual module direct number call in boolean context fails" {
+    // cacheIncr returns number - direct call in if fails
+    try checkSource(
+        \\import { cacheIncr } from "zigttp:cache";
+        \\if (cacheIncr("ns", "key")) { let x = 1; }
+    , 1);
+}
+
+// Phase 2: Match expression type inference tests must run via `zig build test-zts`
+// (standalone `zig test` on bool_checker.zig hangs when parsing match expressions).
+
+// Phase 3: Nullable union types
+
+test "sound: nullable string from env used with ?? passes" {
+    // env() ?? "default" is fine - ?? resolves nullable
+    try checkSourceFull(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY") ?? "default";
+        \\if (val) { let x = 1; }
+    , 1, 0); // val is string (from ??), string in boolean context fails; no warnings
+}
+
+test "sound: nullable with ?? does not warn" {
+    // env() ?? "default" - the ?? is legitimate because env() is nullable
+    try checkSourceFull(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY") ?? "default";
+    , 0, 0); // no errors, no warnings
+}
+
+test "sound: non-nullable with ?? still warns" {
+    // sha256() ?? "" - sha256 returns string (never null), so ?? is unreachable
+    try checkSourceFull(
+        \\import { sha256 } from "zigttp:crypto";
+        \\const val = sha256("data") ?? "";
+    , 0, 1); // no errors, 1 warning
+}
+
+test "sound: nullable cacheGet in boolean context fails" {
+    try checkSource(
+        \\import { cacheGet } from "zigttp:cache";
+        \\const val = cacheGet("ns", "key");
+        \\if (val) { let x = 1; }
+    , 1);
+}
+
+test "sound: function returning string or null infers nullable_string" {
+    // Mixed return: string + undefined -> nullable_string -> fails in boolean context
+    try checkSource(
+        \\const find = (arr) => {
+        \\  if (arr.length > 0) { return "found"; }
+        \\  return undefined;
+        \\};
+        \\const r = find([1]);
+        \\if (r) { let x = 1; }
+    , 1);
+}
+
+// Phase 4: Property access on known shapes
+
+test "sound: result.ok is boolean - passes in boolean context" {
+    try checkSource(
+        \\import { jwtVerify } from "zigttp:auth";
+        \\const result = jwtVerify("token", "secret", "opts");
+        \\if (result.ok) { let x = 1; }
+    , 0);
+}
+
+test "sound: aliased result-producing import preserves result shape" {
+    try checkSource(
+        \\import { jwtVerify as verify } from "zigttp:auth";
+        \\const result = verify("token", "secret", "opts");
+        \\if (result.ok) { let x = 1; }
+    , 0);
+}
+
+test "sound: result.error is string - fails in boolean context" {
+    try checkSource(
+        \\import { validateJson } from "zigttp:validate";
+        \\const result = validateJson("schema", "data");
+        \\if (result.error) { let x = 1; }
+    , 1);
+}
+
+test "sound: non-result object property stays unknown" {
+    // Regular object property access - stays unknown (passes)
+    try checkSource(
+        \\const obj = { x: 1 };
+        \\if (obj.x) { let y = 1; }
     , 0);
 }
