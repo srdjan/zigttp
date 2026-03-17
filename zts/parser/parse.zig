@@ -3128,7 +3128,6 @@ pub const Parser = struct {
     fn getInfixPrecedence(self: *Parser, token_type: TokenType) Precedence {
         _ = self;
         return switch (token_type) {
-            .comma => .comma,
             .assign, .plus_assign, .minus_assign, .star_assign, .slash_assign, .percent_assign, .ampersand_assign, .pipe_assign, .caret_assign, .lt_lt_assign, .gt_gt_assign, .gt_gt_gt_assign, .star_star_assign, .ampersand_ampersand_assign, .pipe_pipe_assign, .question_question_assign => .assignment,
             .question => .ternary,
             .question_question => .nullish,
