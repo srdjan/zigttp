@@ -13,6 +13,7 @@ const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const builtins = @import("builtins.zig");
 const bytecode = @import("bytecode.zig");
+const handler_policy = @import("handler_policy.zig");
 const modules = @import("modules/root.zig");
 
 pub const enable_jit_metrics = builtin.mode != .ReleaseFast;
@@ -269,6 +270,8 @@ pub const Context = struct {
     /// Per-module persistent state (caches, registries).
     /// Indexed by VirtualModule enum ordinal. Null when module has no state.
     module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
+    /// Embedded capability policy for precompiled handlers.
+    capability_policy: handler_policy.RuntimePolicy,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -331,6 +334,7 @@ pub const Context = struct {
             .small_int_cache = small_int_cache,
             .literal_shapes = .{},
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
+            .capability_policy = .{},
         };
 
         if (config.use_http_shape_cache) {

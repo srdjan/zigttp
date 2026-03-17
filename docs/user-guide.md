@@ -1748,6 +1748,27 @@ zig build -Dhandler=handler.ts -Dverify -Dcontract
 
 The contract is written to `src/generated/contract.json` alongside the embedded bytecode.
 
+Add `-Dpolicy=policy.json` to enforce a least-privilege capability policy for a precompiled handler:
+
+```bash
+zig build -Dhandler=handler.ts -Dpolicy=policy.json
+```
+
+```json
+{
+  "env": { "allow": ["JWT_SECRET"] },
+  "egress": { "allow_hosts": ["api.example.com"] },
+  "cache": { "allow_namespaces": ["sessions"] }
+}
+```
+
+Policy rules in v1:
+
+- Omit a section to leave that capability unrestricted.
+- If a section is present, only the listed literals are allowed.
+- Dynamic access in a restricted category fails the build because zigttp cannot enumerate it soundly.
+- Runtime enforcement currently applies to precompiled handlers only.
+
 ---
 
 ## Troubleshooting

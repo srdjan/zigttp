@@ -4,7 +4,7 @@
 //! This eliminates runtime parsing overhead and removes the need for source files
 //! in deployment.
 //!
-//! Usage: precompile [--aot] <handler.ts> <output.zig>
+//! Usage: precompile [--aot] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
 const zts = @import("zts");
@@ -15,6 +15,8 @@ const ContractBuilder = handler_contract.ContractBuilder;
 const writeContractJson = handler_contract.writeContractJson;
 const HandlerContract = handler_contract.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
+const handler_policy = zts.handler_policy;
+const HandlerPolicy = handler_policy.HandlerPolicy;
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -126,6 +128,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var emit_aot = false;
     var emit_verify = false;
     var emit_contract = false;
+    var policy_path: ?[]const u8 = null;
     var emit_sound = false;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -141,6 +144,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (std.mem.eql(u8, arg, "--contract")) {
             emit_contract = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--policy")) {
+            policy_path = args.next() orelse {
+                std.debug.print("Missing path after --policy\n", .{});
+                return error.MissingArgument;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--sound")) {
@@ -162,13 +172,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--sound] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] [--sound] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--sound] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] [--sound] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -180,10 +190,34 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer allocator.free(source);
 
+    var policy: ?HandlerPolicy = null;
+    defer if (policy) |*p| p.deinit(allocator);
+    if (policy_path) |path| {
+        const policy_source = readFilePosix(allocator, path, 1024 * 1024) catch |err| {
+            std.debug.print("Error reading policy file '{s}': {}\n", .{ path, err });
+            return err;
+        };
+        defer allocator.free(policy_source);
+
+        policy = handler_policy.parsePolicyJson(allocator, policy_source) catch |err| {
+            std.debug.print("Error parsing policy file '{s}': {}\n", .{ path, err });
+            return err;
+        };
+    }
+
     std.debug.print("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
-    var compiled = compileHandler(allocator, source, handler_path_final, emit_aot, emit_verify, emit_contract, emit_sound) catch |err| {
+    var compiled = compileHandler(
+        allocator,
+        source,
+        handler_path_final,
+        emit_aot,
+        emit_verify,
+        emit_contract,
+        policy,
+        emit_sound,
+    ) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
     };
@@ -195,7 +229,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Write the output Zig file
-    writeZigFile(output_path_final, compiled, handler_path_final, allocator) catch |err| {
+    writeZigFile(output_path_final, compiled, handler_path_final, policy, allocator) catch |err| {
         std.debug.print("Error writing output file '{s}': {}\n", .{ output_path_final, err });
         return err;
     };
@@ -203,29 +237,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Wrote embedded handler to: {s}\n", .{output_path_final});
 
     // Write contract.json alongside the output if requested
-    if (compiled.contract) |*contract| {
-        const contract_path = deriveContractPath(allocator, output_path_final) catch |err| {
-            std.debug.print("Error deriving contract path: {}\n", .{err});
-            return err;
-        };
-        defer allocator.free(contract_path);
+    if (emit_contract) {
+        if (compiled.contract) |*contract| {
+            const contract_path = deriveContractPath(allocator, output_path_final) catch |err| {
+                std.debug.print("Error deriving contract path: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(contract_path);
 
-        var json_output: std.ArrayList(u8) = .empty;
-        defer json_output.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
+            var json_output: std.ArrayList(u8) = .empty;
+            defer json_output.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
 
-        writeContractJson(contract, &aw.writer) catch |err| {
-            std.debug.print("Error serializing contract: {}\n", .{err});
-            return err;
-        };
-        json_output = aw.toArrayList();
+            writeContractJson(contract, &aw.writer) catch |err| {
+                std.debug.print("Error serializing contract: {}\n", .{err});
+                return err;
+            };
+            json_output = aw.toArrayList();
 
-        writeFilePosix(contract_path, json_output.items, allocator) catch |err| {
-            std.debug.print("Error writing contract file '{s}': {}\n", .{ contract_path, err });
-            return err;
-        };
+            writeFilePosix(contract_path, json_output.items, allocator) catch |err| {
+                std.debug.print("Error writing contract file '{s}': {}\n", .{ contract_path, err });
+                return err;
+            };
 
-        std.debug.print("Wrote contract manifest to: {s}\n", .{contract_path});
+            std.debug.print("Wrote contract manifest to: {s}\n", .{contract_path});
+        }
     }
 }
 
@@ -236,6 +272,7 @@ fn compileHandler(
     emit_aot: bool,
     emit_verify: bool,
     emit_contract: bool,
+    policy: ?HandlerPolicy,
     emit_sound: bool,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
@@ -300,10 +337,19 @@ fn compileHandler(
         return err;
     };
 
+    const needs_contract = emit_contract or policy != null;
+
     // Check for file imports before proceeding with single-module compilation
     const has_file_imports = hasFileImports(&js_parser, root);
 
     if (has_file_imports) {
+        if (policy != null) {
+            std.debug.print(
+                "Capability policies currently require single-module handlers; file imports are not yet supported\n",
+                .{},
+            );
+            return error.PolicyUnsupportedWithFileImports;
+        }
         std.debug.print("File imports detected, building module graph...\n", .{});
         return compileMultiModule(allocator, source_to_parse, filename, &strings, &atoms);
     }
@@ -449,9 +495,18 @@ fn compileHandler(
             transpiler.deinit();
             aot = try analyzeAot(allocator, &js_parser, &atoms, root);
 
-            // Build contract if requested (transpiler fallback path)
-            const contract = if (emit_contract)
-                try buildContract(allocator, &js_parser, &atoms, filename, root, aot, verify_info)
+            // Build contract if requested or needed for policy validation.
+            const contract = if (needs_contract)
+                try buildContractWithPolicy(
+                    allocator,
+                    &js_parser,
+                    &atoms,
+                    filename,
+                    root,
+                    aot,
+                    verify_info,
+                    policy,
+                )
             else
                 null;
 
@@ -475,17 +530,27 @@ fn compileHandler(
         }
     }
 
-    // Build contract if requested
-    // When contract is enabled, always run AOT analysis for route extraction
+    // Build contract if requested or needed for policy validation.
+    // When contract output or policy validation is enabled, always run AOT
+    // analysis for route extraction even if the transpiler succeeded.
     // even if the transpiler succeeded (transpiler doesn't produce a dispatch table).
     var contract: ?HandlerContract = null;
-    if (emit_contract) {
+    if (needs_contract) {
         // Run AOT analysis for route extraction if not already done
         var temp_aot = if (aot == null) try analyzeAot(allocator, &js_parser, &atoms, root) else null;
         defer if (temp_aot) |*t| t.deinit(allocator);
         const effective_aot = aot orelse temp_aot;
 
-        contract = try buildContract(allocator, &js_parser, &atoms, filename, root, effective_aot, verify_info);
+        contract = try buildContractWithPolicy(
+            allocator,
+            &js_parser,
+            &atoms,
+            filename,
+            root,
+            effective_aot,
+            verify_info,
+            policy,
+        );
     }
 
     return .{
@@ -703,6 +768,51 @@ fn buildContract(
     );
 }
 
+fn buildContractWithPolicy(
+    allocator: std.mem.Allocator,
+    js_parser: *zts.parser.JsParser,
+    atoms: *zts.context.AtomTable,
+    filename: []const u8,
+    root: ir.NodeIndex,
+    aot: ?AotAnalysis,
+    verify_info: ?VerificationInfo,
+    policy: ?HandlerPolicy,
+) !HandlerContract {
+    var contract = try buildContract(
+        allocator,
+        js_parser,
+        atoms,
+        filename,
+        root,
+        aot,
+        verify_info,
+    );
+    errdefer contract.deinit(allocator);
+
+    if (policy) |*p| {
+        var report = try handler_policy.validateContract(allocator, &contract, p);
+        defer report.deinit(allocator);
+
+        if (report.hasViolations()) {
+            std.debug.print("\n", .{});
+            var output: std.ArrayList(u8) = .empty;
+            defer output.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+            try handler_policy.formatViolations(&report, &aw.writer);
+            output = aw.toArrayList();
+            if (output.items.len > 0) {
+                std.debug.print("{s}", .{output.items});
+            }
+            std.debug.print("Capability policy check failed for {s}\n", .{filename});
+            return error.PolicyViolation;
+        }
+
+        std.debug.print("Capability policy check passed\n", .{});
+    }
+
+    return contract;
+}
+
 /// Derive contract.json path from the output .zig path.
 /// e.g. "src/generated/embedded_handler.zig" -> "src/generated/contract.json"
 fn deriveContractPath(allocator: std.mem.Allocator, output_path: []const u8) ![]u8 {
@@ -723,6 +833,7 @@ fn writeZigFile(
     path: []const u8,
     compiled: CompiledHandler,
     handler_path: []const u8,
+    policy: ?HandlerPolicy,
     allocator: std.mem.Allocator,
 ) !void {
     // If the transpiler produced output, use it directly
@@ -743,6 +854,7 @@ fn writeZigFile(
         // Append dependency module declarations (required by zruntime.zig)
         try writer.writeAll("\npub const dep_count: u16 = 0;\n");
         try writer.writeAll("pub const dep_bytecodes = [_][]const u8{};\n");
+        try writeCapabilityPolicy(writer, policy);
 
         output = aw.toArrayList();
         try writeFilePosix(path, output.items, allocator);
@@ -964,8 +1076,42 @@ fn writeZigFile(
         try writer.writeAll("pub const dep_bytecodes = [_][]const u8{};\n");
     }
 
+    try writeCapabilityPolicy(writer, policy);
+
     output = aw.toArrayList();
     try writeFilePosix(path, output.items, allocator);
+}
+
+fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy) !void {
+    try writer.writeAll("\npub const capability_policy = @import(\"zts\").handler_policy.RuntimePolicy{\n");
+    if (policy) |p| {
+        try writePolicySection(writer, "env", p.env);
+        try writePolicySection(writer, "egress", p.egress);
+        try writePolicySection(writer, "cache", p.cache);
+    } else {
+        try writePolicySection(writer, "env", null);
+        try writePolicySection(writer, "egress", null);
+        try writePolicySection(writer, "cache", null);
+    }
+    try writer.writeAll("};\n");
+}
+
+fn writePolicySection(writer: anytype, field_name: []const u8, section: ?handler_policy.AllowList) !void {
+    try writer.print("    .{s} = ", .{field_name});
+    if (section) |allow| {
+        try writer.writeAll(".{\n");
+        try writer.writeAll("        .enabled = true,\n");
+        try writer.writeAll("        .values = &[_][]const u8{\n");
+        for (allow.values.items) |item| {
+            try writer.writeAll("            ");
+            try writeZigStringLiteral(writer, item);
+            try writer.writeAll(",\n");
+        }
+        try writer.writeAll("        },\n");
+        try writer.writeAll("    },\n");
+        return;
+    }
+    try writer.writeAll(".{},\n");
 }
 
 fn writeBytecodeArray(writer: anytype, bytecode_data: []const u8) !void {

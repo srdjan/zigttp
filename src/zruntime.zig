@@ -99,6 +99,10 @@ fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.H
     }
 }
 
+fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context) void {
+    ctx.capability_policy = embedded_handler.capability_policy;
+}
+
 // ============================================================================
 // File reading for module graph (POSIX, no async I/O dependency)
 // ============================================================================
@@ -202,6 +206,7 @@ pub const Runtime = struct {
         errdefer ctx.deinit();
 
         applyRuntimeConfig(ctx, gc_state, heap_state, config);
+        applyEmbeddedCapabilityPolicy(ctx);
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
         try zq.builtins.initBuiltins(ctx);
@@ -303,6 +308,7 @@ pub const Runtime = struct {
         errdefer self.strings.deinit();
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
+        applyEmbeddedCapabilityPolicy(pool_rt.ctx);
 
         // Install core JS builtins if the pooled runtime hasn't already done so.
         if (pool_rt.ctx.builtin_objects.items.len == 0) {
@@ -2103,6 +2109,18 @@ fn responseRedirectStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []c
     return wrapResponseStatic(ctx, this, args, zq.http.responseRedirect);
 }
 
+fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {
+    if (rt.config.outbound_allow_host) |allowed_host| {
+        if (!ascii.eqlIgnoreCase(host, allowed_host)) {
+            return allowed_host;
+        }
+    }
+    if (!rt.ctx.capability_policy.allowsEgressHost(host)) {
+        return "capability policy";
+    }
+    return null;
+}
+
 fn fetchSyncNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const rt = current_runtime orelse return error.RuntimeUnavailable;
     return fetchSyncResult(rt, args) catch |err| {
@@ -2156,10 +2174,8 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     const host = uri.getHost(&host_buf) catch {
         return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
     };
-    if (rt.config.outbound_allow_host) |allowed_host| {
-        if (!ascii.eqlIgnoreCase(host.bytes, allowed_host)) {
-            return createFetchErrorResponse(rt, "HostNotAllowed", allowed_host);
-        }
+    if (outboundHostViolation(rt, host.bytes)) |details| {
+        return createFetchErrorResponse(rt, "HostNotAllowed", details);
     }
 
     var method = std.http.Method.GET;
@@ -2359,10 +2375,8 @@ fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
     const host = uri.getHost(&host_buf) catch {
         return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "url host is required");
     };
-    if (rt.config.outbound_allow_host) |allowed_host| {
-        if (!ascii.eqlIgnoreCase(host.bytes, allowed_host)) {
-            return try httpRequestErrorJsonAlloc(a, "HostNotAllowed", allowed_host);
-        }
+    if (outboundHostViolation(rt, host.bytes)) |details| {
+        return try httpRequestErrorJsonAlloc(a, "HostNotAllowed", details);
     }
 
     const method = blk: {
@@ -4012,6 +4026,48 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
     try std.testing.expectEqualStrings("InvalidBody", obj.get("badBodyError").?.string);
     try std.testing.expectEqualStrings("InvalidUrl", obj.get("missingUrlError").?.string);
     try std.testing.expectEqualStrings("HostNotAllowed", obj.get("hostBlockedError").?.string);
+}
+
+test "fetchSync respects embedded capability policy host allowlist" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{
+        .outbound_http_enabled = true,
+    });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{
+        .egress = .{
+            .enabled = true,
+            .values = &[_][]const u8{"localhost"},
+        },
+    };
+
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.json({
+        \\    blocked: fetchSync("http://example.com").json().error,
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<fetchsync-policy>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .{},
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("HostNotAllowed", obj.get("blocked").?.string);
 }
 
 test "fetchSync sends request data and exposes response helpers" {

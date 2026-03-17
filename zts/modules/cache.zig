@@ -289,6 +289,7 @@ fn cacheGetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
 
     if (args.len < 2) return value.JSValue.null_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.null_val;
+    if (!ensureNamespaceAllowed(ctx, ns)) return value.JSValue.exception_val;
     const key = util.extractString(args[1]) orelse return value.JSValue.null_val;
 
     const store = getOrCreateStore(ctx) catch return value.JSValue.null_val;
@@ -303,6 +304,7 @@ fn cacheSetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
 
     if (args.len < 3) return value.JSValue.false_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.false_val;
+    if (!ensureNamespaceAllowed(ctx, ns)) return value.JSValue.exception_val;
     const key = util.extractString(args[1]) orelse return value.JSValue.false_val;
     const val_str = util.extractString(args[2]) orelse return value.JSValue.false_val;
 
@@ -326,6 +328,7 @@ fn cacheDeleteNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
 
     if (args.len < 2) return value.JSValue.false_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.false_val;
+    if (!ensureNamespaceAllowed(ctx, ns)) return value.JSValue.exception_val;
     const key = util.extractString(args[1]) orelse return value.JSValue.false_val;
 
     const store = getOrCreateStore(ctx) catch return value.JSValue.false_val;
@@ -338,6 +341,7 @@ fn cacheIncrNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
 
     if (args.len < 2) return value.JSValue.undefined_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
+    if (!ensureNamespaceAllowed(ctx, ns)) return value.JSValue.exception_val;
     const key = util.extractString(args[1]) orelse return value.JSValue.undefined_val;
 
     const delta: i64 = if (args.len >= 3) blk: {
@@ -381,6 +385,7 @@ fn cacheStatsNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     // If namespace specified, return stats for that namespace
     if (args.len >= 1) {
         if (util.extractString(args[0])) |ns| {
+            if (!ensureNamespaceAllowed(ctx, ns)) return value.JSValue.exception_val;
             if (store.namespaces.get(ns)) |ns_cache| {
                 return makeStatsObject(ctx, ns_cache.hits, ns_cache.misses, ns_cache.entries.count(), 0);
             }
@@ -428,6 +433,12 @@ fn intToJsValue(n: anytype) value.JSValue {
         return value.JSValue.fromInt(@intCast(i));
     }
     return value.JSValue.fromFloat(@floatFromInt(i));
+}
+
+fn ensureNamespaceAllowed(ctx: *context.Context, ns: []const u8) bool {
+    if (ctx.capability_policy.allowsCacheNamespace(ns)) return true;
+    _ = util.throwCapabilityPolicyError(ctx, "cache namespace", ns);
+    return false;
 }
 
 // ============================================================================
@@ -587,4 +598,36 @@ test "CacheStore: stats tracking" {
     try std.testing.expect(ns_cache.hits == 1);
     try std.testing.expect(ns_cache.misses == 1);
     try std.testing.expect(store.total_entries == 1);
+}
+
+test "cache policy rejects disallowed namespace" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+    ctx.capability_policy = .{
+        .cache = .{
+            .enabled = true,
+            .values = &[_][]const u8{"sessions"},
+        },
+    };
+
+    const blocked_ns = try ctx.createString("metrics");
+    const key = try ctx.createString("key");
+    _ = try cacheGetNative(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ blocked_ns, key });
+
+    try std.testing.expect(ctx.hasException());
 }

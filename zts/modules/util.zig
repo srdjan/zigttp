@@ -90,3 +90,56 @@ pub fn createPlainResultErrs(ctx: *context.Context, errors: value.JSValue) !valu
     try obj.setProperty(ctx.allocator, pool, errors_atom, errors);
     return obj.toValue();
 }
+
+pub fn throwError(ctx: *context.Context, name: []const u8, message: []const u8) value.JSValue {
+    const obj = ctx.createObject(ctx.object_prototype) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    const name_val = ctx.createString(name) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+    const message_val = ctx.createString(message) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    ctx.setPropertyChecked(obj, .name, name_val) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+    ctx.setPropertyChecked(obj, .message, message_val) catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+
+    obj.class_id = .@"error";
+    ctx.throwException(obj.toValue());
+    return value.JSValue.exception_val;
+}
+
+pub fn throwCapabilityPolicyError(
+    ctx: *context.Context,
+    category: []const u8,
+    subject: []const u8,
+) value.JSValue {
+    var message = std.ArrayList(u8).empty;
+    defer message.deinit(ctx.allocator);
+
+    message.appendSlice(ctx.allocator, category) catch {
+        return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
+    };
+    message.appendSlice(ctx.allocator, " '") catch {
+        return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
+    };
+    message.appendSlice(ctx.allocator, subject) catch {
+        return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
+    };
+    message.appendSlice(ctx.allocator, "' is not allowed by capability policy") catch {
+        return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
+    };
+
+    return throwError(ctx, "CapabilityPolicyError", message.items);
+}

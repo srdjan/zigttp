@@ -27,6 +27,9 @@ fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
 
     // Get the variable name from the first argument
     const name_str = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
+    if (!ctx.capability_policy.allowsEnv(name_str)) {
+        return util.throwCapabilityPolicyError(ctx, "env access", name_str);
+    }
 
     // Need a null-terminated copy for the C getenv API
     var name_buf: [256]u8 = undefined;
@@ -41,3 +44,34 @@ fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
     return ctx.createString(result) catch value.JSValue.undefined_val;
 }
 
+test "env policy rejects disallowed env access" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+
+    ctx.capability_policy = .{
+        .env = .{
+            .enabled = true,
+            .values = &[_][]const u8{"ALLOWED"},
+        },
+    };
+
+    const key = try ctx.createString("BLOCKED");
+    _ = try envNative(ctx, value.JSValue.undefined_val, &[_]value.JSValue{key});
+
+    try std.testing.expect(ctx.hasException());
+}

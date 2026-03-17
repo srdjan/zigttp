@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
     const aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false;
     const verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false;
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
+    const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const sound_enabled = b.option(bool, "sound", "Enable strict boolean sound mode") orelse false;
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
@@ -76,6 +77,10 @@ pub fn build(b: *std.Build) void {
         if (contract_enabled) {
             run_precompile.addArg("--contract");
         }
+        if (policy_path) |policy| {
+            run_precompile.addArg("--policy");
+            run_precompile.addArg(policy);
+        }
         if (sound_enabled) {
             run_precompile.addArg("--sound");
         }
@@ -100,6 +105,9 @@ pub fn build(b: *std.Build) void {
         // No handler specified - create a stub module
         exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("src/embedded_handler_stub.zig"),
+            .imports = &.{
+                .{ .name = "zts", .module = zts_mod },
+            },
         });
     }
 
@@ -129,6 +137,9 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("zts", zts_mod);
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zts", .module = zts_mod },
+        },
     });
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
@@ -146,6 +157,9 @@ pub fn build(b: *std.Build) void {
     zruntime_tests.root_module.addImport("zts", zts_mod);
     zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zts", .module = zts_mod },
+        },
     });
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
@@ -162,6 +176,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     bench_exe.root_module.addImport("zts", zts_mod);
+    bench_exe.root_module.addAnonymousImport("embedded_handler", .{
+        .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zts", .module = zts_mod },
+        },
+    });
     b.installArtifact(bench_exe);
 
     // Benchmark run command

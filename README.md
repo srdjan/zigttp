@@ -22,7 +22,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
 
-**Contract manifests.** `-Dcontract` emits a machine-readable `contract.json` describing what your handler is allowed to do: which modules it imports, which env vars it reads, which hosts it calls, which cache namespaces it uses. Non-literal arguments honestly report `"dynamic": true`. No other JS runtime can do this because full JS is not statically analyzable.
+**Contract manifests and policy enforcement.** `-Dcontract` emits a machine-readable `contract.json` describing what your handler is allowed to do: which modules it imports, which env vars it reads, which hosts it calls, which cache namespaces it uses. `-Dpolicy=policy.json` turns that into an enforced least-privilege build for precompiled handlers by rejecting disallowed env vars, outbound hosts, and cache namespaces at build time and runtime. Non-literal arguments honestly report `"dynamic": true`.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 
@@ -285,8 +285,11 @@ zig build -Dhandler=handler.ts -Dverify
 # Emit contract manifest (what the handler is allowed to do)
 zig build -Dhandler=handler.ts -Dcontract
 
+# Enforce a capability policy for a precompiled handler
+zig build -Dhandler=handler.ts -Dpolicy=policy.json
+
 # Combine all passes
-zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Daot
+zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Dpolicy=policy.json -Daot
 ```
 
 ### Handler Verification (`-Dverify`)
@@ -338,6 +341,20 @@ The contract describes what your handler does before it runs. It extracts:
 ```
 
 The `"dynamic": false` fields are the key signal. They mean "we can enumerate every value statically." When a handler uses a variable instead of a string literal (`env(someVar)` instead of `env("JWT_SECRET")`), the contract honestly reports `"dynamic": true`.
+
+### Capability Policy (`-Dpolicy`)
+
+Policies are opt-in and apply to precompiled handlers. They consume the same contract data at build time and fail the build if the handler exceeds the allowed env vars, outbound hosts, or cache namespaces. The validated policy is then embedded into the generated handler metadata and enforced again at runtime.
+
+```json
+{
+  "env": { "allow": ["JWT_SECRET"] },
+  "egress": { "allow_hosts": ["api.example.com"] },
+  "cache": { "allow_namespaces": ["sessions"] }
+}
+```
+
+Omit a section to leave that capability unrestricted. If a section is present, dynamic access in that category is rejected because zigttp cannot fully enumerate it.
 
 ### Precompiled Bytecode
 
