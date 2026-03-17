@@ -85,11 +85,47 @@ param ?? defaultValue
 
 The parser already rejects `==` and `!=` with a helpful error message suggesting `===` and `!==`. This is independent of sound mode and always active.
 
+### 6. typeof guard type narrowing
+
+When an `if` condition is a `typeof` guard, the BoolChecker narrows the variable's type within the appropriate branch. This catches more bugs statically while remaining sound (no false positives).
+
+```javascript
+function handler(req) {
+    const val = req.headers.get("x-flag");
+
+    if (typeof val === "number") {
+        if (val) { /* ... */ }  // ERROR: number in boolean context
+    }
+
+    if (typeof val === "boolean") {
+        if (val) { /* ... */ }  // OK: val is boolean here
+    }
+
+    // Negated guards narrow the else-branch
+    if (typeof val !== "number") {
+        // val is still unknown here
+    } else {
+        if (val) { /* ... */ }  // ERROR: number in boolean context
+    }
+
+    // Compound guards with && narrow all variables
+    if (typeof x === "boolean" && typeof y === "boolean") {
+        const r = x && y;      // OK: both are boolean
+    }
+
+    return Response.json({ ok: true });
+}
+```
+
+Narrowing is branch-scoped: it does not leak outside the guarded branch. Nested typeof guards compose correctly. Reassignment inside a guarded branch invalidates the narrowing.
+
+Only `typeof x === "T"` and `"T" === typeof x` patterns are recognized. Other forms like `x === true` do not trigger narrowing.
+
 ## The `unknown` Escape Hatch
 
 The BoolChecker performs lightweight type inference by walking the IR tree. When it cannot determine the type of an expression statically, it infers `unknown`. This happens for:
 
-- Function parameters
+- Function parameters (narrowed inside typeof guard branches)
 - Function call results (unless the callee is a tracked local function)
 - Property accesses (e.g., `obj.flag`)
 - Computed accesses (e.g., `arr[i]`)
@@ -124,6 +160,8 @@ When `unknown` appears in a boolean context, no diagnostic is emitted. The stati
 | `const f = (x) => { return x * 2; }; f(1)` | return type of f (number) |
 | function calls (untracked callee) | unknown |
 | property access | unknown |
+| `typeof x === "T"` guard (then-branch) | T (narrowed) |
+| `typeof x !== "T"` guard (else-branch) | T (narrowed) |
 
 ## Migration Guide
 

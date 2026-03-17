@@ -81,6 +81,18 @@ pub const BoolChecker = struct {
     const_types: std.AutoHashMapUnmanaged(u32, ExprType),
     /// Tracks inferred return type for function bindings: packed(scope_id, slot) -> ExprType
     fn_return_types: std.AutoHashMapUnmanaged(u32, ExprType),
+    /// Branch-scoped type narrowings from typeof guards.
+    /// Checked before const_types in inferType for ALL binding kinds.
+    /// Entries are temporary: installed before walking a branch, removed after.
+    narrowed_types: std.AutoHashMapUnmanaged(u32, ExprType),
+
+    const TypeofGuard = struct {
+        binding_key: u32,
+        narrowed_type: ExprType,
+        op: ir.BinaryOp,
+    };
+
+    const MAX_NARROWINGS = 4;
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) BoolChecker {
         return .{
@@ -90,6 +102,7 @@ pub const BoolChecker = struct {
             .diagnostics = .empty,
             .const_types = .empty,
             .fn_return_types = .empty,
+            .narrowed_types = .empty,
         };
     }
 
@@ -103,6 +116,7 @@ pub const BoolChecker = struct {
         self.diagnostics.deinit(self.allocator);
         self.const_types.deinit(self.allocator);
         self.fn_return_types.deinit(self.allocator);
+        self.narrowed_types.deinit(self.allocator);
     }
 
     /// Check if a diagnostic message was dynamically allocated vs static string.
@@ -186,9 +200,35 @@ pub const BoolChecker = struct {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
                 // S1: condition must be boolean
                 self.requireBoolean(if_s.condition, "if");
-                self.walkStmt(if_s.then_branch);
-                if (if_s.else_branch != null_node) {
-                    self.walkStmt(if_s.else_branch);
+
+                // Extract typeof guards from condition for branch-scoped narrowing
+                var guards: [MAX_NARROWINGS]TypeofGuard = undefined;
+                var saved: [MAX_NARROWINGS]?ExprType = undefined;
+                var is_negated = false;
+                const guard_count = self.extractTypeofGuards(if_s.condition, &guards, &is_negated);
+                const active = guards[0..guard_count];
+
+                if (active.len > 0 and !is_negated) {
+                    // === guard: narrow in then-branch
+                    self.installGuards(active, saved[0..guard_count]);
+                    self.walkStmt(if_s.then_branch);
+                    self.restoreGuards(active, saved[0..guard_count]);
+                    if (if_s.else_branch != null_node) {
+                        self.walkStmt(if_s.else_branch);
+                    }
+                } else if (active.len > 0) {
+                    // !== guard: narrow in else-branch
+                    self.walkStmt(if_s.then_branch);
+                    if (if_s.else_branch != null_node) {
+                        self.installGuards(active, saved[0..guard_count]);
+                        self.walkStmt(if_s.else_branch);
+                        self.restoreGuards(active, saved[0..guard_count]);
+                    }
+                } else {
+                    self.walkStmt(if_s.then_branch);
+                    if (if_s.else_branch != null_node) {
+                        self.walkStmt(if_s.else_branch);
+                    }
                 }
             },
 
@@ -340,8 +380,28 @@ pub const BoolChecker = struct {
                 // S1: ternary condition must be boolean
                 self.requireBoolean(t.condition, "ternary");
                 self.walkExpr(t.condition);
-                self.walkExpr(t.then_branch);
-                self.walkExpr(t.else_branch);
+
+                // Apply typeof guard narrowing to ternary branches
+                var guards: [MAX_NARROWINGS]TypeofGuard = undefined;
+                var saved: [MAX_NARROWINGS]?ExprType = undefined;
+                var is_negated = false;
+                const guard_count = self.extractTypeofGuards(t.condition, &guards, &is_negated);
+                const active = guards[0..guard_count];
+
+                if (active.len > 0 and !is_negated) {
+                    self.installGuards(active, saved[0..guard_count]);
+                    self.walkExpr(t.then_branch);
+                    self.restoreGuards(active, saved[0..guard_count]);
+                    self.walkExpr(t.else_branch);
+                } else if (active.len > 0) {
+                    self.walkExpr(t.then_branch);
+                    self.installGuards(active, saved[0..guard_count]);
+                    self.walkExpr(t.else_branch);
+                    self.restoreGuards(active, saved[0..guard_count]);
+                } else {
+                    self.walkExpr(t.then_branch);
+                    self.walkExpr(t.else_branch);
+                }
             },
 
             .call => {
@@ -371,6 +431,8 @@ pub const BoolChecker = struct {
                 if (target_tag == .identifier) {
                     const binding = self.ir_view.getBinding(asgn.target) orelse return;
                     const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+                    // Invalidate branch-scoped narrowing on reassignment
+                    _ = self.narrowed_types.remove(key);
                     // Re-infer from the new value (simple assignment only)
                     if (asgn.op == null) {
                         const new_type = self.inferType(asgn.value);
@@ -422,6 +484,12 @@ pub const BoolChecker = struct {
                 }
             },
 
+            // Function expressions: walk body for boolean checks
+            .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(node) orelse return;
+                self.walkStmt(func.body);
+            },
+
             // Leaf expressions - no children to walk
             .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null,
             .lit_undefined, .identifier, .member_access, .computed_access,
@@ -461,10 +529,12 @@ pub const BoolChecker = struct {
             },
 
             .identifier => {
-                // Look up const binding type if tracked
                 const binding = self.ir_view.getBinding(node) orelse return .unknown;
+                const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+                // Branch-scoped narrowing (applies to ALL binding kinds including .argument)
+                if (self.narrowed_types.get(key)) |t| return t;
+                // Existing: const/let tracking (local/global only)
                 if (binding.kind == .local or binding.kind == .global) {
-                    const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
                     if (self.const_types.get(key)) |t| return t;
                 }
                 return .unknown;
@@ -716,6 +786,149 @@ pub const BoolChecker = struct {
                 .message = "non-boolean value used in boolean context",
                 .help = help,
             });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Typeof guard extraction
+    // -----------------------------------------------------------------------
+
+    /// Map a typeof result string to an ExprType.
+    fn typeStringToExprType(s: []const u8) ?ExprType {
+        if (std.mem.eql(u8, s, "boolean")) return .boolean;
+        if (std.mem.eql(u8, s, "number")) return .number;
+        if (std.mem.eql(u8, s, "string")) return .string;
+        if (std.mem.eql(u8, s, "object")) return .object;
+        if (std.mem.eql(u8, s, "function")) return .function;
+        if (std.mem.eql(u8, s, "undefined")) return .undefined;
+        return null;
+    }
+
+    /// Extract a single typeof guard from a `typeof x === "T"` or `"T" === typeof x` pattern.
+    /// Returns null if the node does not match the pattern.
+    fn extractTypeofGuard(self: *BoolChecker, node: NodeIndex) ?TypeofGuard {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .binary_op) return null;
+
+        const bin = self.ir_view.getBinary(node) orelse return null;
+        if (bin.op != .strict_eq and bin.op != .strict_neq) return null;
+
+        // Try both operand orderings: typeof x === "T" and "T" === typeof x
+        const typeof_node, const string_node = blk: {
+            const left_tag = self.ir_view.getTag(bin.left) orelse return null;
+            const right_tag = self.ir_view.getTag(bin.right) orelse return null;
+
+            if (left_tag == .unary_op and right_tag == .lit_string) {
+                break :blk .{ bin.left, bin.right };
+            } else if (left_tag == .lit_string and right_tag == .unary_op) {
+                break :blk .{ bin.right, bin.left };
+            } else {
+                return null;
+            }
+        };
+
+        // Verify the unary op is typeof
+        const un = self.ir_view.getUnary(typeof_node) orelse return null;
+        if (un.op != .typeof_op) return null;
+
+        // Operand must be an identifier
+        const operand_tag = self.ir_view.getTag(un.operand) orelse return null;
+        if (operand_tag != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(un.operand) orelse return null;
+        const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+
+        // Get the type string
+        const str_idx = self.ir_view.getStringIdx(string_node) orelse return null;
+        const type_str = self.ir_view.getString(str_idx) orelse return null;
+        const narrowed = typeStringToExprType(type_str) orelse return null;
+
+        return .{
+            .binding_key = key,
+            .narrowed_type = narrowed,
+            .op = bin.op,
+        };
+    }
+
+    /// Extract typeof guards from a condition, handling &&-chained guards.
+    /// Sets is_negated to true if a single !== guard is found.
+    /// For && chains, only collects === guards (not !==) to stay sound.
+    /// Returns the number of guards collected.
+    fn extractTypeofGuards(
+        self: *BoolChecker,
+        node: NodeIndex,
+        guards: *[MAX_NARROWINGS]TypeofGuard,
+        is_negated: *bool,
+    ) usize {
+        is_negated.* = false;
+
+        // Try single guard first
+        if (self.extractTypeofGuard(node)) |guard| {
+            guards[0] = guard;
+            is_negated.* = (guard.op == .strict_neq);
+            return 1;
+        }
+
+        // Try && chain
+        const tag = self.ir_view.getTag(node) orelse return 0;
+        if (tag != .binary_op) return 0;
+        const bin = self.ir_view.getBinary(node) orelse return 0;
+        if (bin.op != .and_op) return 0;
+
+        var count: usize = 0;
+        self.collectAndGuards(bin.left, guards, &count);
+        self.collectAndGuards(bin.right, guards, &count);
+        return count;
+    }
+
+    /// Recursively collect === typeof guards from an && chain.
+    fn collectAndGuards(
+        self: *BoolChecker,
+        node: NodeIndex,
+        guards: *[MAX_NARROWINGS]TypeofGuard,
+        count: *usize,
+    ) void {
+        if (count.* >= MAX_NARROWINGS) return;
+
+        // Check if this node is itself a typeof === guard
+        if (self.extractTypeofGuard(node)) |guard| {
+            if (guard.op == .strict_eq) {
+                guards[count.*] = guard;
+                count.* += 1;
+            }
+            return;
+        }
+
+        // Check if this is another && to recurse into
+        const tag = self.ir_view.getTag(node) orelse return;
+        if (tag != .binary_op) return;
+        const bin = self.ir_view.getBinary(node) orelse return;
+        if (bin.op != .and_op) return;
+
+        self.collectAndGuards(bin.left, guards, count);
+        self.collectAndGuards(bin.right, guards, count);
+    }
+
+    // -----------------------------------------------------------------------
+    // Narrowing scope helpers
+    // -----------------------------------------------------------------------
+
+    /// Save current narrowed_types values for the guard keys, then install the narrowings.
+    fn installGuards(self: *BoolChecker, guards: []const TypeofGuard, saved: []?ExprType) void {
+        for (guards, 0..) |g, i| {
+            saved[i] = self.narrowed_types.get(g.binding_key);
+            self.narrowed_types.put(self.allocator, g.binding_key, g.narrowed_type) catch {};
+        }
+    }
+
+    /// Restore narrowed_types to saved values, removing entries that had no prior value.
+    fn restoreGuards(self: *BoolChecker, guards: []const TypeofGuard, saved: []const ?ExprType) void {
+        for (guards, 0..) |g, i| {
+            if (saved[i]) |prev| {
+                self.narrowed_types.put(self.allocator, g.binding_key, prev) catch {};
+            } else {
+                _ = self.narrowed_types.remove(g.binding_key);
+            }
         }
     }
 
@@ -972,4 +1185,101 @@ test "sound: diagnostic includes operator context" {
     // Message should include the operator context
     try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "number") != null);
     try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "if") != null);
+}
+
+// Typeof guard narrowing
+
+test "sound: typeof guard narrows to number, used in boolean context" {
+    try checkSource(
+        \\const f = (x) => {
+        \\  if (typeof x === "number") {
+        \\    if (x) { let y = 1; }
+        \\  }
+        \\  return true;
+        \\};
+    , 1);
+}
+
+test "sound: typeof guard narrows to boolean, used in boolean context" {
+    try checkSource(
+        \\const f = (x) => {
+        \\  if (typeof x === "boolean") {
+        \\    if (x) { let y = 1; }
+        \\  }
+        \\  return true;
+        \\};
+    , 0);
+}
+
+test "sound: typeof guard reversed operand order" {
+    try checkSource(
+        \\const f = (x) => {
+        \\  if ("number" === typeof x) {
+        \\    if (x) { let y = 1; }
+        \\  }
+        \\  return true;
+        \\};
+    , 1);
+}
+
+test "sound: typeof negated guard narrows else-branch" {
+    try checkSource(
+        \\const f = (x) => {
+        \\  if (typeof x !== "number") {
+        \\    let y = 1;
+        \\  } else {
+        \\    if (x) { let z = 1; }
+        \\  }
+        \\  return true;
+        \\};
+    , 1);
+}
+
+test "sound: typeof narrowing does not leak outside branch" {
+    // Outside the typeof branch, x should revert to unknown (passes)
+    try checkSource(
+        \\const f = (x) => {
+        \\  if (typeof x === "number") {
+        \\    let y = x;
+        \\  }
+        \\  if (x) { let z = 1; }
+        \\  return true;
+        \\};
+    , 0);
+}
+
+test "sound: typeof compound && guard narrows both" {
+    try checkSource(
+        \\const f = (x, y) => {
+        \\  if (typeof x === "number" && typeof y === "string") {
+        \\    if (x) { let z = 1; }
+        \\  }
+        \\  return true;
+        \\};
+    , 1);
+}
+
+test "sound: typeof nested guards compose" {
+    try checkSource(
+        \\const f = (x, y) => {
+        \\  if (typeof x === "boolean") {
+        \\    if (typeof y === "boolean") {
+        \\      const r = x && y;
+        \\    }
+        \\  }
+        \\  return true;
+        \\};
+    , 0);
+}
+
+test "sound: non-typeof condition does not narrow" {
+    // x === true is not a typeof guard - x stays unknown (passes)
+    try checkSource(
+        \\const f = (x) => {
+        \\  if (x === true) {
+        \\    if (x) { let y = 1; }
+        \\  }
+        \\  return true;
+        \\};
+    , 0);
 }
