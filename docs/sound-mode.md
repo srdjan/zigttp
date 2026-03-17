@@ -126,11 +126,87 @@ Only `typeof x === "T"` and `"T" === typeof x` patterns are recognized. Other fo
 The BoolChecker performs lightweight type inference by walking the IR tree. When it cannot determine the type of an expression statically, it infers `unknown`. This happens for:
 
 - Function parameters (narrowed inside typeof guard branches)
-- Function call results (unless the callee is a tracked local function)
-- Property accesses (e.g., `obj.flag`)
+- Function call results (unless the callee is a tracked local function or a modeled virtual-module import)
+- Property accesses (except modeled Result properties such as `result.ok`)
 - Computed accesses (e.g., `arr[i]`)
 
 When `unknown` appears in a boolean context, no diagnostic is emitted. The static checker only rejects code it can prove is non-boolean. Runtime VM assertions catch the remaining cases when the code actually executes.
+
+## Progressive Inference
+
+Recent sound-mode passes extend the lightweight inference beyond literals and local bindings:
+
+### Known virtual-module imports
+
+Imported functions from `zigttp:*` modules can carry known return types into the checker.
+
+```javascript
+import { verifyWebhookSignature } from "zigttp:auth";
+import { cacheIncr } from "zigttp:cache";
+import { env } from "zigttp:env";
+
+if (verifyWebhookSignature(payload, secret, signature)) {
+    // OK: boolean
+}
+
+if (cacheIncr("stats", "requests")) {
+    // ERROR: number in boolean context
+}
+
+const apiKey = env("API_KEY");
+if (apiKey !== undefined) {
+    // OK: explicit check for env()'s maybe-missing return
+}
+```
+
+### Nullable returns and `??`
+
+The checker models "value may be missing" returns from functions such as `env()`, `parseBearer()`, `cacheGet()`, and `routerMatch()` as nullable variants. These are rejected in boolean contexts until you narrow them explicitly.
+
+```javascript
+const cached = cacheGet("api", req.url);
+if (cached !== null) {
+    return Response.json(JSON.parse(cached));
+}
+
+const appName = env("APP_NAME") ?? "zigttp";
+// Inferred as string
+```
+
+`??` also emits a warning when the left side is provably never null or undefined.
+
+### Result-shaped property access
+
+Values returned from `jwtVerify()`, `validateJson()`, `validateObject()`, and `coerceJson()` keep enough shape information for common Result properties.
+
+```javascript
+const result = jwtVerify(token, secret);
+
+if (result.ok) {
+    // OK: result.ok is inferred boolean
+    return Response.json(result.value);
+}
+
+if (result.error) {
+    // ERROR: string in boolean context
+}
+```
+
+### Match expressions
+
+When all `match` arms resolve to the same type, the whole expression inherits that type.
+
+```javascript
+const count = match (kind) {
+    when "fast": 1,
+    when "slow": 2,
+    default: 0
+};
+
+if (count) {
+    // ERROR: number in boolean context
+}
+```
 
 ## Type Inference Rules
 
@@ -155,11 +231,15 @@ When `unknown` appears in a boolean context, no diagnostic is emitted. The stati
 | `void` | undefined |
 | `const x = expr; ... x` | same as expr |
 | `let x = expr; ... x` | same as expr (invalidated on reassignment) |
-| `cond ? a : b` | type of a (if a and b match) |
+| `cond ? a : b` | unified type of a and b |
+| `match (...) { ... }` | unified arm type (if compatible) |
 | `const f = (x) => x > 0; f(1)` | return type of f (boolean) |
 | `const f = (x) => { return x * 2; }; f(1)` | return type of f (number) |
+| imported virtual-module call | known return type when modeled |
+| nullable virtual-module return | nullable string/object |
 | function calls (untracked callee) | unknown |
-| property access | unknown |
+| Result property access (`result.ok`) | known property type when modeled |
+| property access (general case) | unknown |
 | `typeof x === "T"` guard (then-branch) | T (narrowed) |
 | `typeof x !== "T"` guard (else-branch) | T (narrowed) |
 
@@ -168,6 +248,8 @@ When `unknown` appears in a boolean context, no diagnostic is emitted. The stati
 | Before (standard JS) | After (sound mode) |
 |---|---|
 | `if (x)` | `if (x !== undefined && x !== null)` |
+| `if (env("KEY"))` | `if (env("KEY") !== undefined)` |
+| `if (cacheGet(ns, key))` | `if (cacheGet(ns, key) !== null)` |
 | `if (count)` | `if (count !== 0)` |
 | `if (name)` | `if (name.length > 0)` or `if (name !== "")` |
 | `x && doSomething()` | `if (x) { doSomething(); }` |
@@ -186,6 +268,8 @@ All sound mode diagnostics are prefixed with `sound error:` or `sound warning:`.
 - `non-boolean value (undefined) used in boolean context` - help: undefined is not boolean; this condition is always false
 - `non-boolean value (object) used in boolean context` - help: objects are not boolean; this condition is always true
 - `non-boolean value (function) used in boolean context` - help: functions are not boolean; this condition is always true
+- `non-boolean value (string?) used in boolean context` - help: use an explicit null/undefined check before treating the value as present
+- `non-boolean value (object?) used in boolean context` - help: use an explicit null/undefined check before using the object
 
 **Warnings (do not block compilation):**
 - `left side of '??' is never null or undefined` - help: remove the '??' fallback; it is unreachable

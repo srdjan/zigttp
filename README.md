@@ -18,6 +18,8 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges, no exceptions, and no non-local jumps - the IR tree IS the control flow graph. See [verification docs](docs/verification.md).
 
+**Strict boolean sound mode.** `-Dsound` (or `--sound`) rejects truthy/falsy coercion in conditions and logical operators. The checker now performs progressive type inference for known virtual-module imports, `match` expressions, nullable returns like `env()`/`cacheGet()`, and Result-shaped values like `jwtVerify(...).ok`. See [sound mode docs](docs/sound-mode.md).
+
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
 
 **Contract manifests.** `-Dcontract` emits a machine-readable `contract.json` describing what your handler is allowed to do: which modules it imports, which env vars it reads, which hosts it calls, which cache namespaces it uses. Non-literal arguments honestly report `"dynamic": true`. No other JS runtime can do this because full JS is not statically analyzable.
@@ -142,7 +144,7 @@ import { parseBearer, jwtVerify, jwtSign } from "zigttp:auth";
 
 function handler(req: Request): Response {
     const token = parseBearer(req.headers["authorization"]);
-    if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (token === null) return Response.json({ error: "unauthorized" }, { status: 401 });
 
     const result = jwtVerify(token, "my-secret");
     if (!result.ok) return Response.json({ error: result.error }, { status: 401 });
@@ -183,7 +185,7 @@ import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
 
 function handler(req: Request): Response {
     const cached = cacheGet("api", req.url);
-    if (cached) return Response.json(JSON.parse(cached));
+    if (cached !== null) return Response.json(JSON.parse(cached));
 
     const data = { message: "computed", path: req.url };
     cacheSet("api", req.url, JSON.stringify(data), 60); // TTL: 60 seconds
