@@ -137,6 +137,12 @@ Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode
 
 **Sound Mode BoolChecker** (`zts/bool_checker.zig`): The `-Dsound` build option (or `--sound` CLI flag) enables strict boolean enforcement. The BoolChecker walks the IR tree inferring expression types, rejecting non-boolean values in if/ternary conditions, &&/|| operands, and ! operands. Runtime VM assertions at conditional jump opcodes catch values the static checker cannot prove. See [docs/sound-mode.md](docs/sound-mode.md).
 
+Sound mode includes progressive type inference:
+- **Virtual module return types**: Imported functions from `zigttp:*` modules have known return types (boolean, number, string, object, nullable variants). Using `cacheIncr()` (number) in an `if` condition is caught at compile time.
+- **Match expression types**: When all arms return the same type, the match expression inherits that type.
+- **Nullable union types**: Functions like `env()` and `cacheGet()` return `nullable_string`. These fail in boolean contexts with a help message suggesting explicit null checks. The `??` operator resolves nullables: `env("KEY") ?? "default"` infers as `string`.
+- **Result property access**: `result.ok` on objects from `jwtVerify`/`validateJson`/`validateObject`/`coerceJson` infers as `boolean`. `result.error` infers as `string`.
+
 ## TypeScript/TSX Support
 
 zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly.

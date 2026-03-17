@@ -57,6 +57,7 @@ pub const VirtualModule = enum {
             .cache => &cache_mod.exports,
         };
     }
+
 };
 
 /// Resolution result
