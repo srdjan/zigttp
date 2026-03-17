@@ -150,6 +150,7 @@ pub const Parser = struct {
     // Output fields for zruntime.zig compatibility
     max_local_count: u8,
     constants: ConstantsList,
+    root_node: NodeIndex = @import("ir.zig").null_node,
 
     // Strings/atoms kept for API compatibility (not used by new parser)
     strings: *string.StringTable,
@@ -198,6 +199,7 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) ![]const u8 {
         // Parse to IR
         const root = try self.js_parser.parse();
+        self.root_node = root;
 
         // Optimize IR (cold-start-friendly single pass)
         // Non-fatal: optimization failures are silently ignored

@@ -381,6 +381,9 @@ pub const Interpreter = struct {
     pic_misses: u32 = 0, // PIC cache misses (type feedback)
     last_op: bytecode.Opcode = .nop,
 
+    // Sound mode: enforce boolean-only conditions at runtime
+    sound_mode: bool = false,
+
     pub fn init(ctx: *context.Context) Interpreter {
         return .{
             .ctx = ctx,
@@ -1136,6 +1139,7 @@ pub const Interpreter = struct {
         NoRootClass,
         ArenaObjectEscape, // Arena object stored into persistent object
         NoHiddenClassPool,
+        SoundModeViolation, // Non-boolean value in boolean context (sound mode)
     };
 
     /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
@@ -1596,6 +1600,10 @@ pub const Interpreter = struct {
             },
             .not => {
                 const a = self.ctx.pop();
+                if (self.sound_mode and !a.isBool()) {
+                    self.ctx.exception = try self.createSoundModeError(a);
+                    return .{ .ret = value.JSValue.undefined_val };
+                }
                 try self.ctx.push(value.JSValue.fromBool(!a.toBoolean()));
                 return .handled;
             },
@@ -1710,6 +1718,10 @@ pub const Interpreter = struct {
             },
             .if_true => {
                 const cond = self.ctx.pop();
+                if (self.sound_mode and !cond.isBool()) {
+                    self.ctx.exception = try self.createSoundModeError(cond);
+                    return .{ .ret = value.JSValue.undefined_val };
+                }
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (cond.toBoolean()) {
@@ -1719,6 +1731,10 @@ pub const Interpreter = struct {
             },
             .if_false => {
                 const cond = self.ctx.pop();
+                if (self.sound_mode and !cond.isBool()) {
+                    self.ctx.exception = try self.createSoundModeError(cond);
+                    return .{ .ret = value.JSValue.undefined_val };
+                }
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (!cond.toBoolean()) {
@@ -2821,6 +2837,10 @@ pub const Interpreter = struct {
 
                 .if_false_goto => {
                     const cond = self.ctx.pop();
+                    if (self.sound_mode and !cond.isBool()) {
+                        self.ctx.exception = try self.createSoundModeError(cond);
+                        return error.TypeError;
+                    }
                     const offset = readI16(self.pc);
                     self.pc += 2;
                     if (!cond.toBoolean()) {
@@ -3540,6 +3560,25 @@ pub const Interpreter = struct {
         return try string.createString(self.ctx.allocator, s);
     }
 
+    fn createSoundModeError(self: *Interpreter, val: value.JSValue) !value.JSValue {
+        const type_name = val.typeOf();
+        const prefix = "sound mode: condition must be boolean, got ";
+        // Build error message
+        var buf: [80]u8 = undefined;
+        const total = @min(prefix.len + type_name.len, buf.len);
+        @memcpy(buf[0..prefix.len], prefix);
+        const type_copy_len = total - prefix.len;
+        @memcpy(buf[prefix.len..][0..type_copy_len], type_name[0..type_copy_len]);
+        const msg = buf[0..total];
+        const js_str = blk: {
+            if (self.ctx.hybrid) |h| {
+                break :blk string.createStringWithArena(h.arena, msg) orelse return error.OutOfMemory;
+            }
+            break :blk try string.createString(self.ctx.allocator, msg);
+        };
+        return value.JSValue.fromPtr(js_str);
+    }
+
     fn getConstant(self: *Interpreter, idx: u16) !value.JSValue {
         if (idx >= self.constants.len) return error.InvalidConstant;
         return self.constants[idx];
@@ -3899,6 +3938,10 @@ pub const Interpreter = struct {
             },
             .if_true => {
                 const cond = self.ctx.pop();
+                if (self.sound_mode and !cond.isBool()) {
+                    self.ctx.exception = try self.createSoundModeError(cond);
+                    return error.SoundModeViolation;
+                }
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (cond.toBoolean()) {
@@ -3908,6 +3951,10 @@ pub const Interpreter = struct {
             },
             .if_false => {
                 const cond = self.ctx.pop();
+                if (self.sound_mode and !cond.isBool()) {
+                    self.ctx.exception = try self.createSoundModeError(cond);
+                    return error.SoundModeViolation;
+                }
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (!cond.toBoolean()) {

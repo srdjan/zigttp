@@ -112,6 +112,8 @@ fn parseArgs(args_vector: std.process.Args) !ServerConfig {
             config.pool_size = std.fmt.parseInt(usize, pool_str, 10) catch return error.InvalidPoolSize;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             config.log_requests = false;
+        } else if (std.mem.eql(u8, arg, "--sound")) {
+            config.runtime_config.sound_mode = true;
         } else if (std.mem.eql(u8, arg, "--cors")) {
             config.enable_cors = true;
         } else if (std.mem.eql(u8, arg, "--static")) {
@@ -194,6 +196,7 @@ fn printHelp() void {
         \\                        Supports k/kb, m/mb, g/gb suffixes
         \\  -n, --pool <N>        Runtime pool size (default: auto = 2 * cpu, min 8)
         \\  -q, --quiet           Disable request logging
+        \\  --sound               Enable strict boolean sound mode
         \\  --cors                Enable CORS headers
         \\  --static <DIR>        Serve static files from directory
         \\  --outbound-http       Enable native outbound HTTP bridge (fetchSync/httpRequest)

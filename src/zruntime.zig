@@ -68,6 +68,9 @@ pub const RuntimeConfig = struct {
 
     /// Connect timeout in milliseconds for outbound HTTP requests.
     outbound_timeout_ms: u32 = 10_000,
+
+    /// Enable strict boolean sound mode (static + runtime enforcement)
+    sound_mode: bool = false,
 };
 
 fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.Heap, config: RuntimeConfig) void {
@@ -693,6 +696,35 @@ pub const Runtime = struct {
             }
             return err;
         };
+
+        // Sound mode: run BoolChecker on parsed IR
+        if (self.config.sound_mode) {
+            const ir_view = zq.parser.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
+            var checker = zq.BoolChecker.init(self.allocator, ir_view, &self.ctx.atoms);
+            defer checker.deinit();
+
+            const error_count = try checker.check(p.root_node);
+            const diags = checker.getDiagnostics();
+
+            if (diags.len > 0) {
+                var diag_output: std.ArrayList(u8) = .empty;
+                defer diag_output.deinit(self.allocator);
+                var diag_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &diag_output);
+                checker.formatDiagnostics(source_to_parse, &diag_aw.writer) catch {};
+                diag_output = diag_aw.toArrayList();
+                if (diag_output.items.len > 0) {
+                    std.log.err("{s}", .{diag_output.items});
+                }
+                std.log.err("{d} sound mode error(s), {d} warning(s)", .{
+                    error_count,
+                    diags.len - error_count,
+                });
+            }
+
+            if (error_count > 0) {
+                return error.SoundModeViolation;
+            }
+        }
 
         // Resolve module imports and register virtual module native functions
         const has_file_imports = try self.resolveModuleImports(&p);

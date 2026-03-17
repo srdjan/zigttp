@@ -126,6 +126,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var emit_aot = false;
     var emit_verify = false;
     var emit_contract = false;
+    var emit_sound = false;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
@@ -140,6 +141,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (std.mem.eql(u8, arg, "--contract")) {
             emit_contract = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--sound")) {
+            emit_sound = true;
             continue;
         }
 
@@ -157,13 +162,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--sound] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--sound] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -178,7 +183,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
-    var compiled = compileHandler(allocator, source, handler_path_final, emit_aot, emit_verify, emit_contract) catch |err| {
+    var compiled = compileHandler(allocator, source, handler_path_final, emit_aot, emit_verify, emit_contract, emit_sound) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
     };
@@ -231,6 +236,7 @@ fn compileHandler(
     emit_aot: bool,
     emit_verify: bool,
     emit_contract: bool,
+    emit_sound: bool,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
     var strip_result: ?zts.StripResult = null;
@@ -309,6 +315,39 @@ fn compileHandler(
         &js_parser.constants,
         root,
     ) catch {};
+
+    // Run sound mode bool checker if requested
+    if (emit_sound) {
+        const ir_view_sound = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        var checker = zts.BoolChecker.init(allocator, ir_view_sound, &atoms);
+        defer checker.deinit();
+
+        const sound_error_count = try checker.check(root);
+        const sound_diags = checker.getDiagnostics();
+
+        if (sound_diags.len > 0) {
+            std.debug.print("\n", .{});
+            var sound_output: std.ArrayList(u8) = .empty;
+            defer sound_output.deinit(allocator);
+            var sound_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sound_output);
+            checker.formatDiagnostics(source_to_parse, &sound_aw.writer) catch {};
+            sound_output = sound_aw.toArrayList();
+            if (sound_output.items.len > 0) {
+                std.debug.print("{s}", .{sound_output.items});
+            }
+            std.debug.print("{d} sound mode error(s), {d} warning(s)\n", .{
+                sound_error_count,
+                sound_diags.len - sound_error_count,
+            });
+        }
+
+        if (sound_error_count > 0) {
+            std.debug.print("\nSound mode check failed for {s}\n", .{filename});
+            return error.SoundModeViolation;
+        }
+
+        std.debug.print("Sound mode check passed\n", .{});
+    }
 
     // Run handler verification if requested
     var verify_info: ?VerificationInfo = null;

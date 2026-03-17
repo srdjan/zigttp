@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
     const aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false;
     const verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false;
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
+    const sound_enabled = b.option(bool, "sound", "Enable strict boolean sound mode") orelse false;
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -74,6 +75,9 @@ pub fn build(b: *std.Build) void {
         }
         if (contract_enabled) {
             run_precompile.addArg("--contract");
+        }
+        if (sound_enabled) {
+            run_precompile.addArg("--sound");
         }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");
