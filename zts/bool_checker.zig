@@ -77,8 +77,10 @@ pub const BoolChecker = struct {
     ir_view: IrView,
     atoms: ?*context.AtomTable,
     diagnostics: std.ArrayList(Diagnostic),
-    /// Tracks inferred type for const bindings: binding slot -> ExprType
+    /// Tracks inferred type for const/let bindings: packed(scope_id, slot) -> ExprType
     const_types: std.AutoHashMapUnmanaged(u32, ExprType),
+    /// Tracks inferred return type for function bindings: packed(scope_id, slot) -> ExprType
+    fn_return_types: std.AutoHashMapUnmanaged(u32, ExprType),
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) BoolChecker {
         return .{
@@ -87,6 +89,7 @@ pub const BoolChecker = struct {
             .atoms = atoms,
             .diagnostics = .empty,
             .const_types = .empty,
+            .fn_return_types = .empty,
         };
     }
 
@@ -99,6 +102,7 @@ pub const BoolChecker = struct {
         }
         self.diagnostics.deinit(self.allocator);
         self.const_types.deinit(self.allocator);
+        self.fn_return_types.deinit(self.allocator);
     }
 
     /// Check if a diagnostic message was dynamically allocated vs static string.
@@ -200,6 +204,14 @@ pub const BoolChecker = struct {
                         // Key: pack scope_id and slot into a single u32
                         const key = (@as(u32, vd.binding.scope_id) << 16) | @as(u32, vd.binding.slot);
                         self.const_types.put(self.allocator, key, inferred) catch {};
+
+                        // If binding is a function, try to infer its return type
+                        if (inferred == .function) {
+                            const ret_type = self.inferFunctionReturnType(vd.init);
+                            if (ret_type != .unknown) {
+                                self.fn_return_types.put(self.allocator, key, ret_type) catch {};
+                            }
+                        }
                     }
                 }
             },
@@ -237,7 +249,21 @@ pub const BoolChecker = struct {
                 }
             },
 
-            .function_decl, .function_expr, .arrow_function => {
+            .function_decl => {
+                const func = self.ir_view.getFunction(node) orelse return;
+                // Track function return type for named declarations
+                const ret_type = self.inferFunctionReturnType(node);
+                if (ret_type != .unknown and func.name_atom != 0) {
+                    // Function declarations create a binding in the enclosing scope
+                    // Use scope_id=0 + name_atom as key (global function pattern)
+                    const key = @as(u32, func.name_atom);
+                    self.fn_return_types.put(self.allocator, key, ret_type) catch {};
+                    self.const_types.put(self.allocator, key, .function) catch {};
+                }
+                self.walkStmt(func.body);
+            },
+
+            .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
                 self.walkStmt(func.body);
             },
@@ -446,8 +472,10 @@ pub const BoolChecker = struct {
 
             .match_expr => .unknown,
 
-            // Function calls, property access - cannot determine statically
-            .call, .method_call, .member_access, .computed_access,
+            .call => self.inferCallReturnType(node),
+
+            // Method calls, property access - cannot determine statically
+            .method_call, .member_access, .computed_access,
             .optional_chain, .optional_call, .spread,
             => .unknown,
 
@@ -497,6 +525,121 @@ pub const BoolChecker = struct {
             .typeof_op => .string,
             .void_op => .undefined,
         };
+    }
+
+    // -----------------------------------------------------------------------
+    // Function return type inference
+    // -----------------------------------------------------------------------
+
+    /// Infer the return type of a function expression or arrow function.
+    /// Handles: single-expression arrows `(x) => x > 0` and block-bodied
+    /// functions with a uniform return type across all return statements.
+    fn inferFunctionReturnType(self: *BoolChecker, node: NodeIndex) ExprType {
+        const tag = self.ir_view.getTag(node) orelse return .unknown;
+        if (tag != .arrow_function and tag != .function_expr and tag != .function_decl) return .unknown;
+
+        const func = self.ir_view.getFunction(node) orelse return .unknown;
+        if (func.body == null_node) return .unknown;
+
+        const body_tag = self.ir_view.getTag(func.body) orelse return .unknown;
+
+        // Single-expression arrow: body is wrapped in a return_stmt by the parser
+        if (body_tag == .return_stmt) {
+            const ret_val = self.ir_view.getOptValue(func.body) orelse return .undefined;
+            return self.inferType(ret_val);
+        }
+
+        // Other non-block body (shouldn't happen normally, but handle gracefully)
+        if (body_tag != .block and body_tag != .program) {
+            return self.inferType(func.body);
+        }
+
+        // Block body: collect return types
+        return self.inferBlockReturnType(func.body);
+    }
+
+    /// Scan a block for return statements and infer a uniform return type.
+    fn inferBlockReturnType(self: *BoolChecker, block_node: NodeIndex) ExprType {
+        const block = self.ir_view.getBlock(block_node) orelse return .unknown;
+        var return_type: ?ExprType = null;
+
+        for (0..block.stmts_count) |i| {
+            const stmt_idx = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
+            const stmt_tag = self.ir_view.getTag(stmt_idx) orelse continue;
+
+            switch (stmt_tag) {
+                .return_stmt => {
+                    const ret_val = self.ir_view.getOptValue(stmt_idx) orelse {
+                        // bare return -> undefined
+                        if (return_type) |rt| {
+                            if (rt != .undefined) return .unknown;
+                        } else {
+                            return_type = .undefined;
+                        }
+                        continue;
+                    };
+                    const this_type = self.inferType(ret_val);
+                    if (return_type) |rt| {
+                        if (rt != this_type) return .unknown;
+                    } else {
+                        return_type = this_type;
+                    }
+                },
+                .if_stmt => {
+                    // Recurse into if branches
+                    const if_s = self.ir_view.getIfStmt(stmt_idx) orelse continue;
+                    const then_type = self.inferBranchReturnType(if_s.then_branch);
+                    if (then_type) |tt| {
+                        if (return_type) |rt| {
+                            if (rt != tt) return .unknown;
+                        } else {
+                            return_type = tt;
+                        }
+                    }
+                    if (if_s.else_branch != null_node) {
+                        const else_type = self.inferBranchReturnType(if_s.else_branch);
+                        if (else_type) |et| {
+                            if (return_type) |rt| {
+                                if (rt != et) return .unknown;
+                            } else {
+                                return_type = et;
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        return return_type orelse .unknown;
+    }
+
+    /// Infer return type from a branch (block or single statement).
+    fn inferBranchReturnType(self: *BoolChecker, node: NodeIndex) ?ExprType {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag == .block or tag == .program) {
+            const t = self.inferBlockReturnType(node);
+            return if (t == .unknown) null else t;
+        }
+        if (tag == .return_stmt) {
+            const ret_val = self.ir_view.getOptValue(node) orelse return .undefined;
+            return self.inferType(ret_val);
+        }
+        return null;
+    }
+
+    /// Infer the return type of a call expression by looking up the callee.
+    fn inferCallReturnType(self: *BoolChecker, node: NodeIndex) ExprType {
+        const call = self.ir_view.getCall(node) orelse return .unknown;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return .unknown;
+
+        if (callee_tag == .identifier) {
+            const binding = self.ir_view.getBinding(call.callee) orelse return .unknown;
+            const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
+            if (self.fn_return_types.get(key)) |ret_type| return ret_type;
+        }
+
+        return .unknown;
     }
 
     // -----------------------------------------------------------------------
@@ -766,6 +909,48 @@ test "sound: let reassigned to number fails" {
         \\flag = 42;
         \\if (flag) { let x = 1; }
     , 1);
+}
+
+// Diagnostic context messages
+
+// Function return type inference
+
+test "sound: arrow function returning boolean - call site passes" {
+    try checkSource(
+        \\const isPositive = (n) => n > 0;
+        \\if (isPositive(5)) { let x = 1; }
+    , 0);
+}
+
+test "sound: arrow function returning number - call site fails" {
+    try checkSource(
+        \\const double = (n) => n * 2;
+        \\if (double(5)) { let x = 1; }
+    , 1);
+}
+
+test "sound: block function returning boolean passes" {
+    try checkSource(
+        \\const check = (x) => {
+        \\  return x > 0;
+        \\};
+        \\if (check(1)) { let y = 1; }
+    , 0);
+}
+
+test "sound: block function with mixed return types is unknown" {
+    // Mixed return types -> unknown -> passes (runtime catches it)
+    try checkSource(
+        \\const mixed = (x) => {
+        \\  if (x > 0) { return true; }
+        \\  return 0;
+        \\};
+        \\if (mixed(1)) { let y = 1; }
+    , 0);
+}
+
+test "sound: untracked function call is unknown (passes)" {
+    try checkSource("if (someFunc()) { let x = 1; }", 0);
 }
 
 // Diagnostic context messages

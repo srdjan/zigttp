@@ -90,7 +90,7 @@ The parser already rejects `==` and `!=` with a helpful error message suggesting
 The BoolChecker performs lightweight type inference by walking the IR tree. When it cannot determine the type of an expression statically, it infers `unknown`. This happens for:
 
 - Function parameters
-- Function call results
+- Function call results (unless the callee is a tracked local function)
 - Property accesses (e.g., `obj.flag`)
 - Computed accesses (e.g., `arr[i]`)
 
@@ -120,7 +120,10 @@ When `unknown` appears in a boolean context, no diagnostic is emitted. The stati
 | `const x = expr; ... x` | same as expr |
 | `let x = expr; ... x` | same as expr (invalidated on reassignment) |
 | `cond ? a : b` | type of a (if a and b match) |
-| function calls, property access | unknown |
+| `const f = (x) => x > 0; f(1)` | return type of f (boolean) |
+| `const f = (x) => { return x * 2; }; f(1)` | return type of f (number) |
+| function calls (untracked callee) | unknown |
+| property access | unknown |
 
 ## Migration Guide
 
