@@ -17,6 +17,7 @@ pub const CompiledModule = struct {
     shapes: []const []const object.Atom,
     local_count: u8,
     constants: []const @import("../value.zig").JSValue,
+    root: zts_parser.NodeIndex,
 };
 
 pub const ModuleCompiler = struct {
@@ -115,6 +116,7 @@ pub const ModuleCompiler = struct {
                 .shapes = shapes,
                 .local_count = @intCast(func.local_count),
                 .constants = func.constants,
+                .root = root,
             });
 
             // Keep parser and codegen alive (bytecode borrows from them)

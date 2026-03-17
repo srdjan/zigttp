@@ -1768,6 +1768,7 @@ Policy rules in v1:
 - If a section is present, only the listed literals are allowed.
 - Dynamic access in a restricted category fails the build because zigttp cannot enumerate it soundly.
 - Runtime enforcement currently applies to precompiled handlers only.
+- Local file imports are aggregated before validation, so helper modules count toward the same policy.
 
 ---
 

@@ -345,6 +345,7 @@ The `"dynamic": false` fields are the key signal. They mean "we can enumerate ev
 ### Capability Policy (`-Dpolicy`)
 
 Policies are opt-in and apply to precompiled handlers. They consume the same contract data at build time and fail the build if the handler exceeds the allowed env vars, outbound hosts, or cache namespaces. The validated policy is then embedded into the generated handler metadata and enforced again at runtime.
+Local file-import handlers are covered too: capability usage is aggregated across the module graph before validation.
 
 ```json
 {

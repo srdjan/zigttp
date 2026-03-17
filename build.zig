@@ -33,6 +33,19 @@ pub fn build(b: *std.Build) void {
     const zts_test_step = b.step("test-zts", "Run zts unit tests");
     zts_test_step.dependOn(&run_zts_tests.step);
 
+    const precompile_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/precompile.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    precompile_tests.root_module.addImport("zts", zts_mod);
+    const run_precompile_tests = b.addRunArtifact(precompile_tests);
+    const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
+    precompile_test_step.dependOn(&run_precompile_tests.step);
+
     // Precompile tool (build-time compiler with full zts)
     // Build for host since it runs at build time
     const precompile_exe = b.addExecutable(.{
@@ -145,6 +158,7 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_precompile_tests.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{

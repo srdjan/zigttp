@@ -343,15 +343,17 @@ fn compileHandler(
     const has_file_imports = hasFileImports(&js_parser, root);
 
     if (has_file_imports) {
-        if (policy != null) {
-            std.debug.print(
-                "Capability policies currently require single-module handlers; file imports are not yet supported\n",
-                .{},
-            );
-            return error.PolicyUnsupportedWithFileImports;
-        }
         std.debug.print("File imports detected, building module graph...\n", .{});
-        return compileMultiModule(allocator, source_to_parse, filename, &strings, &atoms);
+        return compileMultiModule(
+            allocator,
+            source_to_parse,
+            filename,
+            &strings,
+            &atoms,
+            needs_contract,
+            emit_contract,
+            policy,
+        );
     }
 
     // Optimize IR (cold-start-friendly single pass)
@@ -461,6 +463,7 @@ fn compileHandler(
     defer code_gen.deinit();
 
     const func = try code_gen.generate(root);
+    defer code_gen.freeOwnedConstantPayloads();
 
     std.debug.print("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
 
@@ -590,6 +593,9 @@ fn compileMultiModule(
     filename: []const u8,
     strings: *zts.string.StringTable,
     atoms: *zts.context.AtomTable,
+    needs_contract: bool,
+    emit_contract: bool,
+    policy: ?HandlerPolicy,
 ) !CompiledHandler {
     // Build module graph
     var graph = zts.modules.ModuleGraph.init(allocator);
@@ -612,6 +618,9 @@ fn compileMultiModule(
         return err;
     };
     defer compile_result.deinit();
+    defer {
+        for (compile_result.codegens) |*cg| cg.freeOwnedConstantPayloads();
+    }
 
     // Serialize each module and collect dependency bytecodes
     const mod_count = compile_result.modules.len;
@@ -657,12 +666,27 @@ fn compileMultiModule(
     };
 
     const entry_bytecode = try allocator.dupe(u8, entry_writer.getWritten());
+    errdefer allocator.free(entry_bytecode);
 
     std.debug.print("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
+
+    var contract: ?HandlerContract = null;
+    if (needs_contract) {
+        contract = try buildMultiModuleContract(
+            allocator,
+            &graph,
+            &compile_result,
+            atoms,
+            filename,
+            emit_contract,
+            policy,
+        );
+    }
 
     return .{
         .bytecode = entry_bytecode,
         .dep_bytecodes = dep_bytecodes,
+        .contract = contract,
     };
 }
 
@@ -789,28 +813,188 @@ fn buildContractWithPolicy(
     );
     errdefer contract.deinit(allocator);
 
-    if (policy) |*p| {
-        var report = try handler_policy.validateContract(allocator, &contract, p);
-        defer report.deinit(allocator);
-
-        if (report.hasViolations()) {
-            std.debug.print("\n", .{});
-            var output: std.ArrayList(u8) = .empty;
-            defer output.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-            try handler_policy.formatViolations(&report, &aw.writer);
-            output = aw.toArrayList();
-            if (output.items.len > 0) {
-                std.debug.print("{s}", .{output.items});
-            }
-            std.debug.print("Capability policy check failed for {s}\n", .{filename});
-            return error.PolicyViolation;
-        }
-
+    try enforcePolicyForContract(allocator, filename, &contract, policy);
+    if (policy != null) {
         std.debug.print("Capability policy check passed\n", .{});
     }
 
     return contract;
+}
+
+fn buildMultiModuleContract(
+    allocator: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+    atoms: *zts.context.AtomTable,
+    entry_filename: []const u8,
+    emit_contract: bool,
+    policy: ?HandlerPolicy,
+) !HandlerContract {
+    var merged = try initMergedContract(allocator, entry_filename);
+    errdefer merged.deinit(allocator);
+
+    const entry_index = compile_result.modules.len - 1;
+    var policy_checked = false;
+
+    for (compile_result.modules, compile_result.parsers, 0..) |compiled_module, *js_parser, idx| {
+        const graph_idx = graph.execution_order[idx];
+        const module = &graph.module_list.items[graph_idx];
+        const is_entry = idx == entry_index;
+
+        var temp_aot = if (is_entry and emit_contract)
+            try analyzeAot(allocator, js_parser, atoms, compiled_module.root)
+        else
+            null;
+        defer if (temp_aot) |*aot| aot.deinit(allocator);
+
+        var module_contract = try buildContract(
+            allocator,
+            js_parser,
+            atoms,
+            module.path,
+            compiled_module.root,
+            temp_aot,
+            null,
+        );
+        defer module_contract.deinit(allocator);
+
+        try enforcePolicyForContract(allocator, module.path, &module_contract, policy);
+        if (policy != null) policy_checked = true;
+
+        try mergeModuleContract(allocator, &merged, &module_contract, is_entry);
+    }
+
+    if (policy_checked) {
+        std.debug.print("Capability policy check passed\n", .{});
+    }
+
+    return merged;
+}
+
+fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !HandlerContract {
+    return .{
+        .handler = .{
+            .path = try allocator.dupe(u8, handler_path),
+            .line = 0,
+            .column = 0,
+        },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .verification = null,
+        .aot = null,
+    };
+}
+
+fn mergeModuleContract(
+    allocator: std.mem.Allocator,
+    target: *HandlerContract,
+    source: *const HandlerContract,
+    is_entry: bool,
+) !void {
+    if (is_entry) {
+        target.handler.line = source.handler.line;
+        target.handler.column = source.handler.column;
+        target.verification = source.verification;
+        target.aot = source.aot;
+
+        for (source.routes.items) |route| {
+            try target.routes.append(allocator, .{
+                .pattern = try allocator.dupe(u8, route.pattern),
+                .route_type = route.route_type,
+                .field = route.field,
+                .status = route.status,
+                .content_type = route.content_type,
+                .aot = route.aot,
+            });
+        }
+    }
+
+    for (source.modules.items) |name| {
+        try appendUniqueString(allocator, &target.modules, name, false);
+    }
+
+    for (source.functions.items) |entry| {
+        const target_entry = try getOrCreateFunctionEntry(allocator, &target.functions, entry.module);
+        for (entry.names.items) |name| {
+            try appendUniqueString(allocator, &target_entry.names, name, false);
+        }
+    }
+
+    for (source.env.literal.items) |name| {
+        try appendUniqueString(allocator, &target.env.literal, name, false);
+    }
+    target.env.dynamic = target.env.dynamic or source.env.dynamic;
+
+    for (source.egress.hosts.items) |host| {
+        try appendUniqueString(allocator, &target.egress.hosts, host, true);
+    }
+    target.egress.dynamic = target.egress.dynamic or source.egress.dynamic;
+
+    for (source.cache.namespaces.items) |ns| {
+        try appendUniqueString(allocator, &target.cache.namespaces, ns, false);
+    }
+    target.cache.dynamic = target.cache.dynamic or source.cache.dynamic;
+}
+
+fn getOrCreateFunctionEntry(
+    allocator: std.mem.Allocator,
+    functions: *std.ArrayList(HandlerContract.FunctionEntry),
+    module_name: []const u8,
+) !*HandlerContract.FunctionEntry {
+    for (functions.items) |*entry| {
+        if (std.mem.eql(u8, entry.module, module_name)) return entry;
+    }
+
+    try functions.append(allocator, .{
+        .module = try allocator.dupe(u8, module_name),
+        .names = .empty,
+    });
+    return &functions.items[functions.items.len - 1];
+}
+
+fn appendUniqueString(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList([]const u8),
+    value: []const u8,
+    case_insensitive: bool,
+) !void {
+    for (list.items) |item| {
+        const matches = if (case_insensitive)
+            std.ascii.eqlIgnoreCase(item, value)
+        else
+            std.mem.eql(u8, item, value);
+        if (matches) return;
+    }
+    try list.append(allocator, try allocator.dupe(u8, value));
+}
+
+fn enforcePolicyForContract(
+    allocator: std.mem.Allocator,
+    label_path: []const u8,
+    contract: *const HandlerContract,
+    policy: ?HandlerPolicy,
+) !void {
+    const p = policy orelse return;
+
+    var report = try handler_policy.validateContract(allocator, contract, &p);
+    defer report.deinit(allocator);
+
+    if (!report.hasViolations()) return;
+
+    std.debug.print("\nCapability policy violations in {s}:\n", .{label_path});
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try handler_policy.formatViolations(&report, &aw.writer);
+    output = aw.toArrayList();
+    if (output.items.len > 0) {
+        std.debug.print("{s}", .{output.items});
+    }
+    return error.PolicyViolation;
 }
 
 /// Derive contract.json path from the output .zig path.
@@ -1169,4 +1353,91 @@ fn contentTypeFor(idx: u8) []const u8 {
 fn hexChar(n: u4) u8 {
     const hex_chars = "0123456789abcdef";
     return hex_chars[n];
+}
+
+test "compileHandler aggregates contract across file imports" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const entry_source =
+        \\import { readSecret } from "./dep.js";
+        \\export function handler(req) {
+        \\  return Response.text(readSecret());
+        \\}
+    ;
+    const dep_source =
+        \\import { env } from "zigttp:env";
+        \\export function readSecret() {
+        \\  return env("JWT_SECRET") ?? "";
+        \\}
+    ;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.js", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.js", .data = dep_source });
+
+    const allocator = std.testing.allocator;
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.js", allocator);
+    defer allocator.free(entry_path);
+
+    var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"JWT_SECRET\"]}}");
+    defer policy.deinit(allocator);
+
+    var compiled = try compileHandler(
+        allocator,
+        entry_source,
+        entry_path,
+        false,
+        false,
+        true,
+        policy,
+        false,
+    );
+    defer compiled.deinit(allocator);
+
+    try std.testing.expect(compiled.dep_bytecodes != null);
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), contract.env.literal.items.len);
+    try std.testing.expectEqualStrings("JWT_SECRET", contract.env.literal.items[0]);
+}
+
+test "compileHandler rejects disallowed policy from imported module" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const entry_source =
+        \\import { readSecret } from "./dep.js";
+        \\export function handler(req) {
+        \\  return Response.text(readSecret());
+        \\}
+    ;
+    const dep_source =
+        \\import { env } from "zigttp:env";
+        \\export function readSecret() {
+        \\  return env("JWT_SECRET") ?? "";
+        \\}
+    ;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.js", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.js", .data = dep_source });
+
+    const allocator = std.testing.allocator;
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.js", allocator);
+    defer allocator.free(entry_path);
+
+    var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"PUBLIC_KEY\"]}}");
+    defer policy.deinit(allocator);
+
+    try std.testing.expectError(
+        error.PolicyViolation,
+        compileHandler(
+            allocator,
+            entry_source,
+            entry_path,
+            false,
+            false,
+            false,
+            policy,
+            false,
+        ),
+    );
 }
