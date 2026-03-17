@@ -21,6 +21,7 @@ zig build -Doptimize=ReleaseFast   # Optimized build
 zig build -Dhandler=handler.jsx    # Precompile handler at build time
 zig build -Dhandler=handler.jsx -Dverify  # Verify handler at compile time
 zig build -Dhandler=handler.jsx -Dcontract  # Emit contract.json manifest
+zig build -Dhandler=handler.jsx -Dsound   # Enforce strict boolean sound mode
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
@@ -134,6 +135,8 @@ Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode
 
 **Handler Contract Manifest** (`zts/handler_contract.zig`): The `-Dcontract` build option emits `contract.json` alongside the embedded bytecode, describing what the handler is allowed to do. The contract extracts: virtual module imports and function names, literal env var names (`env.dynamic: false` when all calls use string literals), outbound hosts from `fetchSync` URL arguments, cache namespace strings, route patterns (when AOT pattern analysis detects them), and verification results (when `-Dverify` is also set). Non-literal arguments set `dynamic: true` as an honest signal that static analysis cannot enumerate all values. This is v1 (emission only) - runtime enforcement is v2 scope.
 
+**Sound Mode BoolChecker** (`zts/bool_checker.zig`): The `-Dsound` build option (or `--sound` CLI flag) enables strict boolean enforcement. The BoolChecker walks the IR tree inferring expression types, rejecting non-boolean values in if/ternary conditions, &&/|| operands, and ! operands. Runtime VM assertions at conditional jump opcodes catch values the static checker cannot prove. See [docs/sound-mode.md](docs/sound-mode.md).
+
 ## TypeScript/TSX Support
 
 zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly.
@@ -213,6 +216,7 @@ Stateful modules (validate, cache) use `Context.module_state` - a fixed-size arr
 -e, --eval <CODE>      Inline JavaScript code
 -m, --memory <SIZE>    JS runtime memory limit (default: 0 = no limit)
 -n, --pool <N>         Runtime pool size (default: auto = 2 * cpu, min 8)
+--sound                Enable strict boolean sound mode
 --cors                 Enable CORS headers
 --static <DIR>         Serve static files
 ```
