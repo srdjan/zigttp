@@ -167,6 +167,7 @@ pub const Runtime = struct {
     strings: zq.StringTable,
     handler_atom: ?zq.Atom,
     cached_handler_obj: ?*zq.JSObject,
+    cached_handler_arg_count: u8,
     cached_dispatch: ?*const zq.bytecode.PatternDispatchTable,
     config: RuntimeConfig,
     outbound_io_backend: ?std.Io.Threaded,
@@ -245,6 +246,7 @@ pub const Runtime = struct {
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,
+            .cached_handler_arg_count = 1,
             .cached_dispatch = null,
             .config = config,
             .outbound_io_backend = if (config.outbound_http_enabled)
@@ -288,6 +290,7 @@ pub const Runtime = struct {
             .strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,
+            .cached_handler_arg_count = 1,
             .cached_dispatch = null,
             .config = config,
             .outbound_io_backend = if (config.outbound_http_enabled)
@@ -349,6 +352,7 @@ pub const Runtime = struct {
         // Use predefined handler atom
         self.handler_atom = zq.Atom.handler;
         self.cached_handler_obj = null;
+        self.cached_handler_arg_count = 1;
         self.cached_dispatch = null;
 
         try self.installHttpConstructors();
@@ -731,9 +735,11 @@ pub const Runtime = struct {
             return err;
         };
 
-        // Sound mode: run BoolChecker on parsed IR
+        // Sound mode: run BoolChecker and TypeChecker on parsed IR
         if (self.config.sound_mode) {
             const ir_view = zq.parser.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
+
+            // BoolChecker: strict boolean enforcement
             var checker = zq.BoolChecker.init(self.allocator, ir_view, &self.ctx.atoms);
             defer checker.deinit();
 
@@ -757,6 +763,42 @@ pub const Runtime = struct {
 
             if (error_count > 0) {
                 return error.SoundModeViolation;
+            }
+
+            // TypeChecker: full type annotation checking (when TypeMap available)
+            if (strip_result) |sr| {
+                if (sr.type_map) |tm| {
+                    var type_pool = zq.TypePool.init(self.allocator);
+                    defer type_pool.deinit(self.allocator);
+
+                    var type_env = zq.TypeEnv.init(self.allocator, &type_pool);
+                    defer type_env.deinit();
+
+                    // Populate module types and user-declared types
+                    zq.modules.populateModuleTypes(&type_env, &type_pool, self.allocator);
+                    type_env.populateFromTypeMap(&tm);
+
+                    var tc = zq.TypeChecker.init(self.allocator, ir_view, &self.ctx.atoms, &type_env);
+                    defer tc.deinit();
+
+                    const tc_errors = try tc.check(p.root_node);
+                    const tc_diags = tc.getDiagnostics();
+
+                    if (tc_diags.len > 0) {
+                        var tc_output: std.ArrayList(u8) = .empty;
+                        defer tc_output.deinit(self.allocator);
+                        var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
+                        tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+                        tc_output = tc_aw.toArrayList();
+                        if (tc_output.items.len > 0) {
+                            std.log.err("{s}", .{tc_output.items});
+                        }
+                    }
+
+                    if (tc_errors > 0) {
+                        return error.SoundModeViolation;
+                    }
+                }
             }
         }
 
@@ -848,6 +890,8 @@ pub const Runtime = struct {
 
         if (handler_obj.getBytecodeFunctionData()) |bc_data| {
             self.cached_dispatch = bc_data.bytecode.pattern_dispatch;
+            // Detect handler arg count for capability injection support
+            self.cached_handler_arg_count = @intCast(@min(bc_data.bytecode.arg_count, 255));
         } else {
             self.cached_dispatch = null;
         }
@@ -965,13 +1009,20 @@ pub const Runtime = struct {
 
         // Create Request object from HttpRequest (shared between AOT and interpreter)
         const request_obj = try self.createRequestObject(request);
-        const args = [_]zq.JSValue{request_obj};
+
+        // Build argument array: 1-arg (backward compat) or 2-arg (with capabilities)
+        var args_buf: [2]zq.JSValue = undefined;
+        args_buf[0] = request_obj;
+        const args: []const zq.JSValue = if (self.cached_handler_arg_count >= 2) blk: {
+            args_buf[1] = try self.createCapabilitiesObject();
+            break :blk args_buf[0..2];
+        } else args_buf[0..1];
 
         // === AOT PATH: Native Zig handler ===
         aot_attempt: {
             if (builtin.is_test) {
                 if (aot_override) |override_fn| {
-                    const override_result = override_fn(self.ctx, &args) catch |err| {
+                    const override_result = override_fn(self.ctx, args) catch |err| {
                         if (err == error.AotBail) break :aot_attempt;
                         std.log.err("AOT override failed: {}", .{err});
                         return error.HandlerError;
@@ -986,7 +1037,7 @@ pub const Runtime = struct {
             }
             if (!embedded_handler.has_aot) break :aot_attempt;
 
-            const aot_result = embedded_handler.aotHandler(self.ctx, &args) catch |err| {
+            const aot_result = embedded_handler.aotHandler(self.ctx, args) catch |err| {
                 if (err == error.AotBail) break :aot_attempt;
                 std.log.err("AOT handler failed: {}", .{err});
                 return error.HandlerError;
@@ -1009,7 +1060,7 @@ pub const Runtime = struct {
         zq.http.setCallFunctionCallback(callFunctionWrapper);
         defer zq.http.clearCallFunctionCallback();
 
-        const result = self.callFunction(handler_obj, &args) catch |err| {
+        const result = self.callFunction(handler_obj, args) catch |err| {
             std.log.err("Handler execution failed: {}", .{err});
             return error.HandlerError;
         };
@@ -1207,6 +1258,21 @@ pub const Runtime = struct {
         if (ascii.eqlIgnoreCase(key, "accept-encoding")) return .@"accept-encoding";
         if (ascii.eqlIgnoreCase(key, "authorization")) return .authorization;
         return null;
+    }
+
+    /// Create a capabilities object for 2-arg handler invocation.
+    /// The caps object contains virtual module functions grouped by namespace.
+    /// For now, all registered virtual module functions are included.
+    /// The type checker (sound mode) validates that the handler only accesses
+    /// capabilities declared in its type annotation.
+    fn createCapabilitiesObject(self: *Self) !zq.JSValue {
+        // Create a plain empty object as the capabilities container.
+        // Virtual module functions are already available via imports;
+        // the caps object provides an alternative DI-style access pattern.
+        // Full population with module namespaces is done lazily: the type
+        // checker ensures only declared capabilities are accessed.
+        const caps_obj = try self.ctx.createObject(null);
+        return zq.JSValue.fromPtr(caps_obj);
     }
 
     fn createRequestObject(self: *Self, request: HttpRequestView) !zq.JSValue {

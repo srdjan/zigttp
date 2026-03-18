@@ -396,6 +396,43 @@ fn compileHandler(
         }
 
         std.debug.print("Sound mode check passed\n", .{});
+
+        // TypeChecker: full type annotation checking (when TypeMap available)
+        if (strip_result) |sr| {
+            if (sr.type_map) |tm| {
+                var type_pool = zts.TypePool.init(allocator);
+                defer type_pool.deinit(allocator);
+
+                var type_env = zts.TypeEnv.init(allocator, &type_pool);
+                defer type_env.deinit();
+
+                zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+                type_env.populateFromTypeMap(&tm);
+
+                var tc = zts.type_checker.TypeChecker.init(allocator, ir_view_sound, &atoms, &type_env);
+                defer tc.deinit();
+
+                const tc_errors = try tc.check(root);
+                const tc_diags = tc.getDiagnostics();
+
+                if (tc_diags.len > 0) {
+                    var tc_output: std.ArrayList(u8) = .empty;
+                    defer tc_output.deinit(allocator);
+                    var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
+                    tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+                    tc_output = tc_aw.toArrayList();
+                    if (tc_output.items.len > 0) {
+                        std.debug.print("{s}", .{tc_output.items});
+                    }
+                }
+
+                if (tc_errors > 0) {
+                    std.debug.print("\nType check failed for {s}\n", .{filename});
+                    return error.SoundModeViolation;
+                }
+                std.debug.print("Type check passed\n", .{});
+            }
+        }
     }
 
     // Run handler verification if requested

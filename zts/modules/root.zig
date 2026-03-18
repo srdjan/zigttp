@@ -18,6 +18,7 @@ pub const util = @import("util.zig");
 pub const file_resolver = @import("file_resolver.zig");
 pub const module_graph = @import("module_graph.zig");
 pub const compiler = @import("compiler.zig");
+pub const types = @import("types.zig");
 
 pub const VirtualModule = resolver.VirtualModule;
 pub const ModuleExport = resolver.ModuleExport;
@@ -30,3 +31,4 @@ pub const CompileResult = compiler.CompileResult;
 pub const resolve = resolver.resolve;
 pub const registerVirtualModule = resolver.registerVirtualModule;
 pub const validateImports = resolver.validateImports;
+pub const populateModuleTypes = types.populateModuleTypes;

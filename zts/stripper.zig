@@ -22,6 +22,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const comptime_eval = @import("comptime.zig");
+const type_map_mod = @import("type_map.zig");
+pub const TypeMap = type_map_mod.TypeMap;
+pub const TypeMapEntry = type_map_mod.TypeMapEntry;
+pub const TypeMapKind = type_map_mod.TypeMapKind;
 
 pub const StripError = error{
     UnsupportedAngleBracketAssertion,
@@ -41,8 +45,12 @@ pub const StripError = error{
 pub const StripResult = struct {
     code: []const u8,
     allocator: std.mem.Allocator,
+    /// Type annotations extracted during stripping (sound mode only).
+    /// Null in compat mode.
+    type_map: ?TypeMap = null,
 
     pub fn deinit(self: *StripResult) void {
+        if (self.type_map) |*tm| tm.deinit(self.allocator);
         self.allocator.free(self.code);
     }
 };
@@ -107,6 +115,9 @@ const Stripper = struct {
     // Prevents 'as' from being treated as a type assertion (it's import aliasing)
     in_import: bool,
 
+    // TypeMap: records type annotations in sound mode for downstream type checking
+    type_map: ?TypeMap,
+
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, options: StripOptions) Self {
@@ -124,6 +135,7 @@ const Stripper = struct {
             .col = 1,
             .in_expression = false,
             .in_import = false,
+            .type_map = if (options.sound_mode) TypeMap.init(source) else null,
         };
     }
 
@@ -144,6 +156,7 @@ const Stripper = struct {
         return StripResult{
             .code = code,
             .allocator = self.allocator,
+            .type_map = self.type_map,
         };
     }
 
@@ -282,6 +295,8 @@ const Stripper = struct {
                 if (self.looksLikeGenericArrow()) {
                     const generic_start = self.pos;
                     if (self.skipBalancedAngles()) {
+                        // Record generic params (content inside angle brackets)
+                        self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, 0, 0);
                         self.blankSpan(generic_start, self.pos);
                         // Copy whitespace after generics
                         const ws2_start = self.pos;
@@ -336,8 +351,12 @@ const Stripper = struct {
         self.output.appendSlice(self.allocator, self.source[ws_start..self.pos]) catch return StripError.OutOfMemory;
 
         // Copy function name (optional for function expressions)
+        var fn_name_start: usize = 0;
+        var fn_name_end: usize = 0;
         if (self.pos < self.source.len and isIdentifierStart(self.source[self.pos])) {
+            fn_name_start = self.pos;
             const name = self.scanIdentifier();
+            fn_name_end = self.pos;
             self.output.appendSlice(self.allocator, name) catch return StripError.OutOfMemory;
         }
 
@@ -345,6 +364,8 @@ const Stripper = struct {
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             const generic_start = self.pos;
             if (self.skipBalancedAngles()) {
+                // Record generic params in TypeMap (inside the angle brackets)
+                self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, fn_name_start, fn_name_end);
                 // Blank the generic params
                 self.blankSpan(generic_start, self.pos);
             }
@@ -371,9 +392,13 @@ const Stripper = struct {
             self.skipWhitespaceTracked();
 
             if (self.looksLikeTypeStart()) {
+                const ret_type_start = self.pos;
                 try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' });
+                const ret_type_end = self.pos;
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
+                // Record return type annotation
+                self.recordTypeAnnotation(.return_annotation, ret_type_start, ret_type_end, fn_name_start, fn_name_end);
                 // Blank the return type annotation (but preserve final whitespace)
                 self.blankSpan(colon_pos, self.pos);
             }
@@ -393,6 +418,9 @@ const Stripper = struct {
         self.col += 1;
 
         var paren_depth: u16 = 1;
+        // Track the last identifier position for param name recording
+        var last_ident_start: usize = 0;
+        var last_ident_end: usize = 0;
 
         while (self.pos < self.source.len and paren_depth > 0) {
             const c = self.source[self.pos];
@@ -413,6 +441,24 @@ const Stripper = struct {
                 continue;
             }
 
+            // Track identifiers at depth 1 for param name recording.
+            // Only record the FIRST identifier in each parameter (before the colon).
+            if (isIdentifierStart(c) and paren_depth == 1 and last_ident_start == 0) {
+                last_ident_start = self.pos;
+                // Peek ahead to find end of identifier without consuming
+                var peek = self.pos;
+                while (peek < self.source.len and isIdentifierContinue(self.source[peek])) {
+                    peek += 1;
+                }
+                last_ident_end = peek;
+            }
+
+            // Reset ident tracking on comma (new param)
+            if (c == ',' and paren_depth == 1) {
+                last_ident_start = 0;
+                last_ident_end = 0;
+            }
+
             // Strip type annotations in params
             if (c == ':' and paren_depth == 1) {
                 const colon_pos = self.pos;
@@ -423,8 +469,16 @@ const Stripper = struct {
                 if (self.looksLikeTypeStart()) {
                     // Check for banned 'any' type
                     try self.checkForAnyType();
+                    const type_start = self.pos;
                     // Skip to , or ) at depth 1
                     try self.skipParamType();
+                    // Trim trailing whitespace from type text
+                    var type_end = self.pos;
+                    while (type_end > type_start and (self.source[type_end - 1] == ' ' or self.source[type_end - 1] == '\t')) {
+                        type_end -= 1;
+                    }
+                    // Record param annotation
+                    self.recordTypeAnnotation(.param_annotation, type_start, type_end, last_ident_start, last_ident_end);
                     self.blankSpan(colon_pos, self.pos);
                     continue;
                 } else {
@@ -477,13 +531,17 @@ const Stripper = struct {
             self.skipWhitespaceTracked();
 
             if (self.looksLikeTypeStart()) {
+                const ret_type_start = self.pos;
                 // Skip to => or {
                 try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'});
+                const ret_type_end = self.pos;
                 // Check for =>
                 self.skipWhitespaceTracked();
                 if (self.pos + 1 < self.source.len and
                     self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')
                 {
+                    // Record arrow function return type (no name for arrows)
+                    self.recordTypeAnnotation(.return_annotation, ret_type_start, ret_type_end, 0, 0);
                     // Blank just the return type, not the =>
                     self.blankSpan(colon_pos, self.pos);
                     return;
@@ -651,18 +709,24 @@ const Stripper = struct {
             return false;
         }
 
-        // Skip identifier
+        // Skip identifier - record name position
+        const name_start = self.pos;
         _ = self.scanIdentifier();
+        const name_end = self.pos;
         self.skipWhitespaceTracked();
 
         // Skip optional generic params <T, U>
+        var generic_start: usize = 0;
+        var generic_end: usize = 0;
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
+            generic_start = self.pos;
             if (!self.skipBalancedAngles()) {
                 self.pos = saved_pos;
                 self.line = saved_line;
                 self.col = saved_col;
                 return false;
             }
+            generic_end = self.pos;
             self.skipWhitespaceTracked();
         }
 
@@ -679,17 +743,25 @@ const Stripper = struct {
             }
         }
 
+        // Record type body position for the type map
+        var type_body_start: usize = 0;
+        var type_body_end: usize = 0;
+
         // For type: skip = and type expression
         if (is_type and self.pos < self.source.len and self.source[self.pos] == '=') {
             self.pos += 1;
             self.col += 1;
             self.skipWhitespaceTracked();
+            type_body_start = self.pos;
             try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' });
+            type_body_end = self.pos;
         }
 
         // For interface: skip the { ... } body
         if (is_interface and self.pos < self.source.len and self.source[self.pos] == '{') {
+            type_body_start = self.pos;
             self.skipBalancedBraces();
+            type_body_end = self.pos;
         }
 
         // Skip optional semicolon
@@ -697,6 +769,13 @@ const Stripper = struct {
         if (self.pos < self.source.len and self.source[self.pos] == ';') {
             self.pos += 1;
             self.col += 1;
+        }
+
+        // Record in TypeMap before blanking
+        const kind: TypeMapKind = if (is_type) .type_alias else .interface_decl;
+        self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
+        if (generic_start != 0) {
+            self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
         }
 
         // Blank the entire span
@@ -829,7 +908,13 @@ const Stripper = struct {
         try self.checkForAnyType();
 
         // This looks like a type annotation - skip the type
+        const type_start = self.pos;
         try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '=', '{', '}' });
+        // Trim trailing whitespace from type text
+        var type_end = self.pos;
+        while (type_end > type_start and (self.source[type_end - 1] == ' ' or self.source[type_end - 1] == '\t')) {
+            type_end -= 1;
+        }
 
         // Check for arrow function
         self.skipWhitespaceTracked();
@@ -838,6 +923,10 @@ const Stripper = struct {
         {
             // Stop before =>
         }
+
+        // Find the identifier name before the colon in original source
+        const name_range = self.findIdentifierBefore(colon_pos);
+        self.recordTypeAnnotation(.var_annotation, type_start, type_end, name_range[0], name_range[1]);
 
         // Blank from colon to current position
         self.blankSpan(colon_pos, self.pos);
@@ -1034,6 +1123,8 @@ const Stripper = struct {
         if (self.pos < self.source.len) {
             const next = self.source[self.pos];
             if (next == '(' or next == '{') {
+                // Record generic params (content inside angle brackets)
+                self.recordTypeAnnotation(.generic_params, start + 1, self.pos - 1, 0, 0);
                 // Looks like generic function - blank the params
                 self.blankSpan(start, self.pos);
                 return true;
@@ -1042,6 +1133,7 @@ const Stripper = struct {
             // Check for 'extends' (in type context)
             const kw = self.peekKeyword();
             if (kw != null and std.mem.eql(u8, kw.?, "extends")) {
+                self.recordTypeAnnotation(.generic_params, start + 1, self.pos - 1, 0, 0);
                 self.blankSpan(start, self.pos);
                 return true;
             }
@@ -1122,6 +1214,47 @@ const Stripper = struct {
                 self.output.append(self.allocator, ' ') catch {};
             }
         }
+    }
+
+    /// Record a type annotation in the TypeMap (sound mode only).
+    fn recordTypeAnnotation(
+        self: *Self,
+        kind: TypeMapKind,
+        type_start: usize,
+        type_end: usize,
+        name_start: usize,
+        name_end: usize,
+    ) void {
+        if (self.type_map) |*tm| {
+            tm.addEntry(self.allocator, .{
+                .kind = kind,
+                .source_start = @intCast(type_start),
+                .source_end = @intCast(type_end),
+                .context_line = self.line,
+                .context_col = self.col,
+                .name_start = @intCast(name_start),
+                .name_end = @intCast(name_end),
+            }) catch {};
+        }
+    }
+
+    /// Scan backwards in the original source to find the identifier before a given position.
+    /// Returns [start, end] byte offsets. Returns [0, 0] if no identifier found.
+    fn findIdentifierBefore(self: *const Self, pos: usize) [2]usize {
+        if (pos == 0) return .{ 0, 0 };
+        var end = pos;
+        // Skip whitespace backwards
+        while (end > 0 and (self.source[end - 1] == ' ' or self.source[end - 1] == '\t')) {
+            end -= 1;
+        }
+        // Now end points past the last identifier char (or non-identifier)
+        var start = end;
+        while (start > 0 and isIdentifierContinue(self.source[start - 1])) {
+            start -= 1;
+        }
+        if (start >= end) return .{ 0, 0 };
+        if (!isIdentifierStart(self.source[start])) return .{ 0, 0 };
+        return .{ start, end };
     }
 
     fn skipWhitespaceTracked(self: *Self) void {
@@ -1947,4 +2080,121 @@ test "compat mode: as assertion stripped normally" {
     const result = try strip(std.testing.allocator, "let n = (foo as number) + 1;", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, " as number") == null);
+}
+
+// ---------------------------------------------------------------------------
+// TypeMap extraction tests (sound mode)
+// ---------------------------------------------------------------------------
+
+test "sound mode: TypeMap is null in compat mode" {
+    const result = try strip(std.testing.allocator, "const x: number = 42;", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(result.type_map == null);
+}
+
+test "sound mode: TypeMap records variable annotation" {
+    const source = "const x: number = 42;";
+    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), tm.count());
+    const entry = tm.entries.items[0];
+    try std.testing.expectEqual(TypeMapKind.var_annotation, entry.kind);
+    try std.testing.expectEqualStrings("number", tm.getTypeText(entry));
+    try std.testing.expectEqualStrings("x", tm.getNameText(entry).?);
+}
+
+test "sound mode: TypeMap records type alias" {
+    const source = "type Config = { port: number };";
+    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    // Should have at least one entry for the type alias body
+    var found_alias = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .type_alias) {
+            found_alias = true;
+            try std.testing.expectEqualStrings("Config", tm.getNameText(entry).?);
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expect(std.mem.indexOf(u8, type_text, "port") != null);
+        }
+    }
+    try std.testing.expect(found_alias);
+}
+
+test "sound mode: TypeMap records interface" {
+    const source = "interface CacheFx { get(key: string): string | null; }";
+    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    var found_iface = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .interface_decl) {
+            found_iface = true;
+            try std.testing.expectEqualStrings("CacheFx", tm.getNameText(entry).?);
+        }
+    }
+    try std.testing.expect(found_iface);
+}
+
+test "sound mode: TypeMap records function return type" {
+    const source = "function handler(req: Request): Response { }";
+    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    var found_return = false;
+    var found_param = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .return_annotation) {
+            found_return = true;
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expect(std.mem.indexOf(u8, type_text, "Response") != null);
+        }
+        if (entry.kind == .param_annotation) {
+            found_param = true;
+            try std.testing.expectEqualStrings("req", tm.getNameText(entry).?);
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expect(std.mem.indexOf(u8, type_text, "Request") != null);
+        }
+    }
+    try std.testing.expect(found_return);
+    try std.testing.expect(found_param);
+}
+
+test "sound mode: TypeMap records generic params" {
+    const source = "function identity<T>(x: T): T { return x; }";
+    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    var found_generic = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .generic_params) {
+            found_generic = true;
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expect(std.mem.indexOf(u8, type_text, "T") != null);
+        }
+    }
+    try std.testing.expect(found_generic);
+}
+
+test "sound mode: TypeMap records arrow function return type" {
+    const source = "const f = (x: number): string => x.toString();";
+    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+
+    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    var found_return = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .return_annotation) {
+            found_return = true;
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expect(std.mem.indexOf(u8, type_text, "string") != null);
+        }
+    }
+    try std.testing.expect(found_return);
 }
