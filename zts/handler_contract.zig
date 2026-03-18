@@ -65,6 +65,10 @@ pub const VerificationInfo = struct {
     exhaustive_returns: bool,
     results_safe: bool,
     unreachable_code: bool,
+    /// Bytecode passed structural verification (opcode validity, bounds, stack discipline)
+    bytecode_verified: bool = false,
+    /// Sound mode checks passed (boolean enforcement, type inference)
+    sound_mode_passed: bool = false,
 };
 
 pub const AotInfo = struct {
@@ -644,7 +648,9 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  \"verification\": {\n");
         try writer.print("    \"exhaustiveReturns\": {s},\n", .{if (v.exhaustive_returns) "true" else "false"});
         try writer.print("    \"resultsSafe\": {s},\n", .{if (v.results_safe) "true" else "false"});
-        try writer.print("    \"unreachableCode\": {s}\n", .{if (v.unreachable_code) "true" else "false"});
+        try writer.print("    \"unreachableCode\": {s},\n", .{if (v.unreachable_code) "true" else "false"});
+        try writer.print("    \"bytecodeVerified\": {s},\n", .{if (v.bytecode_verified) "true" else "false"});
+        try writer.print("    \"soundModePassed\": {s}\n", .{if (v.sound_mode_passed) "true" else "false"});
         try writer.writeAll("  },\n");
     } else {
         try writer.writeAll("  \"verification\": null,\n");

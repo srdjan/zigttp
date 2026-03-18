@@ -76,12 +76,17 @@ const ReturnStatus = enum {
 
 /// Tracks a local binding for result checking and dead variable detection.
 const BindingState = struct {
+    scope_id: ir.ScopeId, // scope that owns this binding
     slot: u16,
     is_result: bool,
     ok_checked: bool,
     ref_count: u16,
     decl_node: NodeIndex,
     name_idx: u16, // string constant index for the name (0 = unknown)
+
+    fn key(self: BindingState) u32 {
+        return (@as(u32, self.scope_id) << 16) | @as(u32, self.slot);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -168,11 +173,8 @@ pub const HandlerVerifier = struct {
 
         // Phase 4: Report unchecked result accesses (already emitted during walk)
 
-        // Phase 5: Report unused variables
-        // Currently disabled - ref counting needs scope-aware tracking to avoid
-        // false positives in nested blocks. Infrastructure is in place for future
-        // refinement.
-        // self.reportUnusedVariables();
+        // Phase 5: Report unused variables (scope-aware tracking)
+        self.reportUnusedVariables();
 
         // Count errors
         var error_count: u32 = 0;
@@ -437,8 +439,9 @@ pub const HandlerVerifier = struct {
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
 
-                // Track this binding for dead variable detection
+                // Track this binding for dead variable detection (scope-aware)
                 self.all_bindings.append(self.allocator, .{
+                    .scope_id = decl.binding.scope_id,
                     .slot = decl.binding.slot,
                     .is_result = false,
                     .ok_checked = false,
@@ -453,6 +456,7 @@ pub const HandlerVerifier = struct {
 
                     if (self.isResultProducingCall(decl.init)) {
                         self.result_bindings.append(self.allocator, .{
+                            .scope_id = decl.binding.scope_id,
                             .slot = decl.binding.slot,
                             .is_result = true,
                             .ok_checked = false,
@@ -555,7 +559,7 @@ pub const HandlerVerifier = struct {
         switch (tag) {
             .identifier => {
                 const binding = self.ir_view.getBinding(node) orelse return;
-                self.incrementRefCount(binding.slot);
+                self.incrementRefCount(binding);
             },
             .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return;
@@ -845,10 +849,11 @@ pub const HandlerVerifier = struct {
         }
     }
 
-    /// Increment reference count for a binding slot.
-    fn incrementRefCount(self: *HandlerVerifier, slot: u16) void {
+    /// Increment reference count for a binding (scope-aware).
+    fn incrementRefCount(self: *HandlerVerifier, binding_ref: ir.BindingRef) void {
+        const target_key = (@as(u32, binding_ref.scope_id) << 16) | @as(u32, binding_ref.slot);
         for (self.all_bindings.items) |*binding| {
-            if (binding.slot == slot) {
+            if (binding.key() == target_key) {
                 binding.ref_count +|= 1;
                 return;
             }
@@ -902,13 +907,22 @@ pub const HandlerVerifier = struct {
         for (self.all_bindings.items) |binding| {
             if (binding.ref_count > 0) continue;
 
-            // Skip special bindings
+            // Skip special bindings (slot 0 is typically the module scope)
             if (binding.slot == 0) continue;
 
             // Skip _-prefixed names (convention for intentionally unused)
-            // We can't easily check the name here without atom table access,
-            // so we skip this check for now and rely on the name_idx field
-            // if it's populated.
+            // For global bindings, slot is the atom index
+            if (binding.scope_id == 0) {
+                if (self.resolveAtomName(binding.slot)) |name| {
+                    if (name.len > 0 and name[0] == '_') continue;
+                }
+            }
+            // For named string index
+            if (binding.name_idx != 0) {
+                if (self.ir_view.getString(binding.name_idx)) |name| {
+                    if (name.len > 0 and name[0] == '_') continue;
+                }
+            }
 
             self.addDiagnostic(.{
                 .severity = .warning,

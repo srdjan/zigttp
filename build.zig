@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const sound_enabled = b.option(bool, "sound", "Enable strict boolean sound mode") orelse false;
+    _ = b.option(bool, "compat", "Explicit compat edition (types stripped, not checked)"); // recognized but no-op (default)
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{

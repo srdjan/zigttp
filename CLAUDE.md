@@ -131,7 +131,7 @@ The request pipeline includes several optimizations for low-latency FaaS workloa
 
 Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
 
-**Handler Verification** (`zts/handler_verifier.zig`): The `-Dverify` build option enables compile-time correctness verification. The verifier statically proves: (1) every code path returns a Response, (2) Result values from virtual modules are checked before access, (3) no unreachable code after returns. This is possible because zigttp's JS subset eliminates all non-trivial control flow - the IR tree IS the control flow graph. See [docs/verification.md](docs/verification.md).
+**Handler Verification** (`zts/handler_verifier.zig`): The `-Dverify` build option enables compile-time correctness verification. The verifier statically proves: (1) every code path returns a Response, (2) Result values from virtual modules are checked before access, (3) no unreachable code after returns, (4) unused variables detected with scope-aware tracking (warnings, underscore-prefix suppresses). This is possible because zigttp's JS subset eliminates all non-trivial control flow - the IR tree IS the control flow graph. See [docs/verification.md](docs/verification.md).
 
 **Handler Contract Manifest** (`zts/handler_contract.zig`): The `-Dcontract` build option emits `contract.json` alongside the embedded bytecode, describing what the handler is allowed to do. The contract extracts: virtual module imports and function names, literal env var names (`env.dynamic: false` when all calls use string literals), outbound hosts from `fetchSync` URL arguments, cache namespace strings, route patterns (when AOT pattern analysis detects them), and verification results (when `-Dverify` is also set). Non-literal arguments set `dynamic: true` as an honest signal that static analysis cannot enumerate all values. This is v1 (emission only) - runtime enforcement is v2 scope.
 
@@ -142,6 +142,10 @@ Sound mode includes progressive type inference:
 - **Match expression types**: When all arms return the same type, the match expression inherits that type.
 - **Nullable union types**: Functions like `env()` and `cacheGet()` return `nullable_string`. These fail in boolean contexts with a help message suggesting explicit null checks. The `??` operator resolves nullables: `env("KEY") ?? "default"` infers as `string`.
 - **Result property access**: `result.ok` on objects from `jwtVerify`/`validateJson`/`validateObject`/`coerceJson` infers as `boolean`. `result.error` infers as `string`.
+- **Null/undefined equality narrowing**: `x !== null` and `x !== undefined` guards narrow nullable types to their non-nullable variants in the then-branch. `x === null` narrows to `null_type`. Both operand orderings supported (`null !== x`).
+- **Sound mode assertion rejection**: In `--sound` mode, `as` and `satisfies` type assertions are rejected by the stripper with errors instead of being silently stripped.
+
+**Bytecode Verifier** (`zts/bytecode_verifier.zig`): Validates bytecode structural integrity before execution. Checks: (1) opcode validity - every instruction boundary byte is a recognized opcode, (2) operand bounds - jump targets within bytecode range and on instruction boundaries, (3) constant pool indices valid, (4) stack discipline - height never negative and within limits, (5) local/upvalue indices within declared counts. Called automatically at runtime and during precompilation.
 
 ## TypeScript/TSX Support
 
@@ -168,7 +172,8 @@ See [docs/typescript.md](docs/typescript.md) for full specification.
 zigttp uses a two-layer fail-fast validation system to detect unsupported JavaScript and TypeScript features as early as possible:
 
 1. **TypeScript Stripper** ([zts/stripper.zig](zts/stripper.zig)): Catches TypeScript-specific type-position syntax before parsing
-   - Only detects `any` type (in annotations, assertions, nested positions)
+   - Detects `any` type (in annotations, assertions, nested positions)
+   - In `--sound` mode: rejects `as` and `satisfies` assertions as errors
    - Only runs for .ts/.tsx files
 
 2. **Parser** ([zts/parser/parse.zig](zts/parser/parse.zig)): Catches all other unsupported features
@@ -223,7 +228,8 @@ Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size
 -e, --eval <CODE>      Inline JavaScript code
 -m, --memory <SIZE>    JS runtime memory limit (default: 0 = no limit)
 -n, --pool <N>         Runtime pool size (default: auto = 2 * cpu, min 8)
---sound                Enable strict boolean sound mode
+--sound                Enable strict boolean sound mode (Sound Edition)
+--compat               Explicit compat edition (default: types stripped, not checked)
 --cors                 Enable CORS headers
 --static <DIR>         Serve static files
 ```

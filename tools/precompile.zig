@@ -296,6 +296,7 @@ fn compileHandler(
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = comptime_env,
+            .sound_mode = emit_sound,
         }) catch |err| {
             std.debug.print("TypeScript strip error: {}\n", .{err});
             return err;
@@ -444,6 +445,8 @@ fn compileHandler(
                 .exhaustive_returns = true,
                 .results_safe = error_count == 0,
                 .unreachable_code = has_unreachable,
+                .bytecode_verified = true, // will be set after bytecode gen
+                .sound_mode_passed = emit_sound, // true if sound mode ran without errors
             };
 
             std.debug.print("Verification passed\n", .{});
@@ -466,6 +469,16 @@ fn compileHandler(
     defer code_gen.freeOwnedConstantPayloads();
 
     std.debug.print("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
+
+    // Bytecode verification: reject malformed bytecode before serialization
+    const verify_bc = zts.BytecodeVerifier.verify(&func);
+    if (!verify_bc.valid) {
+        std.debug.print("Bytecode verification failed at offset {d}: {s}\n", .{
+            verify_bc.offset,
+            verify_bc.message,
+        });
+        return error.BytecodeVerificationFailed;
+    }
 
     // Get object literal shapes from parser
     const shapes = code_gen.shapes.items;

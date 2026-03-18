@@ -32,6 +32,10 @@ pub const StripError = error{
     UnterminatedComment,
     OutOfMemory,
     ComptimeEvaluationFailed,
+    /// 'as' type assertion is illegal in sound mode
+    UnsupportedAsInSoundMode,
+    /// 'satisfies' type assertion is illegal in sound mode
+    UnsupportedSatisfiesInSoundMode,
 };
 
 pub const StripResult = struct {
@@ -63,6 +67,9 @@ pub const StripOptions = struct {
     /// Emit unsupported-feature diagnostics to std.log
     /// Disabled by default in tests to avoid expected-error log failures.
     report_errors: bool = !builtin.is_test,
+    /// Sound mode: reject 'as' and 'satisfies' assertions instead of stripping them.
+    /// In sound mode, type assertions are illegal - types must be checked, not cast.
+    sound_mode: bool = false,
 };
 
 /// Strip TypeScript types from source code
@@ -87,6 +94,7 @@ const Stripper = struct {
     enable_comptime: bool,
     comptime_env: ?ComptimeEnv,
     report_errors: bool,
+    sound_mode: bool,
 
     // State
     line: u32,
@@ -95,6 +103,9 @@ const Stripper = struct {
     // Context tracking for smart colon handling
     // When true, colons are for expressions (object literals), not types
     in_expression: bool,
+    // True when inside an import declaration (import { ... } from "...";)
+    // Prevents 'as' from being treated as a type assertion (it's import aliasing)
+    in_import: bool,
 
     const Self = @This();
 
@@ -108,9 +119,11 @@ const Stripper = struct {
             .enable_comptime = options.enable_comptime,
             .comptime_env = options.comptime_env,
             .report_errors = options.report_errors,
+            .sound_mode = options.sound_mode,
             .line = 1,
             .col = 1,
             .in_expression = false,
+            .in_import = false,
         };
     }
 
@@ -196,7 +209,8 @@ const Stripper = struct {
             }
 
             // Check for 'as' or 'satisfies' after expression
-            if (std.mem.eql(u8, ident, "as")) {
+            // Skip 'as' inside import specifiers (import { x as y } is aliasing, not assertion)
+            if (std.mem.eql(u8, ident, "as") and !self.in_import) {
                 if (try self.tryStripAsAssertion(start)) return;
             }
             if (std.mem.eql(u8, ident, "satisfies")) {
@@ -208,6 +222,11 @@ const Stripper = struct {
                 self.output.appendSlice(self.allocator, ident) catch return StripError.OutOfMemory;
                 try self.handleFunctionDeclaration();
                 return;
+            }
+
+            // Track import context: 'as' inside import specifiers is aliasing, not assertion
+            if (std.mem.eql(u8, ident, "import")) {
+                self.in_import = true;
             }
 
             // Keywords that start expressions
@@ -284,7 +303,10 @@ const Stripper = struct {
 
         // Track expression context based on punctuators
         switch (c) {
-            ';' => self.in_expression = false, // Statement end
+            ';' => {
+                self.in_expression = false; // Statement end
+                self.in_import = false; // Import statement ended
+            },
             '{' => {}, // Keep current context (could be block or object literal)
             '}' => self.in_expression = false, // End of block/object
             '(' => self.in_expression = true, // Contents of parens is expression
@@ -846,6 +868,14 @@ const Stripper = struct {
             return false;
         }
 
+        // Sound mode: 'as' type assertions are illegal
+        if (self.sound_mode) {
+            if (self.report_errors) {
+                std.log.err("{}:{}: 'as' type assertion is not supported in sound mode; use type-safe patterns instead", .{ self.line, self.col });
+            }
+            return StripError.UnsupportedAsInSoundMode;
+        }
+
         // Check for banned 'any' type
         try self.checkForAnyType();
 
@@ -863,6 +893,14 @@ const Stripper = struct {
 
         if (!self.looksLikeTypeStart()) {
             return false;
+        }
+
+        // Sound mode: 'satisfies' type assertions are illegal
+        if (self.sound_mode) {
+            if (self.report_errors) {
+                std.log.err("{}:{}: 'satisfies' type assertion is not supported in sound mode; use type-safe patterns instead", .{ self.line, self.col });
+            }
+            return StripError.UnsupportedSatisfiesInSoundMode;
         }
 
         // Check for banned 'any' type
@@ -1873,4 +1911,40 @@ test "comptime identifier without parens passes through" {
     const result = try strip(std.testing.allocator, "const comptime = 5;", .{ .enable_comptime = true });
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const comptime = 5;") != null);
+}
+
+// ============================================================================
+// Sound Mode Tests
+// ============================================================================
+
+test "sound mode: as assertion rejected" {
+    const result = strip(std.testing.allocator, "let n = (foo as number) + 1;", .{ .sound_mode = true });
+    try std.testing.expectError(StripError.UnsupportedAsInSoundMode, result);
+}
+
+test "sound mode: satisfies assertion rejected" {
+    const result = strip(std.testing.allocator, "const cfg = { port: 8080 } satisfies Config;", .{ .sound_mode = true });
+    try std.testing.expectError(StripError.UnsupportedSatisfiesInSoundMode, result);
+}
+
+test "sound mode: type annotations still stripped" {
+    // Type annotations are stripped even in sound mode (for now - future: checked)
+    const result = try strip(std.testing.allocator, "function f(x: number): string { return x; }", .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
+}
+
+test "sound mode: as identifier (not assertion) passes" {
+    // 'as' used as identifier, not type assertion
+    const result = try strip(std.testing.allocator, "import { sha256 as hash } from \"zigttp:crypto\";", .{ .sound_mode = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "as hash") != null);
+}
+
+test "compat mode: as assertion stripped normally" {
+    // In compat mode (default), as is stripped
+    const result = try strip(std.testing.allocator, "let n = (foo as number) + 1;", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, " as number") == null);
 }

@@ -699,7 +699,7 @@ pub const Runtime = struct {
         const is_ts = std.mem.endsWith(u8, filename, ".ts");
         const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
         if (is_ts or is_tsx) {
-            strip_result = zq.strip(self.allocator, code, .{ .tsx_mode = is_tsx }) catch |err| {
+            strip_result = zq.strip(self.allocator, code, .{ .tsx_mode = is_tsx, .sound_mode = self.config.sound_mode }) catch |err| {
                 std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
                 return err;
             };
@@ -787,6 +787,16 @@ pub const Runtime = struct {
             .constants = p.constants.items,
             .source_map = null,
         };
+
+        // Bytecode verification: reject malformed bytecode before execution
+        const verify_result = zq.BytecodeVerifier.verify(&func);
+        if (!verify_result.valid) {
+            std.log.err("Bytecode verification failed at offset {d}: {s}", .{
+                verify_result.offset,
+                verify_result.message,
+            });
+            return error.BytecodeVerificationFailed;
+        }
 
         // Serialize for caching if buffer provided (includes atoms for true cache hit)
         var serialized: ?[]const u8 = null;

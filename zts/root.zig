@@ -51,6 +51,7 @@ pub const handler_verifier = @import("handler_verifier.zig");
 pub const handler_contract = @import("handler_contract.zig");
 pub const handler_policy = @import("handler_policy.zig");
 pub const bool_checker = @import("bool_checker.zig");
+pub const bytecode_verifier = @import("bytecode_verifier.zig");
 pub const modules = @import("modules/root.zig");
 // Optional/experimental modules (not wired into runtime by default)
 // These are kept in zts/ for future development but not exported publicly.
@@ -103,6 +104,7 @@ pub const OptStats = bytecode_opt.OptStats;
 pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
 pub const HandlerVerifier = handler_verifier.HandlerVerifier;
 pub const BoolChecker = bool_checker.BoolChecker;
+pub const BytecodeVerifier = bytecode_verifier;
 pub const ContractBuilder = handler_contract.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
 pub const writeContractJson = handler_contract.writeContractJson;

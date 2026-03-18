@@ -46,6 +46,17 @@ pub const ExprType = enum(u8) {
             else => false,
         };
     }
+
+    /// Remove nullability from a type: nullable_string -> string, etc.
+    /// Returns .unknown for types that are purely null/undefined.
+    pub fn removeNullish(self: ExprType) ExprType {
+        return switch (self) {
+            .nullable_string => .string,
+            .nullable_object => .object,
+            .null_type, .undefined => .unknown,
+            else => self,
+        };
+    }
 };
 
 /// Unify two types into a single type. Returns .unknown if they're incompatible.
@@ -660,17 +671,21 @@ pub const BoolChecker = struct {
             // Bitwise ops
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => .number,
 
-            // Nullish coalescing: if LHS is nullable_T and RHS matches T, result is T
+            // Nullish coalescing: Join(RemoveNullish(LHS), RHS)
             .nullish => {
                 const left_type = self.inferType(bin.left);
                 const right_type = self.inferType(bin.right);
                 // nullable_string ?? string -> string
                 if (left_type == .nullable_string and right_type == .string) return .string;
                 if (left_type == .nullable_object and right_type == .object) return .object;
+                // nullable_string ?? number -> unknown (mismatched base types)
+                if (left_type == .nullable_string and right_type != .string and right_type != .unknown) return .unknown;
+                if (left_type == .nullable_object and right_type != .object and right_type != .unknown) return .unknown;
                 // Non-nullable ?? anything -> non-nullable (the RHS is dead code, warned above)
                 if (left_type.isNonNullable()) return left_type;
                 // null/undefined ?? T -> T
                 if (left_type == .null_type or left_type == .undefined) return right_type;
+                // unknown ?? T -> unknown (conservative)
                 return .unknown;
             },
 
@@ -946,7 +961,9 @@ pub const BoolChecker = struct {
     }
 
     /// Extract a single typeof guard from a `typeof x === "T"` or `"T" === typeof x` pattern.
-    /// Returns null if the node does not match the pattern.
+    /// Also extracts null/undefined equality guards: `x === null`, `x !== null`,
+    /// `x === undefined`, `x !== undefined` (and reversed operand forms).
+    /// Returns null if the node does not match any guard pattern.
     fn extractTypeofGuard(self: *BoolChecker, node: NodeIndex) ?TypeofGuard {
         const tag = self.ir_view.getTag(node) orelse return null;
         if (tag != .binary_op) return null;
@@ -954,41 +971,94 @@ pub const BoolChecker = struct {
         const bin = self.ir_view.getBinary(node) orelse return null;
         if (bin.op != .strict_eq and bin.op != .strict_neq) return null;
 
-        // Try both operand orderings: typeof x === "T" and "T" === typeof x
-        const typeof_node, const string_node = blk: {
-            const left_tag = self.ir_view.getTag(bin.left) orelse return null;
-            const right_tag = self.ir_view.getTag(bin.right) orelse return null;
+        const left_tag = self.ir_view.getTag(bin.left) orelse return null;
+        const right_tag = self.ir_view.getTag(bin.right) orelse return null;
 
-            if (left_tag == .unary_op and right_tag == .lit_string) {
-                break :blk .{ bin.left, bin.right };
-            } else if (left_tag == .lit_string and right_tag == .unary_op) {
-                break :blk .{ bin.right, bin.left };
+        // Pattern 1: typeof x === "T" or "T" === typeof x
+        if ((left_tag == .unary_op and right_tag == .lit_string) or
+            (left_tag == .lit_string and right_tag == .unary_op))
+        {
+            const typeof_node = if (left_tag == .unary_op) bin.left else bin.right;
+            const string_node = if (left_tag == .lit_string) bin.left else bin.right;
+
+            // Verify the unary op is typeof
+            const un = self.ir_view.getUnary(typeof_node) orelse return null;
+            if (un.op != .typeof_op) return null;
+
+            // Operand must be an identifier
+            const operand_tag = self.ir_view.getTag(un.operand) orelse return null;
+            if (operand_tag != .identifier) return null;
+
+            const binding = self.ir_view.getBinding(un.operand) orelse return null;
+            const key = packBindingKey(binding.scope_id, binding.slot);
+
+            // Get the type string
+            const str_idx = self.ir_view.getStringIdx(string_node) orelse return null;
+            const type_str = self.ir_view.getString(str_idx) orelse return null;
+            const narrowed = typeStringToExprType(type_str) orelse return null;
+
+            return .{
+                .binding_key = key,
+                .narrowed_type = narrowed,
+                .op = bin.op,
+            };
+        }
+
+        // Pattern 2: x === null / null === x / x === undefined / undefined === x
+        // For x !== null: narrow nullable_T -> T (remove nullability)
+        // For x === null: narrow to null_type in then-branch
+        const ident_node, const null_kind = blk: {
+            if (left_tag == .identifier and (right_tag == .lit_null or right_tag == .lit_undefined)) {
+                break :blk .{ bin.left, right_tag };
+            } else if ((left_tag == .lit_null or left_tag == .lit_undefined) and right_tag == .identifier) {
+                break :blk .{ bin.right, left_tag };
             } else {
                 return null;
             }
         };
 
-        // Verify the unary op is typeof
-        const un = self.ir_view.getUnary(typeof_node) orelse return null;
-        if (un.op != .typeof_op) return null;
+        const binding = self.ir_view.getBinding(ident_node) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
 
-        // Operand must be an identifier
-        const operand_tag = self.ir_view.getTag(un.operand) orelse return null;
-        if (operand_tag != .identifier) return null;
+        // For null/undefined guards, the narrowed_type is what the variable becomes
+        // in the "positive" (===) branch. The guard system uses `op` to decide:
+        //   op == strict_eq -> install narrowing in then-branch
+        //   op == strict_neq -> install narrowing in else-branch
+        //
+        // x === null: then-branch -> null_type, else-branch -> removeNullish
+        // x !== null: then-branch -> removeNullish, else-branch -> null_type
+        //
+        // We always store the "then-branch" narrowing and encode the op.
+        if (bin.op == .strict_eq) {
+            // x === null: then-branch narrowing is null/undefined
+            const narrowed: ExprType = if (null_kind == .lit_null) .null_type else .undefined;
+            return .{
+                .binding_key = key,
+                .narrowed_type = narrowed,
+                .op = bin.op,
+            };
+        } else {
+            // x !== null: then-branch narrowing is removeNullish (non-null)
+            const current_type = self.lookupBindingType(key);
+            const narrowed = current_type.removeNullish();
+            // For x !== null with unknown type, narrow to unknown (still useful for flow)
+            // For x !== null with non-nullable type, no narrowing needed
+            if (narrowed == current_type and current_type.isNonNullable()) return null;
+            return .{
+                .binding_key = key,
+                .narrowed_type = narrowed,
+                // Encode as strict_eq so narrowing applies to then-branch
+                // (x !== null -> then-branch has non-null x)
+                .op = .strict_eq,
+            };
+        }
+    }
 
-        const binding = self.ir_view.getBinding(un.operand) orelse return null;
-        const key = (@as(u32, binding.scope_id) << 16) | @as(u32, binding.slot);
-
-        // Get the type string
-        const str_idx = self.ir_view.getStringIdx(string_node) orelse return null;
-        const type_str = self.ir_view.getString(str_idx) orelse return null;
-        const narrowed = typeStringToExprType(type_str) orelse return null;
-
-        return .{
-            .binding_key = key,
-            .narrowed_type = narrowed,
-            .op = bin.op,
-        };
+    /// Look up the current type of a binding by key.
+    fn lookupBindingType(self: *const BoolChecker, key: u32) ExprType {
+        if (self.narrowed_types.get(key)) |t| return t;
+        if (self.const_types.get(key)) |t| return t;
+        return .unknown;
     }
 
     /// Extract typeof guards from a condition, handling &&-chained guards.
@@ -1714,4 +1784,73 @@ test "sound: non-result object property stays unknown" {
         \\const obj = { x: 1 };
         \\if (obj.x) { let y = 1; }
     , 0);
+}
+
+// Null/undefined equality narrowing
+
+test "sound: x !== null narrows nullable to non-nullable" {
+    // env() returns nullable_string. After !== null guard, it should be string.
+    // string in boolean context fails (which proves narrowing worked).
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY");
+        \\if (val !== null) {
+        \\  if (val) { let x = 1; }
+        \\}
+    , 1); // val narrowed to string -> string in if -> error
+}
+
+test "sound: x !== undefined narrows nullable" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY");
+        \\if (val !== undefined) {
+        \\  if (val) { let x = 1; }
+        \\}
+    , 1); // val narrowed to string -> string in if -> error
+}
+
+test "sound: x !== null on non-nullable is no-op" {
+    // sha256 returns string (non-nullable), !== null check is valid but doesn't change type
+    try checkSource(
+        \\import { sha256 } from "zigttp:crypto";
+        \\const hash = sha256("data");
+        \\if (hash !== null) {
+        \\  if (hash) { let x = 1; }
+        \\}
+    , 1); // hash is string regardless, string in if -> error
+}
+
+test "sound: null === x narrowing works reversed" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY");
+        \\if (null !== val) {
+        \\  if (val) { let x = 1; }
+        \\}
+    , 1); // val narrowed to string
+}
+
+test "sound: x === null narrows to null type in then-branch" {
+    // x === null in then-branch should narrow to null_type
+    // null in boolean context should fail
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY");
+        \\if (val === null) {
+        \\  if (val) { let x = 1; }
+        \\}
+    , 1); // val narrowed to null_type -> null in if -> error
+}
+
+test "sound: narrowing does not leak outside null guard branch" {
+    // Outside the null guard, val should revert to nullable_string (fails in boolean context)
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("KEY");
+        \\if (val !== null) {
+        \\  let y = val;
+        \\}
+        \\if (val) { let z = 1; }
+    , 1); // val reverts to nullable_string -> fails
 }

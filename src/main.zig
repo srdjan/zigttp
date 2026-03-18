@@ -114,6 +114,9 @@ fn parseArgs(args_vector: std.process.Args) !ServerConfig {
             config.log_requests = false;
         } else if (std.mem.eql(u8, arg, "--sound")) {
             config.runtime_config.sound_mode = true;
+        } else if (std.mem.eql(u8, arg, "--compat")) {
+            // Explicit compat edition (default mode - type annotations stripped, not checked)
+            config.runtime_config.sound_mode = false;
         } else if (std.mem.eql(u8, arg, "--cors")) {
             config.enable_cors = true;
         } else if (std.mem.eql(u8, arg, "--static")) {
@@ -197,6 +200,7 @@ fn printHelp() void {
         \\  -n, --pool <N>        Runtime pool size (default: auto = 2 * cpu, min 8)
         \\  -q, --quiet           Disable request logging
         \\  --sound               Enable strict boolean sound mode
+        \\  --compat              Explicit compat edition (default: types stripped, not checked)
         \\  --cors                Enable CORS headers
         \\  --static <DIR>        Serve static files from directory
         \\  --outbound-http       Enable native outbound HTTP bridge (fetchSync/httpRequest)
