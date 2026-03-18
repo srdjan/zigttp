@@ -24,9 +24,9 @@ const schema_ok = schemaCompile("user", JSON.stringify({
 function handler(req: Request): Response {
     // Auth: check JWT from Authorization header
     const auth_header = req.headers["authorization"];
-    if (auth_header) {
+    if (auth_header !== undefined) {
         const token = parseBearer(auth_header);
-        if (token) {
+        if (token !== undefined) {
             const secret = "my-secret-key";
             const result = jwtVerify(token, secret);
             if (result.ok) {

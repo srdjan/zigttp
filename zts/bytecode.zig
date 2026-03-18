@@ -30,8 +30,7 @@ pub const BytecodeFlags = packed struct {
     optimized: bool = false,
     jit_hints: bool = false,
     strict_mode: bool = true,
-    sound_mode: bool = false,
-    _reserved: u3 = 0,
+    _reserved: u4 = 0,
 };
 
 /// Opcode definitions

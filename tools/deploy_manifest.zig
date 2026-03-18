@@ -104,7 +104,6 @@ pub fn extractProvenFacts(
         if (v.exhaustive_returns) try checks.append(allocator, "exhaustiveReturns");
         if (v.results_safe) try checks.append(allocator, "resultsSafe");
         if (v.bytecode_verified) try checks.append(allocator, "bytecodeVerified");
-        if (v.sound_mode_passed) try checks.append(allocator, "soundModePassed");
     }
 
     // Build routes from contract
@@ -601,7 +600,6 @@ test "deriveProofLevel complete when all checks pass and no dynamic" {
         .results_safe = true,
         .unreachable_code = false,
         .bytecode_verified = true,
-        .sound_mode_passed = false,
     };
 
     try std.testing.expectEqual(ProofLevel.complete, deriveProofLevel(&contract));

@@ -36,21 +36,20 @@ pub const StripError = error{
     UnterminatedComment,
     OutOfMemory,
     ComptimeEvaluationFailed,
-    /// 'as' type assertion is illegal in sound mode
-    UnsupportedAsInSoundMode,
-    /// 'satisfies' type assertion is illegal in sound mode
-    UnsupportedSatisfiesInSoundMode,
+    /// 'as' type assertion is not supported
+    UnsupportedAsAssertion,
+    /// 'satisfies' type assertion is not supported
+    UnsupportedSatisfiesAssertion,
 };
 
 pub const StripResult = struct {
     code: []const u8,
     allocator: std.mem.Allocator,
-    /// Type annotations extracted during stripping (sound mode only).
-    /// Null in compat mode.
-    type_map: ?TypeMap = null,
+    /// Type annotations extracted during stripping.
+    type_map: TypeMap,
 
     pub fn deinit(self: *StripResult) void {
-        if (self.type_map) |*tm| tm.deinit(self.allocator);
+        @constCast(&self.type_map).deinit(self.allocator);
         self.allocator.free(self.code);
     }
 };
@@ -75,9 +74,6 @@ pub const StripOptions = struct {
     /// Emit unsupported-feature diagnostics to std.log
     /// Disabled by default in tests to avoid expected-error log failures.
     report_errors: bool = !builtin.is_test,
-    /// Sound mode: reject 'as' and 'satisfies' assertions instead of stripping them.
-    /// In sound mode, type assertions are illegal - types must be checked, not cast.
-    sound_mode: bool = false,
 };
 
 /// Strip TypeScript types from source code
@@ -102,7 +98,6 @@ const Stripper = struct {
     enable_comptime: bool,
     comptime_env: ?ComptimeEnv,
     report_errors: bool,
-    sound_mode: bool,
 
     // State
     line: u32,
@@ -115,8 +110,8 @@ const Stripper = struct {
     // Prevents 'as' from being treated as a type assertion (it's import aliasing)
     in_import: bool,
 
-    // TypeMap: records type annotations in sound mode for downstream type checking
-    type_map: ?TypeMap,
+    // TypeMap: records type annotations for downstream type checking
+    type_map: TypeMap,
 
     const Self = @This();
 
@@ -130,12 +125,11 @@ const Stripper = struct {
             .enable_comptime = options.enable_comptime,
             .comptime_env = options.comptime_env,
             .report_errors = options.report_errors,
-            .sound_mode = options.sound_mode,
             .line = 1,
             .col = 1,
             .in_expression = false,
             .in_import = false,
-            .type_map = if (options.sound_mode) TypeMap.init(source) else null,
+            .type_map = TypeMap.init(source),
         };
     }
 
@@ -943,7 +937,7 @@ const Stripper = struct {
     // Assertion Stripping (Phase 5)
     // ========================================================================
 
-    fn tryStripAsAssertion(self: *Self, keyword_start: usize) StripError!bool {
+    fn tryStripAsAssertion(self: *Self, _: usize) StripError!bool {
         // We just scanned 'as' - check if it's an assertion
         self.skipWhitespaceTracked();
 
@@ -951,26 +945,13 @@ const Stripper = struct {
             return false;
         }
 
-        // Sound mode: 'as' type assertions are illegal
-        if (self.sound_mode) {
-            if (self.report_errors) {
-                std.log.err("{}:{}: 'as' type assertion is not supported in sound mode; use type-safe patterns instead", .{ self.line, self.col });
-            }
-            return StripError.UnsupportedAsInSoundMode;
+        if (self.report_errors) {
+            std.log.err("{}:{}: 'as' type assertion is not supported; use type-safe patterns instead", .{ self.line, self.col });
         }
-
-        // Check for banned 'any' type
-        try self.checkForAnyType();
-
-        // Skip the type
-        try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '}', ']' });
-
-        // Blank from 'as' to current position
-        self.blankSpan(keyword_start, self.pos);
-        return true;
+        return StripError.UnsupportedAsAssertion;
     }
 
-    fn tryStripSatisfiesAssertion(self: *Self, keyword_start: usize) StripError!bool {
+    fn tryStripSatisfiesAssertion(self: *Self, _: usize) StripError!bool {
         // We just scanned 'satisfies'
         self.skipWhitespaceTracked();
 
@@ -978,23 +959,10 @@ const Stripper = struct {
             return false;
         }
 
-        // Sound mode: 'satisfies' type assertions are illegal
-        if (self.sound_mode) {
-            if (self.report_errors) {
-                std.log.err("{}:{}: 'satisfies' type assertion is not supported in sound mode; use type-safe patterns instead", .{ self.line, self.col });
-            }
-            return StripError.UnsupportedSatisfiesInSoundMode;
+        if (self.report_errors) {
+            std.log.err("{}:{}: 'satisfies' type assertion is not supported; use type-safe patterns instead", .{ self.line, self.col });
         }
-
-        // Check for banned 'any' type
-        try self.checkForAnyType();
-
-        // Skip the type
-        try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '}' });
-
-        // Blank from 'satisfies' to current position
-        self.blankSpan(keyword_start, self.pos);
-        return true;
+        return StripError.UnsupportedSatisfiesAssertion;
     }
 
     // ========================================================================
@@ -1210,7 +1178,7 @@ const Stripper = struct {
         }
     }
 
-    /// Record a type annotation in the TypeMap (sound mode only).
+    /// Record a type annotation in the TypeMap.
     fn recordTypeAnnotation(
         self: *Self,
         kind: TypeMapKind,
@@ -1219,17 +1187,15 @@ const Stripper = struct {
         name_start: usize,
         name_end: usize,
     ) void {
-        if (self.type_map) |*tm| {
-            tm.addEntry(self.allocator, .{
-                .kind = kind,
-                .source_start = @intCast(type_start),
-                .source_end = @intCast(type_end),
-                .context_line = self.line,
-                .context_col = self.col,
-                .name_start = @intCast(name_start),
-                .name_end = @intCast(name_end),
-            }) catch {};
-        }
+        self.type_map.addEntry(self.allocator, .{
+            .kind = kind,
+            .source_start = @intCast(type_start),
+            .source_end = @intCast(type_end),
+            .context_line = self.line,
+            .context_col = self.col,
+            .name_start = @intCast(name_start),
+            .name_end = @intCast(name_end),
+        }) catch {};
     }
 
     /// Scan backwards in the original source to find the identifier before a given position.
@@ -1747,8 +1713,9 @@ test "any return type errors" {
 }
 
 test "any as assertion errors" {
+    // 'as' is now always rejected, so UnsupportedAsAssertion fires before any check
     const result = strip(std.testing.allocator, "const x = value as any;", .{});
-    try std.testing.expectError(StripError.UnsupportedAnyType, result);
+    try std.testing.expectError(StripError.UnsupportedAsAssertion, result);
 }
 
 test "any in generic errors" {
@@ -1855,19 +1822,14 @@ test "arrow function annotation stripped" {
 // Phase 5: Assertion Tests
 // ============================================================================
 
-test "as assertion stripped" {
-    const result = try strip(std.testing.allocator, "let n = (foo as number) + 1;", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, " as number") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "(foo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, ") + 1") != null);
+test "as assertion rejected" {
+    const result = strip(std.testing.allocator, "let n = (foo as number) + 1;", .{});
+    try std.testing.expectError(StripError.UnsupportedAsAssertion, result);
 }
 
-test "satisfies assertion stripped" {
-    const result = try strip(std.testing.allocator, "const cfg = { port: 8080 } satisfies Config;", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "satisfies") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "{ port: 8080 }") != null);
+test "satisfies assertion rejected" {
+    const result = strip(std.testing.allocator, "const cfg = { port: 8080 } satisfies Config;", .{});
+    try std.testing.expectError(StripError.UnsupportedSatisfiesAssertion, result);
 }
 
 // ============================================================================
@@ -1911,7 +1873,7 @@ test "full handler example" {
         \\}
         \\
         \\function handler(req: Request): Response {
-        \\    const data = { name: "World", count: 42 } as RequestData;
+        \\    const data: RequestData = { name: "World", count: 42 };
         \\    const result: ResponseData = processData(data);
         \\    return Response.json(result);
         \\}
@@ -2050,57 +2012,33 @@ test "comptime identifier without parens passes through" {
 }
 
 // ============================================================================
-// Sound Mode Tests
+// Type Annotation and TypeMap Tests
 // ============================================================================
 
-test "sound mode: as assertion rejected" {
-    const result = strip(std.testing.allocator, "let n = (foo as number) + 1;", .{ .sound_mode = true });
-    try std.testing.expectError(StripError.UnsupportedAsInSoundMode, result);
-}
-
-test "sound mode: satisfies assertion rejected" {
-    const result = strip(std.testing.allocator, "const cfg = { port: 8080 } satisfies Config;", .{ .sound_mode = true });
-    try std.testing.expectError(StripError.UnsupportedSatisfiesInSoundMode, result);
-}
-
-test "sound mode: type annotations still stripped" {
-    // Type annotations are stripped even in sound mode (for now - future: checked)
-    const result = try strip(std.testing.allocator, "function f(x: number): string { return x; }", .{ .sound_mode = true });
+test "type annotations stripped" {
+    const result = try strip(std.testing.allocator, "function f(x: number): string { return x; }", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
 }
 
-test "sound mode: as identifier (not assertion) passes" {
+test "as identifier (not assertion) passes" {
     // 'as' used as identifier, not type assertion
-    const result = try strip(std.testing.allocator, "import { sha256 as hash } from \"zigttp:crypto\";", .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, "import { sha256 as hash } from \"zigttp:crypto\";", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "as hash") != null);
 }
 
-test "compat mode: as assertion stripped normally" {
-    // In compat mode (default), as is stripped
-    const result = try strip(std.testing.allocator, "let n = (foo as number) + 1;", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, " as number") == null);
-}
-
 // ---------------------------------------------------------------------------
-// TypeMap extraction tests (sound mode)
+// TypeMap extraction tests
 // ---------------------------------------------------------------------------
 
-test "sound mode: TypeMap is null in compat mode" {
-    const result = try strip(std.testing.allocator, "const x: number = 42;", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(result.type_map == null);
-}
-
-test "sound mode: TypeMap records variable annotation" {
+test "TypeMap records variable annotation" {
     const source = "const x: number = 42;";
-    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
-    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    const tm = result.type_map;
     try std.testing.expectEqual(@as(usize, 1), tm.count());
     const entry = tm.entries.items[0];
     try std.testing.expectEqual(TypeMapKind.var_annotation, entry.kind);
@@ -2108,13 +2046,12 @@ test "sound mode: TypeMap records variable annotation" {
     try std.testing.expectEqualStrings("x", tm.getNameText(entry).?);
 }
 
-test "sound mode: TypeMap records type alias" {
+test "TypeMap records type alias" {
     const source = "type Config = { port: number };";
-    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
-    const tm = result.type_map orelse return error.TestUnexpectedResult;
-    // Should have at least one entry for the type alias body
+    const tm = result.type_map;
     var found_alias = false;
     for (tm.entries.items) |entry| {
         if (entry.kind == .type_alias) {
@@ -2127,12 +2064,12 @@ test "sound mode: TypeMap records type alias" {
     try std.testing.expect(found_alias);
 }
 
-test "sound mode: TypeMap records interface" {
+test "TypeMap records interface" {
     const source = "interface CacheFx { get(key: string): string | null; }";
-    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
-    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    const tm = result.type_map;
     var found_iface = false;
     for (tm.entries.items) |entry| {
         if (entry.kind == .interface_decl) {
@@ -2143,12 +2080,12 @@ test "sound mode: TypeMap records interface" {
     try std.testing.expect(found_iface);
 }
 
-test "sound mode: TypeMap records function return type" {
+test "TypeMap records function return type" {
     const source = "function handler(req: Request): Response { }";
-    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
-    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    const tm = result.type_map;
     var found_return = false;
     var found_param = false;
     for (tm.entries.items) |entry| {
@@ -2168,12 +2105,12 @@ test "sound mode: TypeMap records function return type" {
     try std.testing.expect(found_param);
 }
 
-test "sound mode: TypeMap records generic params" {
+test "TypeMap records generic params" {
     const source = "function identity<T>(x: T): T { return x; }";
-    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
-    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    const tm = result.type_map;
     var found_generic = false;
     for (tm.entries.items) |entry| {
         if (entry.kind == .generic_params) {
@@ -2185,12 +2122,12 @@ test "sound mode: TypeMap records generic params" {
     try std.testing.expect(found_generic);
 }
 
-test "sound mode: TypeMap records arrow function return type" {
+test "TypeMap records arrow function return type" {
     const source = "const f = (x: number): string => x.toString();";
-    const result = try strip(std.testing.allocator, source, .{ .sound_mode = true });
+    const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
-    const tm = result.type_map orelse return error.TestUnexpectedResult;
+    const tm = result.type_map;
     var found_return = false;
     for (tm.entries.items) |entry| {
         if (entry.kind == .return_annotation) {

@@ -18,6 +18,8 @@ These features exist only in TypeScript type annotation positions that are strip
 | Feature | Error Type | Suggested Alternative |
 |---------|------------|----------------------|
 | `any` type (all positions: annotations, assertions, nested) | UnsupportedAnyType | Use specific types (string, number, object) or union types |
+| `as` type assertion (e.g., `x as string`) | UnsupportedAssertion | Use explicit type narrowing with typeof guards or undefined checks |
+| `satisfies` operator (e.g., `x satisfies T`) | UnsupportedAssertion | Use explicit type annotations on declarations |
 
 ## Supported Module Syntax
 
@@ -55,7 +57,7 @@ These produce helpful error messages directing users to named imports/exports:
 | `export { x } from "mod"` | Re-exports not supported; use named exports |
 | `export * from "mod"` | Export star not supported; use named exports |
 
-## Parser Features (53 total)
+## Parser Features (54 total)
 
 These are JavaScript and TypeScript language features that are syntactically valid but unsupported in zigttp's runtime. All are detected during parsing with helpful error messages following the pattern: "'feature' is not supported; use X instead".
 
@@ -160,6 +162,12 @@ All compound assignments follow the pattern: "use `x = x [op] value`"
 |---------|----------------------|
 | `instanceof` | Use discriminated unions with tag property |
 
+### Values
+
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `null` | Use `undefined` for absent values |
+
 ### Expression-level Features
 
 | Feature | Suggested Alternative |
@@ -246,7 +254,7 @@ Runtime checks should only exist as defensive programming (e.g., `UnimplementedO
 
 Before consolidation, features like `class` and `enum` were detected in the stripper for .ts files but only in the parser for .js files. This created inconsistent developer experience based on file extension. Moving all keyword-level detection to the parser ensures all developers see the same helpful error with rich formatting (source context, underlines) regardless of file type.
 
-The only feature remaining in the stripper is `any` type detection, because `any` only appears in type annotation positions that are stripped before the parser runs.
+The features remaining in the stripper are `any` type detection (because `any` only appears in type annotation positions that are stripped before the parser runs) and `as`/`satisfies` assertion rejection (because these are type-position syntax that the parser never sees).
 
 ## Migration History
 

@@ -56,7 +56,7 @@ pub fn createRequest(
             const body_str = try ctx.createString(b);
             req_obj.setSlot(shapes.request.body_slot, body_str);
         } else {
-            req_obj.setSlot(shapes.request.body_slot, value.JSValue.null_val);
+            req_obj.setSlot(shapes.request.body_slot, value.JSValue.undefined_val);
         }
 
         const headers_obj = try ctx.createObject(null);
@@ -87,7 +87,7 @@ pub fn createRequest(
         const body_str = try ctx.createString(b);
         try ctx.setPropertyChecked(req_obj, body_atom, body_str);
     } else {
-        try ctx.setPropertyChecked(req_obj, body_atom, value.JSValue.null_val);
+        try ctx.setPropertyChecked(req_obj, body_atom, value.JSValue.undefined_val);
     }
 
     // Set headers object

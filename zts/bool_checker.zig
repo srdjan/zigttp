@@ -1,4 +1,4 @@
-//! Sound Mode: Strict Boolean Enforcement
+//! Strict Boolean Enforcement
 //!
 //! Static analysis pass that enforces boolean-typed values in boolean contexts:
 //! - if/ternary conditions must be boolean
@@ -8,8 +8,8 @@
 //!
 //! Modeled on handler_verifier.zig: walks the IR tree inferring expression types.
 //! When inferType returns .unknown, no diagnostic is emitted (escape hatch for
-//! function calls, parameters, property accesses). Runtime VM assertions (sound_mode
-//! flag on interpreter) catch those cases at execution time.
+//! function calls, parameters, property accesses). Runtime VM assertions in the
+//! interpreter catch those cases at execution time.
 
 const std = @import("std");
 const ir = @import("parser/ir.zig");
@@ -30,16 +30,15 @@ pub const ExprType = enum(u8) {
     boolean, // true/false, comparisons, !(bool), &&/|| of bools
     number, // int/float literals, arithmetic, bitwise, unary -/+/~
     string, // string/template literals, typeof
-    null_type, // null literal
     undefined, // undefined literal
     object, // object/array literals
     function, // function/arrow expressions
     unknown, // cannot determine statically (params, fn calls, let vars, property access)
-    // Nullable variants: T | null | undefined
-    nullable_string, // e.g. env(), parseBearer(), cacheGet()
-    nullable_object, // e.g. routerMatch()
+    // Optional variants: T | undefined
+    optional_string, // e.g. env(), parseBearer(), cacheGet()
+    optional_object, // e.g. routerMatch()
 
-    /// Returns true if this type is known to never be null or undefined.
+    /// Returns true if this type is known to never be undefined.
     pub fn isNonNullable(self: ExprType) bool {
         return switch (self) {
             .boolean, .number, .string, .object, .function => true,
@@ -47,42 +46,38 @@ pub const ExprType = enum(u8) {
         };
     }
 
-    /// Remove nullability from a type: nullable_string -> string, etc.
-    /// Returns .unknown for types that are purely null/undefined.
+    /// Remove optionality from a type: optional_string -> string, etc.
+    /// Returns .unknown for types that are purely undefined.
     pub fn removeNullish(self: ExprType) ExprType {
         return switch (self) {
-            .nullable_string => .string,
-            .nullable_object => .object,
-            .null_type, .undefined => .unknown,
+            .optional_string => .string,
+            .optional_object => .object,
+            .undefined => .unknown,
             else => self,
         };
     }
 };
 
 /// Unify two types into a single type. Returns .unknown if they're incompatible.
-/// Handles nullable promotion: string + null -> nullable_string, etc.
+/// Handles optional promotion: string + undefined -> optional_string, etc.
 fn unifyTypes(a: ExprType, b: ExprType) ExprType {
     if (a == b) return a;
-    // Nullable promotion: T + null/undefined -> nullable_T
-    const null_like = ExprType.null_type;
-    const undef = ExprType.undefined;
-    if (a == null_like or a == undef) return makeNullable(b);
-    if (b == null_like or b == undef) return makeNullable(a);
-    // nullable_T + T -> nullable_T
-    if (a == .nullable_string and b == .string) return .nullable_string;
-    if (a == .string and b == .nullable_string) return .nullable_string;
-    if (a == .nullable_object and b == .object) return .nullable_object;
-    if (a == .object and b == .nullable_object) return .nullable_object;
+    // Optional promotion: T + undefined -> optional_T
+    if (a == .undefined) return makeNullable(b);
+    if (b == .undefined) return makeNullable(a);
+    // optional_T + T -> optional_T
+    if (a == .optional_string and b == .string) return .optional_string;
+    if (a == .string and b == .optional_string) return .optional_string;
+    if (a == .optional_object and b == .object) return .optional_object;
+    if (a == .object and b == .optional_object) return .optional_object;
     return .unknown;
 }
 
-/// Promote a type to its nullable variant. Returns .unknown for types without nullable variants.
+/// Promote a type to its optional variant. Returns .unknown for types without optional variants.
 fn makeNullable(t: ExprType) ExprType {
     return switch (t) {
-        .string, .nullable_string => .nullable_string,
-        .object, .nullable_object => .nullable_object,
-        // null + null, undefined + undefined stay as-is
-        .null_type => .null_type,
+        .string, .optional_string => .optional_string,
+        .object, .optional_object => .optional_object,
         .undefined => .undefined,
         else => .unknown,
     };
@@ -239,7 +234,7 @@ pub const BoolChecker = struct {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
 
             // Header
-            try writer.print("sound {s}: {s}\n", .{ diag.severity.label(), diag.message });
+            try writer.print("{s}: {s}\n", .{ diag.severity.label(), diag.message });
 
             // Location
             try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
@@ -440,7 +435,7 @@ pub const BoolChecker = struct {
                                 .severity = .warning,
                                 .kind = .nullish_on_non_nullable,
                                 .node = node,
-                                .message = "left side of '??' is never null or undefined",
+                                .message = "left side of '??' is never undefined",
                                 .help = "remove the '??' fallback; it is unreachable",
                             });
                         }
@@ -601,7 +596,7 @@ pub const BoolChecker = struct {
             .lit_bool => .boolean,
             .lit_int, .lit_float => .number,
             .lit_string, .template_literal => .string,
-            .lit_null => .null_type,
+            .lit_null => .undefined, // parser rejects null, but map defensively
             .lit_undefined => .undefined,
             .object_literal, .array_literal => .object,
             .function_expr, .arrow_function, .function_decl => .function,
@@ -653,7 +648,7 @@ pub const BoolChecker = struct {
             // Comparisons always produce boolean
             .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => .boolean,
 
-            // Logical ops in sound mode: both sides boolean -> boolean
+            // Logical ops: both sides boolean -> boolean
             .and_op, .or_op => .boolean,
 
             // Arithmetic
@@ -675,16 +670,16 @@ pub const BoolChecker = struct {
             .nullish => {
                 const left_type = self.inferType(bin.left);
                 const right_type = self.inferType(bin.right);
-                // nullable_string ?? string -> string
-                if (left_type == .nullable_string and right_type == .string) return .string;
-                if (left_type == .nullable_object and right_type == .object) return .object;
-                // nullable_string ?? number -> unknown (mismatched base types)
-                if (left_type == .nullable_string and right_type != .string and right_type != .unknown) return .unknown;
-                if (left_type == .nullable_object and right_type != .object and right_type != .unknown) return .unknown;
+                // optional_string ?? string -> string
+                if (left_type == .optional_string and right_type == .string) return .string;
+                if (left_type == .optional_object and right_type == .object) return .object;
+                // optional_string ?? number -> unknown (mismatched base types)
+                if (left_type == .optional_string and right_type != .string and right_type != .unknown) return .unknown;
+                if (left_type == .optional_object and right_type != .object and right_type != .unknown) return .unknown;
                 // Non-nullable ?? anything -> non-nullable (the RHS is dead code, warned above)
                 if (left_type.isNonNullable()) return left_type;
-                // null/undefined ?? T -> T
-                if (left_type == .null_type or left_type == .undefined) return right_type;
+                // undefined ?? T -> T
+                if (left_type == .undefined) return right_type;
                 // unknown ?? T -> unknown (conservative)
                 return .unknown;
             },
@@ -877,24 +872,22 @@ pub const BoolChecker = struct {
         const help: []const u8 = switch (inferred) {
             .number => "use explicit comparison: n !== 0",
             .string => "use explicit comparison: s.length > 0 or s !== \"\"",
-            .null_type => "null is not boolean; this condition is always false",
             .undefined => "undefined is not boolean; this condition is always false",
             .object => "objects are not boolean; this condition is always true",
             .function => "functions are not boolean; this condition is always true",
-            .nullable_string => "use explicit null check: val !== null && val !== undefined",
-            .nullable_object => "use explicit null check: val !== null && val !== undefined",
+            .optional_string => "use explicit undefined check: val !== undefined",
+            .optional_object => "use explicit undefined check: val !== undefined",
             else => unreachable,
         };
 
         const type_name: []const u8 = switch (inferred) {
             .number => "number",
             .string => "string",
-            .null_type => "null",
             .undefined => "undefined",
             .object => "object",
             .function => "function",
-            .nullable_string => "string?",
-            .nullable_object => "object?",
+            .optional_string => "string?",
+            .optional_object => "object?",
             else => unreachable,
         };
 
@@ -1004,14 +997,14 @@ pub const BoolChecker = struct {
             };
         }
 
-        // Pattern 2: x === null / null === x / x === undefined / undefined === x
-        // For x !== null: narrow nullable_T -> T (remove nullability)
-        // For x === null: narrow to null_type in then-branch
-        const ident_node, const null_kind = blk: {
+        // Pattern 2: x === undefined / undefined === x
+        // For x !== undefined: narrow optional_T -> T (remove optionality)
+        // For x === undefined: narrow to undefined in then-branch
+        const ident_node = blk: {
             if (left_tag == .identifier and (right_tag == .lit_null or right_tag == .lit_undefined)) {
-                break :blk .{ bin.left, right_tag };
+                break :blk bin.left;
             } else if ((left_tag == .lit_null or left_tag == .lit_undefined) and right_tag == .identifier) {
-                break :blk .{ bin.right, left_tag };
+                break :blk bin.right;
             } else {
                 return null;
             }
@@ -1020,35 +1013,34 @@ pub const BoolChecker = struct {
         const binding = self.ir_view.getBinding(ident_node) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
 
-        // For null/undefined guards, the narrowed_type is what the variable becomes
+        // For undefined guards, the narrowed_type is what the variable becomes
         // in the "positive" (===) branch. The guard system uses `op` to decide:
         //   op == strict_eq -> install narrowing in then-branch
         //   op == strict_neq -> install narrowing in else-branch
         //
-        // x === null: then-branch -> null_type, else-branch -> removeNullish
-        // x !== null: then-branch -> removeNullish, else-branch -> null_type
+        // x === undefined: then-branch -> undefined, else-branch -> removeNullish
+        // x !== undefined: then-branch -> removeNullish, else-branch -> undefined
         //
         // We always store the "then-branch" narrowing and encode the op.
         if (bin.op == .strict_eq) {
-            // x === null: then-branch narrowing is null/undefined
-            const narrowed: ExprType = if (null_kind == .lit_null) .null_type else .undefined;
+            // x === undefined: then-branch narrowing is undefined
             return .{
                 .binding_key = key,
-                .narrowed_type = narrowed,
+                .narrowed_type = .undefined,
                 .op = bin.op,
             };
         } else {
-            // x !== null: then-branch narrowing is removeNullish (non-null)
+            // x !== undefined: then-branch narrowing is removeNullish (non-undefined)
             const current_type = self.lookupBindingType(key);
             const narrowed = current_type.removeNullish();
-            // For x !== null with unknown type, narrow to unknown (still useful for flow)
-            // For x !== null with non-nullable type, no narrowing needed
+            // For x !== undefined with unknown type, narrow to unknown (still useful for flow)
+            // For x !== undefined with non-nullable type, no narrowing needed
             if (narrowed == current_type and current_type.isNonNullable()) return null;
             return .{
                 .binding_key = key,
                 .narrowed_type = narrowed,
                 // Encode as strict_eq so narrowing applies to then-branch
-                // (x !== null -> then-branch has non-null x)
+                // (x !== undefined -> then-branch has non-undefined x)
                 .op = .strict_eq,
             };
         }
@@ -1189,7 +1181,7 @@ pub const BoolChecker = struct {
         .{ .module = "zigttp:auth", .name = "timingSafeEqual", .ret = .boolean },
         .{ .module = "zigttp:auth", .name = "jwtVerify", .ret = .object, .is_result = true },
         .{ .module = "zigttp:auth", .name = "jwtSign", .ret = .string },
-        .{ .module = "zigttp:auth", .name = "parseBearer", .ret = .nullable_string },
+        .{ .module = "zigttp:auth", .name = "parseBearer", .ret = .optional_string },
         // zigttp:crypto
         .{ .module = "zigttp:crypto", .name = "sha256", .ret = .string },
         .{ .module = "zigttp:crypto", .name = "hmacSha256", .ret = .string },
@@ -1206,11 +1198,11 @@ pub const BoolChecker = struct {
         .{ .module = "zigttp:cache", .name = "cacheDelete", .ret = .boolean },
         .{ .module = "zigttp:cache", .name = "cacheIncr", .ret = .number },
         .{ .module = "zigttp:cache", .name = "cacheStats", .ret = .object },
-        .{ .module = "zigttp:cache", .name = "cacheGet", .ret = .nullable_string },
+        .{ .module = "zigttp:cache", .name = "cacheGet", .ret = .optional_string },
         // zigttp:env
-        .{ .module = "zigttp:env", .name = "env", .ret = .nullable_string },
+        .{ .module = "zigttp:env", .name = "env", .ret = .optional_string },
         // zigttp:router
-        .{ .module = "zigttp:router", .name = "routerMatch", .ret = .nullable_object },
+        .{ .module = "zigttp:router", .name = "routerMatch", .ret = .optional_object },
         // zigttp:io
         .{ .module = "zigttp:io", .name = "parallel", .ret = .object },
         .{ .module = "zigttp:io", .name = "race", .ret = .object },
@@ -1372,8 +1364,8 @@ test "sound: string literal in if fails" {
     try checkSource("if (\"hello\") { let x = 1; }", 1);
 }
 
-test "sound: null literal in if fails" {
-    try checkSource("if (null) { let x = 1; }", 1);
+test "sound: undefined literal in if fails" {
+    try checkSource("if (undefined) { let x = 1; }", 1);
 }
 
 test "sound: tracked const number in if fails" {
@@ -1677,8 +1669,8 @@ test "sound: virtual module object return type fails in boolean context" {
     , 1);
 }
 
-test "sound: virtual module nullable return type fails in boolean context" {
-    // env returns nullable_string - truthiness check is not safe
+test "sound: virtual module optional return type fails in boolean context" {
+    // env returns optional_string - truthiness check is not safe
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
@@ -1705,10 +1697,10 @@ test "sound: virtual module direct number call in boolean context fails" {
 // Phase 2: Match expression type inference tests must run via `zig build test-zts`
 // (standalone `zig test` on bool_checker.zig hangs when parsing match expressions).
 
-// Phase 3: Nullable union types
+// Phase 3: Optional union types
 
-test "sound: nullable string from env used with ?? passes" {
-    // env() ?? "default" is fine - ?? resolves nullable
+test "sound: optional string from env used with ?? passes" {
+    // env() ?? "default" is fine - ?? resolves optional
     try checkSourceFull(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY") ?? "default";
@@ -1716,23 +1708,23 @@ test "sound: nullable string from env used with ?? passes" {
     , 1, 0); // val is string (from ??), string in boolean context fails; no warnings
 }
 
-test "sound: nullable with ?? does not warn" {
-    // env() ?? "default" - the ?? is legitimate because env() is nullable
+test "sound: optional with ?? does not warn" {
+    // env() ?? "default" - the ?? is legitimate because env() is optional
     try checkSourceFull(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY") ?? "default";
     , 0, 0); // no errors, no warnings
 }
 
-test "sound: non-nullable with ?? still warns" {
-    // sha256() ?? "" - sha256 returns string (never null), so ?? is unreachable
+test "sound: non-optional with ?? still warns" {
+    // sha256() ?? "" - sha256 returns string (never undefined), so ?? is unreachable
     try checkSourceFull(
         \\import { sha256 } from "zigttp:crypto";
         \\const val = sha256("data") ?? "";
     , 0, 1); // no errors, 1 warning
 }
 
-test "sound: nullable cacheGet in boolean context fails" {
+test "sound: optional cacheGet in boolean context fails" {
     try checkSource(
         \\import { cacheGet } from "zigttp:cache";
         \\const val = cacheGet("ns", "key");
@@ -1740,8 +1732,8 @@ test "sound: nullable cacheGet in boolean context fails" {
     , 1);
 }
 
-test "sound: function returning string or null infers nullable_string" {
-    // Mixed return: string + undefined -> nullable_string -> fails in boolean context
+test "sound: function returning string or undefined infers optional_string" {
+    // Mixed return: string + undefined -> optional_string -> fails in boolean context
     try checkSource(
         \\const find = (arr) => {
         \\  if (arr.length > 0) { return "found"; }
@@ -1786,21 +1778,11 @@ test "sound: non-result object property stays unknown" {
     , 0);
 }
 
-// Null/undefined equality narrowing
+// Undefined equality narrowing
 
-test "sound: x !== null narrows nullable to non-nullable" {
-    // env() returns nullable_string. After !== null guard, it should be string.
+test "sound: x !== undefined narrows optional to non-optional" {
+    // env() returns optional_string. After !== undefined guard, it should be string.
     // string in boolean context fails (which proves narrowing worked).
-    try checkSource(
-        \\import { env } from "zigttp:env";
-        \\const val = env("KEY");
-        \\if (val !== null) {
-        \\  if (val) { let x = 1; }
-        \\}
-    , 1); // val narrowed to string -> string in if -> error
-}
-
-test "sound: x !== undefined narrows nullable" {
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
@@ -1810,47 +1792,47 @@ test "sound: x !== undefined narrows nullable" {
     , 1); // val narrowed to string -> string in if -> error
 }
 
-test "sound: x !== null on non-nullable is no-op" {
-    // sha256 returns string (non-nullable), !== null check is valid but doesn't change type
+test "sound: x !== undefined on non-optional is no-op" {
+    // sha256 returns string (non-optional), !== undefined check is valid but doesn't change type
     try checkSource(
         \\import { sha256 } from "zigttp:crypto";
         \\const hash = sha256("data");
-        \\if (hash !== null) {
+        \\if (hash !== undefined) {
         \\  if (hash) { let x = 1; }
         \\}
     , 1); // hash is string regardless, string in if -> error
 }
 
-test "sound: null === x narrowing works reversed" {
+test "sound: undefined === x narrowing works reversed" {
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
-        \\if (null !== val) {
+        \\if (undefined !== val) {
         \\  if (val) { let x = 1; }
         \\}
     , 1); // val narrowed to string
 }
 
-test "sound: x === null narrows to null type in then-branch" {
-    // x === null in then-branch should narrow to null_type
-    // null in boolean context should fail
+test "sound: x === undefined narrows to undefined type in then-branch" {
+    // x === undefined in then-branch should narrow to undefined
+    // undefined in boolean context should fail
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
-        \\if (val === null) {
+        \\if (val === undefined) {
         \\  if (val) { let x = 1; }
         \\}
-    , 1); // val narrowed to null_type -> null in if -> error
+    , 1); // val narrowed to undefined -> undefined in if -> error
 }
 
-test "sound: narrowing does not leak outside null guard branch" {
-    // Outside the null guard, val should revert to nullable_string (fails in boolean context)
+test "sound: narrowing does not leak outside undefined guard branch" {
+    // Outside the undefined guard, val should revert to optional_string (fails in boolean context)
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
-        \\if (val !== null) {
+        \\if (val !== undefined) {
         \\  let y = val;
         \\}
         \\if (val) { let z = 1; }
-    , 1); // val reverts to nullable_string -> fails
+    , 1); // val reverts to optional_string -> fails
 }

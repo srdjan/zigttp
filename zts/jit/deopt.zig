@@ -34,6 +34,7 @@ pub const DeoptStats = struct {
     hidden_class_mismatch_count: u64 = 0,
     overflow_count: u64 = 0,
     callee_changed_count: u64 = 0,
+    bool_expected_count: u64 = 0,
 
     pub fn record(self: *DeoptStats, reason: baseline.DeoptReason) void {
         self.total_deopts += 1;
@@ -42,6 +43,7 @@ pub const DeoptStats = struct {
             .hidden_class_mismatch => self.hidden_class_mismatch_count += 1,
             .overflow => self.overflow_count += 1,
             .callee_changed => self.callee_changed_count += 1,
+            .bool_expected => self.bool_expected_count += 1,
         }
     }
 };

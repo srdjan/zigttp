@@ -47,16 +47,16 @@ pub const exports = [_]resolver.ModuleExport{
 fn parseBearerNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
-    if (args.len == 0) return value.JSValue.null_val;
-    const header = util.extractString(args[0]) orelse return value.JSValue.null_val;
+    if (args.len == 0) return value.JSValue.undefined_val;
+    const header = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
 
-    if (header.len < 7) return value.JSValue.null_val;
-    if (!std.ascii.eqlIgnoreCase(header[0..7], "Bearer ")) return value.JSValue.null_val;
+    if (header.len < 7) return value.JSValue.undefined_val;
+    if (!std.ascii.eqlIgnoreCase(header[0..7], "Bearer ")) return value.JSValue.undefined_val;
 
     const token = header[7..];
-    if (token.len == 0) return value.JSValue.null_val;
+    if (token.len == 0) return value.JSValue.undefined_val;
 
-    return ctx.createString(token) catch value.JSValue.null_val;
+    return ctx.createString(token) catch value.JSValue.undefined_val;
 }
 
 // ============================================================================

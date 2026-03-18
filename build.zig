@@ -10,9 +10,7 @@ pub fn build(b: *std.Build) void {
     const verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false;
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
-    const sound_enabled = b.option(bool, "sound", "Enable strict boolean sound mode") orelse false;
     const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
-    _ = b.option(bool, "compat", "Explicit compat edition (types stripped, not checked)"); // recognized but no-op (default)
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -99,9 +97,6 @@ pub fn build(b: *std.Build) void {
         if (policy_path) |policy| {
             run_precompile.addArg("--policy");
             run_precompile.addArg(policy);
-        }
-        if (sound_enabled) {
-            run_precompile.addArg("--sound");
         }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");

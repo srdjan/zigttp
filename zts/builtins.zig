@@ -1257,10 +1257,10 @@ fn parseJsonValueAt(ctx: *context.Context, text: []const u8, pos: *usize) JsonEr
         return value.JSValue.false_val;
     }
 
-    // null
+    // null -> undefined (zigttp has no user-facing null)
     if (text.len >= pos.* + 4 and std.mem.eql(u8, text[pos.*..][0..4], "null")) {
         pos.* += 4;
-        return value.JSValue.null_val;
+        return value.JSValue.undefined_val;
     }
 
     return error.InvalidJson;
@@ -3533,9 +3533,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.builtin_objects.append(allocator, render_func);
     try ctx.setGlobal(render_atom, render_func.toValue());
 
-    // Register Fragment constant for JSX (null value - fragments have no wrapper element)
+    // Register Fragment constant for JSX (undefined value - fragments have no wrapper element)
     const fragment_atom: object.Atom = .Fragment;
-    try ctx.setGlobal(fragment_atom, value.JSValue.null_val);
+    try ctx.setGlobal(fragment_atom, value.JSValue.undefined_val);
 
     // Register Date object with Date.now()
     const date_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
@@ -4554,10 +4554,10 @@ test "initBuiltins registers console and Math" {
     try std.testing.expect(render_val != null);
     try std.testing.expect(render_val.?.isCallable());
 
-    // Check Fragment is registered (null value - fragments render children without wrapper)
+    // Check Fragment is registered (undefined value - fragments render children without wrapper)
     const fragment_val = ctx.getGlobal(.Fragment);
     try std.testing.expect(fragment_val != null);
-    try std.testing.expect(fragment_val.?.isNull());
+    try std.testing.expect(fragment_val.?.isUndefined());
 }
 
 test "Number.isInteger" {
@@ -5739,7 +5739,7 @@ test "JSON.parse null" {
         value.JSValue.fromPtr(null_str),
     });
 
-    try std.testing.expect(result.isNull());
+    try std.testing.expect(result.isUndefined());
 }
 
 test "JSON.parse array" {

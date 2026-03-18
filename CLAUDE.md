@@ -21,7 +21,6 @@ zig build -Doptimize=ReleaseFast   # Optimized build
 zig build -Dhandler=handler.jsx    # Precompile handler at build time
 zig build -Dhandler=handler.jsx -Dverify  # Verify handler at compile time
 zig build -Dhandler=handler.jsx -Dcontract  # Emit contract.json manifest
-zig build -Dhandler=handler.jsx -Dsound   # Enforce strict boolean sound mode
 zig build -Dhandler=handler.jsx -Ddeploy=aws  # Generate proven deployment manifest
 
 # Run
@@ -134,7 +133,9 @@ Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode
 
 **Handler Verification** (`zts/handler_verifier.zig`): The `-Dverify` build option enables compile-time correctness verification. The verifier statically proves: (1) every code path returns a Response, (2) Result values from virtual modules are checked before access, (3) no unreachable code after returns, (4) unused variables detected with scope-aware tracking (warnings, underscore-prefix suppresses). This is possible because zigttp's JS subset eliminates all non-trivial control flow - the IR tree IS the control flow graph. See [docs/verification.md](docs/verification.md).
 
-**Handler Contract Manifest** (`zts/handler_contract.zig`): The `-Dcontract` build option emits `contract.json` alongside the embedded bytecode, describing what the handler is allowed to do. The contract extracts: virtual module imports and function names, literal env var names (`env.dynamic: false` when all calls use string literals), outbound hosts from `fetchSync` URL arguments, cache namespace strings, route patterns (when AOT pattern analysis detects them), and verification results (when `-Dverify` is also set). Non-literal arguments set `dynamic: true` as an honest signal that static analysis cannot enumerate all values. This is v1 (emission only) - runtime enforcement is v2 scope.
+**Handler Contract Manifest** (`zts/handler_contract.zig`): Contract extraction runs automatically during every precompilation, scanning the handler's IR for virtual module imports, literal env var names, outbound hosts from `fetchSync` URL arguments, cache namespace strings, and route patterns. The `-Dcontract` build option additionally emits `contract.json` alongside the embedded bytecode. Non-literal arguments set `dynamic: true` as an honest signal that static analysis cannot enumerate all values.
+
+**Compiler-Derived Runtime Sandboxing** (`zts/handler_policy.zig`, `tools/precompile.zig`): Every precompiled handler is automatically sandboxed based on its contract. The `RuntimePolicy` embedded in the generated code restricts env vars, outbound hosts, and cache namespaces to exactly what the compiler can prove the code uses. When a contract section has `dynamic: false`, the sandbox restricts to the proven literal values. When `dynamic: true`, that section remains permissive. An explicit `--policy` file overrides auto-derived sandboxing. The `contractToRuntimePolicy()` function in `handler_policy.zig` implements the conversion. The build output includes a sandbox report showing what was proven and restricted. Non-precompiled handlers (dev mode via `zig build run`) run without sandboxing.
 
 **Proven Deployment Manifests** (`tools/deploy_manifest.zig`): The `-Ddeploy=<target>` build option generates platform-specific deployment configurations from compiler-proven contracts. Implies `-Dcontract`. The system extracts `ProvenFacts` (platform-agnostic) from the contract, then dispatches to a `DeployTarget` renderer. Architecture is pluggable via a `DeployTarget` enum - add new backends by adding an enum variant and render function.
 
@@ -143,19 +144,18 @@ Currently supported targets:
 
 Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). The deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
 
-**Sound Mode BoolChecker** (`zts/bool_checker.zig`): The `-Dsound` build option (or `--sound` CLI flag) enables strict boolean enforcement. The BoolChecker walks the IR tree inferring expression types, rejecting non-boolean values in if/ternary conditions, &&/|| operands, and ! operands. Runtime VM assertions at conditional jump opcodes catch values the static checker cannot prove. See [docs/sound-mode.md](docs/sound-mode.md).
+**Boolean Enforcement** (`zts/bool_checker.zig`): The BoolChecker walks the IR tree inferring expression types, rejecting non-boolean values in if/ternary conditions, &&/|| operands, and ! operands. Runtime VM assertions at conditional jump opcodes catch values the static checker cannot prove. See [docs/sound-mode.md](docs/sound-mode.md).
 
-Sound mode includes progressive type inference:
-- **Virtual module return types**: Imported functions from `zigttp:*` modules have known return types (boolean, number, string, object, nullable variants). Using `cacheIncr()` (number) in an `if` condition is caught at compile time.
+Boolean enforcement includes progressive type inference:
+- **Virtual module return types**: Imported functions from `zigttp:*` modules have known return types (boolean, number, string, object, optional variants). Using `cacheIncr()` (number) in an `if` condition is caught at compile time.
 - **Match expression types**: When all arms return the same type, the match expression inherits that type.
-- **Nullable union types**: Functions like `env()` and `cacheGet()` return `nullable_string`. These fail in boolean contexts with a help message suggesting explicit null checks. The `??` operator resolves nullables: `env("KEY") ?? "default"` infers as `string`.
+- **Optional types**: Functions like `env()` and `cacheGet()` return `optional_string` (`T | undefined`). These fail in boolean contexts with a help message suggesting explicit undefined checks. The `??` operator resolves optionals: `env("KEY") ?? "default"` infers as `string`.
 - **Result property access**: `result.ok` on objects from `jwtVerify`/`validateJson`/`validateObject`/`coerceJson` infers as `boolean`. `result.error` infers as `string`.
-- **Null/undefined equality narrowing**: `x !== null` and `x !== undefined` guards narrow nullable types to their non-nullable variants in the then-branch. `x === null` narrows to `null_type`. Both operand orderings supported (`null !== x`).
-- **Sound mode assertion rejection**: In `--sound` mode, `as` and `satisfies` type assertions are rejected by the stripper with errors instead of being silently stripped.
+- **Undefined equality narrowing**: `x !== undefined` guards narrow optional types to their non-optional variants in the then-branch. `x === undefined` narrows to `undefined`. Both operand orderings supported (`undefined !== x`).
 
 **Bytecode Verifier** (`zts/bytecode_verifier.zig`): Validates bytecode structural integrity before execution. Checks: (1) opcode validity - every instruction boundary byte is a recognized opcode, (2) operand bounds - jump targets within bytecode range and on instruction boundaries, (3) constant pool indices valid, (4) stack discipline - height never negative and within limits, (5) local/upvalue indices within declared counts. Called automatically at runtime and during precompilation.
 
-**Sound Edition Type System** (`zts/type_map.zig`, `zts/type_pool.zig`, `zts/type_env.zig`, `zts/type_checker.zig`): Full type annotation checking in `--sound` mode. The stripper extracts a TypeMap of all type annotations (type aliases, interfaces, variable/param/return annotations, generics) as sideband data without changing the IR or parser. The TypePool stores structured types (primitives, records, unions, functions, arrays, tuples, nullable, generics) as a flat indexed array with structural subtyping via `isAssignableTo`. The TypeEnv resolves type aliases, interfaces, and annotations by walking the TypeMap. The TypeChecker walks the IR tree checking: variable declaration type mismatches, function argument types, property access on known records, return type mismatches. Virtual module types (`zts/modules/types.zig`) provide full function signatures for all 27 zigttp:* exports. Interface declarations with all-function members are marked nominal to prevent structural forgery of capability objects. Two-arg handler support (`handler(req, caps)`) detects handler arity at runtime for capability injection.
+**Type Checking** (`zts/type_map.zig`, `zts/type_pool.zig`, `zts/type_env.zig`, `zts/type_checker.zig`): Full type annotation checking for TypeScript handlers. The stripper extracts a TypeMap of all type annotations (type aliases, interfaces, variable/param/return annotations, generics) as sideband data without changing the IR or parser. The TypePool stores structured types (primitives, records, unions, functions, arrays, tuples, nullable, generics) as a flat indexed array with structural subtyping via `isAssignableTo`. The TypeEnv resolves type aliases, interfaces, and annotations by walking the TypeMap. The TypeChecker walks the IR tree checking: variable declaration type mismatches, function argument types, property access on known records, return type mismatches. Virtual module types (`zts/modules/types.zig`) provide full function signatures for all 27 zigttp:* exports. Interface declarations with all-function members are marked nominal to prevent structural forgery of capability objects. Two-arg handler support (`handler(req, caps)`) detects handler arity at runtime for capability injection.
 
 ## TypeScript/TSX Support
 
@@ -183,7 +183,7 @@ zigttp uses a two-layer fail-fast validation system to detect unsupported JavaSc
 
 1. **TypeScript Stripper** ([zts/stripper.zig](zts/stripper.zig)): Catches TypeScript-specific type-position syntax before parsing
    - Detects `any` type (in annotations, assertions, nested positions)
-   - In `--sound` mode: rejects `as` and `satisfies` assertions as errors
+   - Rejects `as` and `satisfies` type assertions as errors
    - Only runs for .ts/.tsx files
 
 2. **Parser** ([zts/parser/parse.zig](zts/parser/parse.zig)): Catches all other unsupported features
@@ -204,7 +204,7 @@ All error messages follow the pattern: "'feature' is not supported; use X instea
 
 **Supported**: ES5 + arrow functions, template literals, destructuring, spread operator, `for...of` (arrays), optional chaining, nullish coalescing, typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching).
 
-**Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API. Classes, async/await, Promises, `var`, `while`/`do-while`, `this`, `new`, `try/catch`, regular expressions are all detected at parse time with helpful error messages.
+**Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API. Classes, async/await, Promises, `var`, `while`/`do-while`, `this`, `new`, `try/catch`, `null`, regular expressions are all detected at parse time with helpful error messages. Use `undefined` as the sole absent-value sentinel.
 
 **Response helpers**:
 - `Response.json(data, init?)`
@@ -238,8 +238,6 @@ Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size
 -e, --eval <CODE>      Inline JavaScript code
 -m, --memory <SIZE>    JS runtime memory limit (default: 0 = no limit)
 -n, --pool <N>         Runtime pool size (default: auto = 2 * cpu, min 8)
---sound                Enable strict boolean sound mode (Sound Edition)
---compat               Explicit compat edition (default: types stripped, not checked)
 --cors                 Enable CORS headers
 --static <DIR>         Serve static files
 ```

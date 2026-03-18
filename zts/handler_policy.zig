@@ -87,6 +87,37 @@ pub const RuntimePolicy = struct {
     }
 };
 
+/// Convert a HandlerContract's proven sections into a RuntimePolicy.
+/// When `dynamic: false`, the compiler proved ALL access uses literal strings -
+/// restrict to exactly those. When `dynamic: true`, some access is computed -
+/// leave that section permissive.
+///
+/// The returned policy borrows string data from the contract. The contract
+/// must outlive the policy. For precompilation this is fine because the data
+/// gets embedded as compile-time constants in the generated .zig file.
+pub fn contractToRuntimePolicy(contract: *const HandlerContract) RuntimePolicy {
+    return .{
+        .env = if (!contract.env.dynamic and contract.env.literal.items.len > 0)
+            .{ .enabled = true, .values = contract.env.literal.items }
+        else if (!contract.env.dynamic)
+            .{ .enabled = true, .values = &.{} }
+        else
+            .{},
+        .egress = if (!contract.egress.dynamic and contract.egress.hosts.items.len > 0)
+            .{ .enabled = true, .values = contract.egress.hosts.items }
+        else if (!contract.egress.dynamic)
+            .{ .enabled = true, .values = &.{} }
+        else
+            .{},
+        .cache = if (!contract.cache.dynamic and contract.cache.namespaces.items.len > 0)
+            .{ .enabled = true, .values = contract.cache.namespaces.items }
+        else if (!contract.cache.dynamic)
+            .{ .enabled = true, .values = &.{} }
+        else
+            .{},
+    };
+}
+
 pub const PolicyCategory = enum {
     env,
     egress,
@@ -387,4 +418,83 @@ test "runtime policy host matching is case insensitive" {
 
     try std.testing.expect(policy.allowsEgressHost("api.example.com"));
     try std.testing.expect(!policy.allowsEgressHost("other.example.com"));
+}
+
+test "contractToRuntimePolicy restricts static sections" {
+    const allocator = std.testing.allocator;
+
+    const path = try allocator.dupe(u8, "handler.ts");
+    var env_literals: std.ArrayList([]const u8) = .empty;
+    try env_literals.append(allocator, try allocator.dupe(u8, "API_KEY"));
+    try env_literals.append(allocator, try allocator.dupe(u8, "DB_URL"));
+    var hosts: std.ArrayList([]const u8) = .empty;
+    try hosts.append(allocator, try allocator.dupe(u8, "api.stripe.com"));
+    var namespaces: std.ArrayList([]const u8) = .empty;
+    try namespaces.append(allocator, try allocator.dupe(u8, "sessions"));
+
+    var contract = HandlerContract{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = env_literals, .dynamic = false },
+        .egress = .{ .hosts = hosts, .dynamic = false },
+        .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(allocator);
+
+    const policy = contractToRuntimePolicy(&contract);
+
+    // All sections should be restricted
+    try std.testing.expect(policy.env.enabled);
+    try std.testing.expect(policy.egress.enabled);
+    try std.testing.expect(policy.cache.enabled);
+
+    // Should allow proven values
+    try std.testing.expect(policy.allowsEnv("API_KEY"));
+    try std.testing.expect(policy.allowsEnv("DB_URL"));
+    try std.testing.expect(!policy.allowsEnv("SECRET"));
+
+    try std.testing.expect(policy.allowsEgressHost("api.stripe.com"));
+    try std.testing.expect(!policy.allowsEgressHost("evil.com"));
+
+    try std.testing.expect(policy.allowsCacheNamespace("sessions"));
+    try std.testing.expect(!policy.allowsCacheNamespace("other"));
+}
+
+test "contractToRuntimePolicy leaves dynamic sections permissive" {
+    const allocator = std.testing.allocator;
+
+    const path = try allocator.dupe(u8, "handler.ts");
+    var env_literals: std.ArrayList([]const u8) = .empty;
+    try env_literals.append(allocator, try allocator.dupe(u8, "API_KEY"));
+
+    var contract = HandlerContract{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = env_literals, .dynamic = true }, // dynamic
+        .egress = .{ .hosts = .empty, .dynamic = false }, // static, empty
+        .cache = .{ .namespaces = .empty, .dynamic = true }, // dynamic
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(allocator);
+
+    const policy = contractToRuntimePolicy(&contract);
+
+    // Dynamic sections are permissive (not enabled)
+    try std.testing.expect(!policy.env.enabled);
+    try std.testing.expect(policy.allowsEnv("ANYTHING"));
+
+    // Static but empty: restricted to nothing (enabled with empty list)
+    try std.testing.expect(policy.egress.enabled);
+    try std.testing.expect(!policy.allowsEgressHost("any.host"));
+
+    // Dynamic cache is permissive
+    try std.testing.expect(!policy.cache.enabled);
+    try std.testing.expect(policy.allowsCacheNamespace("anything"));
 }

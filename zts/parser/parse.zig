@@ -1267,7 +1267,10 @@ pub const Parser = struct {
             .number => self.parseNumber(),
             .true_lit => self.parseBoolLiteral(true),
             .false_lit => self.parseBoolLiteral(false),
-            .null_lit => self.parseNullLiteral(),
+            .null_lit => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'null' is not supported; use 'undefined' for absent values instead");
+                return error.ParseError;
+            },
             .undefined_lit => self.parseUndefinedLiteral(),
             else => {
                 self.errorAtCurrent("expected pattern (literal, object, or '_' wildcard)");
@@ -1640,7 +1643,10 @@ pub const Parser = struct {
             .string_literal => self.parseString(),
             .true_lit => self.parseBoolLiteral(true),
             .false_lit => self.parseBoolLiteral(false),
-            .null_lit => self.parseNullLiteral(),
+            .null_lit => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'null' is not supported; use 'undefined' for absent values instead");
+                return error.ParseError;
+            },
             .undefined_lit => self.parseUndefinedLiteral(),
             .regex_literal => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "regular expressions are not supported; use string methods instead");
@@ -4405,6 +4411,52 @@ test "parse match expression with wildcard" {
 
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+test "unsupported: null literal" {
+    const allocator = std.testing.allocator;
+    const source = "const x = null;";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "null") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "undefined") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "unsupported: null in match pattern" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const x = match (val) {
+        \\  when null: "missing",
+        \\  default: "present"
+        \\};
+    ;
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "null") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
 }
 
 test "match as property name" {

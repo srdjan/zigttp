@@ -18,7 +18,7 @@ function processData(data: RequestData): ResponseData {
 }
 
 function handler(req: Request): Response {
-    const data = { name: "World", count: 42 } as RequestData;
+    const data: RequestData = { name: "World", count: 42 };
     const result: ResponseData = processData(data);
     return Response.json(result);
 }

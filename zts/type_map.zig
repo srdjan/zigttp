@@ -1,6 +1,6 @@
 //! TypeMap: Structured metadata for type annotations stripped by the TypeScript stripper.
 //!
-//! When the stripper runs in sound mode, it records every type annotation it strips
+//! When the stripper runs, it records every type annotation it strips
 //! as a TypeMapEntry. This allows downstream passes (type checker, type environment)
 //! to reconstruct type information without modifying the parser or IR.
 //!

@@ -2,10 +2,11 @@
 //!
 //! Defines full function signatures for all 27 virtual module exports.
 //! Used by the type checker to validate argument types and infer return types
-//! for calls to zigttp:* module functions.
+//! for calls to zigttp:* module functions. Return types use T | undefined for
+//! optional values (no null in user-facing API).
 //!
 //! Replaces the hardcoded module_return_types table in bool_checker when
-//! the type checker is active in sound mode.
+//! the type checker is active.
 
 const std = @import("std");
 const type_pool_mod = @import("../type_pool.zig");
@@ -39,9 +40,9 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = false },
     });
 
-    // Nullable types
-    const nullable_string = pool.addNullable(allocator, pool.idx_string);
-    const nullable_object = pool.addNullable(allocator, pool.addRef(allocator, "object"));
+    // Optional types (T | undefined)
+    const optional_string = pool.addNullable(allocator, pool.idx_string);
+    const optional_object = pool.addNullable(allocator, pool.addRef(allocator, "object"));
 
     // Store module function signatures in the env by name
     const sigs = [_]struct { name: []const u8, sig: type_env_mod.FunctionSig }{
@@ -50,7 +51,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         .{ .name = "timingSafeEqual", .sig = makeSig(&.{ pool.idx_string, pool.idx_string }, pool.idx_boolean) },
         .{ .name = "jwtVerify", .sig = makeSig(&.{ pool.idx_string, pool.idx_string }, result_type) },
         .{ .name = "jwtSign", .sig = makeSig(&.{ pool.idx_string, pool.idx_string }, pool.idx_string) },
-        .{ .name = "parseBearer", .sig = makeSig(&.{pool.idx_string}, nullable_string) },
+        .{ .name = "parseBearer", .sig = makeSig(&.{pool.idx_string}, optional_string) },
         // zigttp:crypto
         .{ .name = "sha256", .sig = makeSig(&.{pool.idx_string}, pool.idx_string) },
         .{ .name = "hmacSha256", .sig = makeSig(&.{ pool.idx_string, pool.idx_string }, pool.idx_string) },
@@ -67,11 +68,11 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         .{ .name = "cacheDelete", .sig = makeSig(&.{pool.idx_string}, pool.idx_boolean) },
         .{ .name = "cacheIncr", .sig = makeSig(&.{pool.idx_string}, pool.idx_number) },
         .{ .name = "cacheStats", .sig = makeSig(&.{}, pool.idx_string) },
-        .{ .name = "cacheGet", .sig = makeSig(&.{pool.idx_string}, nullable_string) },
+        .{ .name = "cacheGet", .sig = makeSig(&.{pool.idx_string}, optional_string) },
         // zigttp:env
-        .{ .name = "env", .sig = makeSig(&.{pool.idx_string}, nullable_string) },
+        .{ .name = "env", .sig = makeSig(&.{pool.idx_string}, optional_string) },
         // zigttp:router
-        .{ .name = "routerMatch", .sig = makeSig(&.{ pool.idx_string, pool.idx_string, pool.idx_string }, nullable_object) },
+        .{ .name = "routerMatch", .sig = makeSig(&.{ pool.idx_string, pool.idx_string, pool.idx_string }, optional_object) },
         // zigttp:io
         .{ .name = "parallel", .sig = makeSig(&.{}, pool.idx_string) }, // takes array of thunks
         .{ .name = "race", .sig = makeSig(&.{}, pool.idx_string) }, // takes array of thunks

@@ -1,23 +1,10 @@
-# Sound Mode: Strict Boolean Enforcement
+# Boolean Enforcement
 
-Sound mode adds compile-time and runtime enforcement that boolean contexts require actual boolean values. JavaScript's truthy/falsy coercion is a major source of bugs: `if (count)` silently passes when count is 0, `user && user.name` returns the user object instead of a boolean, `!""` is `true`. Sound mode catches these before deployment.
+zigttp enforces that boolean contexts require actual boolean values. JavaScript's truthy/falsy coercion is a major source of bugs: `if (count)` silently passes when count is 0, `user && user.name` returns the user object instead of a boolean, `!""` is `true`. Boolean enforcement catches these at compile time, before deployment.
 
-## Enabling Sound Mode
+The BoolChecker runs during compilation and fails the build on violations. Any values the static checker cannot prove are caught by runtime assertions in the VM at execution time.
 
-**CLI (runtime checking):**
-```bash
-zigttp-server --sound -e "function handler(req) { ... }"
-zigttp-server --sound examples/handler.jsx
-```
-
-**Build option (compile-time checking):**
-```bash
-zig build -Dhandler=handler.jsx -Dsound
-```
-
-When enabled at build time, the BoolChecker runs during precompilation and fails the build on violations. When enabled at runtime via `--sound`, violations in dynamically-loaded handlers are caught before execution, and any values the static checker could not prove (the `unknown` escape hatch) are caught by runtime assertions in the VM.
-
-## What Sound Mode Enforces
+## What Boolean Enforcement Requires
 
 ### 1. Boolean-only if/ternary conditions
 
@@ -32,7 +19,7 @@ if (flag) { ... }  // if flag is known boolean or unknown
 // Fails
 if (0) { ... }              // number in condition
 if ("hello") { ... }        // string in condition
-if (null) { ... }           // null in condition
+if (undefined) { ... }      // undefined in condition
 const count = 42;
 if (count) { ... }          // tracked const number
 ```
@@ -43,7 +30,7 @@ Both sides of `&&` and `||` must be boolean. This prevents the common JS pattern
 
 ```javascript
 // Passes
-if (a > 0 && b !== null) { ... }
+if (a > 0 && b !== undefined) { ... }
 const ok = isValid() || isFallback();
 
 // Fails
@@ -64,7 +51,7 @@ const inverted = !flag;  // if flag is boolean or unknown
 // Fails
 !0            // number operand
 !"str"        // string operand
-!null         // null operand
+!undefined    // undefined operand
 ```
 
 ### 4. Nullish coalescing ?? warnings
@@ -72,18 +59,18 @@ const inverted = !flag;  // if flag is boolean or unknown
 When the left side of `??` is provably non-nullable (number, string, boolean, object, or function), a warning is emitted since the fallback is unreachable.
 
 ```javascript
-// Warning: LHS is never null/undefined
+// Warning: LHS is never undefined
 42 ?? 0
 "str" ?? "default"
 
-// No warning: unknown types may be nullable
+// No warning: unknown types may be undefined
 getValue() ?? fallback
 param ?? defaultValue
 ```
 
 ### 5. == and != are globally banned
 
-The parser already rejects `==` and `!=` with a helpful error message suggesting `===` and `!==`. This is independent of sound mode and always active.
+The parser rejects `==` and `!=` with a helpful error message suggesting `===` and `!==`.
 
 ### 6. typeof guard type narrowing
 
@@ -134,7 +121,7 @@ When `unknown` appears in a boolean context, no diagnostic is emitted. The stati
 
 ## Progressive Inference
 
-Recent sound-mode passes extend the lightweight inference beyond literals and local bindings:
+The BoolChecker extends its lightweight inference beyond literals and local bindings:
 
 ### Known virtual-module imports
 
@@ -161,11 +148,11 @@ if (apiKey !== undefined) {
 
 ### Nullable returns and `??`
 
-The checker models "value may be missing" returns from functions such as `env()`, `parseBearer()`, `cacheGet()`, and `routerMatch()` as nullable variants. These are rejected in boolean contexts until you narrow them explicitly.
+The checker models "value may be missing" returns from functions such as `env()`, `parseBearer()`, `cacheGet()`, and `routerMatch()` as optional variants (`T | undefined`). These are rejected in boolean contexts until you narrow them explicitly.
 
 ```javascript
 const cached = cacheGet("api", req.url);
-if (cached !== null) {
+if (cached !== undefined) {
     return Response.json(JSON.parse(cached));
 }
 
@@ -173,7 +160,7 @@ const appName = env("APP_NAME") ?? "zigttp";
 // Inferred as string
 ```
 
-`??` also emits a warning when the left side is provably never null or undefined.
+`??` also emits a warning when the left side is provably never undefined.
 
 ### Result-shaped property access
 
@@ -215,12 +202,11 @@ if (count) {
 | `true`, `false` | boolean |
 | `42`, `3.14` | number |
 | `"hello"`, `` `template` `` | string |
-| `null` | null |
 | `undefined` | undefined |
 | `{}`, `[]` | object |
 | `() => ...`, `function() {}` | function |
 | `===`, `!==`, `<`, `>`, `<=`, `>=`, `in` | boolean |
-| `&&`, `\|\|` (sound mode) | boolean |
+| `&&`, `\|\|` | boolean |
 | `+` (string + any) | string |
 | `+` (number + number) | number |
 | `-`, `*`, `/`, `%`, `**` | number |
@@ -236,7 +222,7 @@ if (count) {
 | `const f = (x) => x > 0; f(1)` | return type of f (boolean) |
 | `const f = (x) => { return x * 2; }; f(1)` | return type of f (number) |
 | imported virtual-module call | known return type when modeled |
-| nullable virtual-module return | nullable string/object |
+| optional virtual-module return | optional string/object |
 | function calls (untracked callee) | unknown |
 | Result property access (`result.ok`) | known property type when modeled |
 | property access (general case) | unknown |
@@ -245,44 +231,43 @@ if (count) {
 
 ## Migration Guide
 
-| Before (standard JS) | After (sound mode) |
+| Before (standard JS) | After (zigttp) |
 |---|---|
-| `if (x)` | `if (x !== undefined && x !== null)` |
+| `if (x)` | `if (x !== undefined)` |
 | `if (env("KEY"))` | `if (env("KEY") !== undefined)` |
-| `if (cacheGet(ns, key))` | `if (cacheGet(ns, key) !== null)` |
+| `if (cacheGet(ns, key))` | `if (cacheGet(ns, key) !== undefined)` |
 | `if (count)` | `if (count !== 0)` |
 | `if (name)` | `if (name.length > 0)` or `if (name !== "")` |
 | `x && doSomething()` | `if (x) { doSomething(); }` |
 | `x \|\| defaultValue` | `x ?? defaultValue` |
 | `!0` | `false` |
-| `!!x` | `x !== null && x !== undefined` |
+| `!!x` | `x !== undefined` |
 
 ## Diagnostic Reference
 
-All sound mode diagnostics are prefixed with `sound error:` or `sound warning:`.
+All boolean enforcement diagnostics are prefixed with `error:` or `warning:`.
 
 **Errors (block compilation):**
 - `non-boolean value (number) used in boolean context` - help: use explicit comparison: n !== 0
 - `non-boolean value (string) used in boolean context` - help: use explicit comparison: s.length > 0 or s !== ""
-- `non-boolean value (null) used in boolean context` - help: null is not boolean; this condition is always false
 - `non-boolean value (undefined) used in boolean context` - help: undefined is not boolean; this condition is always false
 - `non-boolean value (object) used in boolean context` - help: objects are not boolean; this condition is always true
 - `non-boolean value (function) used in boolean context` - help: functions are not boolean; this condition is always true
-- `non-boolean value (string?) used in boolean context` - help: use an explicit null/undefined check before treating the value as present
-- `non-boolean value (object?) used in boolean context` - help: use an explicit null/undefined check before using the object
+- `non-boolean value (string?) used in boolean context` - help: use explicit undefined check: val !== undefined
+- `non-boolean value (object?) used in boolean context` - help: use explicit undefined check: val !== undefined
 
 **Warnings (do not block compilation):**
-- `left side of '??' is never null or undefined` - help: remove the '??' fallback; it is unreachable
+- `left side of '??' is never undefined` - help: remove the '??' fallback; it is unreachable
 
 ## Runtime Assertions
 
-When sound mode is enabled, the VM enforces boolean values at three opcode sites:
+The VM enforces boolean values at three opcode sites:
 
 - `if_true` / `if_false` / `if_false_goto`: conditional jumps assert `isBool()` before branching
 - `not`: logical NOT asserts `isBool()` before negating
 
-If a non-boolean value reaches these opcodes at runtime, an exception is set: `sound mode: condition must be boolean, got <type>`.
+If a non-boolean value reaches these opcodes at runtime, an exception is set: `condition must be boolean, got <type>`.
 
 Performance impact is negligible: `isBool()` is two u64 comparisons against constants, and the branch predictor nearly always takes the non-error path.
 
-**JIT suppression**: Sound mode disables JIT tier promotion. The JIT compiles conditional jumps to native branches without `isBool()` guards, so all execution stays in the interpreter where assertions are enforced. For FaaS workloads this is typically not a concern since most handlers run below the JIT threshold anyway.
+The JIT includes inline boolean guards at conditional jumps, so boolean enforcement is maintained across both interpreter and JIT tiers.

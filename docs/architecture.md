@@ -127,6 +127,47 @@ Request-scoped arena with O(1) bulk reset. Write barriers detect arena escape. G
 - Zero GC pauses during request handling
 - Write barriers prevent arena objects from leaking to persistent storage
 
+### Structured Concurrent I/O
+
+zigttp avoids async/await, Promises, and event loops. Handler code is always
+synchronous and linear. When a handler needs concurrent outbound HTTP, it uses
+`parallel()` or `race()` from `zigttp:io`. Concurrency happens entirely in the
+I/O layer, invisible to the JavaScript execution model.
+
+**Three-phase collect-execute-join model** (`zts/modules/io.zig`,
+`src/zruntime.zig`):
+
+1. **Collect**: Each thunk is called sequentially on the main thread. A
+   threadlocal `parallel_collector` intercepts `fetchSync` calls during thunk
+   execution - instead of performing HTTP I/O, `fetchSync` records a
+   `FetchDescriptor` (URL, method, body, headers) into the collector and returns
+   immediately.
+
+2. **Execute**: All collected descriptors are dispatched to OS threads. Each
+   worker thread creates its own `std.Io.Threaded` backend and `std.http.Client`
+   for full isolation. HTTP requests run truly in parallel with no shared mutable
+   state between workers.
+
+3. **Join**: The main thread joins all worker threads, builds JS Response objects
+   from the results, and returns them. `parallel()` returns an array in
+   declaration order. `race()` returns the first successful response.
+
+**Design constraints**:
+- At most 8 concurrent operations per call (`MAX_PARALLEL`).
+- Single fetch runs inline without thread overhead.
+- Thread spawn failure falls back to inline execution per slot.
+- Each `fetchSync` inside a thunk is individually checked against egress
+  policies and capability sandboxing.
+- The JS heap is never touched from worker threads - only the main thread
+  interacts with the VM.
+
+**Why not async/await**: zigttp targets FaaS workloads where handlers process a
+single request and exit. Async/await adds complexity (event loop, microtask
+queue, Promise machinery) for a concurrency model that only benefits long-lived
+servers. The collect-execute-join approach gives the same I/O overlap benefit
+with a fraction of the runtime complexity, and the handler code remains a
+straight-line function that the verifier and type checker can fully analyze.
+
 ## Runtime Model
 
 zts uses a **generational garbage collector** with:
@@ -160,6 +201,16 @@ zigttp-server/
 │   ├── builtins.zig       # Built-in JavaScript functions
 │   ├── stripper.zig       # TypeScript/TSX type stripper
 │   ├── comptime.zig       # Compile-time expression evaluator
+│   ├── handler_contract.zig # Contract extraction from IR
+│   ├── handler_policy.zig # Runtime policy + contract-to-policy conversion
+│   ├── modules/
+│   │   ├── io.zig         # Structured concurrent I/O (parallel, race)
+│   │   ├── auth.zig       # JWT, HMAC, webhook verification
+│   │   ├── cache.zig      # In-memory KV cache with LRU
+│   │   ├── validate.zig   # JSON Schema validation
+│   │   ├── env.zig        # Environment variable access
+│   │   ├── crypto.zig     # SHA-256, HMAC, base64
+│   │   └── router.zig     # Pattern-matching HTTP router
 │   ├── jit/
 │   │   └── baseline.zig   # Baseline JIT compiler (x86-64, ARM64)
 │   └── type_feedback.zig  # Call site profiling
@@ -223,6 +274,22 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 **Handler Precompilation** (`tools/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely.
 
 Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
+
+### Compiler-Derived Sandboxing
+
+Every precompilation extracts a handler contract by walking the IR for virtual module imports and call sites. The contract records which env vars, outbound hosts, and cache namespaces the handler accesses, and whether each section uses only literal strings (`dynamic: false`) or includes computed access (`dynamic: true`).
+
+When no explicit `--policy` file is provided, the precompiler auto-derives a `RuntimePolicy` from the contract and embeds it in the generated code. Static sections are restricted to exactly the proven literals. Dynamic sections remain permissive. The result is zero-configuration least-privilege sandboxing for every precompiled handler.
+
+**Key files**:
+- `zts/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
+- `zts/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
+- `tools/precompile.zig` - `writeContractDerivedSection()` embeds derived policy in generated code
+
+**Enforcement points** (existing, activated by the embedded policy):
+- `zts/modules/env.zig` - `allowsEnv()` check on env var access
+- `zts/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
+- `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
 
 ## Deployment Patterns
 

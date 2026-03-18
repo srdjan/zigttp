@@ -69,8 +69,6 @@ pub const RuntimeConfig = struct {
     /// Connect timeout in milliseconds for outbound HTTP requests.
     outbound_timeout_ms: u32 = 10_000,
 
-    /// Enable strict boolean sound mode (static + runtime enforcement)
-    sound_mode: bool = false,
 };
 
 fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.Heap, config: RuntimeConfig) void {
@@ -234,8 +232,7 @@ pub const Runtime = struct {
             }
         }
 
-        var interp = zq.Interpreter.init(ctx);
-        interp.sound_mode = config.sound_mode;
+        const interp = zq.Interpreter.init(ctx);
 
         self.* = .{
             .allocator = allocator,
@@ -278,8 +275,7 @@ pub const Runtime = struct {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
-        var interp = zq.Interpreter.init(pool_rt.ctx);
-        interp.sound_mode = config.sound_mode;
+        const interp = zq.Interpreter.init(pool_rt.ctx);
 
         self.* = .{
             .allocator = allocator,
@@ -703,7 +699,7 @@ pub const Runtime = struct {
         const is_ts = std.mem.endsWith(u8, filename, ".ts");
         const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
         if (is_ts or is_tsx) {
-            strip_result = zq.strip(self.allocator, code, .{ .tsx_mode = is_tsx, .sound_mode = self.config.sound_mode }) catch |err| {
+            strip_result = zq.strip(self.allocator, code, .{ .tsx_mode = is_tsx }) catch |err| {
                 std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
                 return err;
             };
@@ -735,8 +731,8 @@ pub const Runtime = struct {
             return err;
         };
 
-        // Sound mode: run BoolChecker and TypeChecker on parsed IR
-        if (self.config.sound_mode) {
+        // Run BoolChecker and TypeChecker on parsed IR
+        {
             const ir_view = zq.parser.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
 
             // BoolChecker: strict boolean enforcement
@@ -755,7 +751,7 @@ pub const Runtime = struct {
                 if (diag_output.items.len > 0) {
                     std.log.err("{s}", .{diag_output.items});
                 }
-                std.log.err("{d} sound mode error(s), {d} warning(s)", .{
+                std.log.err("{d} boolean check error(s), {d} warning(s)", .{
                     error_count,
                     diags.len - error_count,
                 });
@@ -765,39 +761,38 @@ pub const Runtime = struct {
                 return error.SoundModeViolation;
             }
 
-            // TypeChecker: full type annotation checking (when TypeMap available)
+            // TypeChecker: full type annotation checking (when TypeMap available from .ts/.tsx stripping)
             if (strip_result) |sr| {
-                if (sr.type_map) |tm| {
-                    var type_pool = zq.TypePool.init(self.allocator);
-                    defer type_pool.deinit(self.allocator);
+                const tm = sr.type_map;
+                var type_pool = zq.TypePool.init(self.allocator);
+                defer type_pool.deinit(self.allocator);
 
-                    var type_env = zq.TypeEnv.init(self.allocator, &type_pool);
-                    defer type_env.deinit();
+                var type_env = zq.TypeEnv.init(self.allocator, &type_pool);
+                defer type_env.deinit();
 
-                    // Populate module types and user-declared types
-                    zq.modules.populateModuleTypes(&type_env, &type_pool, self.allocator);
-                    type_env.populateFromTypeMap(&tm);
+                // Populate module types and user-declared types
+                zq.modules.populateModuleTypes(&type_env, &type_pool, self.allocator);
+                type_env.populateFromTypeMap(&tm);
 
-                    var tc = zq.TypeChecker.init(self.allocator, ir_view, &self.ctx.atoms, &type_env);
-                    defer tc.deinit();
+                var tc = zq.TypeChecker.init(self.allocator, ir_view, &self.ctx.atoms, &type_env);
+                defer tc.deinit();
 
-                    const tc_errors = try tc.check(p.root_node);
-                    const tc_diags = tc.getDiagnostics();
+                const tc_errors = try tc.check(p.root_node);
+                const tc_diags = tc.getDiagnostics();
 
-                    if (tc_diags.len > 0) {
-                        var tc_output: std.ArrayList(u8) = .empty;
-                        defer tc_output.deinit(self.allocator);
-                        var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
-                        tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
-                        tc_output = tc_aw.toArrayList();
-                        if (tc_output.items.len > 0) {
-                            std.log.err("{s}", .{tc_output.items});
-                        }
+                if (tc_diags.len > 0) {
+                    var tc_output: std.ArrayList(u8) = .empty;
+                    defer tc_output.deinit(self.allocator);
+                    var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
+                    tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+                    tc_output = tc_aw.toArrayList();
+                    if (tc_output.items.len > 0) {
+                        std.log.err("{s}", .{tc_output.items});
                     }
+                }
 
-                    if (tc_errors > 0) {
-                        return error.SoundModeViolation;
-                    }
+                if (tc_errors > 0) {
+                    return error.SoundModeViolation;
                 }
             }
         }
@@ -1263,7 +1258,7 @@ pub const Runtime = struct {
     /// Create a capabilities object for 2-arg handler invocation.
     /// The caps object contains virtual module functions grouped by namespace.
     /// For now, all registered virtual module functions are included.
-    /// The type checker (sound mode) validates that the handler only accesses
+    /// The type checker validates that the handler only accesses
     /// capabilities declared in its type annotation.
     fn createCapabilitiesObject(self: *Self) !zq.JSValue {
         // Create a plain empty object as the capabilities container.
@@ -1311,7 +1306,7 @@ pub const Runtime = struct {
             const body_str = try self.ctx.createString(body);
             req_obj.setSlot(shapes.request.body_slot, body_str);
         } else {
-            req_obj.setSlot(shapes.request.body_slot, zq.JSValue.null_val);
+            req_obj.setSlot(shapes.request.body_slot, zq.JSValue.undefined_val);
         }
 
         // Headers
@@ -1736,7 +1731,7 @@ fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
             return throwTypeError(ctx, "Failed to track body consumption");
         };
     }
-    return getBodyValue(ctx, this) orelse zq.JSValue.null_val;
+    return getBodyValue(ctx, this) orelse zq.JSValue.undefined_val;
 }
 
 fn findHeaderPropertyAtom(
@@ -2012,12 +2007,12 @@ fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) 
 
 fn headersGetNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    if (!this.isObject() or args.len == 0) return zq.JSValue.null_val;
+    if (!this.isObject() or args.len == 0) return zq.JSValue.undefined_val;
 
-    const wanted = getStringData(args[0]) orelse return zq.JSValue.null_val;
-    const pool = ctx.hidden_class_pool orelse return zq.JSValue.null_val;
+    const wanted = getStringData(args[0]) orelse return zq.JSValue.undefined_val;
+    const pool = ctx.hidden_class_pool orelse return zq.JSValue.undefined_val;
     const headers_obj = this.toPtr(zq.JSObject);
-    return getHeaderValueCaseInsensitive(ctx, headers_obj, pool, wanted) orelse zq.JSValue.null_val;
+    return getHeaderValueCaseInsensitive(ctx, headers_obj, pool, wanted) orelse zq.JSValue.undefined_val;
 }
 
 fn headersHasNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
@@ -2138,7 +2133,7 @@ fn requestConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq
     if (body) |body_str| {
         try ctx.setPropertyChecked(req_obj, zq.Atom.body, try ctx.createString(body_str));
     } else {
-        try ctx.setPropertyChecked(req_obj, zq.Atom.body, zq.JSValue.null_val);
+        try ctx.setPropertyChecked(req_obj, zq.Atom.body, zq.JSValue.undefined_val);
     }
     try ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
 
@@ -4189,7 +4184,7 @@ test "request helpers expose body parsing and case-insensitive headers" {
 
     const handler_code =
         \\function handler(req) {
-        \\  const body = req.body || "";
+        \\  const body = req.body ?? "";
         \\  const data = req.json();
         \\  return Response.json({
         \\    contentType: req.headers.get("content-type"),
@@ -4231,7 +4226,7 @@ test "request helpers expose body parsing and case-insensitive headers" {
     const obj = parsed.value.object;
     try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
     try std.testing.expectEqualStrings("Bearer override", obj.get("auth").?.string);
-    try std.testing.expect(obj.get("missing").? == .null);
+    try std.testing.expect(obj.get("missing") == null); // undefined values are omitted from JSON
     try std.testing.expectEqualStrings("{\"name\":\"zigttp\"}", obj.get("body").?.string);
     try std.testing.expectEqualStrings("zigttp", obj.get("name").?.string);
 }
@@ -4247,9 +4242,9 @@ test "request helpers define empty and invalid body semantics" {
     const handler_code =
         \\function handler(req) {
         \\  return Response.json({
-        \\    body: req.body || "",
+        \\    body: req.body ?? "",
         \\    jsonIsUndefined: req.json() === undefined,
-        \\    missingIsNull: req.headers.get("x-missing") === null,
+        \\    missingIsUndefined: req.headers.get("x-missing") === undefined,
         \\  });
         \\}
     ;
@@ -4271,7 +4266,7 @@ test "request helpers define empty and invalid body semantics" {
     const empty_obj = empty_parsed.value.object;
     try std.testing.expectEqualStrings("", empty_obj.get("body").?.string);
     try std.testing.expectEqual(true, empty_obj.get("jsonIsUndefined").?.bool);
-    try std.testing.expectEqual(true, empty_obj.get("missingIsNull").?.bool);
+    try std.testing.expectEqual(true, empty_obj.get("missingIsUndefined").?.bool);
 
     var invalid_request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
@@ -4289,7 +4284,7 @@ test "request helpers define empty and invalid body semantics" {
     const invalid_obj = invalid_parsed.value.object;
     try std.testing.expectEqualStrings("{invalid json", invalid_obj.get("body").?.string);
     try std.testing.expectEqual(true, invalid_obj.get("jsonIsUndefined").?.bool);
-    try std.testing.expectEqual(true, invalid_obj.get("missingIsNull").?.bool);
+    try std.testing.expectEqual(true, invalid_obj.get("missingIsUndefined").?.bool);
 }
 
 test "Headers Request and Response factories share the HTTP model" {

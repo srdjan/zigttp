@@ -30,7 +30,7 @@ const routes = {
 
 function handler(req) {
     const match = routerMatch(routes, req);
-    if (match) {
+    if (match !== undefined) {
         req.params = match.params;
         return match.handler(req);
     }

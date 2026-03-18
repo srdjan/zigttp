@@ -1862,6 +1862,7 @@ pub const IrView = struct {
                 // Function uses extra data for full structure
                 const extra_start = d.a;
                 const extra = ir.extra.items;
+                if (extra_start + 5 >= extra.len) break :blk null;
                 break :blk .{
                     .scope_id = @truncate(extra[extra_start]),
                     .name_atom = @truncate(extra[extra_start + 1]),

@@ -147,6 +147,26 @@ Shapes:
 
 Build flow: `precompile.zig` compiles handler, serializes bytecode with atoms and shapes, generates `src/generated/embedded_handler.zig`. Server loads via `loadFromCachedBytecode()`.
 
+### Concurrent I/O
+
+**Structured concurrency** (`zts/modules/io.zig`, `src/zruntime.zig`):
+`parallel()` and `race()` overlap outbound HTTP without async/await overhead.
+The three-phase model (collect descriptors, dispatch to OS threads, join results)
+avoids event loop machinery entirely.
+
+Performance characteristics:
+- Single fetch: inline execution, zero thread overhead
+- Multiple fetches: one OS thread per descriptor, each with its own
+  `std.http.Client` and I/O backend - no contention between workers
+- Maximum 8 concurrent operations per call
+- Thread spawn failure degrades gracefully to sequential inline execution
+- The JS heap is never touched from worker threads, so no locking or write
+  barriers are needed during the concurrent phase
+
+The latency of a `parallel()` call equals the slowest fetch plus thread
+spawn/join overhead (typically under 100us). For a handler making 3 API calls
+at 50ms each, `parallel()` reduces total I/O time from ~150ms to ~50ms.
+
 ## Memory Management
 
 ### Hybrid Arena Allocation

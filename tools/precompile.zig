@@ -130,7 +130,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var emit_verify = false;
     var emit_contract = false;
     var policy_path: ?[]const u8 = null;
-    var emit_sound = false;
     var deploy_target_str: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -155,10 +154,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
             continue;
         }
-        if (std.mem.eql(u8, arg, "--sound")) {
-            emit_sound = true;
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--deploy")) {
             deploy_target_str = args.next() orelse {
                 std.debug.print("Missing target after --deploy\n", .{});
@@ -181,13 +176,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] [--sound] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] [--sound] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -225,7 +220,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         emit_verify,
         emit_contract,
         policy,
-        emit_sound,
     ) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
@@ -244,6 +238,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
 
     std.debug.print("Wrote embedded handler to: {s}\n", .{output_path_final});
+
+    // Print sandbox report when auto-deriving from contract (no explicit policy)
+    if (policy == null) {
+        if (compiled.contract) |*contract| {
+            printSandboxReport(contract);
+        }
+    }
 
     // Write contract.json alongside the output if requested
     if (emit_contract) {
@@ -356,7 +357,6 @@ fn compileHandler(
     emit_verify: bool,
     emit_contract: bool,
     policy: ?HandlerPolicy,
-    emit_sound: bool,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
     var strip_result: ?zts.StripResult = null;
@@ -379,7 +379,6 @@ fn compileHandler(
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = comptime_env,
-            .sound_mode = emit_sound,
         }) catch |err| {
             std.debug.print("TypeScript strip error: {}\n", .{err});
             return err;
@@ -421,7 +420,7 @@ fn compileHandler(
         return err;
     };
 
-    const needs_contract = emit_contract or policy != null;
+    const needs_contract = true; // Always extract for auto-sandboxing
 
     // Check for file imports before proceeding with single-module compilation
     const has_file_imports = hasFileImports(&js_parser, root);
@@ -448,73 +447,72 @@ fn compileHandler(
         root,
     ) catch {};
 
-    // Run sound mode bool checker if requested
-    if (emit_sound) {
-        const ir_view_sound = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var checker = zts.BoolChecker.init(allocator, ir_view_sound, &atoms);
+    // Run bool checker and type checker
+    {
+        const ir_view_check = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        var checker = zts.BoolChecker.init(allocator, ir_view_check, &atoms);
         defer checker.deinit();
 
-        const sound_error_count = try checker.check(root);
-        const sound_diags = checker.getDiagnostics();
+        const bool_error_count = try checker.check(root);
+        const bool_diags = checker.getDiagnostics();
 
-        if (sound_diags.len > 0) {
+        if (bool_diags.len > 0) {
             std.debug.print("\n", .{});
-            var sound_output: std.ArrayList(u8) = .empty;
-            defer sound_output.deinit(allocator);
-            var sound_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sound_output);
-            checker.formatDiagnostics(source_to_parse, &sound_aw.writer) catch {};
-            sound_output = sound_aw.toArrayList();
-            if (sound_output.items.len > 0) {
-                std.debug.print("{s}", .{sound_output.items});
+            var bool_output: std.ArrayList(u8) = .empty;
+            defer bool_output.deinit(allocator);
+            var bool_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &bool_output);
+            checker.formatDiagnostics(source_to_parse, &bool_aw.writer) catch {};
+            bool_output = bool_aw.toArrayList();
+            if (bool_output.items.len > 0) {
+                std.debug.print("{s}", .{bool_output.items});
             }
-            std.debug.print("{d} sound mode error(s), {d} warning(s)\n", .{
-                sound_error_count,
-                sound_diags.len - sound_error_count,
+            std.debug.print("{d} boolean check error(s), {d} warning(s)\n", .{
+                bool_error_count,
+                bool_diags.len - bool_error_count,
             });
         }
 
-        if (sound_error_count > 0) {
-            std.debug.print("\nSound mode check failed for {s}\n", .{filename});
+        if (bool_error_count > 0) {
+            std.debug.print("\nBoolean check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
 
-        std.debug.print("Sound mode check passed\n", .{});
+        std.debug.print("Boolean check passed\n", .{});
 
-        // TypeChecker: full type annotation checking (when TypeMap available)
+        // TypeChecker: full type annotation checking (when TypeMap available from .ts/.tsx)
         if (strip_result) |sr| {
-            if (sr.type_map) |tm| {
-                var type_pool = zts.TypePool.init(allocator);
-                defer type_pool.deinit(allocator);
+            const tm = sr.type_map;
+            var type_pool = zts.TypePool.init(allocator);
+            defer type_pool.deinit(allocator);
 
-                var type_env = zts.TypeEnv.init(allocator, &type_pool);
-                defer type_env.deinit();
+            var type_env = zts.TypeEnv.init(allocator, &type_pool);
+            defer type_env.deinit();
 
-                zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
-                type_env.populateFromTypeMap(&tm);
+            zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+            type_env.populateFromTypeMap(&tm);
 
-                var tc = zts.type_checker.TypeChecker.init(allocator, ir_view_sound, &atoms, &type_env);
-                defer tc.deinit();
+            var tc = zts.type_checker.TypeChecker.init(allocator, ir_view_check, &atoms, &type_env);
+            defer tc.deinit();
 
-                const tc_errors = try tc.check(root);
-                const tc_diags = tc.getDiagnostics();
+            const tc_errors = try tc.check(root);
+            const tc_diags = tc.getDiagnostics();
 
-                if (tc_diags.len > 0) {
-                    var tc_output: std.ArrayList(u8) = .empty;
-                    defer tc_output.deinit(allocator);
-                    var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
-                    tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
-                    tc_output = tc_aw.toArrayList();
-                    if (tc_output.items.len > 0) {
-                        std.debug.print("{s}", .{tc_output.items});
-                    }
+            if (tc_diags.len > 0) {
+                var tc_output: std.ArrayList(u8) = .empty;
+                defer tc_output.deinit(allocator);
+                var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
+                tc.formatDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+                tc_output = tc_aw.toArrayList();
+                if (tc_output.items.len > 0) {
+                    std.debug.print("{s}", .{tc_output.items});
                 }
-
-                if (tc_errors > 0) {
-                    std.debug.print("\nType check failed for {s}\n", .{filename});
-                    return error.SoundModeViolation;
-                }
-                std.debug.print("Type check passed\n", .{});
             }
+
+            if (tc_errors > 0) {
+                std.debug.print("\nType check failed for {s}\n", .{filename});
+                return error.SoundModeViolation;
+            }
+            std.debug.print("Type check passed\n", .{});
         }
     }
 
@@ -566,7 +564,6 @@ fn compileHandler(
                 .results_safe = error_count == 0,
                 .unreachable_code = has_unreachable,
                 .bytecode_verified = true, // will be set after bytecode gen
-                .sound_mode_passed = emit_sound, // true if sound mode ran without errors
             };
 
             std.debug.print("Verification passed\n", .{});
@@ -1130,6 +1127,39 @@ fn enforcePolicyForContract(
     return error.PolicyViolation;
 }
 
+fn printSandboxReport(contract: *const HandlerContract) void {
+    const env_restricted = !contract.env.dynamic;
+    const egress_restricted = !contract.egress.dynamic;
+    const cache_restricted = !contract.cache.dynamic;
+
+    if (env_restricted and egress_restricted and cache_restricted) {
+        std.debug.print("Sandbox: complete (all access statically proven)\n", .{});
+    } else {
+        std.debug.print("Sandbox derived from contract:\n", .{});
+    }
+
+    printSandboxSection("env", contract.env.literal.items, env_restricted, "no dynamic access");
+    printSandboxSection("egress", contract.egress.hosts.items, egress_restricted, "no dynamic access");
+    printSandboxSection("cache", contract.cache.namespaces.items, cache_restricted, "no dynamic access");
+}
+
+fn printSandboxSection(name: []const u8, items: []const []const u8, restricted: bool, reason: []const u8) void {
+    if (!restricted) {
+        std.debug.print("  {s}: unrestricted (dynamic access detected)\n", .{name});
+        return;
+    }
+    if (items.len == 0) {
+        std.debug.print("  {s}: restricted to [] (none proven, {s})\n", .{ name, reason });
+        return;
+    }
+    std.debug.print("  {s}: restricted to [", .{name});
+    for (items, 0..) |item, i| {
+        if (i > 0) std.debug.print(", ", .{});
+        std.debug.print("{s}", .{item});
+    }
+    std.debug.print("] ({d} proven, {s})\n", .{ items.len, reason });
+}
+
 /// Derive contract.json path from the output .zig path.
 /// e.g. "src/generated/embedded_handler.zig" -> "src/generated/contract.json"
 /// Derive a sibling path by replacing the filename portion with a suffix.
@@ -1171,7 +1201,8 @@ fn writeZigFile(
         // Append dependency module declarations (required by zruntime.zig)
         try writer.writeAll("\npub const dep_count: u16 = 0;\n");
         try writer.writeAll("pub const dep_bytecodes = [_][]const u8{};\n");
-        try writeCapabilityPolicy(writer, policy);
+        const contract_ptr = if (compiled.contract) |*c| c else null;
+        try writeCapabilityPolicy(writer, policy, contract_ptr);
 
         output = aw.toArrayList();
         try writeFilePosix(path, output.items, allocator);
@@ -1393,27 +1424,35 @@ fn writeZigFile(
         try writer.writeAll("pub const dep_bytecodes = [_][]const u8{};\n");
     }
 
-    try writeCapabilityPolicy(writer, policy);
+    const contract_ptr = if (compiled.contract) |*c| c else null;
+    try writeCapabilityPolicy(writer, policy, contract_ptr);
 
     output = aw.toArrayList();
     try writeFilePosix(path, output.items, allocator);
 }
 
-fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy) !void {
+fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*const HandlerContract) !void {
     try writer.writeAll("\npub const capability_policy = @import(\"zts\").handler_policy.RuntimePolicy{\n");
     if (policy) |p| {
-        try writePolicySection(writer, "env", p.env);
-        try writePolicySection(writer, "egress", p.egress);
-        try writePolicySection(writer, "cache", p.cache);
+        // Explicit policy takes precedence
+        try writePolicySectionFromAllowList(writer, "env", p.env);
+        try writePolicySectionFromAllowList(writer, "egress", p.egress);
+        try writePolicySectionFromAllowList(writer, "cache", p.cache);
+    } else if (contract) |c| {
+        // Auto-derive from contract proven facts
+        try writeContractDerivedSection(writer, "env", c.env.literal.items, c.env.dynamic);
+        try writeContractDerivedSection(writer, "egress", c.egress.hosts.items, c.egress.dynamic);
+        try writeContractDerivedSection(writer, "cache", c.cache.namespaces.items, c.cache.dynamic);
     } else {
-        try writePolicySection(writer, "env", null);
-        try writePolicySection(writer, "egress", null);
-        try writePolicySection(writer, "cache", null);
+        // No policy, no contract: permissive
+        try writePolicySectionFromAllowList(writer, "env", null);
+        try writePolicySectionFromAllowList(writer, "egress", null);
+        try writePolicySectionFromAllowList(writer, "cache", null);
     }
     try writer.writeAll("};\n");
 }
 
-fn writePolicySection(writer: anytype, field_name: []const u8, section: ?handler_policy.AllowList) !void {
+fn writePolicySectionFromAllowList(writer: anytype, field_name: []const u8, section: ?handler_policy.AllowList) !void {
     try writer.print("    .{s} = ", .{field_name});
     if (section) |allow| {
         try writer.writeAll(".{\n");
@@ -1429,6 +1468,29 @@ fn writePolicySection(writer: anytype, field_name: []const u8, section: ?handler
         return;
     }
     try writer.writeAll(".{},\n");
+}
+
+/// Write a policy section derived from contract proven facts.
+/// When dynamic is false, restrict to exactly the proven literals.
+/// When dynamic is true, leave permissive.
+fn writeContractDerivedSection(writer: anytype, field_name: []const u8, literals: []const []const u8, dynamic: bool) !void {
+    try writer.print("    .{s} = ", .{field_name});
+    if (!dynamic) {
+        // Static: restrict to proven literals
+        try writer.writeAll(".{\n");
+        try writer.writeAll("        .enabled = true,\n");
+        try writer.writeAll("        .values = &[_][]const u8{\n");
+        for (literals) |item| {
+            try writer.writeAll("            ");
+            try writeZigStringLiteral(writer, item);
+            try writer.writeAll(",\n");
+        }
+        try writer.writeAll("        },\n");
+        try writer.writeAll("    },\n");
+    } else {
+        // Dynamic: can't restrict
+        try writer.writeAll(".{},\n");
+    }
 }
 
 fn writeBytecodeArray(writer: anytype, bytecode_data: []const u8) !void {
@@ -1523,7 +1585,6 @@ test "compileHandler aggregates contract across file imports" {
         false,
         true,
         policy,
-        false,
     );
     defer compiled.deinit(allocator);
 
@@ -1570,7 +1631,6 @@ test "compileHandler rejects disallowed policy from imported module" {
             false,
             false,
             policy,
-            false,
         ),
     );
 }

@@ -122,6 +122,7 @@ pub const DeoptReason = enum(u8) {
     hidden_class_mismatch,
     overflow,
     callee_changed,
+    bool_expected,
 };
 
 /// Deoptimization point recorded during compilation
@@ -1571,7 +1572,7 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                try self.emitConditionalJump(target, false);
+                try self.emitConditionalJump(target, false, pc - 1);
             },
 
             .push_const_call => {
@@ -1814,14 +1815,14 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                try self.emitConditionalJump(target, true);
+                try self.emitConditionalJump(target, true, pc - 1);
             },
 
             .if_false => {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
-                try self.emitConditionalJump(target, false);
+                try self.emitConditionalJump(target, false, pc - 1);
             },
 
             // Comparison opcodes (integer fast path)
@@ -1857,7 +1858,7 @@ pub const BaselineCompiler = struct {
             .typeof => try self.emitTypeOf(),
 
             // Logical NOT
-            .not => try self.emitLogicalNot(),
+            .not => try self.emitLogicalNot(pc - 1),
 
             else => {
                 return CompileError.UnsupportedOpcode;
@@ -6150,43 +6151,75 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    fn emitLogicalNot(self: *BaselineCompiler) CompileError!void {
-        // Logical NOT: convert value to boolean and negate.
-        // Use Context.jitToBoolean for correctness across all value types.
-
-        const fn_ptr = @intFromPtr(&Context.jitToBoolean);
+    fn emitLogicalNot(self: *BaselineCompiler, bytecode_offset: u32) CompileError!void {
+        // Logical NOT with inline isBool() check.
+        // true -> push false, false -> push true, anything else -> deopt.
+        const true_bits: u64 = @bitCast(value_mod.JSValue.true_val);
+        const false_bits: u64 = @bitCast(value_mod.JSValue.false_val);
 
         if (is_x86_64) {
-            // Pop value into rsi (second argument)
-            try self.emitPopReg(.rsi);
-            // Move context pointer from rbx to rdi (first argument)
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            // Call helper -> bool in rax
-            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
+            const was_true = self.newLocalLabel();
+            const done = self.newLocalLabel();
 
-            // Convert bool to JSValue (!bool)
-            self.emitter.movRegReg(.rcx, .rax) catch return CompileError.OutOfMemory; // rcx = bool
-            self.emitter.movRegImm64(.rax, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rdx, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
-            self.emitter.testRegReg(.rcx, .rcx) catch return CompileError.OutOfMemory;
-            self.emitter.cmovcc(.e, .rax, .rdx) catch return CompileError.OutOfMemory;
+            // Pop value
+            try self.emitPopReg(.rsi);
+
+            // Is it true?
+            self.emitter.movRegImm64(.r11, true_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rsi, .r11) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.e, was_true);
+
+            // Is it false?
+            self.emitter.movRegImm64(.r11, false_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rsi, .r11) catch return CompileError.OutOfMemory;
+            {
+                const deopt_label = self.newLocalLabel();
+                try self.emitJccToLabel(.ne, deopt_label);
+                // was false -> push true
+                self.emitter.movRegImm64(.rax, true_bits) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(done);
+
+                try self.markLabel(deopt_label);
+                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+            }
+
+            // was true -> push false
+            try self.markLabel(was_true);
+            self.emitter.movRegImm64(.rax, false_bits) catch return CompileError.OutOfMemory;
+
+            try self.markLabel(done);
             try self.emitPushReg(.rax);
         } else if (is_aarch64) {
-            // Pop value into x1 (second argument)
-            try self.emitPopReg(.x1);
-            // Move context pointer from x19 to x0 (first argument)
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            // Call helper -> bool in x0
-            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.x9);
+            const was_true = self.newLocalLabel();
+            const done = self.newLocalLabel();
 
-            // Convert bool to JSValue (!bool)
-            self.emitter.movRegReg(.x9, .x0) catch return CompileError.OutOfMemory; // x9 = bool
-            self.emitter.movRegImm64(.x10, @bitCast(value_mod.JSValue.false_val)) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x11, @bitCast(value_mod.JSValue.true_val)) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x9, 0) catch return CompileError.OutOfMemory;
-            self.emitter.csel(.x0, .x11, .x10, .eq) catch return CompileError.OutOfMemory;
+            // Pop value
+            try self.emitPopReg(.x1);
+
+            // Is it true?
+            self.emitter.movRegImm64(.x9, true_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x1, .x9) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, was_true);
+
+            // Is it false?
+            self.emitter.movRegImm64(.x9, false_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x1, .x9) catch return CompileError.OutOfMemory;
+            {
+                const deopt_label = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, deopt_label);
+                // was false -> push true
+                self.emitter.movRegImm64(.x0, true_bits) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(done);
+
+                try self.markLabel(deopt_label);
+                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+            }
+
+            // was true -> push false
+            try self.markLabel(was_true);
+            self.emitter.movRegImm64(.x0, false_bits) catch return CompileError.OutOfMemory;
+
+            try self.markLabel(done);
             try self.emitPushReg(.x0);
         }
     }
@@ -6215,14 +6248,46 @@ pub const BaselineCompiler = struct {
         }
     }
 
-    fn emitConditionalJump(self: *BaselineCompiler, target: u32, jump_if_true: bool) CompileError!void {
-        // Pop condition and convert to boolean
-        const fn_ptr = @intFromPtr(&Context.jitToBoolean);
+    fn emitConditionalJump(self: *BaselineCompiler, target: u32, jump_if_true: bool, bytecode_offset: u32) CompileError!void {
+        // Inline isBool() check: compare against true_val and false_val directly.
+        // Fast path (value is boolean): two 64-bit comparisons (~4 cycles).
+        // Slow path (non-boolean): deopt to interpreter which raises the error.
+        const true_bits: u64 = @bitCast(value_mod.JSValue.true_val);
+        const false_bits: u64 = @bitCast(value_mod.JSValue.false_val);
+
         if (is_x86_64) {
+            const is_true_label = self.newLocalLabel();
+            const check_done = self.newLocalLabel();
+
+            // Pop condition value
             try self.emitPopReg(.rsi);
-            self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.rax);
+
+            // Compare against true
+            self.emitter.movRegImm64(.r11, true_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rsi, .r11) catch return CompileError.OutOfMemory;
+            try self.emitJccToLabel(.e, is_true_label);
+
+            // Compare against false
+            self.emitter.movRegImm64(.r11, false_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.rsi, .r11) catch return CompileError.OutOfMemory;
+            // Neither true nor false: deopt
+            {
+                const deopt_label = self.newLocalLabel();
+                try self.emitJccToLabel(.ne, deopt_label);
+                // is_false: rax = 0
+                self.emitter.xorRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(check_done);
+
+                try self.markLabel(deopt_label);
+                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+            }
+
+            // is_true: rax = 1
+            try self.markLabel(is_true_label);
+            self.emitter.movRegImm32(.rax, 1) catch return CompileError.OutOfMemory;
+
+            // check_done: branch based on rax
+            try self.markLabel(check_done);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
 
             const cond: x86.Condition = if (jump_if_true) .ne else .e;
@@ -6237,10 +6302,38 @@ pub const BaselineCompiler = struct {
                 try self.appendPendingJump(patch_offset, target, true);
             }
         } else if (is_aarch64) {
+            const is_true_label = self.newLocalLabel();
+            const check_done = self.newLocalLabel();
+
+            // Pop condition value into x1
             try self.emitPopReg(.x1);
-            self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
-            try self.emitCallHelperReg(.x9);
+
+            // Compare against true
+            self.emitter.movRegImm64(.x9, true_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x1, .x9) catch return CompileError.OutOfMemory;
+            try self.emitBcondToLabel(.eq, is_true_label);
+
+            // Compare against false
+            self.emitter.movRegImm64(.x9, false_bits) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x1, .x9) catch return CompileError.OutOfMemory;
+            // Neither true nor false: deopt
+            {
+                const deopt_label = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, deopt_label);
+                // is_false: x0 = 0
+                self.emitter.movRegImm64(.x0, 0) catch return CompileError.OutOfMemory;
+                try self.emitJmpToLabel(check_done);
+
+                try self.markLabel(deopt_label);
+                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+            }
+
+            // is_true: x0 = 1
+            try self.markLabel(is_true_label);
+            self.emitter.movRegImm64(.x0, 1) catch return CompileError.OutOfMemory;
+
+            // check_done: branch based on x0
+            try self.markLabel(check_done);
             self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
 
             const cond: arm64.Condition = if (jump_if_true) .ne else .eq;

@@ -41,34 +41,34 @@ pub const exports = [_]resolver.ModuleExport{
 fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
-    if (args.len < 2) return value.JSValue.null_val;
+    if (args.len < 2) return value.JSValue.undefined_val;
 
     const routes_val = args[0];
     const req_val = args[1];
 
     // Get the routes object
-    if (!routes_val.isObject()) return value.JSValue.null_val;
+    if (!routes_val.isObject()) return value.JSValue.undefined_val;
     const routes_obj = routes_val.toPtr(object.JSObject);
 
     // Get request object
-    if (!req_val.isObject()) return value.JSValue.null_val;
+    if (!req_val.isObject()) return value.JSValue.undefined_val;
     const req_obj = req_val.toPtr(object.JSObject);
 
-    const pool = ctx.hidden_class_pool orelse return value.JSValue.null_val;
+    const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
 
-    const method_val = req_obj.getProperty(pool, .method) orelse return value.JSValue.null_val;
-    const method_str = util.extractString(method_val) orelse return value.JSValue.null_val;
+    const method_val = req_obj.getProperty(pool, .method) orelse return value.JSValue.undefined_val;
+    const method_str = util.extractString(method_val) orelse return value.JSValue.undefined_val;
 
     // Try url first (full URL path), fall back to path
     const path_val = req_obj.getProperty(pool, .url) orelse
-        (req_obj.getProperty(pool, .path) orelse return value.JSValue.null_val);
-    const full_path = util.extractString(path_val) orelse return value.JSValue.null_val;
+        (req_obj.getProperty(pool, .path) orelse return value.JSValue.undefined_val);
+    const full_path = util.extractString(path_val) orelse return value.JSValue.undefined_val;
 
     // Strip query string for matching
     const path_str = if (std.mem.indexOfScalar(u8, full_path, '?')) |qi| full_path[0..qi] else full_path;
 
     // Get route property names and iterate
-    const keys = routes_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return value.JSValue.null_val;
+    const keys = routes_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return value.JSValue.undefined_val;
     defer ctx.allocator.free(keys);
 
     for (keys) |atom| {
@@ -80,7 +80,7 @@ fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
             const handler_val = routes_obj.getProperty(pool, atom) orelse continue;
 
             // Create params object
-            const params_obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch return value.JSValue.null_val;
+            const params_obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch return value.JSValue.undefined_val;
 
             for (0..match_result.count) |pi| {
                 const param = match_result.params[pi];
@@ -90,19 +90,19 @@ fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
             }
 
             // Create result object { handler, params }
-            const result_obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch return value.JSValue.null_val;
-            const handler_atom = ctx.atoms.intern("handler") catch return value.JSValue.null_val;
-            const params_atom = ctx.atoms.intern("params") catch return value.JSValue.null_val;
+            const result_obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch return value.JSValue.undefined_val;
+            const handler_atom = ctx.atoms.intern("handler") catch return value.JSValue.undefined_val;
+            const params_atom = ctx.atoms.intern("params") catch return value.JSValue.undefined_val;
 
-            result_obj.setProperty(ctx.allocator, pool, handler_atom, handler_val) catch return value.JSValue.null_val;
-            result_obj.setProperty(ctx.allocator, pool, params_atom, params_obj.toValue()) catch return value.JSValue.null_val;
+            result_obj.setProperty(ctx.allocator, pool, handler_atom, handler_val) catch return value.JSValue.undefined_val;
+            result_obj.setProperty(ctx.allocator, pool, params_atom, params_obj.toValue()) catch return value.JSValue.undefined_val;
 
             return result_obj.toValue();
         }
     }
 
     // No route matched
-    return value.JSValue.null_val;
+    return value.JSValue.undefined_val;
 }
 
 /// Get the string name for an atom (predefined or dynamic)

@@ -53,8 +53,8 @@ pub const TypeTag = enum(u8) {
     t_generic_param, // type variable (T in <T>)
     t_generic_app, // generic application (Array<number>)
 
-    // Nullable shorthand
-    t_nullable, // T | null | undefined (wraps inner type)
+    // Optional shorthand
+    t_nullable, // T | undefined (wraps inner type)
 };
 
 // ---------------------------------------------------------------------------
@@ -748,34 +748,15 @@ const TypeExprParser = struct {
             if (!self.match('|')) break;
         }
 
-        // Check for nullable shorthand: T | null, T | undefined, T | null | undefined
+        // Check for optional shorthand: T | undefined
         if (count == 2) {
             const tag0 = self.pool.getTag(members_buf[0]);
             const tag1 = self.pool.getTag(members_buf[1]);
-            if (tag1 == .t_null or tag1 == .t_undefined) {
+            if (tag1 == .t_undefined) {
                 return self.pool.addNullable(self.allocator, members_buf[0]);
             }
-            if (tag0 == .t_null or tag0 == .t_undefined) {
+            if (tag0 == .t_undefined) {
                 return self.pool.addNullable(self.allocator, members_buf[1]);
-            }
-        }
-        if (count == 3) {
-            // Check for T | null | undefined pattern
-            var base: TypeIndex = null_type_idx;
-            var has_null = false;
-            var has_undef = false;
-            for (members_buf[0..count]) |m| {
-                const t = self.pool.getTag(m);
-                if (t == .t_null) {
-                    has_null = true;
-                } else if (t == .t_undefined) {
-                    has_undef = true;
-                } else {
-                    base = m;
-                }
-            }
-            if (has_null and has_undef and base != null_type_idx) {
-                return self.pool.addNullable(self.allocator, base);
             }
         }
 
@@ -995,7 +976,8 @@ const TypeExprParser = struct {
         if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.pool.idx_boolean;
         if (std.mem.eql(u8, ident, "number")) return self.pool.idx_number;
         if (std.mem.eql(u8, ident, "string")) return self.pool.idx_string;
-        if (std.mem.eql(u8, ident, "null")) return self.pool.idx_null;
+        // 'null' type not supported - treat as unknown (parser rejects null literals)
+        if (std.mem.eql(u8, ident, "null")) return self.pool.idx_unknown;
         if (std.mem.eql(u8, ident, "undefined")) return self.pool.idx_undefined;
         if (std.mem.eql(u8, ident, "void")) return self.pool.idx_void;
         if (std.mem.eql(u8, ident, "never")) return self.pool.idx_never;
@@ -1253,7 +1235,8 @@ test "parseTypeExpr primitives" {
     try std.testing.expectEqual(pool.idx_string, parseTypeExpr(&pool, allocator, "string"));
     try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, "boolean"));
     try std.testing.expectEqual(pool.idx_void, parseTypeExpr(&pool, allocator, "void"));
-    try std.testing.expectEqual(pool.idx_null, parseTypeExpr(&pool, allocator, "null"));
+    // 'null' type resolves to unknown (not supported)
+    try std.testing.expectEqual(pool.idx_unknown, parseTypeExpr(&pool, allocator, "null"));
 }
 
 test "parseTypeExpr union" {
@@ -1267,12 +1250,12 @@ test "parseTypeExpr union" {
     try std.testing.expectEqual(@as(usize, 2), members.len);
 }
 
-test "parseTypeExpr nullable" {
+test "parseTypeExpr optional" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "string | null");
+    const idx = parseTypeExpr(&pool, allocator, "string | undefined");
     try std.testing.expectEqual(TypeTag.t_nullable, pool.getTag(idx).?);
     try std.testing.expectEqual(pool.idx_string, pool.getNullableInner(idx));
 }

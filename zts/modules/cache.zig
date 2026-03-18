@@ -287,15 +287,15 @@ fn getOrCreateStore(ctx: *context.Context) !*CacheStore {
 fn cacheGetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
 
-    if (args.len < 2) return value.JSValue.null_val;
-    const ns = util.extractString(args[0]) orelse return value.JSValue.null_val;
+    if (args.len < 2) return value.JSValue.undefined_val;
+    const ns = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
     if (!ensureNamespaceAllowed(ctx, ns)) return value.JSValue.exception_val;
-    const key = util.extractString(args[1]) orelse return value.JSValue.null_val;
+    const key = util.extractString(args[1]) orelse return value.JSValue.undefined_val;
 
-    const store = getOrCreateStore(ctx) catch return value.JSValue.null_val;
-    const result = store.get(ns, key) orelse return value.JSValue.null_val;
+    const store = getOrCreateStore(ctx) catch return value.JSValue.undefined_val;
+    const result = store.get(ns, key) orelse return value.JSValue.undefined_val;
 
-    return ctx.createString(result) catch value.JSValue.null_val;
+    return ctx.createString(result) catch value.JSValue.undefined_val;
 }
 
 /// cacheSet(namespace, key, value, ttl?) -> boolean

@@ -23,7 +23,8 @@ Functions, Cloudflare Workers), powered by Zig and zts.
 14. [Performance Tuning](#performance-tuning-for-faas)
 15. [Compile-Time Verification](#compile-time-verification)
 16. [Contract Manifest](#contract-manifest)
-17. [Troubleshooting](#troubleshooting)
+17. [Runtime Sandboxing](#runtime-sandboxing)
+18. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -1788,7 +1789,9 @@ See [verification.md](verification.md) for the full specification, recognized pa
 
 ## Contract Manifest
 
-Add `-Dcontract` to emit a `contract.json` describing your handler's capabilities:
+Every precompilation automatically extracts a contract from the handler's IR,
+describing what the handler does. Add `-Dcontract` to also emit the contract as
+a `contract.json` file:
 
 ```bash
 zig build -Dhandler=handler.ts -Dcontract
@@ -1802,16 +1805,57 @@ The contract extracts from the handler's IR:
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Verification results (when combined with `-Dverify`)
 
-Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an honest signal that static analysis cannot enumerate all values.
+Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an
+honest signal that static analysis cannot enumerate all values.
 
 ```bash
 # Combine verification and contract
 zig build -Dhandler=handler.ts -Dverify -Dcontract
 ```
 
-The contract is written to `src/generated/contract.json` alongside the embedded bytecode.
+The contract is written to `src/generated/contract.json` alongside the embedded
+bytecode.
 
-Add `-Dpolicy=policy.json` to enforce a least-privilege capability policy for a precompiled handler:
+## Runtime Sandboxing
+
+Every precompiled handler is automatically sandboxed based on its contract. No
+configuration required. The compiler derives a `RuntimePolicy` from the contract
+and embeds it in the generated code.
+
+### How It Works
+
+The contract records whether each capability section (env, egress, cache) uses
+only literal string arguments or includes dynamic (computed) access:
+
+- **Static access** (`dynamic: false`): the compiler proved all calls use string
+  literals. The sandbox restricts to exactly those values. Any runtime access to
+  an unlisted value throws a `CapabilityPolicyError`.
+- **Dynamic access** (`dynamic: true`): some calls use computed arguments. That
+  section remains unrestricted because the compiler cannot enumerate all possible
+  values.
+
+The build prints a sandbox report:
+
+```
+Sandbox: complete (all access statically proven)
+  env: restricted to [API_KEY, DATABASE_URL] (2 proven, no dynamic access)
+  egress: restricted to [api.stripe.com] (1 proven, no dynamic access)
+  cache: restricted to [sessions] (1 proven, no dynamic access)
+```
+
+Or for partial proof:
+
+```
+Sandbox derived from contract:
+  env: restricted to [API_KEY] (1 proven, no dynamic access)
+  egress: unrestricted (dynamic access detected)
+  cache: restricted to [] (none proven, no dynamic access)
+```
+
+### Explicit Policy Override
+
+Add `-Dpolicy=policy.json` to override auto-derived sandboxing with an explicit
+least-privilege capability policy:
 
 ```bash
 zig build -Dhandler=handler.ts -Dpolicy=policy.json
@@ -1825,13 +1869,20 @@ zig build -Dhandler=handler.ts -Dpolicy=policy.json
 }
 ```
 
-Policy rules in v1:
+Explicit policy rules:
 
 - Omit a section to leave that capability unrestricted.
 - If a section is present, only the listed literals are allowed.
-- Dynamic access in a restricted category fails the build because zigttp cannot enumerate it soundly.
-- Runtime enforcement currently applies to precompiled handlers only.
-- Local file imports are aggregated before validation, so helper modules count toward the same policy.
+- Dynamic access in a restricted category fails the build because zigttp cannot
+  enumerate it soundly.
+- Local file imports are aggregated before validation, so helper modules count
+  toward the same policy.
+
+### Non-Precompiled Handlers
+
+Handlers run via `zig build run --` (dev mode) are not sandboxed. Sandboxing
+requires precompilation (`-Dhandler=...`) because contract extraction runs as
+part of the compile pipeline.
 
 ---
 

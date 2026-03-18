@@ -1,4 +1,4 @@
-//! Type Checker: validates types across the IR tree in sound mode.
+//! Type Checker: validates types across the IR tree.
 //!
 //! Walks the IR tree produced by the parser, consulting the TypeEnv (populated
 //! from the stripper's TypeMap) to check:
@@ -419,7 +419,7 @@ pub const TypeChecker = struct {
             .lit_bool => pool.idx_boolean,
             .lit_int, .lit_float => pool.idx_number,
             .lit_string, .template_literal => pool.idx_string,
-            .lit_null => pool.idx_null,
+            .lit_null => pool.idx_undefined, // parser rejects null, but map defensively
             .lit_undefined => pool.idx_undefined,
             .object_literal => self.inferObjectLiteralType(node),
             .array_literal => null_type_idx, // Could be refined with element type inference
@@ -487,7 +487,7 @@ pub const TypeChecker = struct {
                 if (lt_tag == .t_nullable) {
                     return pool.getNullableInner(lt);
                 }
-                if (lt_tag == .t_null or lt_tag == .t_undefined) return rt;
+                if (lt_tag == .t_undefined) return rt;
                 if (lt != null_type_idx) return lt; // non-nullable ?? anything -> left
                 return null_type_idx;
             },

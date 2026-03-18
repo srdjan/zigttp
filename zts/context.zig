@@ -887,12 +887,6 @@ pub const Context = struct {
         return self.createString(type_str) catch value.JSValue.undefined_val;
     }
 
-    /// JIT helper: convert value to boolean without allocation
-    /// Returns a native bool for branch decisions
-    pub fn jitToBoolean(_: *Context, val: value.JSValue) callconv(.c) bool {
-        return val.toBoolean();
-    }
-
     /// JIT helper: get property by atom index
     pub fn jitGetField(self: *Context, obj_val: value.JSValue, atom_idx: u16) callconv(.c) value.JSValue {
         const pool = self.hidden_class_pool orelse return value.JSValue.undefined_val;
