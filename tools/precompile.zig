@@ -248,7 +248,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Write contract.json alongside the output if requested
     if (emit_contract) {
         if (compiled.contract) |*contract| {
-            const contract_path = deriveContractPath(allocator, output_path_final) catch |err| {
+            const contract_path = deriveSiblingPath(allocator, output_path_final, "contract.json") catch |err| {
                 std.debug.print("Error deriving contract path: {}\n", .{err});
                 return err;
             };
@@ -295,7 +295,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 }
 
                 // Derive deploy output directory from the output path
-                const deploy_dir = deriveDeployDir(allocator, output_path_final) catch |err| {
+                const deploy_dir = deriveSiblingPath(allocator, output_path_final, "deploy/") catch |err| {
                     std.debug.print("Error deriving deploy dir: {}\n", .{err});
                     return err;
                 };
@@ -1132,31 +1132,17 @@ fn enforcePolicyForContract(
 
 /// Derive contract.json path from the output .zig path.
 /// e.g. "src/generated/embedded_handler.zig" -> "src/generated/contract.json"
-fn deriveContractPath(allocator: std.mem.Allocator, output_path: []const u8) ![]u8 {
-    // Find the last '/' to get the directory
+/// Derive a sibling path by replacing the filename portion with a suffix.
+/// E.g. deriveSiblingPath("src/generated/foo.zig", "contract.json") -> "src/generated/contract.json"
+fn deriveSiblingPath(allocator: std.mem.Allocator, output_path: []const u8, suffix: []const u8) ![]u8 {
     var dir_end: usize = 0;
     for (output_path, 0..) |c, i| {
         if (c == '/') dir_end = i + 1;
     }
-
     const dir = output_path[0..dir_end];
-    const result = try allocator.alloc(u8, dir.len + "contract.json".len);
+    const result = try allocator.alloc(u8, dir.len + suffix.len);
     @memcpy(result[0..dir.len], dir);
-    @memcpy(result[dir.len..], "contract.json");
-    return result;
-}
-
-fn deriveDeployDir(allocator: std.mem.Allocator, output_path: []const u8) ![]u8 {
-    // Find the last '/' to get the directory, then append "deploy/"
-    var dir_end: usize = 0;
-    for (output_path, 0..) |c, i| {
-        if (c == '/') dir_end = i + 1;
-    }
-
-    const dir = output_path[0..dir_end];
-    const result = try allocator.alloc(u8, dir.len + "deploy/".len);
-    @memcpy(result[0..dir.len], dir);
-    @memcpy(result[dir.len..], "deploy/");
+    @memcpy(result[dir.len..], suffix);
     return result;
 }
 

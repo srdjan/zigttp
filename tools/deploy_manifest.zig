@@ -11,7 +11,6 @@
 const std = @import("std");
 const handler_contract = @import("zts").handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
-const VerificationInfo = handler_contract.VerificationInfo;
 
 // -------------------------------------------------------------------------
 // Platform-agnostic proven facts
@@ -99,7 +98,7 @@ pub fn extractProvenFacts(
 
     // Collect checks that passed
     var checks: std.ArrayList([]const u8) = .empty;
-    defer checks.deinit(allocator);
+    errdefer checks.deinit(allocator);
 
     if (contract.verification) |v| {
         if (v.exhaustive_returns) try checks.append(allocator, "exhaustiveReturns");
@@ -110,7 +109,7 @@ pub fn extractProvenFacts(
 
     // Build routes from contract
     var routes: std.ArrayList(ProvenRoute) = .empty;
-    defer routes.deinit(allocator);
+    errdefer routes.deinit(allocator);
 
     for (contract.routes.items) |route| {
         try routes.append(allocator, .{
@@ -119,8 +118,9 @@ pub fn extractProvenFacts(
         });
     }
 
-    const checks_buf = try allocator.dupe([]const u8, checks.items);
-    const routes_buf = try allocator.dupe(ProvenRoute, routes.items);
+    const checks_buf = try checks.toOwnedSlice(allocator);
+    errdefer allocator.free(checks_buf);
+    const routes_buf = try routes.toOwnedSlice(allocator);
 
     const proof_level = deriveProofLevel(contract);
 
@@ -224,8 +224,14 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll(check);
         try w.writeByte('"');
     }
-    try w.writeAll("]\n");
-    try w.writeAll("    }\n");
+    try w.writeAll("],\n");
+    // Env proof status in metadata (not as a fake env var)
+    try w.writeAll("      \"envProven\": ");
+    try w.writeAll(if (facts.env_proven) "true" else "false");
+    if (!facts.env_proven) {
+        try w.writeAll(",\n      \"envReview\": \"handler uses dynamic env access - additional vars may be needed\"");
+    }
+    try w.writeAll("\n    }\n");
     try w.writeAll("  },\n");
 
     // Parameters (one per env var)
@@ -275,18 +281,9 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll("\" }");
     }
     if (facts.env_vars.len > 0) {
-        try w.writeAll(",\n            ");
-    } else {
-        try w.writeAll("\n            ");
+        try w.writeAll("\n          ");
     }
-
-    // Proven/review comment as a special env var
-    if (facts.env_proven) {
-        try w.writeAll("\"_proven_env\": \"handler reads exactly these env vars and no others\"");
-    } else {
-        try w.writeAll("\"_review_env\": \"handler uses dynamic env access - additional vars may be needed\"");
-    }
-    try w.writeAll("\n          }\n");
+    try w.writeAll("}\n");
     try w.writeAll("        },\n");
 
     // Events (routes)
@@ -361,8 +358,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll("}\n");
 
     output = aw.toArrayList();
-    const content = try allocator.dupe(u8, output.items);
-    output.deinit(allocator);
+    const content = try output.toOwnedSlice(allocator);
 
     const outputs = try allocator.alloc(RenderOutput, 1);
     outputs[0] = .{
@@ -417,7 +413,8 @@ fn toLower(c: u8) u8 {
     return c;
 }
 
-/// Write a string's content (without surrounding quotes) with JSON escaping
+/// Write a string's content (without surrounding quotes) with JSON escaping.
+/// Handles control characters (matching handler_contract.zig's writeJsonString).
 fn writeJsonStringContent(w: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
@@ -426,6 +423,9 @@ fn writeJsonStringContent(w: anytype, s: []const u8) !void {
             '\n' => try w.writeAll("\\n"),
             '\r' => try w.writeAll("\\r"),
             '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
+                try w.print("\\u{x:0>4}", .{@as(u16, c)});
+            },
             else => try w.writeByte(c),
         }
     }
@@ -450,30 +450,21 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
 
     if (facts.env_vars.len > 0 and facts.env_proven) {
         try w.writeAll("  Environment variables: ");
-        for (facts.env_vars, 0..) |v, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.writeAll(v);
-        }
+        try writeCommaList(w, facts.env_vars);
         try w.writeAll("\n");
         any_proven = true;
     }
 
     if (facts.egress_hosts.len > 0 and facts.egress_proven) {
         try w.writeAll("  Outbound hosts: ");
-        for (facts.egress_hosts, 0..) |h, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.writeAll(h);
-        }
+        try writeCommaList(w, facts.egress_hosts);
         try w.writeAll("\n");
         any_proven = true;
     }
 
     if (facts.cache_namespaces.len > 0 and facts.cache_proven) {
         try w.writeAll("  Cache namespaces: ");
-        for (facts.cache_namespaces, 0..) |ns, i| {
-            if (i > 0) try w.writeAll(", ");
-            try w.writeAll(ns);
-        }
+        try writeCommaList(w, facts.cache_namespaces);
         try w.writeAll("\n");
         any_proven = true;
     }
@@ -483,11 +474,7 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
         for (facts.routes, 0..) |route, i| {
             if (i > 0) try w.writeAll(", ");
             try w.writeAll(route.pattern);
-            if (route.is_prefix) {
-                try w.writeAll(" (prefix)");
-            } else {
-                try w.writeAll(" (exact)");
-            }
+            try w.writeAll(if (route.is_prefix) " (prefix)" else " (exact)");
         }
         try w.writeAll("\n");
         any_proven = true;
@@ -502,44 +489,17 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
     var any_review = false;
 
     if (!facts.env_proven) {
-        try w.writeAll("  Environment variables: handler uses dynamic env access");
-        if (facts.env_vars.len > 0) {
-            try w.writeAll(" (known: ");
-            for (facts.env_vars, 0..) |v, i| {
-                if (i > 0) try w.writeAll(", ");
-                try w.writeAll(v);
-            }
-            try w.writeAll(")");
-        }
-        try w.writeAll("\n");
+        try writeReviewLine(w, "Environment variables: handler uses dynamic env access", facts.env_vars);
         any_review = true;
     }
 
     if (!facts.egress_proven) {
-        try w.writeAll("  Outbound hosts: handler uses dynamic URLs");
-        if (facts.egress_hosts.len > 0) {
-            try w.writeAll(" (known: ");
-            for (facts.egress_hosts, 0..) |h, i| {
-                if (i > 0) try w.writeAll(", ");
-                try w.writeAll(h);
-            }
-            try w.writeAll(")");
-        }
-        try w.writeAll("\n");
+        try writeReviewLine(w, "Outbound hosts: handler uses dynamic URLs", facts.egress_hosts);
         any_review = true;
     }
 
     if (!facts.cache_proven) {
-        try w.writeAll("  Cache namespaces: handler uses dynamic cache keys");
-        if (facts.cache_namespaces.len > 0) {
-            try w.writeAll(" (known: ");
-            for (facts.cache_namespaces, 0..) |ns, i| {
-                if (i > 0) try w.writeAll(", ");
-                try w.writeAll(ns);
-            }
-            try w.writeAll(")");
-        }
-        try w.writeAll("\n");
+        try writeReviewLine(w, "Cache namespaces: handler uses dynamic cache keys", facts.cache_namespaces);
         any_review = true;
     }
 
@@ -561,6 +521,24 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
 
     try w.writeAll("\nPROOF LEVEL: ");
     try w.writeAll(facts.proof_level.toString());
+    try w.writeAll("\n");
+}
+
+fn writeCommaList(w: anytype, items: []const []const u8) !void {
+    for (items, 0..) |item, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.writeAll(item);
+    }
+}
+
+fn writeReviewLine(w: anytype, label: []const u8, known_items: []const []const u8) !void {
+    try w.writeAll("  ");
+    try w.writeAll(label);
+    if (known_items.len > 0) {
+        try w.writeAll(" (known: ");
+        try writeCommaList(w, known_items);
+        try w.writeAll(")");
+    }
     try w.writeAll("\n");
 }
 
@@ -787,7 +765,7 @@ test "renderAws with env vars and routes" {
     try std.testing.expect(std.mem.indexOf(u8, content, "JwtSecret") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "ApiKey") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "PROVEN: handler reads JWT_SECRET") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "_proven_env") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"envProven\": true") != null);
 
     // Routes become events
     try std.testing.expect(std.mem.indexOf(u8, content, "RouteHealth") != null);
@@ -829,7 +807,7 @@ test "renderAws dynamic env produces review comment" {
     }
 
     const content = outputs[0].content;
-    try std.testing.expect(std.mem.indexOf(u8, content, "_review_env") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"envProven\": false") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "dynamic env access") != null);
 }
 
