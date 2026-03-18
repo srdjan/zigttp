@@ -18,11 +18,17 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges, no exceptions, and no non-local jumps - the IR tree IS the control flow graph. See [verification docs](docs/verification.md).
 
-**Strict boolean sound mode.** `-Dsound` (or `--sound`) rejects truthy/falsy coercion in conditions and logical operators. The checker now performs progressive type inference for known virtual-module imports, `match` expressions, nullable returns like `env()`/`cacheGet()`, and Result-shaped values like `jwtVerify(...).ok`. See [sound mode docs](docs/sound-mode.md).
+**Boolean enforcement.** Truthy/falsy coercion is rejected in conditions and logical operators - always, not behind a flag. The BoolChecker performs progressive type inference for virtual-module return types, `match` expressions, optional returns like `env()`/`cacheGet()`, and Result-shaped values like `jwtVerify(...).ok`. Values the static checker cannot prove are caught by runtime VM assertions. See [boolean enforcement docs](docs/sound-mode.md).
 
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
 
-**Contract manifests and policy enforcement.** `-Dcontract` emits a machine-readable `contract.json` describing what your handler is allowed to do: which modules it imports, which env vars it reads, which hosts it calls, which cache namespaces it uses. `-Dpolicy=policy.json` turns that into an enforced least-privilege build for precompiled handlers by rejecting disallowed env vars, outbound hosts, and cache namespaces at build time and runtime. Non-literal arguments honestly report `"dynamic": true`.
+**Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`.
+
+**Full TypeScript type checking.** Beyond stripping type annotations, the compiler checks them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are all validated at build time. Interface declarations with all-function members are treated as nominal types to prevent structural forgery.
+
+**Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
+
+**Proven deployment manifests.** `-Ddeploy=aws` generates platform-specific deployment configurations (AWS SAM templates) directly from compiler-proven contracts. Env vars become parameters, routes become API events, egress hosts become tags. Proof levels (complete/partial/none) signal what was statically verified vs what needs manual review.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 
@@ -136,6 +142,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
+| `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 
 ### Auth Example
 
@@ -144,7 +151,7 @@ import { parseBearer, jwtVerify, jwtSign } from "zigttp:auth";
 
 function handler(req: Request): Response {
     const token = parseBearer(req.headers["authorization"]);
-    if (token === null) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
 
     const result = jwtVerify(token, "my-secret");
     if (!result.ok) return Response.json({ error: result.error }, { status: 401 });
@@ -185,12 +192,33 @@ import { cacheGet, cacheSet, cacheStats } from "zigttp:cache";
 
 function handler(req: Request): Response {
     const cached = cacheGet("api", req.url);
-    if (cached !== null) return Response.json(JSON.parse(cached));
+    if (cached !== undefined) return Response.json(JSON.parse(cached));
 
     const data = { message: "computed", path: req.url };
     cacheSet("api", req.url, JSON.stringify(data), 60); // TTL: 60 seconds
 
     return Response.json(data);
+}
+```
+
+### Concurrent I/O Example
+
+```typescript
+import { parallel, race } from "zigttp:io";
+
+function handler(req: Request): Response {
+    // Three API calls in ~50ms instead of ~150ms
+    const [user, orders, inventory] = parallel([
+        () => fetchSync("https://users.internal/api/v1/123"),
+        () => fetchSync("https://orders.internal/api/v1?user=123"),
+        () => fetchSync("https://inventory.internal/api/v1/789")
+    ]);
+
+    return Response.json({
+        user: user.json(),
+        orders: orders.json(),
+        inventory: inventory.json()
+    });
 }
 ```
 
@@ -221,13 +249,17 @@ Options:
 
 **HTTP/FaaS Optimizations**: Shape preallocation for Request/Response objects, pre-interned HTTP atoms, HTTP string caching, LockFreePool handler isolation, zero-copy response mode.
 
-**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract manifests (`-Dcontract`) enumerate capabilities. Build-time precompilation eliminates runtime parsing.
+**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract extraction and auto-sandboxing restrict runtime capabilities to proven values. Boolean enforcement rejects truthy/falsy coercion. Full TypeScript type checking validates annotations against virtual module signatures.
 
-**Language Support**: ES5 + select ES6 features (for...of, typed arrays, exponentiation), native TypeScript/TSX stripping, compile-time evaluation with `comptime()`, direct JSX parsing.
+**Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
+
+**Deployment Pipeline**: Contract manifests (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), and auto-derived runtime sandboxing form a pipeline from source analysis to platform-specific deployment configuration.
+
+**Language Support**: ES5 + select ES6 features (for...of, typed arrays, exponentiation), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing.
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
@@ -270,13 +302,13 @@ Use `--outbound-host` to restrict egress to a single host.
 
 ## Compile-Time Toolchain
 
-zigttp's compile-time toolchain goes beyond precompilation. It can verify your handler is correct, extract a contract manifest of its capabilities, and embed optimized bytecode - all at build time.
+zigttp's compile-time toolchain goes beyond precompilation. It verifies correctness, checks types, extracts a capability contract, auto-derives a runtime sandbox, and can generate platform-specific deployment configs - all at build time.
 
 ```bash
 # Development build (runtime handler loading)
 zig build -Doptimize=ReleaseFast
 
-# Production build (embedded bytecode, 16% faster cold starts)
+# Production build (embedded bytecode, auto-sandboxed, 16% faster cold starts)
 zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
 
 # Verify handler correctness at compile time
@@ -285,11 +317,14 @@ zig build -Dhandler=handler.ts -Dverify
 # Emit contract manifest (what the handler is allowed to do)
 zig build -Dhandler=handler.ts -Dcontract
 
-# Enforce a capability policy for a precompiled handler
+# Override auto-derived sandbox with an explicit capability policy
 zig build -Dhandler=handler.ts -Dpolicy=policy.json
 
+# Generate proven AWS SAM deployment manifest
+zig build -Dhandler=handler.ts -Ddeploy=aws
+
 # Combine all passes
-zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Dpolicy=policy.json -Daot
+zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Ddeploy=aws
 ```
 
 ### Handler Verification (`-Dverify`)
@@ -315,9 +350,9 @@ verify error: not all code paths return a Response
 
 See [docs/verification.md](docs/verification.md) for the full specification.
 
-### Contract Manifest (`-Dcontract`)
+### Contract Manifest and Auto-Sandboxing
 
-The contract describes what your handler does before it runs. It extracts:
+Every precompilation automatically extracts a contract from the handler's IR. The contract describes what your handler does before it runs and is used to derive the runtime sandbox. Add `-Dcontract` to also emit it as `contract.json`. It extracts:
 
 - **Virtual modules** imported and which functions are used
 - **Environment variables** accessed via `env("NAME")` - literal names are enumerated, dynamic access is flagged
@@ -342,10 +377,18 @@ The contract describes what your handler does before it runs. It extracts:
 
 The `"dynamic": false` fields are the key signal. They mean "we can enumerate every value statically." When a handler uses a variable instead of a string literal (`env(someVar)` instead of `env("JWT_SECRET")`), the contract honestly reports `"dynamic": true`.
 
-### Capability Policy (`-Dpolicy`)
+**Auto-sandboxing**: The contract is used to derive a `RuntimePolicy` embedded in the binary. Sections with `dynamic: false` are restricted to exactly the proven literals. Sections with `dynamic: true` remain unrestricted. The build reports what was proven:
 
-Policies are opt-in and apply to precompiled handlers. They consume the same contract data at build time and fail the build if the handler exceeds the allowed env vars, outbound hosts, or cache namespaces. The validated policy is then embedded into the generated handler metadata and enforced again at runtime.
-Local file-import handlers are covered too: capability usage is aggregated across the module graph before validation.
+```
+Sandbox: complete (all access statically proven)
+  env: restricted to [JWT_SECRET] (1 proven, no dynamic access)
+  egress: restricted to [api.example.com] (1 proven, no dynamic access)
+  cache: restricted to [sessions] (1 proven, no dynamic access)
+```
+
+### Explicit Policy Override (`-Dpolicy`)
+
+To override auto-derived sandboxing with a stricter or different policy, pass an explicit policy file. The policy is validated against the contract at build time and enforced at runtime. Local file-import handlers are covered: capability usage is aggregated across the module graph before validation.
 
 ```json
 {
@@ -356,6 +399,19 @@ Local file-import handlers are covered too: capability usage is aggregated acros
 ```
 
 Omit a section to leave that capability unrestricted. If a section is present, dynamic access in that category is rejected because zigttp cannot fully enumerate it.
+
+### Proven Deployment Manifests (`-Ddeploy`)
+
+Generate platform-specific deployment configurations from compiler-proven contracts:
+
+```bash
+zig build -Dhandler=handler.ts -Ddeploy=aws
+```
+
+Currently supported targets:
+- **aws**: Generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata.
+
+Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). A deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
 
 ### Precompiled Bytecode
 
@@ -400,10 +456,11 @@ See [Performance](docs/performance.md) for detailed profiling analysis and deplo
 
 - [User Guide](docs/user-guide.md) - Complete handler API reference, routing patterns, examples
 - [Verification](docs/verification.md) - Compile-time handler verification: checks, diagnostics, examples
-- [Architecture](docs/architecture.md) - System design, runtime model, project structure
+- [Boolean Enforcement](docs/sound-mode.md) - Strict boolean enforcement: type inference, narrowing, diagnostics
+- [Architecture](docs/architecture.md) - System design, runtime model, concurrency, project structure
 - [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
 - [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation
-- [Performance](docs/performance.md) - Benchmarks, cold starts, optimizations, deployment patterns
+- [Performance](docs/performance.md) - Benchmarks, cold starts, optimizations, concurrent I/O
 - [Feature Detection](docs/feature-detection.md) - Unsupported feature detection matrix
 - [API Reference](docs/api-reference.md) - Zig embedding API, extending with native functions
 
@@ -413,7 +470,7 @@ zts implements ES5 with select ES6+ extensions:
 
 **Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching with literal and object patterns).
 
-**Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, regular expressions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives.
+**Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, `null`, regular expressions, `as`/`satisfies` type assertions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives. Use `undefined` as the sole absent-value sentinel.
 
 See [User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
 
