@@ -17,6 +17,7 @@ const HandlerContract = handler_contract.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
 const handler_policy = zts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
+const deploy_manifest = @import("deploy_manifest.zig");
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -130,6 +131,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var emit_contract = false;
     var policy_path: ?[]const u8 = null;
     var emit_sound = false;
+    var deploy_target_str: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
@@ -155,6 +157,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (std.mem.eql(u8, arg, "--sound")) {
             emit_sound = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--deploy")) {
+            deploy_target_str = args.next() orelse {
+                std.debug.print("Missing target after --deploy\n", .{});
+                return error.MissingArgument;
+            };
             continue;
         }
 
@@ -261,6 +270,80 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
 
             std.debug.print("Wrote contract manifest to: {s}\n", .{contract_path});
+
+            // Generate deployment manifest if --deploy was passed
+            if (deploy_target_str) |dt_str| {
+                const deploy_target = deploy_manifest.DeployTarget.fromString(dt_str) orelse {
+                    std.debug.print("Unknown deploy target: {s} (supported: aws)\n", .{dt_str});
+                    return error.InvalidArgument;
+                };
+
+                const extract = deploy_manifest.extractProvenFacts(allocator, contract) catch |err| {
+                    std.debug.print("Error extracting proven facts: {}\n", .{err});
+                    return err;
+                };
+                defer allocator.free(extract.checks_buf);
+                defer allocator.free(extract.routes_buf);
+
+                const outputs = deploy_manifest.render(allocator, deploy_target, &extract.facts) catch |err| {
+                    std.debug.print("Error rendering deploy manifest: {}\n", .{err});
+                    return err;
+                };
+                defer {
+                    for (outputs) |o| allocator.free(o.content);
+                    allocator.free(outputs);
+                }
+
+                // Derive deploy output directory from the output path
+                const deploy_dir = deriveDeployDir(allocator, output_path_final) catch |err| {
+                    std.debug.print("Error deriving deploy dir: {}\n", .{err});
+                    return err;
+                };
+                defer allocator.free(deploy_dir);
+
+                for (outputs) |output| {
+                    const deploy_path = std.fmt.allocPrint(allocator, "{s}{s}", .{ deploy_dir, output.filename }) catch |err| {
+                        std.debug.print("Error creating deploy path: {}\n", .{err});
+                        return err;
+                    };
+                    defer allocator.free(deploy_path);
+
+                    writeFilePosix(deploy_path, output.content, allocator) catch |err| {
+                        std.debug.print("Error writing deploy file '{s}': {}\n", .{ deploy_path, err });
+                        return err;
+                    };
+
+                    std.debug.print("Wrote deploy manifest to: {s}\n", .{deploy_path});
+                }
+
+                // Write deploy report
+                const report_path = std.fmt.allocPrint(allocator, "{s}deploy-report.txt", .{deploy_dir}) catch |err| {
+                    std.debug.print("Error creating report path: {}\n", .{err});
+                    return err;
+                };
+                defer allocator.free(report_path);
+
+                var report_output: std.ArrayList(u8) = .empty;
+                defer report_output.deinit(allocator);
+                var report_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &report_output);
+
+                deploy_manifest.writeDeployReport(&report_aw.writer, &extract.facts, deploy_target) catch |err| {
+                    std.debug.print("Error generating deploy report: {}\n", .{err});
+                    return err;
+                };
+                report_output = report_aw.toArrayList();
+
+                writeFilePosix(report_path, report_output.items, allocator) catch |err| {
+                    std.debug.print("Error writing deploy report '{s}': {}\n", .{ report_path, err });
+                    return err;
+                };
+
+                std.debug.print("Wrote deploy report to: {s}\n", .{report_path});
+                std.debug.print("Deploy target: {s}, proof level: {s}\n", .{
+                    deploy_target.toString(),
+                    extract.facts.proof_level.toString(),
+                });
+            }
         }
     }
 }
@@ -1060,6 +1143,20 @@ fn deriveContractPath(allocator: std.mem.Allocator, output_path: []const u8) ![]
     const result = try allocator.alloc(u8, dir.len + "contract.json".len);
     @memcpy(result[0..dir.len], dir);
     @memcpy(result[dir.len..], "contract.json");
+    return result;
+}
+
+fn deriveDeployDir(allocator: std.mem.Allocator, output_path: []const u8) ![]u8 {
+    // Find the last '/' to get the directory, then append "deploy/"
+    var dir_end: usize = 0;
+    for (output_path, 0..) |c, i| {
+        if (c == '/') dir_end = i + 1;
+    }
+
+    const dir = output_path[0..dir_end];
+    const result = try allocator.alloc(u8, dir.len + "deploy/".len);
+    @memcpy(result[0..dir.len], dir);
+    @memcpy(result[dir.len..], "deploy/");
     return result;
 }
 

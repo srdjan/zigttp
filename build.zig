@@ -11,6 +11,7 @@ pub fn build(b: *std.Build) void {
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const sound_enabled = b.option(bool, "sound", "Enable strict boolean sound mode") orelse false;
+    const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
     _ = b.option(bool, "compat", "Explicit compat edition (types stripped, not checked)"); // recognized but no-op (default)
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
@@ -88,8 +89,12 @@ pub fn build(b: *std.Build) void {
         if (verify_enabled) {
             run_precompile.addArg("--verify");
         }
-        if (contract_enabled) {
+        if (contract_enabled or deploy_target != null) {
             run_precompile.addArg("--contract");
+        }
+        if (deploy_target) |dt| {
+            run_precompile.addArg("--deploy");
+            run_precompile.addArg(dt);
         }
         if (policy_path) |policy| {
             run_precompile.addArg("--policy");
@@ -101,9 +106,14 @@ pub fn build(b: *std.Build) void {
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");
 
-        // Create the generated directory if it doesn't exist
+        // Create the generated directories if they don't exist
         const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "src/generated" });
         run_precompile.step.dependOn(&mkdir_step.step);
+
+        if (deploy_target != null) {
+            const mkdir_deploy = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "src/generated/deploy" });
+            run_precompile.step.dependOn(&mkdir_deploy.step);
+        }
 
         // Main exe depends on precompile completing
         exe.step.dependOn(&run_precompile.step);

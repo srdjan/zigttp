@@ -22,6 +22,7 @@ zig build -Dhandler=handler.jsx    # Precompile handler at build time
 zig build -Dhandler=handler.jsx -Dverify  # Verify handler at compile time
 zig build -Dhandler=handler.jsx -Dcontract  # Emit contract.json manifest
 zig build -Dhandler=handler.jsx -Dsound   # Enforce strict boolean sound mode
+zig build -Dhandler=handler.jsx -Ddeploy=aws  # Generate proven deployment manifest
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
@@ -134,6 +135,13 @@ Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode
 **Handler Verification** (`zts/handler_verifier.zig`): The `-Dverify` build option enables compile-time correctness verification. The verifier statically proves: (1) every code path returns a Response, (2) Result values from virtual modules are checked before access, (3) no unreachable code after returns, (4) unused variables detected with scope-aware tracking (warnings, underscore-prefix suppresses). This is possible because zigttp's JS subset eliminates all non-trivial control flow - the IR tree IS the control flow graph. See [docs/verification.md](docs/verification.md).
 
 **Handler Contract Manifest** (`zts/handler_contract.zig`): The `-Dcontract` build option emits `contract.json` alongside the embedded bytecode, describing what the handler is allowed to do. The contract extracts: virtual module imports and function names, literal env var names (`env.dynamic: false` when all calls use string literals), outbound hosts from `fetchSync` URL arguments, cache namespace strings, route patterns (when AOT pattern analysis detects them), and verification results (when `-Dverify` is also set). Non-literal arguments set `dynamic: true` as an honest signal that static analysis cannot enumerate all values. This is v1 (emission only) - runtime enforcement is v2 scope.
+
+**Proven Deployment Manifests** (`tools/deploy_manifest.zig`): The `-Ddeploy=<target>` build option generates platform-specific deployment configurations from compiler-proven contracts. Implies `-Dcontract`. The system extracts `ProvenFacts` (platform-agnostic) from the contract, then dispatches to a `DeployTarget` renderer. Architecture is pluggable via a `DeployTarget` enum - add new backends by adding an enum variant and render function.
+
+Currently supported targets:
+- `aws`: Generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata. Output: `src/generated/deploy/template.json` + `src/generated/deploy/deploy-report.txt`.
+
+Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). The deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
 
 **Sound Mode BoolChecker** (`zts/bool_checker.zig`): The `-Dsound` build option (or `--sound` CLI flag) enables strict boolean enforcement. The BoolChecker walks the IR tree inferring expression types, rejecting non-boolean values in if/ternary conditions, &&/|| operands, and ! operands. Runtime VM assertions at conditional jump opcodes catch values the static checker cannot prove. See [docs/sound-mode.md](docs/sound-mode.md).
 
