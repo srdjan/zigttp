@@ -98,7 +98,7 @@ fn mergeReturnType(current: ?ExprType, new: ExprType) ?ExprType {
     return new;
 }
 
-fn packBindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
+pub fn packBindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
     return (@as(u32, scope_id) << 16) | @as(u32, slot);
 }
 
@@ -1278,7 +1278,7 @@ pub const BoolChecker = struct {
 // Utility
 // ---------------------------------------------------------------------------
 
-fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
+pub fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
     var current_line: u32 = 1;
     var line_start: usize = 0;
 

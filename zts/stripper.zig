@@ -473,10 +473,7 @@ const Stripper = struct {
                     // Skip to , or ) at depth 1
                     try self.skipParamType();
                     // Trim trailing whitespace from type text
-                    var type_end = self.pos;
-                    while (type_end > type_start and (self.source[type_end - 1] == ' ' or self.source[type_end - 1] == '\t')) {
-                        type_end -= 1;
-                    }
+                    const type_end = trimTrailingWs(self.source, type_start, self.pos);
                     // Record param annotation
                     self.recordTypeAnnotation(.param_annotation, type_start, type_end, last_ident_start, last_ident_end);
                     self.blankSpan(colon_pos, self.pos);
@@ -911,10 +908,7 @@ const Stripper = struct {
         const type_start = self.pos;
         try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '=', '{', '}' });
         // Trim trailing whitespace from type text
-        var type_end = self.pos;
-        while (type_end > type_start and (self.source[type_end - 1] == ' ' or self.source[type_end - 1] == '\t')) {
-            type_end -= 1;
-        }
+        const type_end = trimTrailingWs(self.source, type_start, self.pos);
 
         // Check for arrow function
         self.skipWhitespaceTracked();
@@ -1651,6 +1645,15 @@ const Stripper = struct {
         return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
     }
 };
+
+/// Trim trailing whitespace from a source range, returning the new end position.
+fn trimTrailingWs(source: []const u8, start: usize, end: usize) usize {
+    var pos = end;
+    while (pos > start and (source[pos - 1] == ' ' or source[pos - 1] == '\t')) {
+        pos -= 1;
+    }
+    return pos;
+}
 
 // ============================================================================
 // Tests

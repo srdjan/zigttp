@@ -20,6 +20,7 @@ const object = @import("object.zig");
 const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
+const bool_checker_mod = @import("bool_checker.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -681,27 +682,8 @@ pub const TypeChecker = struct {
     }
 };
 
-fn packBindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
-    return (@as(u32, scope_id) << 16) | @as(u32, slot);
-}
-
-fn getSourceLine(source: []const u8, line_num: u32) ?[]const u8 {
-    if (line_num == 0) return null;
-    var current_line: u32 = 1;
-    var line_start: usize = 0;
-    for (source, 0..) |c, i| {
-        if (current_line == line_num) {
-            if (c == '\n') return source[line_start..i];
-            continue;
-        }
-        if (c == '\n') {
-            current_line += 1;
-            line_start = i + 1;
-        }
-    }
-    if (current_line == line_num) return source[line_start..];
-    return null;
-}
+const packBindingKey = bool_checker_mod.packBindingKey;
+const getSourceLine = bool_checker_mod.getSourceLine;
 
 // ---------------------------------------------------------------------------
 // Tests

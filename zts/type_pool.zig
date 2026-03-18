@@ -387,35 +387,39 @@ pub const TypePool = struct {
         return self.members.items[start .. start + count];
     }
 
-    /// Get function params. Returns (params, return_type_idx).
+    /// Get function params and return type.
+    /// Layout: data.a = param_start (into params array), data.b = return type index.
+    /// Param count is stored as a members entry at index = node index.
     pub fn getFunctionInfo(self: *const TypePool, idx: TypeIndex) struct { params: []const FuncParam, ret: TypeIndex } {
         const data = self.getData(idx) orelse return .{ .params = &.{}, .ret = null_type_idx };
         if (self.getTag(idx) != .t_function) return .{ .params = &.{}, .ret = null_type_idx };
-        const start = data.a;
-        const count = data.b;
-        // Return type is stored as the last member in members array
-        // Actually, let's store return type index in b field differently.
-        // For functions: a = param_start, b = param_count. Return type stored in members.
-        if (start + count > self.params.items.len) return .{ .params = &.{}, .ret = null_type_idx };
+        const param_start = data.a;
+        const ret = data.b;
+        // Param count encoded as first member entry for this function
+        const param_count_raw = if (idx < self.members.items.len) self.members.items[idx] else 0;
+        const param_count: u16 = @intCast(@min(param_count_raw, self.params.items.len -| param_start));
+        if (param_start + param_count > self.params.items.len) return .{ .params = &.{}, .ret = ret };
         return .{
-            .params = self.params.items[start .. start + count],
-            .ret = null_type_idx, // Return type stored separately - see addFunctionWithReturn
+            .params = self.params.items[param_start .. param_start + param_count],
+            .ret = ret,
         };
     }
 
-    /// Create a function type with explicit return type stored in members.
+    /// Create a function type with params and return type.
     pub fn addFunctionWithReturn(self: *TypePool, allocator: std.mem.Allocator, func_params: []const FuncParam, ret: TypeIndex) TypeIndex {
         const param_start: u16 = @intCast(self.params.items.len);
-        const param_count: u16 = @intCast(func_params.len);
         self.params.appendSlice(allocator, func_params) catch return null_type_idx;
-        // Store return type index in members array
-        const ret_slot: u16 = @intCast(self.members.items.len);
-        self.members.append(allocator, ret) catch return null_type_idx;
-        _ = ret_slot;
-        return self.addNode(allocator, .{
+        const node_idx = self.addNode(allocator, .{
             .tag = .t_function,
-            .data = .{ .a = param_start, .b = param_count },
+            .data = .{ .a = param_start, .b = ret },
         });
+        // Store param count in members at the node's index for retrieval
+        // Pad members array if needed to match node index
+        while (self.members.items.len < node_idx) {
+            self.members.append(allocator, 0) catch break;
+        }
+        self.members.append(allocator, @intCast(func_params.len)) catch {};
+        return node_idx;
     }
 
     /// Get the array element type.
