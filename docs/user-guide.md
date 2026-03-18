@@ -972,6 +972,69 @@ const stats = cacheStats();           // aggregate
 const nsStats = cacheStats("api");    // per-namespace
 ```
 
+### zigttp:io
+
+Structured concurrent I/O without async/await. Handler code stays synchronous
+and linear; concurrency happens in the I/O layer. Requires outbound HTTP to be
+enabled at build time.
+
+```typescript
+import { parallel, race } from "zigttp:io";
+```
+
+**parallel(thunks)** - Execute an array of zero-arg functions concurrently.
+Each thunk typically wraps a `fetchSync` call. All HTTP requests fire in
+parallel using OS threads; results are returned in declaration order regardless
+of completion order.
+
+```typescript
+// Three API calls in ~50ms instead of ~150ms
+const [user, orders, inventory] = parallel([
+  () => fetchSync("https://users.internal/api/v1/123"),
+  () => fetchSync("https://orders.internal/api/v1?user=123"),
+  () => fetchSync("https://inventory.internal/api/v1/789")
+]);
+
+// Each element is a standard Response object
+if (user.ok) {
+  const userData = user.json();
+}
+```
+
+Thunks can use computed URLs:
+
+```typescript
+const [profile, history] = parallel([
+  () => fetchSync(`https://api.internal/users/${userId}`),
+  () => fetchSync(`https://api.internal/history?user=${userId}&limit=10`)
+]);
+```
+
+**race(thunks)** - Execute an array of zero-arg functions concurrently, return
+the result of whichever completes first. Useful for failover patterns.
+
+```typescript
+const fastest = race([
+  () => fetchSync("https://primary.example.com/data"),
+  () => fetchSync("https://fallback.example.com/data")
+]);
+```
+
+Limits: at most 8 concurrent operations per `parallel`/`race` call.
+
+All existing guarantees are preserved:
+
+- **Verification** (`-Dverify`): `parallel` returns a fixed-size array;
+  every code path after it is linear and verifiable.
+- **Contracts** (`-Dcontract`): egress hosts inside thunks are extracted.
+  `parallel` is a structured grouping of effects the contract already tracks.
+- **Sound mode** (`-Dsound`): return types inferred as `object` (array of
+  Response objects).
+- **Policies**: each constituent `fetchSync` is individually checked against
+  `--outbound-host` allowlists and capability policies.
+- **Determinism**: same inputs produce same output ordering. Results always
+  match declaration order.
+
 ---
 
 ## JavaScript Subset Reference

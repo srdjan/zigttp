@@ -1141,6 +1141,9 @@ pub const BoolChecker = struct {
         .{ .module = "zigttp:env", .name = "env", .ret = .nullable_string },
         // zigttp:router
         .{ .module = "zigttp:router", .name = "routerMatch", .ret = .nullable_object },
+        // zigttp:io
+        .{ .module = "zigttp:io", .name = "parallel", .ret = .object },
+        .{ .module = "zigttp:io", .name = "race", .ret = .object },
     };
 
     fn findModuleReturnEntry(module_str: []const u8, func_name: []const u8) ?*const ModuleReturnEntry {

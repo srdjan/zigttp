@@ -4,6 +4,7 @@
 //! - `zigttp:env`    -> native env var functions
 //! - `zigttp:crypto` -> native crypto functions (sha256, hmac, base64)
 //! - `zigttp:router` -> native pattern-matching router
+//! - `zigttp:io`     -> structured concurrent I/O (parallel, race)
 //! - `./path`        -> relative file import (future)
 //!
 //! Resolution happens before codegen. Each virtual module registers
@@ -20,6 +21,7 @@ const router_mod = @import("router.zig");
 const auth_mod = @import("auth.zig");
 const validate_mod = @import("validate.zig");
 const cache_mod = @import("cache.zig");
+const io_mod = @import("io.zig");
 
 /// A single exported function from a virtual module
 pub const ModuleExport = struct {
@@ -36,6 +38,7 @@ pub const VirtualModule = enum {
     auth,
     validate,
     cache,
+    io,
 
     pub fn fromSpecifier(specifier: []const u8) ?VirtualModule {
         if (std.mem.eql(u8, specifier, "zigttp:env")) return .env;
@@ -44,6 +47,7 @@ pub const VirtualModule = enum {
         if (std.mem.eql(u8, specifier, "zigttp:auth")) return .auth;
         if (std.mem.eql(u8, specifier, "zigttp:validate")) return .validate;
         if (std.mem.eql(u8, specifier, "zigttp:cache")) return .cache;
+        if (std.mem.eql(u8, specifier, "zigttp:io")) return .io;
         return null;
     }
 
@@ -55,6 +59,7 @@ pub const VirtualModule = enum {
             .auth => &auth_mod.exports,
             .validate => &validate_mod.exports,
             .cache => &cache_mod.exports,
+            .io => &io_mod.exports,
         };
     }
 

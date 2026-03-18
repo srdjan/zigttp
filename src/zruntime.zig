@@ -362,6 +362,11 @@ pub const Runtime = struct {
         // was parsed or loaded from bytecode cache.
         try self.installVirtualModules();
 
+        // Install io module callbacks for parallel/race (requires outbound HTTP)
+        if (self.config.outbound_http_enabled) {
+            try self.installIoModuleState();
+        }
+
         // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
         // Don't re-register them here as it would overwrite the proper constructor
     }
@@ -659,6 +664,23 @@ pub const Runtime = struct {
             const module: zq.modules.VirtualModule = @enumFromInt(field.value);
             try zq.modules.registerVirtualModule(self.ctx, module, self.allocator);
         }
+    }
+
+    /// Install IoCallbacks into the io module's state slot.
+    /// Enables parallel() and race() to call thunks and execute concurrent fetches.
+    fn installIoModuleState(self: *Self) !void {
+        const io_state = try self.allocator.create(zq.modules.io.IoCallbacks);
+        io_state.* = .{
+            .call_thunk_fn = ioCallThunk,
+            .execute_fetches_fn = ioExecuteFetches,
+            .build_response_fn = ioBuildResponse,
+            .runtime_ptr = self,
+        };
+        self.ctx.setModuleState(
+            zq.modules.io.MODULE_STATE_SLOT,
+            @ptrCast(io_state),
+            &zq.modules.io.IoCallbacks.deinitOpaque,
+        );
     }
 
     /// Load and compile JavaScript code
@@ -2136,6 +2158,12 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
     }
 
+    // If parallel() is collecting fetch descriptors, record this call
+    // instead of executing the HTTP request.
+    if (zq.modules.io.parallel_collector) |collector| {
+        return collectFetchForParallel(rt, collector, args);
+    }
+
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     var init_obj: ?*zq.JSObject = null;
@@ -2325,6 +2353,391 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     for (owned_head.headers.items) |header| {
         const key_atom = try getHeaderAtom(rt.ctx, header.name);
         const value_str = try rt.ctx.createString(header.value);
+        try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
+    }
+
+    return created.value;
+}
+
+// ============================================================================
+// Parallel I/O support
+// ============================================================================
+
+/// Intercept a fetchSync call during parallel collection mode.
+/// Records the URL/method/body/headers as a FetchDescriptor instead of
+/// performing the actual HTTP request.
+fn collectFetchForParallel(rt: *Runtime, collector: *zq.modules.io.ParallelCollector, args: []const zq.JSValue) !zq.JSValue {
+    if (collector.count >= collector.capacity) {
+        return createFetchErrorResponse(rt, "ParallelOverflow", "too many fetchSync calls in parallel thunk");
+    }
+
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const a = collector.allocator;
+
+    // Extract URL (same parsing as fetchSyncResult)
+    var init_obj: ?*zq.JSObject = null;
+    const url = blk: {
+        if (args[0].isObject()) {
+            init_obj = args[0].toPtr(zq.JSObject);
+            const url_val = getObjectProperty(rt.ctx, init_obj.?, pool, zq.Atom.url, "url") orelse {
+                return createFetchErrorResponse(rt, "InvalidUrl", "missing url field");
+            };
+            const url_str = getStringData(url_val) orelse {
+                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+            };
+            if (url_str.len == 0) {
+                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+            }
+            break :blk url_str;
+        }
+        const url_str = getStringData(args[0]) orelse {
+            return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
+        };
+        if (url_str.len == 0) {
+            return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+        }
+        if (args.len > 1 and args[1].isObject()) {
+            init_obj = args[1].toPtr(zq.JSObject);
+        }
+        break :blk url_str;
+    };
+
+    // Validate URL and host
+    const uri = std.Uri.parse(url) catch {
+        return createFetchErrorResponse(rt, "InvalidUrl", "url parse failed");
+    };
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch {
+        return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
+    };
+    if (outboundHostViolation(rt, host.bytes)) |details| {
+        return createFetchErrorResponse(rt, "HostNotAllowed", details);
+    }
+
+    // Extract method, body, headers from init object
+    var method = std.http.Method.GET;
+    var body: ?[]const u8 = null;
+    var max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);
+    var headers_list: std.ArrayList(std.http.Header) = .empty;
+
+    if (init_obj) |init| {
+        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.method, "method")) |method_val| {
+            const method_name = getStringData(method_val) orelse {
+                return createFetchErrorResponse(rt, "InvalidMethod", "method must be string");
+            };
+            method = parseHttpMethod(method_name) orelse {
+                return createFetchErrorResponse(rt, "InvalidMethod", method_name);
+            };
+        }
+        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body")) |body_val| {
+            if (!body_val.isNull() and !body_val.isUndefined()) {
+                body = getStringData(body_val);
+            }
+        }
+        if (getDynamicProperty(rt.ctx, init, pool, "maxResponseBytes")) |max_val| {
+            if (max_val.isInt()) {
+                if (std.math.cast(usize, max_val.getInt())) |req_max| {
+                    max_response_bytes = @min(max_response_bytes, @max(@as(usize, 1), req_max));
+                }
+            }
+        }
+        if (getObjectProperty(rt.ctx, init, pool, zq.Atom.headers, "headers")) |headers_val| {
+            if (headers_val.isObject()) {
+                const headers_obj = headers_val.toPtr(zq.JSObject);
+                const keys = try headers_obj.getOwnEnumerableKeys(a, pool);
+                defer a.free(keys);
+                for (keys) |key_atom| {
+                    const key_name = rt.ctx.atoms.getName(key_atom) orelse continue;
+                    const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
+                    const header_str = getStringData(header_val) orelse continue;
+                    try headers_list.append(a, .{ .name = key_name, .value = header_str });
+                }
+            }
+        }
+    }
+
+    // Store descriptor
+    const idx = collector.count;
+    collector.descriptors[idx] = .{
+        .url = try a.dupe(u8, url),
+        .method = method,
+        .body = if (body) |b| try a.dupe(u8, b) else null,
+        .headers = headers_list,
+        .max_response_bytes = max_response_bytes,
+    };
+    collector.count += 1;
+
+    // Return a placeholder response (status 0, empty body)
+    // parallel() replaces this with the real response after concurrent execution.
+    return zq.JSValue.undefined_val;
+}
+
+/// IoCallbacks.call_thunk_fn - call a zero-arg JS function via the interpreter.
+fn ioCallThunk(runtime_ptr: *anyopaque, thunk_val: zq.JSValue) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    if (!thunk_val.isObject()) return error.NotCallable;
+    const func_obj = thunk_val.toPtr(zq.JSObject);
+    return rt.callFunction(func_obj, &.{});
+}
+
+/// IoCallbacks.execute_fetches_fn - execute HTTP fetches concurrently using threads.
+fn ioExecuteFetches(
+    runtime_ptr: *anyopaque,
+    descriptors: []const zq.modules.io.FetchDescriptor,
+    results: []zq.modules.io.FetchResult,
+) void {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const count = descriptors.len;
+    if (count == 0) return;
+
+    // For a single fetch, execute inline (no thread overhead)
+    if (count == 1) {
+        results[0] = doFetchWorker(rt.allocator, rt.config, &descriptors[0]);
+        return;
+    }
+
+    // Spawn worker threads for concurrent execution
+    var threads: [zq.modules.io.MAX_PARALLEL]?std.Thread = .{null} ** zq.modules.io.MAX_PARALLEL;
+
+    for (0..count) |i| {
+        threads[i] = std.Thread.spawn(.{}, doFetchThread, .{
+            rt.allocator,
+            rt.config,
+            &descriptors[i],
+            &results[i],
+        }) catch null;
+    }
+
+    // If thread spawn failed for any slot, execute inline as fallback
+    for (0..count) |i| {
+        if (threads[i] == null) {
+            results[i] = doFetchWorker(rt.allocator, rt.config, &descriptors[i]);
+        }
+    }
+
+    // Join all threads
+    for (0..count) |i| {
+        if (threads[i]) |t| t.join();
+    }
+}
+
+/// Thread entry point for concurrent HTTP fetch.
+fn doFetchThread(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    desc: *const zq.modules.io.FetchDescriptor,
+    result: *zq.modules.io.FetchResult,
+) void {
+    result.* = doFetchWorker(allocator, config, desc);
+}
+
+/// Execute a single HTTP fetch. Safe to call from any thread.
+/// Creates its own I/O backend and HTTP client.
+fn doFetchWorker(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    desc: *const zq.modules.io.FetchDescriptor,
+) zq.modules.io.FetchResult {
+    return doFetchWorkerInner(allocator, config, desc) catch |err| {
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = allocator.dupe(u8, "InternalError") catch null,
+            .error_details = allocator.dupe(u8, @errorName(err)) catch null,
+        };
+    };
+}
+
+fn doFetchWorkerInner(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    desc: *const zq.modules.io.FetchDescriptor,
+) !zq.modules.io.FetchResult {
+    const uri = try std.Uri.parse(desc.url);
+
+    // Thread-local I/O backend
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+
+    var client = std.http.Client{
+        .allocator = allocator,
+        .io = io_backend.io(),
+    };
+    defer client.deinit();
+
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "InvalidUrl"),
+            .error_details = try allocator.dupe(u8, "unsupported URI scheme"),
+        };
+    };
+
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = try uri.getHost(&host_buf);
+
+    const timeout: std.Io.Timeout = if (config.outbound_timeout_ms == 0) .none else blk: {
+        const duration = std.Io.Duration.fromMilliseconds(@intCast(config.outbound_timeout_ms));
+        break :blk .{ .duration = .{ .raw = duration, .clock = .awake } };
+    };
+
+    const connection = client.connectTcpOptions(.{
+        .host = host,
+        .port = uri.port orelse switch (protocol) {
+            .plain => 80,
+            .tls => 443,
+        },
+        .protocol = protocol,
+        .timeout = timeout,
+    }) catch |err| {
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "ConnectFailed"),
+            .error_details = try allocator.dupe(u8, @errorName(err)),
+        };
+    };
+
+    var req = client.request(desc.method, uri, .{
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+        .connection = connection,
+        .extra_headers = desc.headers.items,
+    }) catch |err| {
+        client.connection_pool.release(connection, client.io);
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "RequestInitFailed"),
+            .error_details = try allocator.dupe(u8, @errorName(err)),
+        };
+    };
+    defer req.deinit();
+
+    if (desc.body) |payload| {
+        req.transfer_encoding = .{ .content_length = payload.len };
+        var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_details = try allocator.dupe(u8, @errorName(err)),
+            };
+        };
+        request_body.writer.writeAll(payload) catch |err| {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_details = try allocator.dupe(u8, @errorName(err)),
+            };
+        };
+        request_body.end() catch |err| {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_details = try allocator.dupe(u8, @errorName(err)),
+            };
+        };
+        req.connection.?.flush() catch |err| {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_details = try allocator.dupe(u8, @errorName(err)),
+            };
+        };
+    } else {
+        req.sendBodiless() catch |err| {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "RequestSendFailed"),
+                .error_details = try allocator.dupe(u8, @errorName(err)),
+            };
+        };
+    }
+
+    var response = req.receiveHead(&.{}) catch |err| {
+        return zq.modules.io.FetchResult{
+            .status = 599,
+            .ok = false,
+            .error_code = try allocator.dupe(u8, "ResponseHeadFailed"),
+            .error_details = try allocator.dupe(u8, @errorName(err)),
+        };
+    };
+
+    const status = @intFromEnum(response.head.status);
+    var owned_head = try snapshotResponseHead(allocator, response.head);
+    defer owned_head.deinit(allocator);
+
+    const max_response_bytes = @max(@as(usize, 1), desc.max_response_bytes);
+    var body_transfer: [64]u8 = undefined;
+    var response_reader = response.reader(&body_transfer);
+    const response_body = response_reader.allocRemaining(allocator, std.Io.Limit.limited(max_response_bytes)) catch |err| switch (err) {
+        error.StreamTooLong => {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "ResponseTooLarge"),
+                .error_details = try allocator.dupe(u8, "response exceeded max_response_bytes"),
+            };
+        },
+        else => {
+            return zq.modules.io.FetchResult{
+                .status = 599,
+                .ok = false,
+                .error_code = try allocator.dupe(u8, "ResponseReadFailed"),
+                .error_details = try allocator.dupe(u8, @errorName(err)),
+            };
+        },
+    };
+
+    // Build response headers list
+    var resp_headers: std.ArrayList(zq.modules.io.FetchResult.ResponseHeader) = .empty;
+    for (owned_head.headers.items) |h| {
+        try resp_headers.append(allocator, .{
+            .name = try allocator.dupe(u8, h.name),
+            .value_str = try allocator.dupe(u8, h.value),
+        });
+    }
+
+    return zq.modules.io.FetchResult{
+        .status = status,
+        .body = response_body,
+        .content_type = if (owned_head.contentType()) |ct| try allocator.dupe(u8, ct) else null,
+        .reason = try allocator.dupe(u8, owned_head.reason),
+        .response_headers = resp_headers,
+        .ok = true,
+    };
+}
+
+/// IoCallbacks.build_response_fn - create a JS Response object from a FetchResult.
+fn ioBuildResponse(runtime_ptr: *anyopaque, result: *const zq.modules.io.FetchResult) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+
+    if (!result.ok) {
+        // Build error response
+        const err_code = result.error_code orelse "InternalError";
+        const err_details = result.error_details orelse "unknown error";
+        return createFetchErrorResponse(rt, err_code, err_details);
+    }
+
+    const body_str = result.body orelse "";
+    const created = try createFetchResponse(
+        rt,
+        result.status,
+        result.reason orelse "",
+        body_str,
+        result.content_type,
+    );
+
+    // Copy response headers
+    for (result.response_headers.items) |h| {
+        const key_atom = try getHeaderAtom(rt.ctx, h.name);
+        const value_str = try rt.ctx.createString(h.value_str);
         try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
     }
 

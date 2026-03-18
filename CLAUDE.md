@@ -209,10 +209,11 @@ Native `zigttp:*` modules provide common FaaS functionality with zero JS interpr
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | HS256 JWT, webhook HMAC-SHA256 |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema subset (type, required, properties, min/maxLength, min/max, enum, items). Per-runtime SchemaRegistry via module_state. |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory KV cache with namespace isolation, LRU eviction, lazy TTL. Per-runtime CacheStore via module_state. Persists across requests in same pool slot. |
+| `zigttp:io` | `parallel`, `race` | Structured concurrent I/O. `parallel(thunks)` executes fetchSync calls concurrently using threads, returns results in declaration order. `race(thunks)` returns the first successful result. Requires outbound HTTP enabled. IoCallbacks via module_state slot 6, set by runtime layer. |
 
-Module implementations: `zts/modules/{auth,validate,cache,env,crypto,router,util}.zig`. Shared helpers in `util.zig`. Resolver/wiring in `resolver.zig` and `root.zig`.
+Module implementations: `zts/modules/{auth,validate,cache,env,crypto,router,io,util}.zig`. Shared helpers in `util.zig`. Resolver/wiring in `resolver.zig` and `root.zig`.
 
-Stateful modules (validate, cache) use `Context.module_state` - a fixed-size array of opaque pointers with deinit callbacks, indexed by VirtualModule enum ordinal. Lazy-initialized on first use.
+Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size array of opaque pointers with deinit callbacks, indexed by VirtualModule enum ordinal. Lazy-initialized on first use (validate, cache) or set by runtime during init (io).
 
 ## CLI Options
 
