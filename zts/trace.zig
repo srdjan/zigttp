@@ -937,6 +937,417 @@ fn allocFloat(_: *context.Context, f: f64) value.JSValue {
 }
 
 // ============================================================================
+// Durable Execution - Write-Ahead Oplog with Hybrid Replay/Record
+// ============================================================================
+
+/// Module state slot for durable state (slot 0, unused by other modules).
+/// Separate from REPLAY_STATE_SLOT (3) to avoid type confusion in getModuleState.
+pub const DURABLE_STATE_SLOT = 0;
+
+/// Per-request durable execution state.
+/// Combines oplog reading (replay phase) with write-ahead persistence (live phase).
+///
+/// During the replay phase, I/O calls return results from the oplog.
+/// When the oplog is exhausted, the state transitions to live mode:
+/// each real I/O result is persisted to the oplog before returning.
+pub const DurableState = struct {
+    /// Pre-parsed I/O entries from an incomplete oplog (replay phase).
+    oplog_entries: []const IoEntry,
+    /// Cursor tracking which oplog entry to return next.
+    cursor: u32,
+    /// Allocator for serialization buffers.
+    allocator: std.mem.Allocator,
+    /// File descriptor for write-ahead persistence.
+    oplog_fd: std.c.fd_t,
+    /// Whether we have transitioned from replay to live execution.
+    is_live: bool,
+    /// Count of I/O calls persisted in live phase.
+    live_io_count: u32,
+    /// Serialization buffer (reused across persist calls).
+    write_buf: std.ArrayList(u8),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        oplog_entries: []const IoEntry,
+        oplog_fd: std.c.fd_t,
+    ) DurableState {
+        return .{
+            .oplog_entries = oplog_entries,
+            .cursor = 0,
+            .allocator = allocator,
+            .oplog_fd = oplog_fd,
+            .is_live = oplog_entries.len == 0,
+            .live_io_count = 0,
+            .write_buf = .empty,
+        };
+    }
+
+    pub fn deinit(self: *DurableState) void {
+        self.write_buf.deinit(self.allocator);
+    }
+
+    pub fn deinitOpaque(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        _ = allocator;
+        const self: *DurableState = @ptrCast(@alignCast(ptr));
+        self.deinit();
+    }
+
+    /// Try to consume the next oplog entry during replay phase.
+    /// Returns the recorded entry if available; transitions to live mode
+    /// when the oplog is exhausted.
+    pub fn replayNext(self: *DurableState, module_name: []const u8, fn_name: []const u8) ?IoEntry {
+        if (self.is_live) return null;
+        if (self.cursor >= self.oplog_entries.len) {
+            self.is_live = true;
+            return null;
+        }
+        const entry = self.oplog_entries[self.cursor];
+        // Verify call sequence matches (divergence = unrecoverable)
+        if (!std.mem.eql(u8, entry.module, module_name) or !std.mem.eql(u8, entry.func, fn_name)) {
+            self.is_live = true;
+            return null;
+        }
+        self.cursor += 1;
+        return entry;
+    }
+
+    /// Persist an I/O call result to the oplog with write-ahead guarantee.
+    /// Serializes as JSONL, writes, and fsyncs before returning.
+    pub fn persistIO(
+        self: *DurableState,
+        module_name: []const u8,
+        fn_name: []const u8,
+        ctx: *context.Context,
+        args: []const value.JSValue,
+        result: value.JSValue,
+    ) void {
+        self.write_buf.clearRetainingCapacity();
+
+        // Build JSONL line in write_buf using same format as TraceRecorder.recordIO
+        const seq = self.cursor + self.live_io_count;
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"io\",\"seq\":") orelse return;
+        appendInt(&self.write_buf, self.allocator, seq) orelse return;
+        appendSlice(&self.write_buf, self.allocator, ",\"module\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, module_name) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\",\"fn\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, fn_name) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\",\"args\":[") orelse return;
+
+        for (args, 0..) |arg, i| {
+            if (i > 0) appendByte(&self.write_buf, self.allocator, ',') orelse return;
+            appendJSValueBuf(&self.write_buf, self.allocator, ctx, arg, 0) orelse return;
+        }
+
+        appendSlice(&self.write_buf, self.allocator, "],\"result\":") orelse return;
+        appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+
+        // Write-ahead: write + fsync before returning to handler
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+
+        self.live_io_count += 1;
+    }
+
+    /// Persist the response line to the oplog and fsync.
+    pub fn persistResponse(
+        self: *DurableState,
+        status: u16,
+        header_names: []const []const u8,
+        header_values: []const []const u8,
+        body: []const u8,
+    ) void {
+        self.write_buf.clearRetainingCapacity();
+
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"response\",\"status\":") orelse return;
+        appendInt(&self.write_buf, self.allocator, status) orelse return;
+        appendSlice(&self.write_buf, self.allocator, ",\"headers\":{") orelse return;
+
+        const count = @min(header_names.len, header_values.len);
+        for (0..count) |i| {
+            if (i > 0) appendByte(&self.write_buf, self.allocator, ',') orelse return;
+            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+            appendEscapedSlice(&self.write_buf, self.allocator, header_names[i]) orelse return;
+            appendSlice(&self.write_buf, self.allocator, "\":\"") orelse return;
+            appendEscapedSlice(&self.write_buf, self.allocator, header_values[i]) orelse return;
+            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+        }
+
+        appendSlice(&self.write_buf, self.allocator, "},\"body\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, body) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
+
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    /// Persist the request line to the oplog (written at start of request).
+    pub fn persistRequest(
+        self: *DurableState,
+        method: []const u8,
+        url: []const u8,
+        header_names: []const []const u8,
+        header_values: []const []const u8,
+        body: ?[]const u8,
+    ) void {
+        self.write_buf.clearRetainingCapacity();
+
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"request\",\"method\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, method) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\",\"url\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, url) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\",\"headers\":{") orelse return;
+
+        const count = @min(header_names.len, header_values.len);
+        for (0..count) |i| {
+            if (i > 0) appendByte(&self.write_buf, self.allocator, ',') orelse return;
+            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+            appendEscapedSlice(&self.write_buf, self.allocator, header_names[i]) orelse return;
+            appendSlice(&self.write_buf, self.allocator, "\":\"") orelse return;
+            appendEscapedSlice(&self.write_buf, self.allocator, header_values[i]) orelse return;
+            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+        }
+
+        appendSlice(&self.write_buf, self.allocator, "},\"body\":") orelse return;
+        if (body) |b| {
+            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+            appendEscapedSlice(&self.write_buf, self.allocator, b) orelse return;
+            appendByte(&self.write_buf, self.allocator, '"') orelse return;
+        } else {
+            appendSlice(&self.write_buf, self.allocator, "null") orelse return;
+        }
+        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    /// Mark the oplog as complete by writing a completion marker and fsyncing.
+    pub fn markComplete(self: *DurableState) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"complete\"}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+};
+
+/// Generate a durable NativeFn wrapper at compile time.
+/// Combines replay (from oplog) and recording (write-ahead) in a single wrapper.
+/// During replay phase: returns recorded results from the oplog.
+/// During live phase: executes the real function, persists result, then returns.
+pub fn makeDurableWrapper(
+    comptime module_name: []const u8,
+    comptime fn_name: []const u8,
+    comptime original_fn: object.NativeFn,
+) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const state = ctx.getModuleState(DurableState, DURABLE_STATE_SLOT) orelse {
+                // No durable state: fall through to real execution
+                return original_fn(ctx_ptr, this, args);
+            };
+
+            // Phase 1: Replay from oplog if entries remain
+            if (state.replayNext(module_name, fn_name)) |entry| {
+                return jsonToJSValue(ctx, entry.result_json);
+            }
+
+            // Phase 2: Live execution with write-ahead persistence
+            const result = try original_fn(ctx_ptr, this, args);
+            state.persistIO(module_name, fn_name, ctx, args, result);
+            return result;
+        }
+    }.call;
+}
+
+// -- DurableState buffer helpers (standalone, not methods on TraceRecorder) --
+
+fn appendSlice(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) ?void {
+    buf.appendSlice(allocator, data) catch return null;
+}
+
+fn appendByte(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, byte: u8) ?void {
+    buf.append(allocator, byte) catch return null;
+}
+
+fn appendInt(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: anytype) ?void {
+    var tmp: [64]u8 = undefined;
+    const slice = std.fmt.bufPrint(&tmp, "{d}", .{val}) catch return null;
+    appendSlice(buf, allocator, slice) orelse return null;
+}
+
+fn appendEscapedSlice(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) ?void {
+    for (data) |c| {
+        switch (c) {
+            '"' => appendSlice(buf, allocator, "\\\"") orelse return null,
+            '\\' => appendSlice(buf, allocator, "\\\\") orelse return null,
+            '\n' => appendSlice(buf, allocator, "\\n") orelse return null,
+            '\r' => appendSlice(buf, allocator, "\\r") orelse return null,
+            '\t' => appendSlice(buf, allocator, "\\t") orelse return null,
+            else => {
+                if (c < 0x20) {
+                    const hex = "0123456789abcdef";
+                    appendSlice(buf, allocator, "\\u00") orelse return null;
+                    appendByte(buf, allocator, hex[c >> 4]) orelse return null;
+                    appendByte(buf, allocator, hex[c & 0xF]) orelse return null;
+                } else {
+                    appendByte(buf, allocator, c) orelse return null;
+                }
+            },
+        }
+    }
+}
+
+fn appendJSValueBuf(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ctx: *context.Context, val: value.JSValue, depth: u32) ?void {
+    if (depth >= TraceRecorder.MAX_JSON_DEPTH) {
+        appendSlice(buf, allocator, "null") orelse return null;
+        return;
+    }
+    if (val.isNull() or val.isUndefined()) {
+        appendSlice(buf, allocator, "null") orelse return null;
+    } else if (val.isTrue()) {
+        appendSlice(buf, allocator, "true") orelse return null;
+    } else if (val.isFalse()) {
+        appendSlice(buf, allocator, "false") orelse return null;
+    } else if (val.isInt()) {
+        appendInt(buf, allocator, val.getInt()) orelse return null;
+    } else if (val.isFloat64()) {
+        const f = val.getFloat64();
+        if (std.math.isNan(f) or std.math.isInf(f)) {
+            appendSlice(buf, allocator, "null") orelse return null;
+        } else {
+            var tmp: [64]u8 = undefined;
+            const slice = std.fmt.bufPrint(&tmp, "{d}", .{f}) catch return null;
+            appendSlice(buf, allocator, slice) orelse return null;
+        }
+    } else if (val.isAnyString()) {
+        appendByte(buf, allocator, '"') orelse return null;
+        const data = extractStringData(val) orelse "";
+        appendEscapedSlice(buf, allocator, data) orelse return null;
+        appendByte(buf, allocator, '"') orelse return null;
+    } else if (val.isObject()) {
+        const obj = object.JSObject.fromValue(val);
+        if (obj.class_id == .array) {
+            appendByte(buf, allocator, '[') orelse return null;
+            const len = obj.getArrayLength();
+            for (0..len) |i| {
+                if (i > 0) appendByte(buf, allocator, ',') orelse return null;
+                if (obj.getIndex(@intCast(i))) |elem| {
+                    appendJSValueBuf(buf, allocator, ctx, elem, depth + 1) orelse return null;
+                } else {
+                    appendSlice(buf, allocator, "null") orelse return null;
+                }
+            }
+            appendByte(buf, allocator, ']') orelse return null;
+        } else {
+            appendByte(buf, allocator, '{') orelse return null;
+            var first = true;
+            const pool = ctx.hidden_class_pool orelse {
+                appendByte(buf, allocator, '}') orelse return null;
+                return;
+            };
+            const class_idx = obj.hidden_class_idx;
+            if (!class_idx.isNone()) {
+                const idx = class_idx.toInt();
+                if (idx < pool.count) {
+                    const prop_count = pool.property_counts.items[idx];
+                    if (prop_count > 0) {
+                        const start = pool.properties_starts.items[idx];
+                        if (start + prop_count <= pool.property_names.items.len and
+                            start + prop_count <= pool.property_offsets.items.len)
+                        {
+                            for (0..prop_count) |pi| {
+                                const atom = pool.property_names.items[start + pi];
+                                const offset = pool.property_offsets.items[start + pi];
+                                const prop_val = obj.getSlot(offset);
+                                if (prop_val.isUndefined()) continue;
+                                if (!first) appendByte(buf, allocator, ',') orelse return null;
+                                first = false;
+                                appendByte(buf, allocator, '"') orelse return null;
+                                const name = atomToString(atom, ctx) orelse "?";
+                                appendEscapedSlice(buf, allocator, name) orelse return null;
+                                appendSlice(buf, allocator, "\":") orelse return null;
+                                appendJSValueBuf(buf, allocator, ctx, prop_val, depth + 1) orelse return null;
+                            }
+                        }
+                    }
+                }
+            }
+            appendByte(buf, allocator, '}') orelse return null;
+        }
+    } else {
+        appendSlice(buf, allocator, "null") orelse return null;
+    }
+}
+
+/// Write all bytes to fd, retrying on partial writes.
+fn writeAll(fd: std.c.fd_t, data: []const u8) void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const result = std.c.write(fd, remaining.ptr, remaining.len);
+        if (result < 0) break;
+        remaining = remaining[@intCast(result)..];
+    }
+}
+
+/// fsync a file descriptor. Best-effort - failure is not fatal.
+fn fsyncFd(fd: std.c.fd_t) void {
+    _ = std.c.fsync(fd);
+}
+
+/// Check if a trace file represents an incomplete (recoverable) oplog.
+/// An oplog is incomplete if it has a request entry but no "complete" marker.
+pub fn isIncompleteOplog(source: []const u8) bool {
+    var has_request = false;
+    var has_complete = false;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const type_str = findJsonStringValue(line, "\"type\"") orelse continue;
+        if (std.mem.eql(u8, type_str, "request")) has_request = true;
+        if (std.mem.eql(u8, type_str, "complete")) has_complete = true;
+    }
+    return has_request and !has_complete;
+}
+
+/// Parse an incomplete oplog into its constituent parts for recovery.
+/// Returns the request trace and any I/O entries that were persisted
+/// before the crash.
+pub const IncompleteOplog = struct {
+    request: RequestTrace,
+    io_calls: []const IoEntry,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *IncompleteOplog) void {
+        self.allocator.free(self.io_calls);
+    }
+};
+
+pub fn parseIncompleteOplog(allocator: std.mem.Allocator, source: []const u8) !IncompleteOplog {
+    var io_calls: std.ArrayList(IoEntry) = .empty;
+    errdefer io_calls.deinit(allocator);
+    var request: ?RequestTrace = null;
+
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const entry = parseTraceLine(line) catch continue;
+        switch (entry) {
+            .request => |req| request = req,
+            .io => |io| try io_calls.append(allocator, io),
+            else => {},
+        }
+    }
+
+    return .{
+        .request = request orelse return error.NoRequestInOplog,
+        .io_calls = try io_calls.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1115,4 +1526,97 @@ test "ReplayState divergence on mismatch" {
     const entry = state.nextIO("cache", "env");
     try std.testing.expect(entry != null);
     try std.testing.expectEqual(@as(u32, 1), state.divergences);
+}
+
+test "isIncompleteOplog" {
+    // Incomplete: has request but no complete marker
+    const incomplete =
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/a\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[\"K\"],\"result\":\"V\"}\n";
+    try std.testing.expect(isIncompleteOplog(incomplete));
+
+    // Complete: has request and complete marker
+    const complete =
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/a\",\"headers\":{},\"body\":null}\n" ++
+        "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[\"K\"],\"result\":\"V\"}\n" ++
+        "{\"type\":\"response\",\"status\":200,\"headers\":{},\"body\":\"ok\"}\n" ++
+        "{\"type\":\"complete\"}\n";
+    try std.testing.expect(!isIncompleteOplog(complete));
+
+    // Empty: no request
+    try std.testing.expect(!isIncompleteOplog(""));
+
+    // Only complete marker, no request
+    try std.testing.expect(!isIncompleteOplog("{\"type\":\"complete\"}\n"));
+}
+
+test "parseIncompleteOplog" {
+    const source =
+        "{\"type\":\"request\",\"method\":\"POST\",\"url\":\"/api/data\",\"headers\":{},\"body\":\"payload\"}\n" ++
+        "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[\"KEY\"],\"result\":\"val\"}\n" ++
+        "{\"type\":\"io\",\"seq\":1,\"module\":\"cache\",\"fn\":\"cacheGet\",\"args\":[\"ns\",\"k\"],\"result\":null}\n";
+
+    var parsed = try parseIncompleteOplog(std.testing.allocator, source);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("POST", parsed.request.method);
+    try std.testing.expectEqualStrings("/api/data", parsed.request.url);
+    try std.testing.expectEqual(@as(usize, 2), parsed.io_calls.len);
+    try std.testing.expectEqualStrings("env", parsed.io_calls[0].module);
+    try std.testing.expectEqualStrings("cache", parsed.io_calls[1].module);
+}
+
+test "DurableState replay then live" {
+    const io_calls = [_]IoEntry{
+        .{ .seq = 0, .module = "env", .func = "env", .args_json = "[\"K\"]", .result_json = "\"V\"" },
+    };
+    var state = DurableState.init(
+        std.testing.allocator,
+        &io_calls,
+        -1, // dummy fd, not used in this test
+    );
+    defer state.deinit();
+
+    // Initially in replay mode
+    try std.testing.expect(!state.is_live);
+
+    // First call: replays from oplog
+    const entry = state.replayNext("env", "env");
+    try std.testing.expect(entry != null);
+    try std.testing.expectEqualStrings("\"V\"", entry.?.result_json);
+
+    // Oplog exhausted: transitions to live mode
+    const entry2 = state.replayNext("cache", "cacheGet");
+    try std.testing.expect(entry2 == null);
+    try std.testing.expect(state.is_live);
+}
+
+test "DurableState divergence triggers live mode" {
+    const io_calls = [_]IoEntry{
+        .{ .seq = 0, .module = "env", .func = "env", .args_json = "[\"K\"]", .result_json = "\"V\"" },
+    };
+    var state = DurableState.init(
+        std.testing.allocator,
+        &io_calls,
+        -1,
+    );
+    defer state.deinit();
+
+    // Call with wrong module: divergence transitions to live mode
+    const entry = state.replayNext("cache", "cacheGet");
+    try std.testing.expect(entry == null);
+    try std.testing.expect(state.is_live);
+}
+
+test "DurableState empty oplog starts in live mode" {
+    var state = DurableState.init(
+        std.testing.allocator,
+        &.{},
+        -1,
+    );
+    defer state.deinit();
+
+    try std.testing.expect(state.is_live);
+    const entry = state.replayNext("env", "env");
+    try std.testing.expect(entry == null);
 }

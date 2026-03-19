@@ -75,6 +75,11 @@ pub const RuntimeConfig = struct {
     /// Replay input file path. When set, replays recorded traces instead of serving.
     replay_file_path: ?[]const u8 = null,
 
+    /// Durable execution oplog directory. When set, each request gets a
+    /// write-ahead oplog for crash recovery. Incomplete oplogs are replayed
+    /// on startup, and completed ones are cleaned up.
+    durable_oplog_dir: ?[]const u8 = null,
+
 };
 
 /// Open a trace file for append writing using POSIX APIs.
@@ -86,6 +91,22 @@ fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
         std.posix.AT.FDCWD,
         path_z,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
+        0o644,
+    ) catch return error.FileOpenFailed;
+
+    return fd;
+}
+
+/// Open an oplog file for write-ahead durable execution.
+/// Creates the file (or truncates if it exists from a previous incomplete run).
+fn openOplogFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
         0o644,
     ) catch return error.FileOpenFailed;
 
@@ -605,10 +626,14 @@ pub const Runtime = struct {
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         const fn_atom = try self.ctx.atoms.intern("fetchSync");
-        // In replay mode, use a stub that returns recorded fetch responses
+        // In replay mode, use a stub that returns recorded fetch responses.
+        // In durable mode, use a hybrid wrapper that replays then records.
         const fetch_replay_stub = comptime zq.trace.makeReplayStub("http", "fetchSync");
+        const fetch_durable_wrapper = comptime zq.trace.makeDurableWrapper("http", "fetchSync", fetchSyncNative);
         const func: zq.NativeFn = if (self.config.replay_file_path != null)
             fetch_replay_stub
+        else if (self.config.durable_oplog_dir != null)
+            fetch_durable_wrapper
         else
             fetchSyncNative;
         const fn_obj = try zq.JSObject.createNativeFunction(
@@ -717,12 +742,19 @@ pub const Runtime = struct {
     /// Called during installBindings() for every runtime instance.
     /// In replay mode, registers stubs that return recorded values.
     /// In trace mode, registers wrappers that record I/O.
+    /// In durable mode, registers hybrid replay/record wrappers.
     fn installVirtualModules(self: *Self) !void {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
             inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
                 const module: zq.modules.VirtualModule = @enumFromInt(field.value);
                 try zq.modules.registerVirtualModuleReplay(module, self.ctx, self.allocator);
+            }
+        } else if (self.config.durable_oplog_dir != null) {
+            // Durable mode: hybrid replay/record wrappers
+            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
+                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
+                try zq.modules.registerVirtualModuleDurable(module, self.ctx, self.allocator);
             }
         } else if (self.config.trace_file_path != null) {
             // Use traced wrappers that record I/O to TraceRecorder
@@ -1103,6 +1135,73 @@ pub const Runtime = struct {
             self.ctx.module_state[zq.TRACE_STATE_SLOT] = null;
         };
 
+        // === DURABLE EXECUTION: Write-ahead oplog per request ===
+        var durable_state: ?zq.trace.DurableState = null;
+        var durable_oplog_fd: ?std.c.fd_t = null;
+        var durable_oplog_path_buf: [256]u8 = undefined;
+        var durable_oplog_path_len: usize = 0;
+
+        if (self.config.durable_oplog_dir) |oplog_dir| {
+            // Generate unique oplog path: {dir}/oplog-{request_id}.jsonl
+            const oplog_path = std.fmt.bufPrint(
+                &durable_oplog_path_buf,
+                "{s}/oplog-{d}.jsonl",
+                .{ oplog_dir, if (request_id != 0) request_id else (compat.monotonicNowNs() catch 0) },
+            ) catch {
+                std.log.err("Oplog path too long", .{});
+                return error.OplogPathTooLong;
+            };
+            durable_oplog_path_len = oplog_path.len;
+
+            const oplog_fd = openOplogFile(self.allocator, oplog_path) catch |err| {
+                std.log.err("Failed to open oplog '{s}': {}", .{ oplog_path, err });
+                return err;
+            };
+            durable_oplog_fd = oplog_fd;
+
+            durable_state = zq.trace.DurableState.init(
+                self.allocator,
+                &.{}, // No replay entries for a fresh request
+                oplog_fd,
+            );
+
+            if (durable_state) |*ds| {
+                self.ctx.setModuleState(
+                    zq.trace.DURABLE_STATE_SLOT,
+                    @ptrCast(ds),
+                    &zq.trace.DurableState.deinitOpaque,
+                );
+
+                // Persist the request line to oplog (write-ahead)
+                var h_names: [64][]const u8 = undefined;
+                var h_values: [64][]const u8 = undefined;
+                const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
+                ds.persistRequest(
+                    request.method,
+                    request.url,
+                    h_names[0..hcount],
+                    h_values[0..hcount],
+                    request.body,
+                );
+            }
+        }
+        defer if (durable_state) |*ds| {
+            self.ctx.module_state[zq.trace.DURABLE_STATE_SLOT] = null;
+            // Close oplog fd first
+            if (durable_oplog_fd) |fd| {
+                std.Io.Threaded.closeFd(fd);
+            }
+            // Delete completed oplog file (has "complete" marker)
+            if (durable_oplog_path_len > 0) {
+                const oplog_path_z = self.allocator.dupeZ(u8, durable_oplog_path_buf[0..durable_oplog_path_len]) catch null;
+                if (oplog_path_z) |pz| {
+                    defer self.allocator.free(pz);
+                    _ = std.c.unlink(pz);
+                }
+            }
+            ds.deinit();
+        };
+
         // === FAST PATH: Native dispatch for static routes ===
         if (self.cached_dispatch) |dispatch| {
             if (self.tryFastPathDispatch(
@@ -1188,8 +1287,23 @@ pub const Runtime = struct {
         return response;
     }
 
-    /// Record response to trace if recording is active.
+    /// Record response to trace or durable oplog if active.
     fn traceRecordResponse(self: *Self, response: *const HttpResponse) void {
+        // Durable mode: persist response and mark complete
+        if (self.ctx.getModuleState(zq.trace.DurableState, zq.trace.DURABLE_STATE_SLOT)) |durable| {
+            var h_names: [64][]const u8 = undefined;
+            var h_values: [64][]const u8 = undefined;
+            const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
+            durable.persistResponse(
+                response.status,
+                h_names[0..hcount],
+                h_values[0..hcount],
+                response.body,
+            );
+            durable.markComplete();
+        }
+
+        // Trace mode: record to trace buffer
         const rec = self.trace_recorder orelse return;
         if (!rec.active) return;
 

@@ -178,6 +178,30 @@ pub fn registerVirtualModuleReplay(comptime module: VirtualModule, ctx: *context
     }
 }
 
+/// Register virtual module exports with durable execution wrappers.
+/// Each NativeFn is wrapped to replay from oplog, then record with write-ahead
+/// persistence once the oplog is exhausted. Uses DurableState in module_state slot 3.
+pub fn registerVirtualModuleDurable(comptime module: VirtualModule, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const module_exports = comptime module.getExports();
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const module_name = comptime moduleEnumName(module);
+
+    inline for (module_exports) |exp| {
+        const wrapped = comptime trace.makeDurableWrapper(module_name, exp.name, exp.func);
+        const name_atom = try ctx.atoms.intern(exp.name);
+        const fn_obj = try object.JSObject.createNativeFunction(
+            allocator,
+            pool,
+            ctx.root_class_idx,
+            wrapped,
+            name_atom,
+            exp.arg_count,
+        );
+        try ctx.builtin_objects.append(allocator, fn_obj);
+        try ctx.setGlobal(name_atom, fn_obj.toValue());
+    }
+}
+
 /// Validate that all import specifiers from a module are actually exported.
 /// Returns the first unresolved specifier name, or null if all resolve.
 pub fn validateImports(module: VirtualModule, specifier_names: []const []const u8) ?[]const u8 {

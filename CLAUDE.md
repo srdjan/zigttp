@@ -167,7 +167,17 @@ Replay: `--replay traces.jsonl handler.ts` replays recorded traces against a han
 
 Build integration: `-Dreplay=traces.jsonl` in the precompile pipeline. The precompile tool creates a lightweight zts context, registers replay stubs, executes the handler against each trace, and fails the build if regressions are detected.
 
-Non-determinism sources handled: `env()`, `fetchSync`, `Date.now()` (intercepted in builtins.zig), `jwtVerify` (captured by result recording), `cacheGet/Set/Delete/Incr` (per-call recording sidesteps state), `parallel`/`race` (individual fetch results recorded).
+Non-determinism sources handled: `env()`, `fetchSync`, `Date.now()` (intercepted in builtins.zig), `Math.random()` (intercepted in builtins.zig), `jwtVerify` (captured by result recording), `cacheGet/Set/Delete/Incr` (per-call recording sidesteps state), `parallel`/`race` (individual fetch results recorded).
+
+**Durable Execution** (`zts/trace.zig:DurableState`, `src/durable_recovery.zig`): Write-ahead oplog mode built on top of the deterministic replay system. `--durable <dir>` enables crash recovery for FaaS handlers.
+
+Per-request lifecycle: (1) create oplog file in dir, (2) persist request line with fsync, (3) execute handler - each I/O call's result is persisted to oplog before returning to handler, (4) persist response and "complete" marker, (5) delete oplog.
+
+Recovery: on startup, scans oplog dir for incomplete files (request entry but no "complete" marker), re-executes handlers with `DurableState` loaded from recorded I/O entries. Replayed I/O returns recorded results (zero real I/O). When oplog is exhausted, transitions to live execution for remaining calls.
+
+Key types: `DurableState` (hybrid replay/record state, module_state slot 0), `makeDurableWrapper` (comptime wrapper combining replay and write-ahead recording), `registerVirtualModuleDurable` (registers durable wrappers for all virtual modules), `isIncompleteOplog`/`parseIncompleteOplog` (recovery helpers).
+
+The durable wrapper (`makeDurableWrapper`) combines both `makeReplayStub` (replay) and `makeTracingWrapper` (record) behavior in a single comptime-generated function. `fetchSync` and `Date.now()` also support durable mode via their own DurableState checks.
 
 ## TypeScript/TSX Support
 
@@ -254,6 +264,7 @@ Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size
 --static <DIR>         Serve static files
 --trace <FILE>         Record handler I/O traces to JSONL file
 --replay <FILE>        Replay recorded traces and verify handler output
+--durable <DIR>        Enable durable execution with write-ahead oplog
 ```
 
 ## JSX Support

@@ -32,5 +32,6 @@ pub const resolve = resolver.resolve;
 pub const registerVirtualModule = resolver.registerVirtualModule;
 pub const registerVirtualModuleTraced = resolver.registerVirtualModuleTraced;
 pub const registerVirtualModuleReplay = resolver.registerVirtualModuleReplay;
+pub const registerVirtualModuleDurable = resolver.registerVirtualModuleDurable;
 pub const validateImports = resolver.validateImports;
 pub const populateModuleTypes = types.populateModuleTypes;

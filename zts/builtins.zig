@@ -157,9 +157,22 @@ pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const va
 /// When trace recording is active, the result is recorded as an I/O call
 /// so replay can reproduce the exact timestamp.
 /// When replay is active, the recorded timestamp is returned instead.
+/// When durable mode is active, replays from oplog or records with write-ahead.
 pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
+
+    // Durable mode: replay from oplog or execute and persist
+    if (ctx.getModuleState(trace_mod.DurableState, trace_mod.DURABLE_STATE_SLOT)) |durable| {
+        if (durable.replayNext("builtin", "Date.now")) |entry| {
+            return trace_mod.jsonToJSValue(ctx, entry.result_json);
+        }
+        // Live phase: get real time, persist, return
+        const ms = compat.realtimeNowMs() catch return value.JSValue.undefined_val;
+        const result = allocFloat(ctx, @floatFromInt(ms));
+        durable.persistIO("builtin", "Date.now", ctx, &.{}, result);
+        return result;
+    }
 
     // Replay mode: return recorded timestamp
     if (ctx.getModuleState(trace_mod.ReplayState, trace_mod.REPLAY_STATE_SLOT)) |state| {
@@ -3274,19 +3287,51 @@ pub fn mathExp(ctx: *context.Context, this: value.JSValue, args: []const value.J
 
 var prng: ?std.Random.DefaultPrng = null;
 
+fn getRandomFloat() f64 {
+    if (prng == null) {
+        const seed = compat.realtimeNowNs() catch 0x9e3779b97f4a7c15;
+        prng = std.Random.DefaultPrng.init(seed);
+    }
+    return prng.?.random().float(f64);
+}
+
+/// Math.random() - Returns a pseudo-random float in [0, 1)
+/// When trace recording is active, the result is recorded as an I/O call
+/// so replay can reproduce the exact value.
+/// When replay is active, the recorded value is returned instead.
+/// When durable mode is active, replays from oplog or records with write-ahead.
 pub fn mathRandom(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
-    if (prng == null) {
-        const seed = compat.realtimeNowNs() catch {
-            prng = std.Random.DefaultPrng.init(0x9e3779b97f4a7c15);
-            const r = prng.?.random().float(f64);
-            return allocFloat(ctx, r);
-        };
-        prng = std.Random.DefaultPrng.init(seed);
+
+    // Durable mode: replay from oplog or execute and persist
+    if (ctx.getModuleState(trace_mod.DurableState, trace_mod.DURABLE_STATE_SLOT)) |durable| {
+        if (durable.replayNext("builtin", "Math.random")) |entry| {
+            return trace_mod.jsonToJSValue(ctx, entry.result_json);
+        }
+        // Live phase: generate real random, persist, return
+        const r = getRandomFloat();
+        const result = allocFloat(ctx, r);
+        durable.persistIO("builtin", "Math.random", ctx, &.{}, result);
+        return result;
     }
-    const r = prng.?.random().float(f64);
-    return allocFloat(ctx, r);
+
+    // Replay mode: return recorded value
+    if (ctx.getModuleState(trace_mod.ReplayState, trace_mod.REPLAY_STATE_SLOT)) |state| {
+        const entry = state.nextIO("builtin", "Math.random") orelse return value.JSValue.undefined_val;
+        return trace_mod.jsonToJSValue(ctx, entry.result_json);
+    }
+
+    // Normal execution
+    const r = getRandomFloat();
+    const result = allocFloat(ctx, r);
+
+    // Record to trace if active (Math.random is a non-determinism source)
+    if (ctx.getModuleState(trace_mod.TraceRecorder, trace_mod.TRACE_STATE_SLOT)) |recorder| {
+        recorder.recordIO("builtin", "Math.random", ctx, &.{}, result);
+    }
+
+    return result;
 }
 
 pub fn mathSign(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
