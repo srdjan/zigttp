@@ -144,12 +144,13 @@ Currently supported targets:
 
 Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). The deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
 
-**Boolean Enforcement** (`zts/bool_checker.zig`): The BoolChecker walks the IR tree inferring expression types, rejecting non-boolean values in if/ternary conditions, &&/|| operands, and ! operands. Runtime VM assertions at conditional jump opcodes catch values the static checker cannot prove. See [docs/sound-mode.md](docs/sound-mode.md).
+**Type-Directed Truthiness** (`zts/bool_checker.zig`): The BoolChecker walks the IR tree inferring expression types and applies type-directed truthiness (TDT) in boolean contexts. Types with unambiguous falsy states are accepted: boolean (value itself), number (!=0), string (!=""), optional_string/optional_object (!=undefined). Objects and functions are rejected (always truthy - pointless condition). undefined emits a warning (always false - dead branch). Runtime VM conditional opcodes use `toConditionBool()` with the same rules. See [docs/sound-mode.md](docs/sound-mode.md).
 
-Boolean enforcement includes progressive type inference:
-- **Virtual module return types**: Imported functions from `zigttp:*` modules have known return types (boolean, number, string, object, optional variants). Using `cacheIncr()` (number) in an `if` condition is caught at compile time.
+TDT includes progressive type inference and automatic narrowing:
+- **Virtual module return types**: Imported functions from `zigttp:*` modules have known return types (boolean, number, string, object, optional variants). `if (cacheIncr("ns", "key"))` works directly (number truthiness: != 0).
 - **Match expression types**: When all arms return the same type, the match expression inherits that type.
-- **Optional types**: Functions like `env()` and `cacheGet()` return `optional_string` (`T | undefined`). These fail in boolean contexts with a help message suggesting explicit undefined checks. The `??` operator resolves optionals: `env("KEY") ?? "default"` infers as `string`.
+- **Optional types**: Functions like `env()` and `cacheGet()` return `optional_string` (`T | undefined`). These work directly in boolean contexts: `if (val)` narrows to string in then-branch. The `??` operator resolves optionals: `env("KEY") ?? "default"` infers as `string`.
+- **Truthiness narrowing**: `if (x)` where x is optional automatically narrows to non-optional in then-branch. `if (!x)` narrows to undefined. Same semantics as `x !== undefined` narrowing, triggered automatically.
 - **Result property access**: `result.ok` on objects from `jwtVerify`/`validateJson`/`validateObject`/`coerceJson` infers as `boolean`. `result.error` infers as `string`.
 - **Undefined equality narrowing**: `x !== undefined` guards narrow optional types to their non-optional variants in the then-branch. `x === undefined` narrows to `undefined`. Both operand orderings supported (`undefined !== x`).
 

@@ -35,7 +35,7 @@ pub const JSValue = packed struct {
     const TYPE_SHIFT: u6 = 44;
 
     /// Type tag mask (3 bits = 8 types) - only used for non-pointer types
-    const TYPE_MASK: u64 = 0x7 << TYPE_SHIFT;
+    pub const TYPE_MASK: u64 = 0x7 << TYPE_SHIFT;
 
     /// Value payload mask (lower 48 bits) - full 48-bit address support
     /// JIT uses low 3 bits for quick type checking, remaining 45 bits for values
@@ -48,7 +48,7 @@ pub const JSValue = packed struct {
     const LOW_TAG_EXTERN: u64 = 7; // External pointer (non-GC)
 
     /// Type tags for TYPE_MASK position (non-pointer types)
-    const TYPE_INT: u64 = 0x1 << TYPE_SHIFT; // 32-bit signed integer
+    pub const TYPE_INT: u64 = 0x1 << TYPE_SHIFT; // 32-bit signed integer
     const TYPE_SPECIAL: u64 = 0x2 << TYPE_SHIFT; // null/undefined/bool/exception
     const TYPE_SYMBOL: u64 = 0x4 << TYPE_SHIFT; // Symbol
 
@@ -701,6 +701,31 @@ pub const JSValue = packed struct {
         }
         // Objects are truthy
         return true;
+    }
+
+    /// Type-directed truthiness for sound mode conditional opcodes.
+    /// Returns the boolean result for types with unambiguous falsy states:
+    ///   boolean: value itself, number: != 0, string: != "", undefined: false
+    /// Returns null for objects/functions (always truthy - pointless condition).
+    pub fn toConditionBool(self: JSValue) ?bool {
+        const string_mod = @import("string.zig");
+        // Fast path: boolean (most common case in conditionals)
+        if (self.isBool()) return self.isTrue();
+        // Integer: zero is falsy
+        if (self.isInt()) return self.getInt() != 0;
+        // Float: zero and NaN are falsy
+        if (self.isFloat64()) {
+            const f = self.getFloat64();
+            return f != 0.0 and !std.math.isNan(f);
+        }
+        // Undefined: always false
+        if (self.isUndefined()) return false;
+        // String: empty is falsy
+        if (self.isString()) return self.toPtr(string_mod.JSString).len != 0;
+        if (self.isStringSlice()) return self.toPtr(string_mod.SliceString).len != 0;
+        if (self.isRope()) return self.toPtr(string_mod.RopeNode).total_len != 0;
+        // Objects, functions: no meaningful falsy state - reject
+        return null;
     }
 
     /// Get the JS typeof result

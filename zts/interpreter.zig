@@ -1597,11 +1597,11 @@ pub const Interpreter = struct {
             },
             .not => {
                 const a = self.ctx.pop();
-                if (!a.isBool()) {
+                const cond_bool = a.toConditionBool() orelse {
                     self.ctx.exception = try self.createBoolError(a);
                     return .{ .ret = value.JSValue.undefined_val };
-                }
-                try self.ctx.push(value.JSValue.fromBool(!a.toBoolean()));
+                };
+                try self.ctx.push(value.JSValue.fromBool(!cond_bool));
                 return .handled;
             },
             else => return .unhandled,
@@ -1715,26 +1715,26 @@ pub const Interpreter = struct {
             },
             .if_true => {
                 const cond = self.ctx.pop();
-                if (!cond.isBool()) {
+                const cond_bool = cond.toConditionBool() orelse {
                     self.ctx.exception = try self.createBoolError(cond);
                     return .{ .ret = value.JSValue.undefined_val };
-                }
+                };
                 const offset = readI16(self.pc);
                 self.pc += 2;
-                if (cond.toBoolean()) {
+                if (cond_bool) {
                     self.offsetPc(offset);
                 }
                 return .handled;
             },
             .if_false => {
                 const cond = self.ctx.pop();
-                if (!cond.isBool()) {
+                const cond_bool = cond.toConditionBool() orelse {
                     self.ctx.exception = try self.createBoolError(cond);
                     return .{ .ret = value.JSValue.undefined_val };
-                }
+                };
                 const offset = readI16(self.pc);
                 self.pc += 2;
-                if (!cond.toBoolean()) {
+                if (!cond_bool) {
                     self.offsetPc(offset);
                 }
                 return .handled;
@@ -2834,13 +2834,13 @@ pub const Interpreter = struct {
 
                 .if_false_goto => {
                     const cond = self.ctx.pop();
-                    if (!cond.isBool()) {
+                    const cond_bool = cond.toConditionBool() orelse {
                         self.ctx.exception = try self.createBoolError(cond);
                         return error.TypeError;
-                    }
+                    };
                     const offset = readI16(self.pc);
                     self.pc += 2;
-                    if (!cond.toBoolean()) {
+                    if (!cond_bool) {
                         self.offsetPc(offset);
                     }
                 },
@@ -3559,14 +3559,17 @@ pub const Interpreter = struct {
 
     fn createBoolError(self: *Interpreter, val: value.JSValue) !value.JSValue {
         const type_name = val.typeOf();
-        const prefix = "condition must be boolean, got ";
+        const prefix = "condition rejected: ";
+        const suffix = " has no falsy state";
         // Build error message
         var buf: [80]u8 = undefined;
-        const total = @min(prefix.len + type_name.len, buf.len);
+        const total = @min(prefix.len + type_name.len + suffix.len, buf.len);
         @memcpy(buf[0..prefix.len], prefix);
-        const type_copy_len = total - prefix.len;
+        const type_copy_len = @min(type_name.len, total - prefix.len);
         @memcpy(buf[prefix.len..][0..type_copy_len], type_name[0..type_copy_len]);
-        const msg = buf[0..total];
+        const suffix_len = @min(suffix.len, total - prefix.len - type_copy_len);
+        @memcpy(buf[prefix.len + type_copy_len ..][0..suffix_len], suffix[0..suffix_len]);
+        const msg = buf[0..prefix.len + type_copy_len + suffix_len];
         const js_str = blk: {
             if (self.ctx.hybrid) |h| {
                 break :blk string.createStringWithArena(h.arena, msg) orelse return error.OutOfMemory;

@@ -199,10 +199,10 @@ pub const BoolChecker = struct {
     }
 
     /// Check if a diagnostic message was dynamically allocated vs static string.
-    /// Allocated messages start with "non-boolean value (" and contain "' operator".
+    /// Allocated messages start with "always-truthy value (" and contain "' operator".
     fn isAllocatedMessage(msg: []const u8) bool {
         return msg.len > 30 and
-            std.mem.startsWith(u8, msg, "non-boolean value (") and
+            std.mem.startsWith(u8, msg, "always-truthy value (") and
             std.mem.endsWith(u8, msg, "' operator");
     }
 
@@ -278,25 +278,36 @@ pub const BoolChecker = struct {
 
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
-                // S1: condition must be boolean
+                // S1: condition must produce a value with unambiguous truthiness
                 self.requireBoolean(if_s.condition, "if");
 
                 // Extract typeof guards from condition for branch-scoped narrowing
                 var guards: [MAX_NARROWINGS]TypeofGuard = undefined;
                 var saved: [MAX_NARROWINGS]?ExprType = undefined;
                 var is_negated = false;
-                const guard_count = self.extractTypeofGuards(if_s.condition, &guards, &is_negated);
+                var guard_count = self.extractTypeofGuards(if_s.condition, &guards, &is_negated);
+
+                // Type-directed truthiness narrowing: if (x) where x is optional
+                // narrows to non-optional in then-branch (like x !== undefined)
+                if (guard_count == 0) {
+                    if (self.extractTruthinessGuard(if_s.condition)) |tg| {
+                        guards[0] = tg.guard;
+                        is_negated = tg.negated;
+                        guard_count = 1;
+                    }
+                }
+
                 const active = guards[0..guard_count];
                 const saved_active = saved[0..guard_count];
 
                 if (active.len > 0 and is_negated) {
-                    // !== guard: narrow in else-branch only
+                    // Negated guard: narrow in else-branch only
                     self.walkStmt(if_s.then_branch);
                     if (if_s.else_branch != null_node) {
                         self.walkStmtWithGuards(if_s.else_branch, active, saved_active);
                     }
                 } else {
-                    // === guard or no guard (install/restore are no-ops on empty slice)
+                    // Positive guard or no guard (install/restore are no-ops on empty slice)
                     self.walkStmtWithGuards(if_s.then_branch, active, saved_active);
                     if (if_s.else_branch != null_node) {
                         self.walkStmt(if_s.else_branch);
@@ -458,7 +469,7 @@ pub const BoolChecker = struct {
 
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return;
-                // S1: ternary condition must be boolean
+                // S1: ternary condition must produce a value with unambiguous truthiness
                 self.requireBoolean(t.condition, "ternary");
                 self.walkExpr(t.condition);
 
@@ -466,7 +477,17 @@ pub const BoolChecker = struct {
                 var guards: [MAX_NARROWINGS]TypeofGuard = undefined;
                 var saved: [MAX_NARROWINGS]?ExprType = undefined;
                 var is_negated = false;
-                const guard_count = self.extractTypeofGuards(t.condition, &guards, &is_negated);
+                var guard_count = self.extractTypeofGuards(t.condition, &guards, &is_negated);
+
+                // Type-directed truthiness narrowing for ternaries
+                if (guard_count == 0) {
+                    if (self.extractTruthinessGuard(t.condition)) |tg| {
+                        guards[0] = tg.guard;
+                        is_negated = tg.negated;
+                        guard_count = 1;
+                    }
+                }
+
                 const active = guards[0..guard_count];
                 const saved_active = saved[0..guard_count];
 
@@ -866,28 +887,35 @@ pub const BoolChecker = struct {
     fn requireBoolean(self: *BoolChecker, node: NodeIndex, context_name: []const u8) void {
         const inferred = self.inferType(node);
 
-        // unknown passes through - runtime assertions catch these
-        if (inferred == .unknown or inferred == .boolean) return;
+        // Type-directed truthiness: accept types with unambiguous falsy states.
+        // boolean, number, string, optional_string, optional_object: accepted
+        // unknown: accepted (runtime handles it)
+        // undefined: WARNING (always false - dead branch)
+        // object, function: ERROR (always truthy - pointless condition)
+        switch (inferred) {
+            .boolean, .number, .string, .optional_string, .optional_object, .unknown => return,
+            .undefined => {
+                self.addDiagnostic(.{
+                    .severity = .warning,
+                    .kind = .condition_not_boolean,
+                    .node = node,
+                    .message = "condition is always false (undefined)",
+                    .help = "this branch is dead code",
+                });
+                return;
+            },
+            .object, .function => {},
+        }
 
         const help: []const u8 = switch (inferred) {
-            .number => "use explicit comparison: n !== 0",
-            .string => "use explicit comparison: s.length > 0 or s !== \"\"",
-            .undefined => "undefined is not boolean; this condition is always false",
-            .object => "objects are not boolean; this condition is always true",
-            .function => "functions are not boolean; this condition is always true",
-            .optional_string => "use explicit undefined check: val !== undefined",
-            .optional_object => "use explicit undefined check: val !== undefined",
+            .object => "objects are always truthy; this condition is pointless",
+            .function => "functions are always truthy; this condition is pointless",
             else => unreachable,
         };
 
         const type_name: []const u8 = switch (inferred) {
-            .number => "number",
-            .string => "string",
-            .undefined => "undefined",
             .object => "object",
             .function => "function",
-            .optional_string => "string?",
-            .optional_object => "object?",
             else => unreachable,
         };
 
@@ -899,9 +927,9 @@ pub const BoolChecker = struct {
         else
             .condition_not_boolean;
 
-        // Build message with context: "non-boolean value (number) in '&&' operator"
+        // Build message: "always-truthy value (object) in 'if' operator"
         var msg_buf: [80]u8 = undefined;
-        const prefix = "non-boolean value (";
+        const prefix = "always-truthy value (";
         const mid = ") in '";
         const suffix = "' operator";
         const msg_len = prefix.len + type_name.len + mid.len + context_name.len + suffix.len;
@@ -917,9 +945,8 @@ pub const BoolChecker = struct {
             pos += context_name.len;
             @memcpy(msg_buf[pos..][0..suffix.len], suffix);
             pos += suffix.len;
-            // Allocate to get a stable pointer for the diagnostic
             const message = self.allocator.dupe(u8, msg_buf[0..pos]) catch
-                "non-boolean value used in boolean context";
+                "always-truthy value used in boolean context";
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = kind,
@@ -932,9 +959,77 @@ pub const BoolChecker = struct {
                 .severity = .err,
                 .kind = kind,
                 .node = node,
-                .message = "non-boolean value used in boolean context",
+                .message = "always-truthy value used in boolean context",
                 .help = help,
             });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Truthiness guard extraction (type-directed narrowing)
+    // -----------------------------------------------------------------------
+
+    const TruthinessGuard = struct {
+        guard: TypeofGuard,
+        negated: bool,
+    };
+
+    /// Extract a truthiness guard from `if (x)` or `if (!x)` where x has an optional type.
+    /// if (x) with optional_string: narrow to string in then-branch
+    /// if (!x) with optional_string: narrow to string in else-branch (negated)
+    fn extractTruthinessGuard(self: *BoolChecker, cond: NodeIndex) ?TruthinessGuard {
+        const tag = self.ir_view.getTag(cond) orelse return null;
+
+        // Pattern 1: direct identifier - if (x)
+        if (tag == .identifier) {
+            return self.makeTruthinessGuard(cond, false);
+        }
+
+        // Pattern 2: negated identifier - if (!x)
+        if (tag == .unary_op) {
+            const un = self.ir_view.getUnary(cond) orelse return null;
+            if (un.op != .not) return null;
+            const operand_tag = self.ir_view.getTag(un.operand) orelse return null;
+            if (operand_tag != .identifier) return null;
+            return self.makeTruthinessGuard(un.operand, true);
+        }
+
+        return null;
+    }
+
+    fn makeTruthinessGuard(self: *BoolChecker, ident_node: NodeIndex, negated: bool) ?TruthinessGuard {
+        const binding = self.ir_view.getBinding(ident_node) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const current_type = self.lookupBindingType(key);
+
+        // Only narrow optional types - non-optional types don't benefit
+        const narrowed = current_type.removeNullish();
+        if (narrowed == current_type) return null; // Not optional
+        if (current_type == .undefined) return null; // Pure undefined has no non-optional variant
+
+        // if (x): then-branch gets non-optional type (truthy = not undefined)
+        // if (!x): then-branch gets undefined, else-branch gets non-optional
+        if (negated) {
+            // !x: this is like x === undefined (narrow to undefined in "positive" direction)
+            // We encode as strict_neq so the guard system installs in else-branch
+            return .{
+                .guard = .{
+                    .binding_key = key,
+                    .narrowed_type = narrowed,
+                    .op = .strict_neq,
+                },
+                .negated = true,
+            };
+        } else {
+            // x: this is like x !== undefined (narrow to non-optional in then-branch)
+            return .{
+                .guard = .{
+                    .binding_key = key,
+                    .narrowed_type = narrowed,
+                    .op = .strict_eq,
+                },
+                .negated = false,
+            };
         }
     }
 
@@ -1356,40 +1451,40 @@ test "sound: unknown (param) in ternary passes" {
     try checkSource("const f = (x) => x ? 1 : 2;", 0);
 }
 
-test "sound: number literal in if fails" {
-    try checkSource("if (0) { let x = 1; }", 1);
+test "sound: number literal in if passes (TDT)" {
+    try checkSource("if (0) { let x = 1; }", 0);
 }
 
-test "sound: string literal in if fails" {
-    try checkSource("if (\"hello\") { let x = 1; }", 1);
+test "sound: string literal in if passes (TDT)" {
+    try checkSource("if (\"hello\") { let x = 1; }", 0);
 }
 
-test "sound: undefined literal in if fails" {
-    try checkSource("if (undefined) { let x = 1; }", 1);
+test "sound: undefined literal in if warns (TDT)" {
+    try checkSourceFull("if (undefined) { let x = 1; }", 0, 1);
 }
 
-test "sound: tracked const number in if fails" {
-    try checkSource("const count = 42; if (count) { let x = 1; }", 1);
+test "sound: tracked const number in if passes (TDT)" {
+    try checkSource("const count = 42; if (count) { let x = 1; }", 0);
 }
 
 // S2: && and || operands
 
-test "sound: number operands for && fails" {
-    try checkSource("const r = 1 && 2;", 2);
+test "sound: number operands for && passes (TDT)" {
+    try checkSource("const r = 1 && 2;", 0);
 }
 
-test "sound: string operands for || fails" {
-    try checkSource("const r = \"a\" || \"b\";", 2);
+test "sound: string operands for || passes (TDT)" {
+    try checkSource("const r = \"a\" || \"b\";", 0);
 }
 
 // S3: ! operand
 
-test "sound: !0 fails" {
-    try checkSource("const r = !0;", 1);
+test "sound: !0 passes (TDT)" {
+    try checkSource("const r = !0;", 0);
 }
 
-test "sound: !string fails" {
-    try checkSource("const r = !\"str\";", 1);
+test "sound: !string passes (TDT)" {
+    try checkSource("const r = !\"str\";", 0);
 }
 
 test "sound: !boolean passes" {
@@ -1412,14 +1507,14 @@ test "sound: unknown LHS for ?? no warning" {
 
 // Combined
 
-test "sound: nested if with mixed types" {
+test "sound: nested if with mixed types passes (TDT)" {
     try checkSource(
         \\const flag = true;
         \\if (flag) {
         \\  const count = 5;
         \\  if (count) { let x = 1; }
         \\}
-    , 1);
+    , 0);
 }
 
 test "sound: complex boolean expression passes" {
@@ -1433,8 +1528,8 @@ test "sound: complex boolean expression passes" {
 
 // Let variable tracking
 
-test "sound: tracked let number in if fails" {
-    try checkSource("let count = 0; if (count) { let x = 1; }", 1);
+test "sound: tracked let number in if passes (TDT)" {
+    try checkSource("let count = 0; if (count) { let x = 1; }", 0);
 }
 
 test "sound: let reassigned to boolean passes" {
@@ -1445,12 +1540,12 @@ test "sound: let reassigned to boolean passes" {
     , 0);
 }
 
-test "sound: let reassigned to number fails" {
+test "sound: let reassigned to number passes (TDT)" {
     try checkSource(
         \\let flag = true;
         \\flag = 42;
         \\if (flag) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 // Diagnostic context messages
@@ -1464,11 +1559,11 @@ test "sound: arrow function returning boolean - call site passes" {
     , 0);
 }
 
-test "sound: arrow function returning number - call site fails" {
+test "sound: arrow function returning number - call site passes (TDT)" {
     try checkSource(
         \\const double = (n) => n * 2;
         \\if (double(5)) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 test "sound: block function returning boolean passes" {
@@ -1497,10 +1592,10 @@ test "sound: untracked function call is unknown (passes)" {
 
 // Diagnostic context messages
 
-test "sound: diagnostic includes operator context" {
+test "sound: diagnostic includes operator context for object" {
     const allocator = std.testing.allocator;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "if (0) { let x = 1; }");
+    var parser = @import("parser/parse.zig").Parser.init(allocator, "if ({}) { let x = 1; }");
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -1512,13 +1607,13 @@ test "sound: diagnostic includes operator context" {
     const diags = checker.getDiagnostics();
     try std.testing.expectEqual(@as(usize, 1), diags.len);
     // Message should include the operator context
-    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "number") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "object") != null);
     try std.testing.expect(std.mem.indexOf(u8, diags[0].message, "if") != null);
 }
 
 // Typeof guard narrowing
 
-test "sound: typeof guard narrows to number, used in boolean context" {
+test "sound: typeof guard narrows to number, used in boolean context (TDT)" {
     try checkSource(
         \\const f = (x) => {
         \\  if (typeof x === "number") {
@@ -1526,7 +1621,7 @@ test "sound: typeof guard narrows to number, used in boolean context" {
         \\  }
         \\  return true;
         \\};
-    , 1);
+    , 0);
 }
 
 test "sound: typeof guard narrows to boolean, used in boolean context" {
@@ -1540,7 +1635,7 @@ test "sound: typeof guard narrows to boolean, used in boolean context" {
     , 0);
 }
 
-test "sound: typeof guard reversed operand order" {
+test "sound: typeof guard reversed operand order (TDT)" {
     try checkSource(
         \\const f = (x) => {
         \\  if ("number" === typeof x) {
@@ -1548,10 +1643,10 @@ test "sound: typeof guard reversed operand order" {
         \\  }
         \\  return true;
         \\};
-    , 1);
+    , 0);
 }
 
-test "sound: typeof negated guard narrows else-branch" {
+test "sound: typeof negated guard narrows else-branch (TDT)" {
     try checkSource(
         \\const f = (x) => {
         \\  if (typeof x !== "number") {
@@ -1561,25 +1656,25 @@ test "sound: typeof negated guard narrows else-branch" {
         \\  }
         \\  return true;
         \\};
-    , 1);
+    , 0);
 }
 
-test "sound: typeof guard narrows ternary then branch" {
+test "sound: typeof guard narrows ternary then branch (TDT)" {
     try checkSource(
         \\const f = (x) => {
         \\  typeof x === "number" ? (x ? 1 : 0) : 0;
         \\  return true;
         \\};
-    , 1);
+    , 0);
 }
 
-test "sound: typeof negated guard narrows ternary else branch" {
+test "sound: typeof negated guard narrows ternary else branch (TDT)" {
     try checkSource(
         \\const f = (x) => {
         \\  typeof x !== "number" ? 0 : (x ? 1 : 0);
         \\  return true;
         \\};
-    , 1);
+    , 0);
 }
 
 test "sound: typeof narrowing does not leak outside branch" {
@@ -1595,7 +1690,7 @@ test "sound: typeof narrowing does not leak outside branch" {
     , 0);
 }
 
-test "sound: typeof compound && guard narrows both" {
+test "sound: typeof compound && guard narrows both (TDT)" {
     try checkSource(
         \\const f = (x, y) => {
         \\  if (typeof x === "number" && typeof y === "string") {
@@ -1603,7 +1698,7 @@ test "sound: typeof compound && guard narrows both" {
         \\  }
         \\  return true;
         \\};
-    , 1);
+    , 0);
 }
 
 test "sound: typeof nested guards compose" {
@@ -1642,26 +1737,26 @@ test "sound: virtual module boolean return type catches non-boolean use" {
     , 0);
 }
 
-test "sound: virtual module number return type fails in boolean context" {
-    // cacheIncr returns number
+test "sound: virtual module number return type passes (TDT)" {
+    // cacheIncr returns number - TDT coerces: != 0
     try checkSource(
         \\import { cacheIncr } from "zigttp:cache";
         \\const count = cacheIncr("ns", "key");
         \\if (count) { let x = 1; }
-    , 1);
+    , 0);
 }
 
-test "sound: virtual module string return type fails in boolean context" {
-    // sha256 returns string
+test "sound: virtual module string return type passes (TDT)" {
+    // sha256 returns string - TDT coerces: != ""
     try checkSource(
         \\import { sha256 } from "zigttp:crypto";
         \\const hash = sha256("data");
         \\if (hash) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 test "sound: virtual module object return type fails in boolean context" {
-    // jwtVerify returns object (Result)
+    // jwtVerify returns object (Result) - objects are always truthy, still an error
     try checkSource(
         \\import { jwtVerify } from "zigttp:auth";
         \\const result = jwtVerify("token", "secret");
@@ -1669,13 +1764,13 @@ test "sound: virtual module object return type fails in boolean context" {
     , 1);
 }
 
-test "sound: virtual module optional return type fails in boolean context" {
-    // env returns optional_string - truthiness check is not safe
+test "sound: virtual module optional return type passes (TDT)" {
+    // env returns optional_string - TDT coerces: != undefined, narrows to string
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
         \\if (val) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 test "sound: virtual module direct call in boolean context" {
@@ -1686,12 +1781,12 @@ test "sound: virtual module direct call in boolean context" {
     , 0);
 }
 
-test "sound: virtual module direct number call in boolean context fails" {
-    // cacheIncr returns number - direct call in if fails
+test "sound: virtual module direct number call in boolean context passes (TDT)" {
+    // cacheIncr returns number - TDT coerces: != 0
     try checkSource(
         \\import { cacheIncr } from "zigttp:cache";
         \\if (cacheIncr("ns", "key")) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 // Phase 2: Match expression type inference tests must run via `zig build test-zts`
@@ -1699,13 +1794,13 @@ test "sound: virtual module direct number call in boolean context fails" {
 
 // Phase 3: Optional union types
 
-test "sound: optional string from env used with ?? passes" {
-    // env() ?? "default" is fine - ?? resolves optional
+test "sound: optional string from env used with ?? passes (TDT)" {
+    // env() ?? "default" is fine - ?? resolves optional, string in boolean context passes
     try checkSourceFull(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY") ?? "default";
         \\if (val) { let x = 1; }
-    , 1, 0); // val is string (from ??), string in boolean context fails; no warnings
+    , 0, 0); // val is string (from ??), string in boolean context passes via TDT; no warnings
 }
 
 test "sound: optional with ?? does not warn" {
@@ -1724,16 +1819,16 @@ test "sound: non-optional with ?? still warns" {
     , 0, 1); // no errors, 1 warning
 }
 
-test "sound: optional cacheGet in boolean context fails" {
+test "sound: optional cacheGet in boolean context passes (TDT)" {
     try checkSource(
         \\import { cacheGet } from "zigttp:cache";
         \\const val = cacheGet("ns", "key");
         \\if (val) { let x = 1; }
-    , 1);
+    , 0);
 }
 
-test "sound: function returning string or undefined infers optional_string" {
-    // Mixed return: string + undefined -> optional_string -> fails in boolean context
+test "sound: function returning string or undefined infers optional_string (TDT)" {
+    // Mixed return: string + undefined -> optional_string -> passes via TDT
     try checkSource(
         \\const find = (arr) => {
         \\  if (arr.length > 0) { return "found"; }
@@ -1741,7 +1836,7 @@ test "sound: function returning string or undefined infers optional_string" {
         \\};
         \\const r = find([1]);
         \\if (r) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 // Phase 4: Property access on known shapes
@@ -1762,12 +1857,12 @@ test "sound: aliased result-producing import preserves result shape" {
     , 0);
 }
 
-test "sound: result.error is string - fails in boolean context" {
+test "sound: result.error is string - passes (TDT)" {
     try checkSource(
         \\import { validateJson } from "zigttp:validate";
         \\const result = validateJson("schema", "data");
         \\if (result.error) { let x = 1; }
-    , 1);
+    , 0);
 }
 
 test "sound: non-result object property stays unknown" {
@@ -1780,19 +1875,19 @@ test "sound: non-result object property stays unknown" {
 
 // Undefined equality narrowing
 
-test "sound: x !== undefined narrows optional to non-optional" {
+test "sound: x !== undefined narrows optional to non-optional (TDT)" {
     // env() returns optional_string. After !== undefined guard, it should be string.
-    // string in boolean context fails (which proves narrowing worked).
+    // string in boolean context now passes via TDT.
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
         \\if (val !== undefined) {
         \\  if (val) { let x = 1; }
         \\}
-    , 1); // val narrowed to string -> string in if -> error
+    , 0); // val narrowed to string -> string in if -> passes via TDT
 }
 
-test "sound: x !== undefined on non-optional is no-op" {
+test "sound: x !== undefined on non-optional is no-op (TDT)" {
     // sha256 returns string (non-optional), !== undefined check is valid but doesn't change type
     try checkSource(
         \\import { sha256 } from "zigttp:crypto";
@@ -1800,33 +1895,33 @@ test "sound: x !== undefined on non-optional is no-op" {
         \\if (hash !== undefined) {
         \\  if (hash) { let x = 1; }
         \\}
-    , 1); // hash is string regardless, string in if -> error
+    , 0); // hash is string regardless, string in if -> passes via TDT
 }
 
-test "sound: undefined === x narrowing works reversed" {
+test "sound: undefined === x narrowing works reversed (TDT)" {
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
         \\if (undefined !== val) {
         \\  if (val) { let x = 1; }
         \\}
-    , 1); // val narrowed to string
+    , 0); // val narrowed to string -> passes via TDT
 }
 
 test "sound: x === undefined narrows to undefined type in then-branch" {
     // x === undefined in then-branch should narrow to undefined
-    // undefined in boolean context should fail
-    try checkSource(
+    // undefined in boolean context emits warning (always false)
+    try checkSourceFull(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
         \\if (val === undefined) {
         \\  if (val) { let x = 1; }
         \\}
-    , 1); // val narrowed to undefined -> undefined in if -> error
+    , 0, 1); // val narrowed to undefined -> undefined in if -> warning (dead branch)
 }
 
-test "sound: narrowing does not leak outside undefined guard branch" {
-    // Outside the undefined guard, val should revert to optional_string (fails in boolean context)
+test "sound: narrowing does not leak outside undefined guard branch (TDT)" {
+    // Outside the undefined guard, val should revert to optional_string (passes via TDT)
     try checkSource(
         \\import { env } from "zigttp:env";
         \\const val = env("KEY");
@@ -1834,5 +1929,71 @@ test "sound: narrowing does not leak outside undefined guard branch" {
         \\  let y = val;
         \\}
         \\if (val) { let z = 1; }
-    , 1); // val reverts to optional_string -> fails
+    , 0); // val reverts to optional_string -> passes via TDT
+}
+
+// TDT-specific tests
+
+test "sound: if (42) passes - number truthiness" {
+    try checkSource("if (42) { let x = 1; }", 0);
+}
+
+test "sound: if (0) passes - number zero is falsy" {
+    try checkSource("if (0) { let x = 1; }", 0);
+}
+
+test "sound: if ('hello') passes - string truthiness" {
+    try checkSource("if (\"hello\") { let x = 1; }", 0);
+}
+
+test "sound: if ('') passes - empty string is falsy" {
+    try checkSource("if (\"\") { let x = 1; }", 0);
+}
+
+test "sound: if (undefined) warns - always false" {
+    try checkSourceFull("if (undefined) { let x = 1; }", 0, 1);
+}
+
+test "sound: if ({}) fails - object always truthy" {
+    try checkSource("if ({}) { let x = 1; }", 1);
+}
+
+test "sound: if (fn) fails - function always truthy" {
+    try checkSource("if (() => 1) { let x = 1; }", 1);
+}
+
+test "sound: truthiness narrowing - if (x) narrows optional to string" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const x = env("K");
+        \\if (x) {
+        \\  const upper = x;
+        \\}
+    , 0);
+}
+
+test "sound: truthiness narrowing - if (!x) narrows optional" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const x = env("K");
+        \\if (!x) {
+        \\  let y = 1;
+        \\}
+    , 0);
+}
+
+test "sound: && with number and string passes (TDT)" {
+    try checkSource("if (1 && \"ok\") { let x = 1; }", 0);
+}
+
+test "sound: optional from function in boolean context passes (TDT)" {
+    // Function returning optional_object -> accepted in boolean context
+    try checkSource(
+        \\const find = (arr) => {
+        \\  if (arr.length > 0) { return "found"; }
+        \\  return undefined;
+        \\};
+        \\const r = find([1]);
+        \\if (r) { let x = r; }
+    , 0);
 }

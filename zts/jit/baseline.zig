@@ -6152,10 +6152,14 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitLogicalNot(self: *BaselineCompiler, bytecode_offset: u32) CompileError!void {
-        // Logical NOT with inline isBool() check.
-        // true -> push false, false -> push true, anything else -> deopt.
+        // Logical NOT with type-directed truthiness.
+        // boolean: true -> false, false -> true
+        // integer (fast path): != 0 -> false, == 0 -> true
+        // anything else: deopt to interpreter (handles string/undefined/error)
         const true_bits: u64 = @bitCast(value_mod.JSValue.true_val);
         const false_bits: u64 = @bitCast(value_mod.JSValue.false_val);
+        const type_mask: u64 = value_mod.JSValue.TYPE_MASK;
+        const type_int: u64 = value_mod.JSValue.TYPE_INT;
 
         if (is_x86_64) {
             const was_true = self.newLocalLabel();
@@ -6173,14 +6177,40 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(.r11, false_bits) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.rsi, .r11) catch return CompileError.OutOfMemory;
             {
-                const deopt_label = self.newLocalLabel();
-                try self.emitJccToLabel(.ne, deopt_label);
+                const not_false_label = self.newLocalLabel();
+                try self.emitJccToLabel(.ne, not_false_label);
                 // was false -> push true
                 self.emitter.movRegImm64(.rax, true_bits) catch return CompileError.OutOfMemory;
                 try self.emitJmpToLabel(done);
 
-                try self.markLabel(deopt_label);
-                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                // Not boolean: try integer fast path
+                try self.markLabel(not_false_label);
+                self.emitter.movRegReg(.rax, .rsi) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.r11, type_mask) catch return CompileError.OutOfMemory;
+                self.emitter.andRegReg(.rax, .r11) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.r11, type_int) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.rax, .r11) catch return CompileError.OutOfMemory;
+                {
+                    const deopt_label = self.newLocalLabel();
+                    try self.emitJccToLabel(.ne, deopt_label);
+                    // Is int: extract lower 32 bits, check == 0
+                    self.emitter.movRegReg32(.rax, .rsi) catch return CompileError.OutOfMemory;
+                    self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
+                    {
+                        const int_nonzero = self.newLocalLabel();
+                        try self.emitJccToLabel(.ne, int_nonzero);
+                        // zero: !0 = true
+                        self.emitter.movRegImm64(.rax, true_bits) catch return CompileError.OutOfMemory;
+                        try self.emitJmpToLabel(done);
+                        try self.markLabel(int_nonzero);
+                        // non-zero: !n = false
+                        self.emitter.movRegImm64(.rax, false_bits) catch return CompileError.OutOfMemory;
+                        try self.emitJmpToLabel(done);
+                    }
+
+                    try self.markLabel(deopt_label);
+                    try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                }
             }
 
             // was true -> push false
@@ -6205,14 +6235,40 @@ pub const BaselineCompiler = struct {
             self.emitter.movRegImm64(.x9, false_bits) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.x1, .x9) catch return CompileError.OutOfMemory;
             {
-                const deopt_label = self.newLocalLabel();
-                try self.emitBcondToLabel(.ne, deopt_label);
+                const not_false_label = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, not_false_label);
                 // was false -> push true
                 self.emitter.movRegImm64(.x0, true_bits) catch return CompileError.OutOfMemory;
                 try self.emitJmpToLabel(done);
 
-                try self.markLabel(deopt_label);
-                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                // Not boolean: try integer fast path
+                try self.markLabel(not_false_label);
+                self.emitter.movRegImm64(.x9, type_mask) catch return CompileError.OutOfMemory;
+                self.emitter.andRegReg(.x0, .x1, .x9) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.x9, type_int) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x0, .x9) catch return CompileError.OutOfMemory;
+                {
+                    const deopt_label = self.newLocalLabel();
+                    try self.emitBcondToLabel(.ne, deopt_label);
+                    // Is int: extract lower 32 bits, check == 0
+                    self.emitter.movRegImm64(.x9, 0xFFFF_FFFF) catch return CompileError.OutOfMemory;
+                    self.emitter.andRegReg(.x0, .x1, .x9) catch return CompileError.OutOfMemory;
+                    self.emitter.cmpRegImm12(.x0, 0) catch return CompileError.OutOfMemory;
+                    {
+                        const int_nonzero = self.newLocalLabel();
+                        try self.emitBcondToLabel(.ne, int_nonzero);
+                        // zero: !0 = true
+                        self.emitter.movRegImm64(.x0, true_bits) catch return CompileError.OutOfMemory;
+                        try self.emitJmpToLabel(done);
+                        try self.markLabel(int_nonzero);
+                        // non-zero: !n = false
+                        self.emitter.movRegImm64(.x0, false_bits) catch return CompileError.OutOfMemory;
+                        try self.emitJmpToLabel(done);
+                    }
+
+                    try self.markLabel(deopt_label);
+                    try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                }
             }
 
             // was true -> push false
@@ -6249,11 +6305,13 @@ pub const BaselineCompiler = struct {
     }
 
     fn emitConditionalJump(self: *BaselineCompiler, target: u32, jump_if_true: bool, bytecode_offset: u32) CompileError!void {
-        // Inline isBool() check: compare against true_val and false_val directly.
-        // Fast path (value is boolean): two 64-bit comparisons (~4 cycles).
-        // Slow path (non-boolean): deopt to interpreter which raises the error.
+        // Type-directed truthiness: boolean fast path, integer fast path, deopt for rest.
+        // Boolean: two 64-bit comparisons. Integer: tag check + lower-32-bit zero check.
+        // String/undefined/object: deopt to interpreter (which handles via toConditionBool).
         const true_bits: u64 = @bitCast(value_mod.JSValue.true_val);
         const false_bits: u64 = @bitCast(value_mod.JSValue.false_val);
+        const type_mask: u64 = value_mod.JSValue.TYPE_MASK;
+        const type_int: u64 = value_mod.JSValue.TYPE_INT;
 
         if (is_x86_64) {
             const is_true_label = self.newLocalLabel();
@@ -6270,23 +6328,39 @@ pub const BaselineCompiler = struct {
             // Compare against false
             self.emitter.movRegImm64(.r11, false_bits) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.rsi, .r11) catch return CompileError.OutOfMemory;
-            // Neither true nor false: deopt
             {
-                const deopt_label = self.newLocalLabel();
-                try self.emitJccToLabel(.ne, deopt_label);
+                const not_false_label = self.newLocalLabel();
+                try self.emitJccToLabel(.ne, not_false_label);
                 // is_false: rax = 0
                 self.emitter.xorRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
                 try self.emitJmpToLabel(check_done);
 
-                try self.markLabel(deopt_label);
-                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                // Not boolean: try integer fast path
+                try self.markLabel(not_false_label);
+                // Check (val & TYPE_MASK) == TYPE_INT
+                self.emitter.movRegReg(.rax, .rsi) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.r11, type_mask) catch return CompileError.OutOfMemory;
+                self.emitter.andRegReg(.rax, .r11) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.r11, type_int) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.rax, .r11) catch return CompileError.OutOfMemory;
+                {
+                    const deopt_label = self.newLocalLabel();
+                    try self.emitJccToLabel(.ne, deopt_label);
+                    // Is int: extract lower 32 bits into rax (zero-extends)
+                    // Non-zero means truthy, zero means falsy
+                    self.emitter.movRegReg32(.rax, .rsi) catch return CompileError.OutOfMemory;
+                    try self.emitJmpToLabel(check_done);
+
+                    try self.markLabel(deopt_label);
+                    try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                }
             }
 
             // is_true: rax = 1
             try self.markLabel(is_true_label);
             self.emitter.movRegImm32(.rax, 1) catch return CompileError.OutOfMemory;
 
-            // check_done: branch based on rax
+            // check_done: branch based on rax (0 = falsy, non-zero = truthy)
             try self.markLabel(check_done);
             self.emitter.testRegReg(.rax, .rax) catch return CompileError.OutOfMemory;
 
@@ -6316,16 +6390,31 @@ pub const BaselineCompiler = struct {
             // Compare against false
             self.emitter.movRegImm64(.x9, false_bits) catch return CompileError.OutOfMemory;
             self.emitter.cmpRegReg(.x1, .x9) catch return CompileError.OutOfMemory;
-            // Neither true nor false: deopt
             {
-                const deopt_label = self.newLocalLabel();
-                try self.emitBcondToLabel(.ne, deopt_label);
+                const not_false_label = self.newLocalLabel();
+                try self.emitBcondToLabel(.ne, not_false_label);
                 // is_false: x0 = 0
                 self.emitter.movRegImm64(.x0, 0) catch return CompileError.OutOfMemory;
                 try self.emitJmpToLabel(check_done);
 
-                try self.markLabel(deopt_label);
-                try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                // Not boolean: try integer fast path
+                try self.markLabel(not_false_label);
+                // Check (val & TYPE_MASK) == TYPE_INT
+                self.emitter.movRegImm64(.x9, type_mask) catch return CompileError.OutOfMemory;
+                self.emitter.andRegReg(.x0, .x1, .x9) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.x9, type_int) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x0, .x9) catch return CompileError.OutOfMemory;
+                {
+                    const deopt_label = self.newLocalLabel();
+                    try self.emitBcondToLabel(.ne, deopt_label);
+                    // Is int: extract lower 32 bits into x0
+                    self.emitter.movRegImm64(.x9, 0xFFFF_FFFF) catch return CompileError.OutOfMemory;
+                    self.emitter.andRegReg(.x0, .x1, .x9) catch return CompileError.OutOfMemory;
+                    try self.emitJmpToLabel(check_done);
+
+                    try self.markLabel(deopt_label);
+                    try self.emitDeoptExit(bytecode_offset, .bool_expected);
+                }
             }
 
             // is_true: x0 = 1
