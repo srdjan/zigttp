@@ -10,6 +10,7 @@ const context = @import("context.zig");
 const string = @import("string.zig");
 const heap = @import("heap.zig");
 const http = @import("http.zig");
+const trace_mod = @import("trace.zig");
 
 /// Built-in class IDs
 pub const ClassId = enum(u8) {
@@ -153,14 +154,31 @@ pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const va
 // Object.freeze and Object.isFrozen removed - immutability is a design choice, not enforced
 
 /// Date.now() - Returns milliseconds since Unix epoch
+/// When trace recording is active, the result is recorded as an I/O call
+/// so replay can reproduce the exact timestamp.
+/// When replay is active, the recorded timestamp is returned instead.
 pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
+
+    // Replay mode: return recorded timestamp
+    if (ctx.getModuleState(trace_mod.ReplayState, trace_mod.REPLAY_STATE_SLOT)) |state| {
+        const entry = state.nextIO("builtin", "Date.now") orelse return value.JSValue.undefined_val;
+        return trace_mod.jsonToJSValue(ctx, entry.result_json);
+    }
+
     const ms = compat.realtimeNowMs() catch {
         return value.JSValue.undefined_val;
     };
     // Return as float since timestamps exceed i32 range
-    return allocFloat(ctx, @floatFromInt(ms));
+    const result = allocFloat(ctx, @floatFromInt(ms));
+
+    // Record to trace if active (Date.now is a non-determinism source)
+    if (ctx.getModuleState(trace_mod.TraceRecorder, trace_mod.TRACE_STATE_SLOT)) |recorder| {
+        recorder.recordIO("builtin", "Date.now", ctx, &.{}, result);
+    }
+
+    return result;
 }
 
 var perf_time_origin: ?compat.Instant = null;

@@ -14,6 +14,7 @@
 const std = @import("std");
 const object = @import("../object.zig");
 const context = @import("../context.zig");
+const trace = @import("../trace.zig");
 
 const env_mod = @import("env.zig");
 const crypto_mod = @import("crypto.zig");
@@ -107,6 +108,68 @@ pub fn registerVirtualModule(ctx: *context.Context, module: VirtualModule, alloc
             pool,
             ctx.root_class_idx,
             exp.func,
+            name_atom,
+            exp.arg_count,
+        );
+        try ctx.builtin_objects.append(allocator, fn_obj);
+        try ctx.setGlobal(name_atom, fn_obj.toValue());
+    }
+}
+
+/// Register virtual module exports with trace-recording wrappers.
+/// Each NativeFn is wrapped to record its arguments and return value
+/// to the TraceRecorder in module_state slot 7 (if present).
+/// The module enum must be comptime-known so we can generate wrappers.
+pub fn registerVirtualModuleTraced(comptime module: VirtualModule, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const module_exports = comptime module.getExports();
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const module_name = comptime moduleEnumName(module);
+
+    inline for (module_exports) |exp| {
+        const wrapped = comptime trace.makeTracingWrapper(module_name, exp.name, exp.func);
+        const name_atom = try ctx.atoms.intern(exp.name);
+        const fn_obj = try object.JSObject.createNativeFunction(
+            allocator,
+            pool,
+            ctx.root_class_idx,
+            wrapped,
+            name_atom,
+            exp.arg_count,
+        );
+        try ctx.builtin_objects.append(allocator, fn_obj);
+        try ctx.setGlobal(name_atom, fn_obj.toValue());
+    }
+}
+
+/// Get the string name for a VirtualModule enum at compile time.
+fn moduleEnumName(comptime module: VirtualModule) []const u8 {
+    return switch (module) {
+        .env => "env",
+        .crypto => "crypto",
+        .router => "router",
+        .auth => "auth",
+        .validate => "validate",
+        .cache => "cache",
+        .io => "io",
+    };
+}
+
+/// Register virtual module exports with replay stubs.
+/// Each NativeFn is replaced with a stub that reads recorded return values
+/// from the ReplayState in module_state slot 3.
+pub fn registerVirtualModuleReplay(comptime module: VirtualModule, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    const module_exports = comptime module.getExports();
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const module_name = comptime moduleEnumName(module);
+
+    inline for (module_exports) |exp| {
+        const stub = comptime trace.makeReplayStub(module_name, exp.name);
+        const name_atom = try ctx.atoms.intern(exp.name);
+        const fn_obj = try object.JSObject.createNativeFunction(
+            allocator,
+            pool,
+            ctx.root_class_idx,
+            stub,
             name_atom,
             exp.arg_count,
         );

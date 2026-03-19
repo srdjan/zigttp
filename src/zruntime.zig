@@ -69,7 +69,28 @@ pub const RuntimeConfig = struct {
     /// Connect timeout in milliseconds for outbound HTTP requests.
     outbound_timeout_ms: u32 = 10_000,
 
+    /// Trace output file path. When set, all handler I/O is recorded as JSONL.
+    trace_file_path: ?[]const u8 = null,
+
+    /// Replay input file path. When set, replays recorded traces instead of serving.
+    replay_file_path: ?[]const u8 = null,
+
 };
+
+/// Open a trace file for append writing using POSIX APIs.
+fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
+        0o644,
+    ) catch return error.FileOpenFailed;
+
+    return fd;
+}
 
 fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.Heap, config: RuntimeConfig) void {
     // Configure arena escape checking (disabled for scripts/benchmarks)
@@ -176,6 +197,10 @@ pub const Runtime = struct {
     response_prototype: ?*zq.JSObject,
     headers_prototype: ?*zq.JSObject,
     consumed_body_objects: std.AutoHashMapUnmanaged(*zq.JSObject, void),
+    // Trace recording support
+    trace_file: ?std.c.fd_t,
+    trace_mutex: ?*zq.trace.TraceMutex,
+    trace_recorder: ?*zq.TraceRecorder,
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
@@ -257,10 +282,24 @@ pub const Runtime = struct {
             .response_prototype = null,
             .headers_prototype = null,
             .consumed_body_objects = .{},
+            .trace_file = null,
+            .trace_mutex = null,
+            .trace_recorder = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
         errdefer self.strings.deinit();
+
+        // Open trace file if configured
+        if (config.trace_file_path) |trace_path| {
+            self.trace_file = openTraceFile(allocator, trace_path) catch |err| {
+                std.log.err("Failed to open trace file '{s}': {}", .{ trace_path, err });
+                return err;
+            };
+            const mutex = try allocator.create(zq.trace.TraceMutex);
+            mutex.* = .{};
+            self.trace_mutex = mutex;
+        }
 
         // Install built-in bindings
         try self.installBindings();
@@ -300,6 +339,9 @@ pub const Runtime = struct {
             .response_prototype = null,
             .headers_prototype = null,
             .consumed_body_objects = .{},
+            .trace_file = null,
+            .trace_mutex = null,
+            .trace_recorder = null,
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
@@ -323,6 +365,17 @@ pub const Runtime = struct {
         self.consumed_body_objects.deinit(self.allocator);
         if (self.outbound_io_backend) |*io_backend| {
             io_backend.deinit();
+        }
+        // Clean up trace recorder
+        if (self.trace_recorder) |rec| {
+            rec.deinit();
+            self.allocator.destroy(rec);
+        }
+        // Only close trace file/mutex if this runtime owns its resources
+        // (pool runtimes share the pool's trace file)
+        if (self.owns_resources) {
+            if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
+            if (self.trace_mutex) |m| self.allocator.destroy(m);
         }
         if (self.owns_resources) {
             // Clean up hybrid allocation state
@@ -555,11 +608,17 @@ pub const Runtime = struct {
         const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
         const fn_atom = try self.ctx.atoms.intern("fetchSync");
+        // In replay mode, use a stub that returns recorded fetch responses
+        const fetch_replay_stub = comptime zq.trace.makeReplayStub("http", "fetchSync");
+        const func: zq.NativeFn = if (self.config.replay_file_path != null)
+            fetch_replay_stub
+        else
+            fetchSyncNative;
         const fn_obj = try zq.JSObject.createNativeFunction(
             self.allocator,
             pool,
             root_class_idx,
-            fetchSyncNative,
+            func,
             fn_atom,
             1,
         );
@@ -659,10 +718,26 @@ pub const Runtime = struct {
 
     /// Register all virtual module native functions on the context.
     /// Called during installBindings() for every runtime instance.
+    /// In replay mode, registers stubs that return recorded values.
+    /// In trace mode, registers wrappers that record I/O.
     fn installVirtualModules(self: *Self) !void {
-        inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
-            const module: zq.modules.VirtualModule = @enumFromInt(field.value);
-            try zq.modules.registerVirtualModule(self.ctx, module, self.allocator);
+        if (self.config.replay_file_path != null) {
+            // Replay mode: stubs that return recorded values from ReplayState
+            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
+                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
+                try zq.modules.registerVirtualModuleReplay(module, self.ctx, self.allocator);
+            }
+        } else if (self.config.trace_file_path != null) {
+            // Use traced wrappers that record I/O to TraceRecorder
+            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
+                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
+                try zq.modules.registerVirtualModuleTraced(module, self.ctx, self.allocator);
+            }
+        } else {
+            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
+                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
+                try zq.modules.registerVirtualModule(self.ctx, module, self.allocator);
+            }
         }
     }
 
@@ -987,6 +1062,54 @@ pub const Runtime = struct {
         var reset_after = true;
         defer if (reset_after) self.resetForNextRequest();
 
+        // === TRACE RECORDING: Set up per-request recorder ===
+        var trace_timer: ?compat.Timer = null;
+        if (self.trace_file != null and self.trace_mutex != null) {
+            if (self.trace_recorder == null) {
+                self.trace_recorder = self.allocator.create(zq.TraceRecorder) catch null;
+                if (self.trace_recorder) |rec| {
+                    rec.* = zq.TraceRecorder.init(
+                        self.allocator,
+                        self.trace_file.?,
+                        self.trace_mutex.?,
+                    );
+                }
+            }
+            if (self.trace_recorder) |rec| {
+                rec.reset();
+                self.ctx.setModuleState(
+                    zq.TRACE_STATE_SLOT,
+                    @ptrCast(rec),
+                    &zq.TraceRecorder.deinitOpaque,
+                );
+
+                // Record request
+                var h_names: [64][]const u8 = undefined;
+                var h_values: [64][]const u8 = undefined;
+                const hcount = @min(request.headers.items.len, 64);
+                for (request.headers.items[0..hcount], 0..) |hdr, i| {
+                    h_names[i] = hdr.key;
+                    h_values[i] = hdr.value;
+                }
+                rec.recordRequestRaw(
+                    request.method,
+                    request.url,
+                    h_names[0..hcount],
+                    h_values[0..hcount],
+                    request.body,
+                );
+                trace_timer = compat.Timer.start() catch null;
+            }
+        }
+        defer if (self.trace_recorder) |rec| {
+            // Record meta and flush after handler completes
+            const duration_us: u64 = if (trace_timer) |*t| t.read() / 1000 else 0;
+            rec.recordMeta(duration_us, self.config.trace_file_path orelse "unknown", 0);
+            rec.flush();
+            // Remove from module_state so next request gets a fresh one
+            self.ctx.module_state[zq.TRACE_STATE_SLOT] = null;
+        };
+
         // === FAST PATH: Native dispatch for static routes ===
         if (self.cached_dispatch) |dispatch| {
             if (self.tryFastPathDispatch(
@@ -1027,6 +1150,7 @@ pub const Runtime = struct {
                     if (borrow_body and response.requires_runtime) {
                         reset_after = false;
                     }
+                    self.traceRecordResponse(&response);
                     return response;
                 }
             }
@@ -1042,6 +1166,7 @@ pub const Runtime = struct {
             if (borrow_body and response.requires_runtime) {
                 reset_after = false;
             }
+            self.traceRecordResponse(&response);
             return response;
         }
 
@@ -1066,7 +1191,28 @@ pub const Runtime = struct {
             reset_after = false;
         }
 
+        self.traceRecordResponse(&response);
         return response;
+    }
+
+    /// Record response to trace if recording is active.
+    fn traceRecordResponse(self: *Self, response: *const HttpResponse) void {
+        const rec = self.trace_recorder orelse return;
+        if (!rec.active) return;
+
+        var h_names: [64][]const u8 = undefined;
+        var h_values: [64][]const u8 = undefined;
+        const hcount = @min(response.headers.items.len, 64);
+        for (response.headers.items[0..hcount], 0..) |hdr, i| {
+            h_names[i] = hdr.key;
+            h_values[i] = hdr.value;
+        }
+        rec.recordResponse(
+            response.status,
+            h_names[0..hcount],
+            h_values[0..hcount],
+            response.body,
+        );
     }
 
     /// Try to dispatch request via native fast path.
@@ -2214,11 +2360,19 @@ fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {
     return null;
 }
 
-fn fetchSyncNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const rt = current_runtime orelse return error.RuntimeUnavailable;
-    return fetchSyncResult(rt, args) catch |err| {
+    const result = fetchSyncResult(rt, args) catch |err| {
         return createFetchErrorResponse(rt, "InternalError", @errorName(err));
     };
+
+    // Record fetchSync to trace (it's outside virtual module dispatch)
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (ctx.getModuleState(zq.TraceRecorder, zq.TRACE_STATE_SLOT)) |recorder| {
+        recorder.recordIO("http", "fetchSync", ctx, args, result);
+    }
+
+    return result;
 }
 
 fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
@@ -3168,6 +3322,10 @@ pub const HandlerPool = struct {
     cache_mutex: compat.Mutex,
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
+    /// Shared trace file handle (owned by pool, shared across runtimes)
+    trace_file: ?std.c.fd_t,
+    /// Mutex protecting concurrent trace file writes
+    trace_mutex: ?*zq.trace.TraceMutex,
 
     const Self = @This();
     const collect_pool_metrics = builtin.mode == .Debug;
@@ -3244,7 +3402,20 @@ pub const HandlerPool = struct {
             .cache = bytecode_cache.BytecodeCache.init(allocator),
             .cache_mutex = .{},
             .embedded_bytecode = embedded_bytecode,
+            .trace_file = null,
+            .trace_mutex = null,
         };
+
+        // Open shared trace file if configured
+        if (config.trace_file_path) |trace_path| {
+            self.trace_file = openTraceFile(allocator, trace_path) catch |err| {
+                std.log.err("Failed to open trace file '{s}': {}", .{ trace_path, err });
+                return err;
+            };
+            const mutex = try allocator.create(zq.trace.TraceMutex);
+            mutex.* = .{};
+            self.trace_mutex = mutex;
+        }
 
         errdefer self.deinit();
         try self.prewarm();
@@ -3261,6 +3432,8 @@ pub const HandlerPool = struct {
     pub fn deinit(self: *Self) void {
         self.pool.deinit();
         self.cache.deinit();
+        if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
+        if (self.trace_mutex) |m| self.allocator.destroy(m);
     }
 
     fn nextRequestId(self: *Self) u64 {
@@ -3641,6 +3814,12 @@ pub const HandlerPool = struct {
 
         const rt = try Runtime.initFromPool(base_rt, self.config);
         errdefer rt.deinit();
+
+        // Inject shared trace file/mutex from pool
+        if (self.trace_file != null and self.trace_mutex != null) {
+            rt.trace_file = self.trace_file;
+            rt.trace_mutex = self.trace_mutex;
+        }
 
         try self.loadHandlerCached(rt);
 

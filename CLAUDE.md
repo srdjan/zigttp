@@ -22,6 +22,7 @@ zig build -Dhandler=handler.jsx    # Precompile handler at build time
 zig build -Dhandler=handler.jsx -Dverify  # Verify handler at compile time
 zig build -Dhandler=handler.jsx -Dcontract  # Emit contract.json manifest
 zig build -Dhandler=handler.jsx -Ddeploy=aws  # Generate proven deployment manifest
+zig build -Dhandler=handler.jsx -Dreplay=traces.jsonl  # Replay-verify before embedding
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
@@ -158,6 +159,16 @@ TDT includes progressive type inference and automatic narrowing:
 
 **Type Checking** (`zts/type_map.zig`, `zts/type_pool.zig`, `zts/type_env.zig`, `zts/type_checker.zig`): Full type annotation checking for TypeScript handlers. The stripper extracts a TypeMap of all type annotations (type aliases, interfaces, variable/param/return annotations, generics) as sideband data without changing the IR or parser. The TypePool stores structured types (primitives, records, unions, functions, arrays, tuples, nullable, generics) as a flat indexed array with structural subtyping via `isAssignableTo`. The TypeEnv resolves type aliases, interfaces, and annotations by walking the TypeMap. The TypeChecker walks the IR tree checking: variable declaration type mismatches, function argument types, property access on known records, return type mismatches. Virtual module types (`zts/modules/types.zig`) provide full function signatures for all 27 zigttp:* exports. Interface declarations with all-function members are marked nominal to prevent structural forgery of capability objects. Two-arg handler support (`handler(req, caps)`) detects handler arity at runtime for capability injection.
 
+**Deterministic Replay** (`zts/trace.zig`, `src/replay_runner.zig`): Handler trace recording and replay system that exploits zigttp's restricted JS subset to provide provable handler equivalence. Since virtual modules are the ONLY I/O boundary, recording their inputs/outputs captures ALL external state a handler depends on - making handlers deterministic pure functions of (Request, VirtualModuleResponses).
+
+Recording: `--trace traces.jsonl` captures every request, virtual module call (with args and return values), `fetchSync` response, `Date.now()` timestamp, and handler response as JSONL. Uses `TraceRecorder` in module_state slot 7 with comptime-generated tracing wrappers (`makeTracingWrapper`) around each NativeFn.
+
+Replay: `--replay traces.jsonl handler.ts` replays recorded traces against a handler. Registers comptime-generated stub functions (`makeReplayStub`) via `registerVirtualModuleReplay` that return recorded values from `ReplayState` in module_state slot 3. Compares actual vs expected Response (status + body). Reports identical count, status changes, body changes with structured diffs.
+
+Build integration: `-Dreplay=traces.jsonl` in the precompile pipeline. The precompile tool creates a lightweight zts context, registers replay stubs, executes the handler against each trace, and fails the build if regressions are detected.
+
+Non-determinism sources handled: `env()`, `fetchSync`, `Date.now()` (intercepted in builtins.zig), `jwtVerify` (captured by result recording), `cacheGet/Set/Delete/Incr` (per-call recording sidesteps state), `parallel`/`race` (individual fetch results recorded).
+
 ## TypeScript/TSX Support
 
 zts includes a native TypeScript/TSX stripper that removes type annotations at load time. Use `.ts` or `.tsx` files directly.
@@ -241,6 +252,8 @@ Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size
 -n, --pool <N>         Runtime pool size (default: auto = 2 * cpu, min 8)
 --cors                 Enable CORS headers
 --static <DIR>         Serve static files
+--trace <FILE>         Record handler I/O traces to JSONL file
+--replay <FILE>        Replay recorded traces and verify handler output
 ```
 
 ## JSX Support

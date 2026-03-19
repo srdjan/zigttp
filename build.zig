@@ -12,6 +12,7 @@ pub fn build(b: *std.Build) void {
     const openapi_enabled = b.option(bool, "openapi", "Emit OpenAPI manifest (openapi.json)") orelse false;
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
+    const replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time");
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -101,6 +102,10 @@ pub fn build(b: *std.Build) void {
         if (policy_path) |policy| {
             run_precompile.addArg("--policy");
             run_precompile.addArg(policy);
+        }
+        if (replay_path) |rp| {
+            run_precompile.addArg("--replay");
+            run_precompile.addArg(rp);
         }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");

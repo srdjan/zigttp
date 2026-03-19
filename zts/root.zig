@@ -56,6 +56,7 @@ pub const type_pool = @import("type_pool.zig");
 pub const type_env = @import("type_env.zig");
 pub const type_checker = @import("type_checker.zig");
 pub const bytecode_verifier = @import("bytecode_verifier.zig");
+pub const trace = @import("trace.zig");
 pub const modules = @import("modules/root.zig");
 // Optional/experimental modules (not wired into runtime by default)
 // These are kept in zts/ for future development but not exported publicly.
@@ -126,6 +127,8 @@ pub const RuntimePolicy = handler_policy.RuntimePolicy;
 pub const PatternDispatchTable = bytecode.PatternDispatchTable;
 pub const HandlerPattern = bytecode.HandlerPattern;
 pub const HandlerFlags = bytecode.HandlerFlags;
+pub const TraceRecorder = trace.TraceRecorder;
+pub const TRACE_STATE_SLOT = trace.TRACE_STATE_SLOT;
 
 /// Version information
 pub const version = struct {
