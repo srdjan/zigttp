@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
     const aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false;
     const verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false;
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
+    const openapi_enabled = b.option(bool, "openapi", "Emit OpenAPI manifest (openapi.json)") orelse false;
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
 
@@ -86,6 +87,9 @@ pub fn build(b: *std.Build) void {
         }
         if (verify_enabled) {
             run_precompile.addArg("--verify");
+        }
+        if (openapi_enabled) {
+            run_precompile.addArg("--openapi");
         }
         if (contract_enabled or deploy_target != null) {
             run_precompile.addArg("--contract");

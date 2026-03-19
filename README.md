@@ -34,8 +34,6 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 ### Numbers
 
-<img src="docs/bench.jpg" alt="Benchmark: zigttp vs QuickJS vs Deno" width="90%">
-
 3ms runtime init. 1.2MB binary. 4MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for cold start breakdowns and deployment patterns.
 
 ## Quick Start

@@ -1818,6 +1818,25 @@ zig build -Dhandler=handler.ts -Dverify -Dcontract
 The contract is written to `src/generated/contract.json` alongside the embedded
 bytecode.
 
+## OpenAPI Manifest
+
+Add `-Dopenapi` to emit a compiler-derived `openapi.json` alongside the
+embedded bytecode:
+
+```bash
+zig build -Dhandler=handler.ts -Dopenapi
+```
+
+The current emitter only includes facts the compiler can prove:
+
+- `schemaCompile("name", JSON.stringify({...}))` schemas become component schemas
+- `validateJson("name", ...)` and `coerceJson("name", ...)` become request schema refs
+- `parseBearer()` / `jwtVerify()` enable bearer auth metadata
+- `routerMatch()` route tables with literal `"METHOD /path"` keys become OpenAPI paths
+
+Dynamic schemas or routes are preserved as `x-zigttp-*` hints instead of guessed
+OpenAPI operations. The manifest is written to `src/generated/openapi.json`.
+
 ## Runtime Sandboxing
 
 Every precompiled handler is automatically sandboxed based on its contract. No

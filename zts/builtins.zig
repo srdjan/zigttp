@@ -2063,11 +2063,17 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
             @memcpy(buf[pos..][0..data.len], data);
             pos += data.len;
         } else if (val.isTrue()) {
-            if (pos + 4 > buf.len) { fast_ok = false; break; }
+            if (pos + 4 > buf.len) {
+                fast_ok = false;
+                break;
+            }
             @memcpy(buf[pos..][0..4], "true");
             pos += 4;
         } else if (val.isFalse()) {
-            if (pos + 5 > buf.len) { fast_ok = false; break; }
+            if (pos + 5 > buf.len) {
+                fast_ok = false;
+                break;
+            }
             @memcpy(buf[pos..][0..5], "false");
             pos += 5;
         } else {
@@ -5610,7 +5616,7 @@ test "Array.concat returns total length" {
     try std.testing.expectEqual(@as(i32, 4), result.getInt());
 }
 
-test "Array.map returns length stub" {
+test "Array.map returns undefined without callback" {
     const gc = @import("gc.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5630,12 +5636,12 @@ test "Array.map returns length stub" {
     try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(3));
     arr.setArrayLength(3);
 
-    // map with no callback returns length (stub behavior)
+    // map requires a callable callback
     const result = arrayMap(ctx, arr.toValue(), &[_]value.JSValue{});
-    try std.testing.expectEqual(@as(i32, 3), result.getInt());
+    try std.testing.expect(result.isUndefined());
 }
 
-test "Array.filter returns zero stub" {
+test "Array.filter returns undefined without callback" {
     const gc = @import("gc.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5651,12 +5657,12 @@ test "Array.filter returns zero stub" {
     arr.prototype = ctx.array_prototype;
     arr.setArrayLength(2);
 
-    // filter with no callback returns 0 (stub behavior - needs callback infrastructure)
+    // filter requires a callable callback
     const result = arrayFilter(ctx, arr.toValue(), &[_]value.JSValue{});
-    try std.testing.expectEqual(@as(i32, 0), result.getInt());
+    try std.testing.expect(result.isUndefined());
 }
 
-test "Array.reduce returns initial value or undefined" {
+test "Array.reduce returns undefined without callback" {
     const gc = @import("gc.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -5672,16 +5678,16 @@ test "Array.reduce returns initial value or undefined" {
     arr.prototype = ctx.array_prototype;
     arr.setArrayLength(3);
 
-    // reduce with no args returns undefined (stub behavior)
+    // reduce requires a callable callback
     const result = arrayReduce(ctx, arr.toValue(), &[_]value.JSValue{});
     try std.testing.expect(result.isUndefined());
 
-    // reduce with initial value returns that value (stub behavior)
+    // even with an initial value, missing callback stays invalid
     const with_init = arrayReduce(ctx, arr.toValue(), &[_]value.JSValue{
         value.JSValue.undefined_val, // callback placeholder
         value.JSValue.fromInt(42), // initial value
     });
-    try std.testing.expectEqual(@as(i32, 42), with_init.getInt());
+    try std.testing.expect(with_init.isUndefined());
 }
 
 test "Array.every returns true stub" {

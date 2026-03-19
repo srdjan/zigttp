@@ -4,7 +4,7 @@
 //! This eliminates runtime parsing overhead and removes the need for source files
 //! in deployment.
 //!
-//! Usage: precompile [--aot] [--policy policy.json] <handler.ts> <output.zig>
+//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
 const zts = @import("zts");
@@ -18,6 +18,7 @@ const VerificationInfo = handler_contract.VerificationInfo;
 const handler_policy = zts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
+const openapi_manifest = @import("openapi_manifest.zig");
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -129,6 +130,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var emit_aot = false;
     var emit_verify = false;
     var emit_contract = false;
+    var emit_openapi = false;
     var policy_path: ?[]const u8 = null;
     var deploy_target_str: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
@@ -145,6 +147,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (std.mem.eql(u8, arg, "--contract")) {
             emit_contract = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--openapi")) {
+            emit_openapi = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--policy")) {
@@ -176,13 +182,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -246,9 +252,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
-    // Write contract.json alongside the output if requested
-    if (emit_contract) {
-        if (compiled.contract) |*contract| {
+    if (compiled.contract) |*contract| {
+        // Write contract.json alongside the output if requested
+        if (emit_contract) {
             const contract_path = deriveSiblingPath(allocator, output_path_final, "contract.json") catch |err| {
                 std.debug.print("Error deriving contract path: {}\n", .{err});
                 return err;
@@ -271,80 +277,105 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
 
             std.debug.print("Wrote contract manifest to: {s}\n", .{contract_path});
+        }
 
-            // Generate deployment manifest if --deploy was passed
-            if (deploy_target_str) |dt_str| {
-                const deploy_target = deploy_manifest.DeployTarget.fromString(dt_str) orelse {
-                    std.debug.print("Unknown deploy target: {s} (supported: aws)\n", .{dt_str});
-                    return error.InvalidArgument;
-                };
+        if (emit_openapi) {
+            const openapi_path = deriveSiblingPath(allocator, output_path_final, "openapi.json") catch |err| {
+                std.debug.print("Error deriving OpenAPI path: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(openapi_path);
 
-                const extract = deploy_manifest.extractProvenFacts(allocator, contract) catch |err| {
-                    std.debug.print("Error extracting proven facts: {}\n", .{err});
-                    return err;
-                };
-                defer allocator.free(extract.checks_buf);
-                defer allocator.free(extract.routes_buf);
+            var openapi_output: std.ArrayList(u8) = .empty;
+            defer openapi_output.deinit(allocator);
+            var openapi_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &openapi_output);
 
-                const outputs = deploy_manifest.render(allocator, deploy_target, &extract.facts) catch |err| {
-                    std.debug.print("Error rendering deploy manifest: {}\n", .{err});
-                    return err;
-                };
-                defer {
-                    for (outputs) |o| allocator.free(o.content);
-                    allocator.free(outputs);
-                }
+            openapi_manifest.writeOpenApiJson(&openapi_aw.writer, contract, .{}) catch |err| {
+                std.debug.print("Error serializing OpenAPI manifest: {}\n", .{err});
+                return err;
+            };
+            openapi_output = openapi_aw.toArrayList();
 
-                // Derive deploy output directory from the output path
-                const deploy_dir = deriveSiblingPath(allocator, output_path_final, "deploy/") catch |err| {
-                    std.debug.print("Error deriving deploy dir: {}\n", .{err});
-                    return err;
-                };
-                defer allocator.free(deploy_dir);
+            writeFilePosix(openapi_path, openapi_output.items, allocator) catch |err| {
+                std.debug.print("Error writing OpenAPI file '{s}': {}\n", .{ openapi_path, err });
+                return err;
+            };
 
-                for (outputs) |output| {
-                    const deploy_path = std.fmt.allocPrint(allocator, "{s}{s}", .{ deploy_dir, output.filename }) catch |err| {
-                        std.debug.print("Error creating deploy path: {}\n", .{err});
-                        return err;
-                    };
-                    defer allocator.free(deploy_path);
+            std.debug.print("Wrote OpenAPI manifest to: {s}\n", .{openapi_path});
+        }
 
-                    writeFilePosix(deploy_path, output.content, allocator) catch |err| {
-                        std.debug.print("Error writing deploy file '{s}': {}\n", .{ deploy_path, err });
-                        return err;
-                    };
+        // Generate deployment manifest if --deploy was passed
+        if (deploy_target_str) |dt_str| {
+            const deploy_target = deploy_manifest.DeployTarget.fromString(dt_str) orelse {
+                std.debug.print("Unknown deploy target: {s} (supported: aws)\n", .{dt_str});
+                return error.InvalidArgument;
+            };
 
-                    std.debug.print("Wrote deploy manifest to: {s}\n", .{deploy_path});
-                }
+            const extract = deploy_manifest.extractProvenFacts(allocator, contract) catch |err| {
+                std.debug.print("Error extracting proven facts: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(extract.checks_buf);
+            defer allocator.free(extract.routes_buf);
 
-                // Write deploy report
-                const report_path = std.fmt.allocPrint(allocator, "{s}deploy-report.txt", .{deploy_dir}) catch |err| {
-                    std.debug.print("Error creating report path: {}\n", .{err});
-                    return err;
-                };
-                defer allocator.free(report_path);
-
-                var report_output: std.ArrayList(u8) = .empty;
-                defer report_output.deinit(allocator);
-                var report_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &report_output);
-
-                deploy_manifest.writeDeployReport(&report_aw.writer, &extract.facts, deploy_target) catch |err| {
-                    std.debug.print("Error generating deploy report: {}\n", .{err});
-                    return err;
-                };
-                report_output = report_aw.toArrayList();
-
-                writeFilePosix(report_path, report_output.items, allocator) catch |err| {
-                    std.debug.print("Error writing deploy report '{s}': {}\n", .{ report_path, err });
-                    return err;
-                };
-
-                std.debug.print("Wrote deploy report to: {s}\n", .{report_path});
-                std.debug.print("Deploy target: {s}, proof level: {s}\n", .{
-                    deploy_target.toString(),
-                    extract.facts.proof_level.toString(),
-                });
+            const outputs = deploy_manifest.render(allocator, deploy_target, &extract.facts) catch |err| {
+                std.debug.print("Error rendering deploy manifest: {}\n", .{err});
+                return err;
+            };
+            defer {
+                for (outputs) |o| allocator.free(o.content);
+                allocator.free(outputs);
             }
+
+            // Derive deploy output directory from the output path
+            const deploy_dir = deriveSiblingPath(allocator, output_path_final, "deploy/") catch |err| {
+                std.debug.print("Error deriving deploy dir: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(deploy_dir);
+
+            for (outputs) |output| {
+                const deploy_path = std.fmt.allocPrint(allocator, "{s}{s}", .{ deploy_dir, output.filename }) catch |err| {
+                    std.debug.print("Error creating deploy path: {}\n", .{err});
+                    return err;
+                };
+                defer allocator.free(deploy_path);
+
+                writeFilePosix(deploy_path, output.content, allocator) catch |err| {
+                    std.debug.print("Error writing deploy file '{s}': {}\n", .{ deploy_path, err });
+                    return err;
+                };
+
+                std.debug.print("Wrote deploy manifest to: {s}\n", .{deploy_path});
+            }
+
+            // Write deploy report
+            const report_path = std.fmt.allocPrint(allocator, "{s}deploy-report.txt", .{deploy_dir}) catch |err| {
+                std.debug.print("Error creating report path: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(report_path);
+
+            var report_output: std.ArrayList(u8) = .empty;
+            defer report_output.deinit(allocator);
+            var report_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &report_output);
+
+            deploy_manifest.writeDeployReport(&report_aw.writer, &extract.facts, deploy_target) catch |err| {
+                std.debug.print("Error generating deploy report: {}\n", .{err});
+                return err;
+            };
+            report_output = report_aw.toArrayList();
+
+            writeFilePosix(report_path, report_output.items, allocator) catch |err| {
+                std.debug.print("Error writing deploy report '{s}': {}\n", .{ report_path, err });
+                return err;
+            };
+
+            std.debug.print("Wrote deploy report to: {s}\n", .{report_path});
+            std.debug.print("Deploy target: {s}, proof level: {s}\n", .{
+                deploy_target.toString(),
+                extract.facts.proof_level.toString(),
+            });
         }
     }
 }
@@ -1014,6 +1045,14 @@ fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !H
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
         .verification = null,
         .aot = null,
     };
@@ -1068,6 +1107,44 @@ fn mergeModuleContract(
         try appendUniqueString(allocator, &target.cache.namespaces, ns, false);
     }
     target.cache.dynamic = target.cache.dynamic or source.cache.dynamic;
+
+    for (source.api.schemas.items) |schema| {
+        try upsertApiSchema(allocator, &target.api.schemas, schema.name, schema.schema_json);
+    }
+
+    for (source.api.requests.schema_refs.items) |schema_ref| {
+        try appendUniqueString(allocator, &target.api.requests.schema_refs, schema_ref, false);
+    }
+    target.api.requests.dynamic = target.api.requests.dynamic or source.api.requests.dynamic;
+    target.api.auth.bearer = target.api.auth.bearer or source.api.auth.bearer;
+    target.api.auth.jwt = target.api.auth.jwt or source.api.auth.jwt;
+    target.api.schemas_dynamic = target.api.schemas_dynamic or source.api.schemas_dynamic;
+    target.api.routes_dynamic = target.api.routes_dynamic or source.api.routes_dynamic;
+
+    for (source.api.routes.items) |route| {
+        if (hasApiRoute(target.api.routes.items, route.method, route.path)) continue;
+
+        var route_copy = handler_contract.ApiRouteInfo{
+            .method = try allocator.dupe(u8, route.method),
+            .path = try allocator.dupe(u8, route.path),
+            .request_schema_refs = .empty,
+            .request_schema_dynamic = route.request_schema_dynamic,
+            .requires_bearer = route.requires_bearer,
+            .requires_jwt = route.requires_jwt,
+            .response_status = route.response_status,
+            .response_content_type = if (route.response_content_type) |content_type|
+                try allocator.dupe(u8, content_type)
+            else
+                null,
+        };
+        errdefer route_copy.deinit(allocator);
+
+        for (route.request_schema_refs.items) |schema_ref| {
+            try appendUniqueString(allocator, &route_copy.request_schema_refs, schema_ref, false);
+        }
+
+        try target.api.routes.append(allocator, route_copy);
+    }
 }
 
 fn getOrCreateFunctionEntry(
@@ -1100,6 +1177,32 @@ fn appendUniqueString(
         if (matches) return;
     }
     try list.append(allocator, try allocator.dupe(u8, value));
+}
+
+fn upsertApiSchema(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(handler_contract.ApiSchemaInfo),
+    name: []const u8,
+    schema_json: []const u8,
+) !void {
+    for (list.items) |*schema| {
+        if (!std.mem.eql(u8, schema.name, name)) continue;
+        allocator.free(schema.schema_json);
+        schema.schema_json = try allocator.dupe(u8, schema_json);
+        return;
+    }
+
+    try list.append(allocator, .{
+        .name = try allocator.dupe(u8, name),
+        .schema_json = try allocator.dupe(u8, schema_json),
+    });
+}
+
+fn hasApiRoute(routes: []const handler_contract.ApiRouteInfo, method: []const u8, path: []const u8) bool {
+    for (routes) |route| {
+        if (std.mem.eql(u8, route.method, method) and std.mem.eql(u8, route.path, path)) return true;
+    }
+    return false;
 }
 
 fn enforcePolicyForContract(
