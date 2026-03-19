@@ -371,13 +371,10 @@ pub const Runtime = struct {
             rec.deinit();
             self.allocator.destroy(rec);
         }
-        // Only close trace file/mutex if this runtime owns its resources
-        // (pool runtimes share the pool's trace file)
+        // Only close owned resources (pool runtimes share the pool's trace file)
         if (self.owns_resources) {
             if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
             if (self.trace_mutex) |m| self.allocator.destroy(m);
-        }
-        if (self.owns_resources) {
             // Clean up hybrid allocation state
             if (self.arena_state) |a| {
                 a.deinit();
@@ -1086,11 +1083,7 @@ pub const Runtime = struct {
                 // Record request
                 var h_names: [64][]const u8 = undefined;
                 var h_values: [64][]const u8 = undefined;
-                const hcount = @min(request.headers.items.len, 64);
-                for (request.headers.items[0..hcount], 0..) |hdr, i| {
-                    h_names[i] = hdr.key;
-                    h_values[i] = hdr.value;
-                }
+                const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
                 rec.recordRequestRaw(
                     request.method,
                     request.url,
@@ -1202,11 +1195,7 @@ pub const Runtime = struct {
 
         var h_names: [64][]const u8 = undefined;
         var h_values: [64][]const u8 = undefined;
-        const hcount = @min(response.headers.items.len, 64);
-        for (response.headers.items[0..hcount], 0..) |hdr, i| {
-            h_names[i] = hdr.key;
-            h_values[i] = hdr.value;
-        }
+        const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
         rec.recordResponse(
             response.status,
             h_names[0..hcount],
@@ -2346,6 +2335,17 @@ fn responseRawJsonStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []co
 fn responseRedirectStaticNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     return wrapResponseStatic(ctx, this, args, zq.http.responseRedirect);
+}
+
+/// Split a slice of headers (any struct with .key/.value) into parallel
+/// name/value arrays for trace recording. Returns the count written.
+fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]const u8) usize {
+    const count = @min(headers.len, 64);
+    for (headers[0..count], 0..) |hdr, i| {
+        names[i] = hdr.key;
+        values[i] = hdr.value;
+    }
+    return count;
 }
 
 fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {

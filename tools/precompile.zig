@@ -438,8 +438,9 @@ const BuildReplayResult = struct {
 };
 
 /// Run replay verification at build time.
-/// Creates a lightweight zts context for each trace, loads the handler source,
-/// installs replay stubs, executes, and compares responses.
+/// Creates a fresh zts context per trace for isolation (the interpreter mutates
+/// context state during execution). This is O(N*parse) but acceptable at build
+/// time since trace counts are typically small.
 fn runBuildTimeReplay(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
@@ -584,7 +585,7 @@ fn replayOneBuildTime(
         200;
 
     const body_val = result_obj.getProperty(hc_pool, zts.Atom.body) orelse zts.JSValue.undefined_val;
-    const actual_body = extractString(body_val) orelse "";
+    const actual_body = zts.trace.extractStringData(body_val) orelse "";
 
     // Compare against expected
     const expected = group.response orelse return true; // no expected response = pass
@@ -597,12 +598,6 @@ fn replayOneBuildTime(
     const body_ok = std.mem.eql(u8, actual_body, expected_body);
 
     return status_ok and body_ok and replay_state.divergences == 0;
-}
-
-fn extractString(val: zts.JSValue) ?[]const u8 {
-    if (val.isString()) return val.toPtr(zts.JSString).data();
-    if (val.isStringSlice()) return val.toPtr(zts.string.SliceString).data();
-    return null;
 }
 
 fn compileHandler(

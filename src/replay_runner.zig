@@ -38,7 +38,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     }
 
     if (groups.len == 0) {
-        log("No traces found in '{s}'\n", .{replay_path});
+        std.log.info("No traces found in '{s}'\n", .{replay_path});
         return;
     }
 
@@ -74,7 +74,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         results.deinit(allocator);
     }
 
-    log("Replaying {d} traces against {s}...\n", .{ groups.len, handler_filename });
+    std.log.info("Replaying {d} traces against {s}...\n", .{ groups.len, handler_filename });
 
     for (groups, 0..) |group, trace_idx| {
         const result = replayOne(allocator, replay_config, handler_code, handler_filename, &group, trace_idx) catch |err| {
@@ -83,7 +83,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
                 .expected_status = if (group.response) |r| r.status else 200,
                 .actual_status = 0,
                 .body_match = false,
-                .expected_body = if (group.response) |r| r.body else "",
+                .expected_body_owned = &.{},
                 .actual_body_owned = &.{},
                 .io_divergences = 0,
                 .io_total = @intCast(group.io_calls.len),
@@ -107,16 +107,16 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     }
 
     // Print summary
-    log("\nReplay results for {s}:\n", .{handler_filename});
-    log("  {d}/{d} identical\n", .{ summary.identical, summary.total });
+    std.log.info("\nReplay results for {s}:\n", .{handler_filename});
+    std.log.info("  {d}/{d} identical\n", .{ summary.identical, summary.total });
     if (summary.status_changed > 0) {
-        log("  {d} status code changes\n", .{summary.status_changed});
+        std.log.info("  {d} status code changes\n", .{summary.status_changed});
     }
     if (summary.body_changed > 0) {
-        log("  {d} body changes\n", .{summary.body_changed});
+        std.log.info("  {d} body changes\n", .{summary.body_changed});
     }
     if (summary.diverged > 0) {
-        log("  {d} diverged (I/O mismatch or runtime error)\n", .{summary.diverged});
+        std.log.info("  {d} diverged (I/O mismatch or runtime error)\n", .{summary.diverged});
     }
 
     // Print diffs for non-matching traces (up to 10)
@@ -124,35 +124,32 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     for (results.items, 0..) |result, idx| {
         if (result.match) continue;
         if (diff_count >= 10) {
-            log("\n  ... and {d} more differences\n", .{summary.total - summary.identical - diff_count});
+            std.log.info("\n  ... and {d} more differences\n", .{summary.total - summary.identical - diff_count});
             break;
         }
         diff_count += 1;
 
         if (result.err) |err| {
-            log("\nTrace #{d}: error - {}\n", .{ idx, err });
+            std.log.info("\nTrace #{d}: error - {}\n", .{ idx, err });
             continue;
         }
 
         if (result.expected_status != result.actual_status) {
-            log("\nTrace #{d}: status changed {d} -> {d}\n", .{ idx, result.expected_status, result.actual_status });
+            std.log.info("\nTrace #{d}: status changed {d} -> {d}\n", .{ idx, result.expected_status, result.actual_status });
         }
         if (!result.body_match) {
-            log("\nTrace #{d}: body changed\n", .{idx});
-            if (result.expected_body.len > 0 and result.expected_body.len <= 200) {
-                // Unescape the expected body for display (trace stores JSON-escaped)
-                const display = trace.unescapeJson(allocator, result.expected_body) catch result.expected_body;
-                defer if (display.ptr != result.expected_body.ptr) allocator.free(display);
-                log("  - {s}\n", .{display});
+            std.log.info("\nTrace #{d}: body changed\n", .{idx});
+            if (result.expected_body_owned.len > 0) {
+                std.log.info("  - {s}\n", .{result.expected_body_owned});
             }
             if (result.actual_body_owned.len > 0) {
-                log("  + {s}\n", .{result.actual_body_owned});
+                std.log.info("  + {s}\n", .{result.actual_body_owned});
             }
         }
     }
 
     if (summary.identical == summary.total) {
-        log("\nAll {d} traces passed.\n", .{summary.total});
+        std.log.info("\nAll {d} traces passed.\n", .{summary.total});
     }
 }
 
@@ -209,7 +206,7 @@ fn replayOne(
             .expected_status = if (group.response) |r| r.status else 200,
             .actual_status = 0,
             .body_match = false,
-            .expected_body = if (group.response) |r| r.body else "",
+            .expected_body_owned = &.{},
             .actual_body_owned = &.{},
             .io_divergences = replay_state.divergences,
             .io_total = @intCast(group.io_calls.len),
@@ -224,7 +221,7 @@ fn replayOne(
             .expected_status = 200,
             .actual_status = response.status,
             .body_match = true,
-            .expected_body = "",
+            .expected_body_owned = &.{},
             .actual_body_owned = &.{},
             .io_divergences = replay_state.divergences,
             .io_total = @intCast(group.io_calls.len),
@@ -234,13 +231,16 @@ fn replayOne(
 
     const status_match = response.status == expected.status;
 
-    // The trace stores body as a JSON string value, so it contains escape
-    // sequences like \" for embedded quotes. Unescape before comparing.
-    const expected_body_unescaped = trace.unescapeJson(allocator, expected.body) catch expected.body;
-    defer if (expected_body_unescaped.ptr != expected.body.ptr) allocator.free(expected_body_unescaped);
-    const body_match = std.mem.eql(u8, response.body, expected_body_unescaped);
+    // The trace stores body as a JSON string value with escape sequences
+    // like \" for embedded quotes. Unescape before comparing.
+    const expected_unescaped = trace.unescapeJson(allocator, expected.body) catch &.{};
+    const body_match = if (expected_unescaped.len > 0)
+        std.mem.eql(u8, response.body, expected_unescaped)
+    else
+        std.mem.eql(u8, response.body, expected.body);
 
-    // Dupe the body before response.deinit() frees it
+    // Dupe the actual body before response.deinit() frees it.
+    // Keep the unescaped expected body for diff display (avoids re-unescaping).
     const body_copy = if (!body_match and response.body.len > 0 and response.body.len <= 200)
         allocator.dupe(u8, response.body) catch &.{}
     else
@@ -251,7 +251,10 @@ fn replayOne(
         .expected_status = expected.status,
         .actual_status = response.status,
         .body_match = body_match,
-        .expected_body = expected.body,
+        .expected_body_owned = if (!body_match) expected_unescaped else blk: {
+            if (expected_unescaped.len > 0) allocator.free(expected_unescaped);
+            break :blk &.{};
+        },
         .actual_body_owned = body_copy,
         .io_divergences = replay_state.divergences,
         .io_total = @intCast(group.io_calls.len),
@@ -268,17 +271,17 @@ pub const ReplayResult = struct {
     expected_status: u16,
     actual_status: u16,
     body_match: bool,
-    expected_body: []const u8,
-    /// Owned copy of the actual response body (must be freed).
+    /// Owned unescaped expected body (for diff display). Empty if match.
+    expected_body_owned: []const u8,
+    /// Owned copy of the actual response body (for diff display). Empty if match.
     actual_body_owned: []const u8,
     io_divergences: u32,
     io_total: u32,
     err: ?anyerror,
 
     pub fn deinit(self: *const ReplayResult, allocator: std.mem.Allocator) void {
-        if (self.actual_body_owned.len > 0) {
-            allocator.free(self.actual_body_owned);
-        }
+        if (self.expected_body_owned.len > 0) allocator.free(self.expected_body_owned);
+        if (self.actual_body_owned.len > 0) allocator.free(self.actual_body_owned);
     }
 };
 
@@ -293,10 +296,6 @@ pub const ReplaySummary = struct {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-fn log(comptime fmt: []const u8, args: anytype) void {
-    std.log.info(fmt, args);
-}
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     const path_z = try allocator.dupeZ(u8, path);

@@ -339,7 +339,7 @@ pub const TraceRecorder = struct {
     }
 };
 
-fn extractStringData(val: value.JSValue) ?[]const u8 {
+pub fn extractStringData(val: value.JSValue) ?[]const u8 {
     if (val.isString()) return val.toPtr(string.JSString).data();
     if (val.isStringSlice()) return val.toPtr(string.SliceString).data();
     if (val.isRope()) {
