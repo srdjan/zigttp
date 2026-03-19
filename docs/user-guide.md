@@ -1300,6 +1300,8 @@ const el = (
 | Comparison | `== != === !== < <= > >=` |
 | Logical    | `&& \|\| ??`              |
 | Ternary    | `cond ? a : b`            |
+| Pipe       | `a \|> f` (desugars to `f(a)`) |
+| Compound   | `+= -= *= /= %= **= &= \|= ^= <<= >>= >>>=` |
 
 #### Math Constants
 

@@ -468,7 +468,7 @@ See [Performance](docs/performance.md) for detailed profiling analysis and deplo
 
 zts implements ES5 with select ES6+ extensions:
 
-**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching with literal and object patterns).
+**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, bitwise), pipe operator (`|>`), array higher-order methods (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`), `Object.keys()` / `.values()` / `.entries()`, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range()`, `match` expression (pattern matching).
 
 **Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, `null`, regular expressions, `as`/`satisfies` type assertions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives. Use `undefined` as the sole absent-value sentinel.
 

@@ -49,6 +49,7 @@ pub const TokenType = enum(u8) {
     tilde, // ~
     ampersand_ampersand, // &&
     pipe_pipe, // ||
+    pipe_gt, // |>
     question_question, // ??
     question_dot, // ?.
     bang, // !

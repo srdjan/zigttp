@@ -49,23 +49,24 @@ const Precedence = enum(u8) {
     none = 0,
     comma = 1, // ,
     assignment = 2, // = += -= etc
-    ternary = 3, // ?:
-    nullish = 4, // ??
-    or_op = 5, // ||
-    and_op = 6, // &&
-    bit_or = 7, // |
-    bit_xor = 8, // ^
-    bit_and = 9, // &
-    equality = 10, // == != === !==
-    comparison = 11, // < > <= >= in instanceof
-    shift = 12, // << >> >>>
-    additive = 13, // + -
-    multiplicative = 14, // * / %
-    exponent = 15, // **
-    unary = 16, // ! ~ - + typeof void delete
-    postfix = 17, // ++ --
-    call = 18, // () [] .
-    primary = 19,
+    pipe_op = 3, // |>
+    ternary = 4, // ?:
+    nullish = 5, // ??
+    or_op = 6, // ||
+    and_op = 7, // &&
+    bit_or = 8, // |
+    bit_xor = 9, // ^
+    bit_and = 10, // &
+    equality = 11, // == != === !==
+    comparison = 12, // < > <= >= in instanceof
+    shift = 13, // << >> >>>
+    additive = 14, // + -
+    multiplicative = 15, // * / %
+    exponent = 16, // **
+    unary = 17, // ! ~ - + typeof void delete
+    postfix = 18, // ++ --
+    call = 19, // () [] .
+    primary = 20,
 };
 
 /// Parser state
@@ -1775,6 +1776,25 @@ pub const Parser = struct {
                 return try self.nodes.add(Node.binaryOp(loc, self.tokenToBinaryOp(op_tok.type), left, right));
             },
 
+            // Pipe operator: a |> f desugars to f(a)
+            .pipe_gt => {
+                self.advance();
+                // Parse the right-hand side (the function to call)
+                const func = try self.parseExpression(prec);
+                // Desugar to f(a): create a call node with left as the single argument
+                const args_start = try self.addNodeList(&[_]NodeIndex{left});
+                return try self.nodes.add(.{
+                    .tag = .call,
+                    .loc = loc,
+                    .data = .{ .call = .{
+                        .callee = func,
+                        .args_start = args_start,
+                        .args_count = 1,
+                        .is_optional = false,
+                    } },
+                });
+            },
+
             // instanceof not supported - use discriminated unions with tag property
             .kw_instanceof => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'instanceof' is not supported; use discriminated unions with tag property instead");
@@ -1796,55 +1816,35 @@ pub const Parser = struct {
                 });
             },
 
-            // Compound assignments are not supported
-            .plus_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'+=' is not supported; use 'x = x + value' instead");
-                return error.ParseError;
+            // Compound assignments: desugar to assignment with binary op
+            .plus_assign,
+            .minus_assign,
+            .star_assign,
+            .slash_assign,
+            .percent_assign,
+            .star_star_assign,
+            .ampersand_assign,
+            .pipe_assign,
+            .caret_assign,
+            .lt_lt_assign,
+            .gt_gt_assign,
+            .gt_gt_gt_assign,
+            => {
+                const binary_op = self.tokenToBinaryOp(op_tok.type);
+                self.advance();
+                const right = try self.parseExpression(@enumFromInt(@intFromEnum(prec) - 1));
+                return try self.nodes.add(.{
+                    .tag = .assignment,
+                    .loc = loc,
+                    .data = .{ .assignment = .{
+                        .target = left,
+                        .value = right,
+                        .op = binary_op,
+                    } },
+                });
             },
-            .minus_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'-=' is not supported; use 'x = x - value' instead");
-                return error.ParseError;
-            },
-            .star_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'*=' is not supported; use 'x = x * value' instead");
-                return error.ParseError;
-            },
-            .slash_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'/=' is not supported; use 'x = x / value' instead");
-                return error.ParseError;
-            },
-            .percent_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'%=' is not supported; use 'x = x % value' instead");
-                return error.ParseError;
-            },
-            .ampersand_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'&=' is not supported; use 'x = x & value' instead");
-                return error.ParseError;
-            },
-            .pipe_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'|=' is not supported; use 'x = x | value' instead");
-                return error.ParseError;
-            },
-            .caret_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'^=' is not supported; use 'x = x ^ value' instead");
-                return error.ParseError;
-            },
-            .lt_lt_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'<<=' is not supported; use 'x = x << value' instead");
-                return error.ParseError;
-            },
-            .gt_gt_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'>>=' is not supported; use 'x = x >> value' instead");
-                return error.ParseError;
-            },
-            .gt_gt_gt_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'>>>=' is not supported; use 'x = x >>> value' instead");
-                return error.ParseError;
-            },
-            .star_star_assign => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'**=' is not supported; use 'x = x ** value' instead");
-                return error.ParseError;
-            },
+
+            // Logical compound assignments need short-circuit semantics (not yet supported)
             .ampersand_ampersand_assign => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'&&=' is not supported; use 'x = x && value' instead");
                 return error.ParseError;
@@ -3135,6 +3135,7 @@ pub const Parser = struct {
         _ = self;
         return switch (token_type) {
             .assign, .plus_assign, .minus_assign, .star_assign, .slash_assign, .percent_assign, .ampersand_assign, .pipe_assign, .caret_assign, .lt_lt_assign, .gt_gt_assign, .gt_gt_gt_assign, .star_star_assign, .ampersand_ampersand_assign, .pipe_pipe_assign, .question_question_assign => .assignment,
+            .pipe_gt => .pipe_op,
             .question => .ternary,
             .question_question => .nullish,
             .pipe_pipe => .or_op,
@@ -3157,12 +3158,12 @@ pub const Parser = struct {
     fn tokenToBinaryOp(self: *Parser, token_type: TokenType) BinaryOp {
         _ = self;
         return switch (token_type) {
-            .plus => .add,
-            .minus => .sub,
-            .star => .mul,
-            .slash => .div,
-            .percent => .mod,
-            .star_star => .pow,
+            .plus, .plus_assign => .add,
+            .minus, .minus_assign => .sub,
+            .star, .star_assign => .mul,
+            .slash, .slash_assign => .div,
+            .percent, .percent_assign => .mod,
+            .star_star, .star_star_assign => .pow,
             .eq => .eq,
             .ne => .neq,
             .eq_eq => .strict_eq,
@@ -3171,12 +3172,12 @@ pub const Parser = struct {
             .le => .lte,
             .gt => .gt,
             .ge => .gte,
-            .ampersand => .bit_and,
-            .pipe => .bit_or,
-            .caret => .bit_xor,
-            .lt_lt => .shl,
-            .gt_gt => .shr,
-            .gt_gt_gt => .ushr,
+            .ampersand, .ampersand_assign => .bit_and,
+            .pipe, .pipe_assign => .bit_or,
+            .caret, .caret_assign => .bit_xor,
+            .lt_lt, .lt_lt_assign => .shl,
+            .gt_gt, .gt_gt_assign => .shr,
+            .gt_gt_gt, .gt_gt_gt_assign => .ushr,
             .ampersand_ampersand => .and_op,
             .pipe_pipe => .or_op,
             .question_question => .nullish,
@@ -3834,25 +3835,75 @@ test "unsupported: prefix increment ++" {
     try std.testing.expect(false);
 }
 
-test "unsupported: compound assignment +=" {
-    const allocator = std.testing.allocator;
-    const source = "x += 5;";
+test "compound assignment +=" {
+    var parser = Parser.init(std.testing.allocator, "let x = 1; x += 5;");
+    defer parser.deinit();
 
-    var parser = Parser.init(allocator, source);
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "compound assignments: all arithmetic operators" {
+    var parser = Parser.init(std.testing.allocator, "let x = 10; x += 1; x -= 2; x *= 3; x /= 4; x %= 5; x **= 2;");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "compound assignments: bitwise operators" {
+    var parser = Parser.init(std.testing.allocator, "let x = 255; x &= 15; x |= 240; x ^= 255; x <<= 2; x >>= 1; x >>>= 1;");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "unsupported: logical compound assignment &&=" {
+    var parser = Parser.init(std.testing.allocator, "x &&= 5;");
     defer parser.deinit();
 
     _ = parser.parse() catch {
         try std.testing.expect(parser.hasErrors());
-        const errors = parser.getErrors();
-        try std.testing.expect(errors.len > 0);
-        const err = errors[0];
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "+=") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "x + value") != null or std.mem.indexOf(u8, err.message, "=") != null);
         return;
     };
-
     try std.testing.expect(false);
+}
+
+test "pipe operator: simple" {
+    var parser = Parser.init(std.testing.allocator, "const r = 5 |> double;");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "pipe operator: chained" {
+    var parser = Parser.init(std.testing.allocator, "const r = x |> f |> g |> h;");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "unsupported: instanceof operator" {

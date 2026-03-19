@@ -1796,7 +1796,7 @@ pub const IrView = struct {
                 const op_byte: u8 = @truncate(d.b >> 24);
                 break :blk .{
                     .target = d.a,
-                    .value = @truncate(d.b),
+                    .value = d.b & 0xFFFFFF,
                     .op = if (op_byte == 0) null else @enumFromInt(op_byte - 1),
                 };
             },

@@ -202,7 +202,7 @@ All error messages follow the pattern: "'feature' is not supported; use X instea
 
 ## JavaScript Runtime
 
-**Supported**: ES5 + arrow functions, template literals, destructuring, spread operator, `for...of` (arrays), optional chaining, nullish coalescing, typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching).
+**Supported**: ES5 + arrow functions, template literals, destructuring, spread operator, `for...of` (arrays), optional chaining, nullish coalescing, typed arrays, `**` operator, `globalThis`, string methods (replaceAll, trimStart/End), Math extensions, `range(end)` / `range(start, end)` / `range(start, end, step)`, `match` expression (pattern matching), compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`), pipe operator (`|>`), array HOFs (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`), `Object.keys()`, `Object.values()`, `Object.entries()`.
 
 **Limitations**: Strict mode only, no `with`, no array holes, no `new Number()`/`new String()`, only `Date.now()` from Date API. Classes, async/await, Promises, `var`, `while`/`do-while`, `this`, `new`, `try/catch`, `null`, regular expressions are all detected at parse time with helpful error messages. Use `undefined` as the sole absent-value sentinel.
 

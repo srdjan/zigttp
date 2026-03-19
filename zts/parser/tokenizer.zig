@@ -301,6 +301,7 @@ pub const Tokenizer = struct {
             if (self.match('=')) return self.tok3(start, col, line, .pipe_pipe_assign);
             return self.tok2(start, col, line, .pipe_pipe);
         }
+        if (self.match('>')) return self.tok2(start, col, line, .pipe_gt);
         if (self.match('=')) return self.tok2(start, col, line, .pipe_assign);
         return self.tok1(start, col, line, .pipe);
     }

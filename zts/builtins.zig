@@ -68,6 +68,12 @@ fn getObject(val: value.JSValue) ?*object.JSObject {
     return val.toPtr(object.JSObject);
 }
 
+/// Helper to get atom name as string
+fn atomName(atom: object.Atom, ctx: *context.Context) ?[]const u8 {
+    if (atom.isPredefined()) return atom.toPredefinedName();
+    return ctx.atoms.getName(atom);
+}
+
 /// Object.keys(obj) - Returns array of own enumerable property names
 pub fn objectKeys(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
@@ -78,9 +84,13 @@ pub fn objectKeys(ctx: *context.Context, this: value.JSValue, args: []const valu
     const keys = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return value.JSValue.undefined_val;
     defer ctx.allocator.free(keys);
 
-    // Create array to hold results
-    // For now, return the count as an integer (proper array creation requires more infrastructure)
-    return value.JSValue.fromInt(@intCast(keys.len));
+    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    for (keys) |key| {
+        const name = atomName(key, ctx) orelse continue;
+        const str_val = ctx.createString(name) catch continue;
+        result.arrayPush(ctx.allocator, str_val) catch continue;
+    }
+    return result.toValue();
 }
 
 /// Object.values(obj) - Returns array of own enumerable property values
@@ -93,8 +103,12 @@ pub fn objectValues(ctx: *context.Context, this: value.JSValue, args: []const va
     const keys = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return value.JSValue.undefined_val;
     defer ctx.allocator.free(keys);
 
-    // For now, return count (proper array creation requires more infrastructure)
-    return value.JSValue.fromInt(@intCast(keys.len));
+    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    for (keys) |key| {
+        const val = obj.getProperty(pool, key) orelse value.JSValue.undefined_val;
+        result.arrayPush(ctx.allocator, val) catch continue;
+    }
+    return result.toValue();
 }
 
 /// Object.entries(obj) - Returns array of [key, value] pairs
@@ -107,8 +121,17 @@ pub fn objectEntries(ctx: *context.Context, this: value.JSValue, args: []const v
     const keys = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return value.JSValue.undefined_val;
     defer ctx.allocator.free(keys);
 
-    // For now, return count
-    return value.JSValue.fromInt(@intCast(keys.len));
+    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    for (keys) |key| {
+        const name = atomName(key, ctx) orelse continue;
+        const pair = createArrayWithPrototype(ctx) orelse continue;
+        const str_val = ctx.createString(name) catch continue;
+        pair.arrayPush(ctx.allocator, str_val) catch continue;
+        const val = obj.getProperty(pool, key) orelse value.JSValue.undefined_val;
+        pair.arrayPush(ctx.allocator, val) catch continue;
+        result.arrayPush(ctx.allocator, pair.toValue()) catch continue;
+    }
+    return result.toValue();
 }
 
 // Object.assign removed - use spread syntax {...obj1, ...obj2} instead
@@ -2177,72 +2200,180 @@ pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const val
     return value.JSValue.fromInt(total_len);
 }
 
+/// Get the JS function calling mechanism. Cache before loops to avoid
+/// repeated threadlocal reads per iteration.
+fn getCallFn() ?http.CallFunctionFn {
+    return http.call_function_callback;
+}
+
+/// Invoke a JS callback via a cached call function pointer.
+fn invokeCallback(call_fn: http.CallFunctionFn, func_obj: *object.JSObject, call_args: []const value.JSValue) ?value.JSValue {
+    return call_fn(func_obj, call_args) catch return null;
+}
+
+/// Create an array with the proper prototype set (enables method chaining).
+fn createArrayWithPrototype(ctx: *context.Context) ?*object.JSObject {
+    const arr = ctx.createArray() catch return null;
+    arr.prototype = ctx.array_prototype;
+    return arr;
+}
+
+/// Extract callback function object from first argument.
+fn getCallbackArg(args: []const value.JSValue) ?*object.JSObject {
+    if (args.len == 0) return null;
+    if (!args[0].isCallable()) return null;
+    return args[0].toPtr(object.JSObject);
+}
+
 /// Array.prototype.map(callback, thisArg?) - Map to new array
 pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
+    if (len <= 0) return (createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val).toValue();
 
-    // Requires function call infrastructure - return length for now
-    return value.JSValue.fromInt(len);
+    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const mapped = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
+        result.arrayPush(ctx.allocator, mapped) catch return value.JSValue.undefined_val;
+    }
+    return result.toValue();
 }
 
 /// Array.prototype.filter(callback, thisArg?) - Filter to new array
 pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
-    // Requires function call infrastructure
-    return value.JSValue.fromInt(0);
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+    if (len <= 0) return (createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val).toValue();
+
+    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const keep = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        if (keep.toBoolean()) {
+            result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
+        }
+    }
+    return result.toValue();
 }
 
 /// Array.prototype.reduce(callback, initialValue?) - Reduce to single value
 pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    // Requires function call infrastructure
-    if (args.len > 1) return args[1]; // Return initial value
-    return value.JSValue.undefined_val;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+
+    var accumulator: value.JSValue = value.JSValue.undefined_val;
+    var start_idx: u32 = 0;
+
+    if (args.len > 1) {
+        accumulator = args[1];
+    } else if (len > 0) {
+        accumulator = obj.getIndex(0) orelse value.JSValue.undefined_val;
+        start_idx = 1;
+    } else {
+        return value.JSValue.undefined_val;
+    }
+
+    var i: u32 = start_idx;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ accumulator, elem, value.JSValue.fromInt(@intCast(i)) };
+        accumulator = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
+    }
+    return accumulator;
 }
 
 /// Array.prototype.forEach(callback, thisArg?) - Execute callback for each element
 pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
-    // Requires function call infrastructure
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        _ = invokeCallback(call_fn, callback, &call_args);
+    }
     return value.JSValue.undefined_val;
 }
 
 /// Array.prototype.every(callback, thisArg?) - Test if all elements pass
 pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.true_val;
+    const call_fn = getCallFn() orelse return value.JSValue.true_val;
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        if (!result.toBoolean()) return value.JSValue.false_val;
+    }
     return value.JSValue.true_val;
 }
 
 /// Array.prototype.some(callback, thisArg?) - Test if any element passes
 pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.false_val;
+    const call_fn = getCallFn() orelse return value.JSValue.false_val;
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        if (result.toBoolean()) return value.JSValue.true_val;
+    }
     return value.JSValue.false_val;
 }
 
 /// Array.prototype.find(callback, thisArg?) - Find first matching element
 pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        if (result.toBoolean()) return elem;
+    }
     return value.JSValue.undefined_val;
 }
 
 /// Array.prototype.findIndex(callback, thisArg?) - Find index of first matching element
 pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    _ = args;
+    const obj = getObject(this) orelse return value.JSValue.undefined_val;
+    const callback = getCallbackArg(args) orelse return value.JSValue.fromInt(-1);
+    const call_fn = getCallFn() orelse return value.JSValue.fromInt(-1);
+    const len = getArrayLength(obj, ctx.hidden_class_pool);
+
+    var i: u32 = 0;
+    while (i < @as(u32, @intCast(len))) : (i += 1) {
+        const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
+        const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)) };
+        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        if (result.toBoolean()) return value.JSValue.fromInt(@intCast(i));
+    }
     return value.JSValue.fromInt(-1);
 }
 

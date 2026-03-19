@@ -134,24 +134,18 @@ These were previously detected by the stripper but moved to the parser for consi
 | `x++` (postfix increment) | Use `x = x + 1` |
 | `x--` (postfix decrement) | Use `x = x - 1` |
 
-### Compound Assignment Operators (15 total)
+### Supported Compound Assignment Operators (12 total)
 
-All compound assignments follow the pattern: "use `x = x [op] value`"
+Arithmetic and bitwise compound assignments are supported and desugar to `x = x [op] value`:
 
-| Feature | Binary Equivalent |
-|---------|-------------------|
-| `+=` | `x = x + value` |
-| `-=` | `x = x - value` |
-| `*=` | `x = x * value` |
-| `/=` | `x = x / value` |
-| `%=` | `x = x % value` |
-| `**=` | `x = x ** value` |
-| `&=` | `x = x & value` |
-| `\|=` | `x = x \| value` |
-| `^=` | `x = x ^ value` |
-| `<<=` | `x = x << value` |
-| `>>=` | `x = x >> value` |
-| `>>>=` | `x = x >>> value` |
+`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`
+
+### Unsupported Logical Compound Assignments (3 total)
+
+Logical compound assignments require short-circuit semantics and are not supported:
+
+| Feature | Suggested Alternative |
+|---------|----------------------|
 | `&&=` | `x = x && value` |
 | `\|\|=` | `x = x \|\| value` |
 | `??=` | `x = x ?? value` |
