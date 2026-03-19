@@ -262,7 +262,17 @@ pub const TraceRecorder = struct {
         }
     }
 
+    const MAX_JSON_DEPTH = 32;
+
     fn appendJSValue(self: *TraceRecorder, ctx: *context.Context, val: value.JSValue) ?void {
+        self.appendJSValueDepth(ctx, val, 0) orelse return null;
+    }
+
+    fn appendJSValueDepth(self: *TraceRecorder, ctx: *context.Context, val: value.JSValue, depth: u32) ?void {
+        if (depth >= MAX_JSON_DEPTH) {
+            self.append("null") orelse return null;
+            return;
+        }
         if (val.isNull() or val.isUndefined()) {
             self.append("null") orelse return null;
         } else if (val.isTrue()) {
@@ -291,7 +301,7 @@ pub const TraceRecorder = struct {
                 for (0..len) |i| {
                     if (i > 0) self.appendByte(',') orelse return null;
                     if (obj.getIndex(@intCast(i))) |elem| {
-                        self.appendJSValue(ctx, elem) orelse return null;
+                        self.appendJSValueDepth(ctx, elem, depth + 1) orelse return null;
                     } else {
                         self.append("null") orelse return null;
                     }
@@ -325,7 +335,7 @@ pub const TraceRecorder = struct {
                                     const name = atomToString(atom, ctx) orelse "?";
                                     self.appendEscaped(name) orelse return null;
                                     self.append("\":") orelse return null;
-                                    self.appendJSValue(ctx, prop_val) orelse return null;
+                                    self.appendJSValueDepth(ctx, prop_val, depth + 1) orelse return null;
                                 }
                             }
                         }
@@ -661,7 +671,16 @@ pub fn makeReplayStub(
             const entry = state.nextIO(module_name, fn_name) orelse {
                 return value.JSValue.undefined_val;
             };
-            return jsonToJSValue(ctx, entry.result_json);
+            const result = jsonToJSValue(ctx, entry.result_json);
+            // If the recorded result was not "null"/"undefined" but parsed as
+            // undefined, it indicates a parse failure - count as divergence.
+            if (result.isUndefined() and entry.result_json.len > 0 and
+                !std.mem.eql(u8, entry.result_json, "null") and
+                !std.mem.eql(u8, entry.result_json, "undefined"))
+            {
+                state.divergences += 1;
+            }
+            return result;
         }
     }.call;
 }
@@ -866,7 +885,7 @@ fn skipWhitespace(json: []const u8, start: usize) usize {
     return pos;
 }
 
-/// Unescape a JSON string value (convert \" to ", \n to newline, etc.).
+/// Unescape a JSON string value (convert \" to ", \n to newline, \uXXXX to UTF-8, etc.).
 pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
@@ -874,15 +893,34 @@ pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     while (i < input.len) : (i += 1) {
         if (input[i] == '\\' and i + 1 < input.len) {
             i += 1;
-            try result.append(allocator, switch (input[i]) {
-                '"' => '"',
-                '\\' => '\\',
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                '/' => '/',
-                else => input[i],
-            });
+            switch (input[i]) {
+                '"' => try result.append(allocator, '"'),
+                '\\' => try result.append(allocator, '\\'),
+                'n' => try result.append(allocator, '\n'),
+                'r' => try result.append(allocator, '\r'),
+                't' => try result.append(allocator, '\t'),
+                '/' => try result.append(allocator, '/'),
+                'u' => {
+                    // \uXXXX unicode escape -> UTF-8
+                    if (i + 4 < input.len) {
+                        const hex = input[i + 1 .. i + 5];
+                        const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
+                            try result.append(allocator, 'u');
+                            continue;
+                        };
+                        var buf: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(codepoint, &buf) catch {
+                            try result.append(allocator, 'u');
+                            continue;
+                        };
+                        try result.appendSlice(allocator, buf[0..len]);
+                        i += 4;
+                    } else {
+                        try result.append(allocator, 'u');
+                    }
+                },
+                else => try result.append(allocator, input[i]),
+            }
         } else {
             try result.append(allocator, input[i]);
         }
