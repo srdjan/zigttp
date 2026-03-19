@@ -281,22 +281,12 @@ pub const BoolChecker = struct {
                 // S1: condition must produce a value with unambiguous truthiness
                 self.requireBoolean(if_s.condition, "if");
 
-                // Extract typeof guards from condition for branch-scoped narrowing
+                // Extract guards from condition for branch-scoped narrowing
+                // (typeof guards, undefined equality guards, and truthiness guards)
                 var guards: [MAX_NARROWINGS]TypeofGuard = undefined;
                 var saved: [MAX_NARROWINGS]?ExprType = undefined;
                 var is_negated = false;
-                var guard_count = self.extractTypeofGuards(if_s.condition, &guards, &is_negated);
-
-                // Type-directed truthiness narrowing: if (x) where x is optional
-                // narrows to non-optional in then-branch (like x !== undefined)
-                if (guard_count == 0) {
-                    if (self.extractTruthinessGuard(if_s.condition)) |tg| {
-                        guards[0] = tg.guard;
-                        is_negated = tg.negated;
-                        guard_count = 1;
-                    }
-                }
-
+                const guard_count = self.extractTypeofGuards(if_s.condition, &guards, &is_negated);
                 const active = guards[0..guard_count];
                 const saved_active = saved[0..guard_count];
 
@@ -473,21 +463,11 @@ pub const BoolChecker = struct {
                 self.requireBoolean(t.condition, "ternary");
                 self.walkExpr(t.condition);
 
-                // Apply typeof guard narrowing to ternary branches
+                // Extract guards from condition for branch-scoped narrowing
                 var guards: [MAX_NARROWINGS]TypeofGuard = undefined;
                 var saved: [MAX_NARROWINGS]?ExprType = undefined;
                 var is_negated = false;
-                var guard_count = self.extractTypeofGuards(t.condition, &guards, &is_negated);
-
-                // Type-directed truthiness narrowing for ternaries
-                if (guard_count == 0) {
-                    if (self.extractTruthinessGuard(t.condition)) |tg| {
-                        guards[0] = tg.guard;
-                        is_negated = tg.negated;
-                        guard_count = 1;
-                    }
-                }
-
+                const guard_count = self.extractTypeofGuards(t.condition, &guards, &is_negated);
                 const active = guards[0..guard_count];
                 const saved_active = saved[0..guard_count];
 
@@ -969,15 +949,11 @@ pub const BoolChecker = struct {
     // Truthiness guard extraction (type-directed narrowing)
     // -----------------------------------------------------------------------
 
-    const TruthinessGuard = struct {
-        guard: TypeofGuard,
-        negated: bool,
-    };
-
     /// Extract a truthiness guard from `if (x)` or `if (!x)` where x has an optional type.
-    /// if (x) with optional_string: narrow to string in then-branch
-    /// if (!x) with optional_string: narrow to string in else-branch (negated)
-    fn extractTruthinessGuard(self: *BoolChecker, cond: NodeIndex) ?TruthinessGuard {
+    /// if (x): narrow to non-optional in then-branch (encoded as strict_eq)
+    /// if (!x): narrow to non-optional in else-branch (encoded as strict_neq)
+    /// Returns null if condition is not an identifier with an optional type.
+    fn extractTruthinessGuard(self: *BoolChecker, cond: NodeIndex) ?TypeofGuard {
         const tag = self.ir_view.getTag(cond) orelse return null;
 
         // Pattern 1: direct identifier - if (x)
@@ -997,7 +973,7 @@ pub const BoolChecker = struct {
         return null;
     }
 
-    fn makeTruthinessGuard(self: *BoolChecker, ident_node: NodeIndex, negated: bool) ?TruthinessGuard {
+    fn makeTruthinessGuard(self: *BoolChecker, ident_node: NodeIndex, negated: bool) ?TypeofGuard {
         const binding = self.ir_view.getBinding(ident_node) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const current_type = self.lookupBindingType(key);
@@ -1007,30 +983,12 @@ pub const BoolChecker = struct {
         if (narrowed == current_type) return null; // Not optional
         if (current_type == .undefined) return null; // Pure undefined has no non-optional variant
 
-        // if (x): then-branch gets non-optional type (truthy = not undefined)
-        // if (!x): then-branch gets undefined, else-branch gets non-optional
-        if (negated) {
-            // !x: this is like x === undefined (narrow to undefined in "positive" direction)
-            // We encode as strict_neq so the guard system installs in else-branch
-            return .{
-                .guard = .{
-                    .binding_key = key,
-                    .narrowed_type = narrowed,
-                    .op = .strict_neq,
-                },
-                .negated = true,
-            };
-        } else {
-            // x: this is like x !== undefined (narrow to non-optional in then-branch)
-            return .{
-                .guard = .{
-                    .binding_key = key,
-                    .narrowed_type = narrowed,
-                    .op = .strict_eq,
-                },
-                .negated = false,
-            };
-        }
+        // if (x) -> strict_eq (narrowing in then-branch), if (!x) -> strict_neq (narrowing in else-branch)
+        return .{
+            .binding_key = key,
+            .narrowed_type = narrowed,
+            .op = if (negated) .strict_neq else .strict_eq,
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -1160,23 +1118,39 @@ pub const BoolChecker = struct {
     ) usize {
         is_negated.* = false;
 
-        // Try single guard first
+        // Try single typeof/equality guard first
         if (self.extractTypeofGuard(node)) |guard| {
             guards[0] = guard;
             is_negated.* = (guard.op == .strict_neq);
             return 1;
         }
 
-        // Try && chain
+        // Try && chain of typeof guards
         const tag = self.ir_view.getTag(node) orelse return 0;
-        if (tag != .binary_op) return 0;
-        const bin = self.ir_view.getBinary(node) orelse return 0;
-        if (bin.op != .and_op) return 0;
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(node) orelse return 0;
+            if (bin.op == .and_op) {
+                var count: usize = 0;
+                self.collectAndGuards(bin.left, guards, &count);
+                self.collectAndGuards(bin.right, guards, &count);
+                if (count > 0) return count;
+            }
+        }
 
-        var count: usize = 0;
-        self.collectAndGuards(bin.left, guards, &count);
-        self.collectAndGuards(bin.right, guards, &count);
-        return count;
+        // Fallback: truthiness guard for if (x) / if (!x) with optional types
+        return self.tryTruthinessGuard(node, guards, is_negated);
+    }
+
+    fn tryTruthinessGuard(
+        self: *BoolChecker,
+        node: NodeIndex,
+        guards: *[MAX_NARROWINGS]TypeofGuard,
+        is_negated: *bool,
+    ) usize {
+        const guard = self.extractTruthinessGuard(node) orelse return 0;
+        guards[0] = guard;
+        is_negated.* = (guard.op == .strict_neq);
+        return 1;
     }
 
     /// Recursively collect === typeof guards from an && chain.
