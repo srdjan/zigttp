@@ -1,8 +1,11 @@
 // HTMX Todo App Example for zigttp-server (JSX version)
 // Demonstrates JSX templating with HTMX partial updates
+// Uses guard composition for request/response logging
 //
 // Run: zig build run -- examples/htmx-todo/handlers.jsx -p 3000
 // Open: http://localhost:3000
+
+import { guard } from "zigttp:compose";
 
 const TODO_ID = 0;
 const TODO_TEXT = 1;
@@ -124,9 +127,6 @@ let styles = [
 
 function encodeFormValue(value) {
     if (typeof value !== 'string') {
-        if (value === null) {
-            return '';
-        }
         if (value === undefined) {
             return '';
         }
@@ -162,7 +162,7 @@ function fallbackId() {
 }
 
 function normalizeQueryValue(value) {
-    if (value === null || value === undefined) {
+    if (value === undefined) {
         return '';
     }
     if (typeof value === 'string') {
@@ -189,7 +189,7 @@ function index() {
 function addTodo(request) {
     let id = '';
     let text = '';
-    if (request.query) {
+    if (request.query !== undefined) {
         id = normalizeQueryValue(request.query.id);
         text = normalizeQueryValue(request.query.text);
     }
@@ -209,7 +209,7 @@ function toggleTodo(request) {
     let id = '';
     let text = '';
     let doneParam = '';
-    if (request.query) {
+    if (request.query !== undefined) {
         id = normalizeQueryValue(request.query.id);
         text = normalizeQueryValue(request.query.text);
         doneParam = request.query.done;
@@ -232,10 +232,22 @@ function deleteTodo() {
 }
 
 // ============================================================================
+// Guards
+// ============================================================================
+
+const logRequest = (req) => {
+    console.log([req.method, ' ', req.path || req.url].join(''));
+};
+
+const logResponse = (res) => {
+    console.log(['-> ', res.status].join(''));
+};
+
+// ============================================================================
 // Main Handler
 // ============================================================================
 
-function handler(request) {
+function routeHandler(request) {
     let method = request.method;
     let path = request.path || request.url;
 
@@ -267,3 +279,11 @@ function handler(request) {
     // 404 Not Found
     return Response.text('Not Found', { status: 404 });
 }
+
+// ============================================================================
+// Composed Handler
+// ============================================================================
+
+const handler = guard(logRequest)
+    |> routeHandler
+    |> guard(logResponse);
