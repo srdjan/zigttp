@@ -15,6 +15,7 @@ pub const validate = @import("validate.zig");
 pub const cache = @import("cache.zig");
 pub const io = @import("io.zig");
 pub const compose = @import("compose.zig");
+pub const durable = @import("durable.zig");
 pub const util = @import("util.zig");
 pub const file_resolver = @import("file_resolver.zig");
 pub const module_graph = @import("module_graph.zig");

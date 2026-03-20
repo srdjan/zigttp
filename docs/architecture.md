@@ -168,6 +168,16 @@ servers. The collect-execute-join approach gives the same I/O overlap benefit
 with a fraction of the runtime complexity, and the handler code remains a
 straight-line function that the verifier and type checker can fully analyze.
 
+### Durable Execution
+
+zigttp extends the same straight-line model to crash recovery through
+`zigttp:durable`. A handler opts in with `run(key, fn)` and can bracket
+idempotent subcomputations with `step(name, fn)`. The runtime writes a JSONL
+oplog under `--durable`, replays deterministic effects from that oplog after a
+restart, and resumes live execution at the first incomplete step. Completed
+logs stay on disk so duplicate keys can return the previously recorded
+`Response` without repeating side effects.
+
 ## Runtime Model
 
 zts uses a **generational garbage collector** with:

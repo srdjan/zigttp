@@ -1,11 +1,13 @@
 //! Durable Execution Recovery
 //!
-//! On server startup, scans the oplog directory for incomplete oplog files
-//! and re-executes their handlers with the recorded I/O entries. The durable
-//! wrappers replay from the oplog, then continue live for any remaining I/O.
+//! On server startup, scans the durable directory for incomplete oplog files
+//! and re-executes their handlers. The handler's run(key, ...) call reuses the
+//! recorded oplog, replays deterministic effects, and continues live for any
+//! remaining work.
 //!
 //! An oplog is incomplete if it contains a request entry but no "complete" marker.
-//! After successful recovery, the oplog is deleted.
+//! Completed oplogs are kept so duplicate durable keys can reuse the recorded
+//! response.
 
 const std = @import("std");
 const zq = @import("zts");
@@ -21,8 +23,8 @@ const c = @cImport({
 
 const trace = zq.trace;
 
-/// Scan the oplog directory and recover any incomplete requests.
-/// Returns the number of requests recovered.
+/// Scan the durable directory and recover any incomplete runs.
+/// Returns the number of runs recovered.
 pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfig) !u32 {
     const oplog_dir = config.runtime_config.durable_oplog_dir orelse return 0;
 
@@ -45,7 +47,7 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
     while (c.readdir(dir)) |entry| {
         const name_ptr: [*:0]const u8 = @ptrCast(&entry.*.d_name);
         const name = std.mem.sliceTo(name_ptr, 0);
-        if (!std.mem.startsWith(u8, name, "oplog-")) continue;
+        if (!std.mem.startsWith(u8, name, "durable-")) continue;
         if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
         try oplog_files.append(allocator, try allocator.dupe(u8, name));
     }
@@ -66,10 +68,8 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
         };
         defer allocator.free(source);
 
-        // Check if incomplete (has request but no complete marker)
         if (!trace.isIncompleteOplog(source)) {
-            // Already complete - safe to delete
-            deleteFile(allocator, full_path);
+            // Completed durable runs remain on disk for duplicate-key reuse.
             continue;
         }
 
@@ -80,13 +80,18 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
         };
         defer parsed.deinit();
 
-        std.log.info("Recovering request: {s} {s} ({d} I/O entries recorded)", .{
+        const run_key = parsed.run_key orelse {
+            std.log.err("Skipping oplog without durable run key: {s}", .{full_path});
+            continue;
+        };
+
+        std.log.info("Recovering durable run: {s} {s} ({d} recorded events)", .{
+            run_key,
             parsed.request.method,
             parsed.request.url,
-            parsed.io_calls.len,
+            parsed.events.len,
         });
 
-        // Re-execute with durable state containing the recorded entries
         const success = recoverOne(allocator, config, &parsed, full_path) catch |err| {
             std.log.err("Recovery failed for '{s}': {}", .{ full_path, err });
             continue;
@@ -94,8 +99,6 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
 
         if (success) {
             recovered += 1;
-            // Oplog was marked complete inside recoverOne; now delete it
-            deleteFile(allocator, full_path);
         }
     }
 
@@ -112,35 +115,10 @@ fn recoverOne(
     parsed: *const trace.IncompleteOplog,
     oplog_path: []const u8,
 ) !bool {
-    // Create a runtime with durable mode enabled
     const recovery_config = config.runtime_config;
-    // Keep durable_oplog_dir set so installVirtualModules picks durable wrappers
-    // but we'll manage the DurableState ourselves
 
     const rt = try Runtime.init(allocator, recovery_config);
     defer rt.deinit();
-
-    // Open the oplog file for appending (to continue writing I/O entries)
-    const oplog_fd = openOplogForAppend(allocator, oplog_path) catch |err| {
-        std.log.err("Failed to reopen oplog for recovery: {}", .{err});
-        return err;
-    };
-    defer std.Io.Threaded.closeFd(oplog_fd);
-
-    // Create DurableState with the recorded I/O entries for replay
-    var durable_state = trace.DurableState.init(
-        allocator,
-        parsed.io_calls,
-        oplog_fd,
-    );
-    defer durable_state.deinit();
-
-    rt.ctx.setModuleState(
-        trace.DURABLE_STATE_SLOT,
-        @ptrCast(&durable_state),
-        &trace.DurableState.deinitOpaque,
-    );
-    defer rt.ctx.module_state[trace.DURABLE_STATE_SLOT] = null;
 
     // Load handler code
     const handler_code = switch (config.handler) {
@@ -162,17 +140,27 @@ fn recoverOne(
     };
 
     try rt.loadCode(handler_code, handler_filename);
+    rt.setPendingDurableRecovery(
+        parsed.run_key orelse return error.MissingRunKey,
+        oplog_path,
+        parsed.events,
+    );
 
     // Build request from oplog
     var headers_list: std.ArrayListUnmanaged(HttpHeader) = .{};
     defer headers_list.deinit(allocator);
     try parseHeadersFromJson(allocator, parsed.request.headers_json, &headers_list);
+    const body = if (parsed.request.body) |raw|
+        try trace.unescapeJson(allocator, raw)
+    else
+        null;
+    defer if (body) |owned| allocator.free(owned);
 
     const request = HttpRequestView{
         .method = parsed.request.method,
         .url = parsed.request.url,
         .headers = headers_list,
-        .body = parsed.request.body,
+        .body = body,
     };
 
     // Execute handler - durable wrappers will replay from oplog, then continue live
@@ -182,39 +170,16 @@ fn recoverOne(
     };
     defer response.deinit();
 
-    // The response was persisted and marked complete by traceRecordResponse
-    // (via the DurableState in module_state). Log the result.
-    std.log.info("Recovered: {s} {s} -> {d}", .{
-        parsed.request.method,
-        parsed.request.url,
-        response.status,
-    });
+    const updated = readFile(allocator, oplog_path) catch return false;
+    defer allocator.free(updated);
+    if (trace.isIncompleteOplog(updated)) return false;
 
+    std.log.info("Recovered: {s} {s} -> {d}", .{ parsed.request.method, parsed.request.url, response.status });
     return true;
-}
-
-fn openOplogForAppend(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd = std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        path_z,
-        .{ .ACCMODE = .WRONLY, .APPEND = true },
-        0,
-    ) catch return error.FileOpenFailed;
-
-    return fd;
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return zq.file_io.readFile(allocator, path, 100 * 1024 * 1024);
-}
-
-fn deleteFile(allocator: std.mem.Allocator, path: []const u8) void {
-    const path_z = allocator.dupeZ(u8, path) catch return;
-    defer allocator.free(path_z);
-    _ = std.c.unlink(path_z);
 }
 
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;

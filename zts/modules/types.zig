@@ -1,6 +1,6 @@
 //! Virtual Module Type Declarations
 //!
-//! Defines full function signatures for all 27 virtual module exports.
+//! Defines full function signatures for all virtual module exports.
 //! Used by the type checker to validate argument types and infer return types
 //! for calls to zigttp:* module functions. Return types use T | undefined for
 //! optional values (no null in user-facing API).
@@ -78,6 +78,9 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         .{ .name = "race", .sig = makeSig(&.{}, pool.idx_string) }, // takes array of thunks
         // zigttp:compose
         .{ .name = "guard", .sig = makeSig(&.{pool.idx_string}, pool.idx_string) }, // compile-time marker
+        // zigttp:durable
+        .{ .name = "run", .sig = makeSig(&.{ pool.idx_string, pool.idx_unknown }, pool.idx_unknown) },
+        .{ .name = "step", .sig = makeSig(&.{ pool.idx_string, pool.idx_unknown }, pool.idx_unknown) },
     };
 
     for (sigs) |entry| {

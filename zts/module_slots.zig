@@ -3,7 +3,8 @@
 /// Each slot is reserved for a specific subsystem to avoid collisions.
 pub const Slot = enum(u3) {
     durable = 0,
-    // 1, 2 unused
+    durable_api = 1,
+    // 2 unused
     replay = 3,
     validate = 4,
     cache = 5,

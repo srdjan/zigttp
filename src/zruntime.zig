@@ -76,10 +76,10 @@ pub const RuntimeConfig = struct {
     replay_file_path: ?[]const u8 = null,
 
     /// Durable execution oplog directory. When set, each request gets a
-    /// write-ahead oplog for crash recovery. Incomplete oplogs are replayed
-    /// on startup, and completed ones are cleaned up.
+    /// Directory backing explicit zigttp:durable runs.
+    /// Incomplete oplogs are replayed on startup; completed ones are kept so
+    /// duplicate durable keys can return the recorded response.
     durable_oplog_dir: ?[]const u8 = null,
-
 };
 
 /// Open a trace file for append writing using POSIX APIs.
@@ -98,7 +98,7 @@ fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
 }
 
 /// Open an oplog file for write-ahead durable execution.
-/// Creates the file (or truncates if it exists from a previous incomplete run).
+/// Creates the file (or truncates any stale content).
 fn openOplogFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
@@ -108,6 +108,21 @@ fn openOplogFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
         path_z,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
         0o644,
+    ) catch return error.FileOpenFailed;
+
+    return fd;
+}
+
+/// Open an existing oplog for append during replay/resume.
+fn openOplogAppendFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        path_z,
+        .{ .ACCMODE = .WRONLY, .APPEND = true },
+        0,
     ) catch return error.FileOpenFailed;
 
     return fd;
@@ -148,6 +163,7 @@ fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context) void {
 // ============================================================================
 
 const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
+const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
 
 // ============================================================================
 // Thread-local Runtime for native function callbacks
@@ -194,11 +210,40 @@ pub const Runtime = struct {
     trace_file: ?std.c.fd_t,
     trace_mutex: ?*zq.trace.TraceMutex,
     trace_recorder: ?*zq.TraceRecorder,
+    active_request: ?HttpRequestView,
+    active_durable_run: ?ActiveDurableRun,
+    pending_durable_recovery: ?PendingDurableRecovery,
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
 
     const Self = @This();
+
+    const ActiveDurableRun = struct {
+        key: []const u8,
+        oplog_path: []const u8,
+        oplog_fd: std.c.fd_t,
+        state: *zq.trace.DurableState,
+        owned_events: ?[]const zq.trace.DurableEvent = null,
+        source_snapshot: ?[]u8 = null,
+        step_depth: u32 = 0,
+
+        fn deinit(self: *ActiveDurableRun, allocator: std.mem.Allocator) void {
+            allocator.free(self.key);
+            allocator.free(self.oplog_path);
+            if (self.owned_events) |events| allocator.free(events);
+            if (self.source_snapshot) |source| allocator.free(source);
+            self.state.deinit();
+            allocator.destroy(self.state);
+            std.Io.Threaded.closeFd(self.oplog_fd);
+        }
+    };
+
+    const PendingDurableRecovery = struct {
+        key: []const u8,
+        oplog_path: []const u8,
+        events: []const zq.trace.DurableEvent,
+    };
 
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
         const self = try allocator.create(Self);
@@ -278,6 +323,9 @@ pub const Runtime = struct {
             .trace_file = null,
             .trace_mutex = null,
             .trace_recorder = null,
+            .active_request = null,
+            .active_durable_run = null,
+            .pending_durable_recovery = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
@@ -335,6 +383,9 @@ pub const Runtime = struct {
             .trace_file = null,
             .trace_mutex = null,
             .trace_recorder = null,
+            .active_request = null,
+            .active_durable_run = null,
+            .pending_durable_recovery = null,
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
@@ -363,6 +414,9 @@ pub const Runtime = struct {
         if (self.trace_recorder) |rec| {
             rec.deinit();
             self.allocator.destroy(rec);
+        }
+        if (self.active_durable_run) |*run| {
+            run.deinit(self.allocator);
         }
         // Only close owned resources (pool runtimes share the pool's trace file)
         if (self.owns_resources) {
@@ -408,6 +462,9 @@ pub const Runtime = struct {
         // Install io module callbacks for parallel/race (requires outbound HTTP)
         if (self.config.outbound_http_enabled) {
             try self.installIoModuleState();
+        }
+        if (self.config.durable_oplog_dir != null) {
+            try self.installDurableModuleState();
         }
 
         // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
@@ -759,6 +816,20 @@ pub const Runtime = struct {
         );
     }
 
+    fn installDurableModuleState(self: *Self) !void {
+        const durable_state = try self.allocator.create(zq.modules.durable.DurableCallbacks);
+        durable_state.* = .{
+            .run_fn = durableRunCallback,
+            .step_fn = durableStepCallback,
+            .runtime_ptr = self,
+        };
+        self.ctx.setModuleState(
+            zq.modules.durable.MODULE_STATE_SLOT,
+            @ptrCast(durable_state),
+            &zq.modules.durable.DurableCallbacks.deinitOpaque,
+        );
+    }
+
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
         _ = try self.loadCodeWithCaching(code, filename, null);
@@ -1041,6 +1112,13 @@ pub const Runtime = struct {
 
     fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         self.last_request_body_len = if (request.body) |b| b.len else 0;
+        self.active_request = request;
+        defer self.active_request = null;
+        defer {
+            if (self.pending_durable_recovery != null) {
+                self.pending_durable_recovery = null;
+            }
+        }
 
         if (self.cached_handler_obj == null) {
             try self.refreshHandlerCache();
@@ -1105,73 +1183,6 @@ pub const Runtime = struct {
             rec.flush();
             // Remove from module_state so next request gets a fresh one
             self.ctx.module_state[zq.TRACE_STATE_SLOT] = null;
-        };
-
-        // === DURABLE EXECUTION: Write-ahead oplog per request ===
-        var durable_state: ?zq.trace.DurableState = null;
-        var durable_oplog_fd: ?std.c.fd_t = null;
-        var durable_oplog_path_buf: [256]u8 = undefined;
-        var durable_oplog_path_len: usize = 0;
-
-        if (self.config.durable_oplog_dir) |oplog_dir| {
-            // Generate unique oplog path: {dir}/oplog-{request_id}.jsonl
-            const oplog_path = std.fmt.bufPrint(
-                &durable_oplog_path_buf,
-                "{s}/oplog-{d}.jsonl",
-                .{ oplog_dir, if (request_id != 0) request_id else (compat.monotonicNowNs() catch 0) },
-            ) catch {
-                std.log.err("Oplog path too long", .{});
-                return error.OplogPathTooLong;
-            };
-            durable_oplog_path_len = oplog_path.len;
-
-            const oplog_fd = openOplogFile(self.allocator, oplog_path) catch |err| {
-                std.log.err("Failed to open oplog '{s}': {}", .{ oplog_path, err });
-                return err;
-            };
-            durable_oplog_fd = oplog_fd;
-
-            durable_state = zq.trace.DurableState.init(
-                self.allocator,
-                &.{}, // No replay entries for a fresh request
-                oplog_fd,
-            );
-
-            if (durable_state) |*ds| {
-                self.ctx.setModuleState(
-                    zq.trace.DURABLE_STATE_SLOT,
-                    @ptrCast(ds),
-                    &zq.trace.DurableState.deinitOpaque,
-                );
-
-                // Persist the request line to oplog (write-ahead)
-                var h_names: [64][]const u8 = undefined;
-                var h_values: [64][]const u8 = undefined;
-                const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
-                ds.persistRequest(
-                    request.method,
-                    request.url,
-                    h_names[0..hcount],
-                    h_values[0..hcount],
-                    request.body,
-                );
-            }
-        }
-        defer if (durable_state) |*ds| {
-            self.ctx.module_state[zq.trace.DURABLE_STATE_SLOT] = null;
-            // Close oplog fd first
-            if (durable_oplog_fd) |fd| {
-                std.Io.Threaded.closeFd(fd);
-            }
-            // Delete completed oplog file (has "complete" marker)
-            if (durable_oplog_path_len > 0) {
-                const oplog_path_z = self.allocator.dupeZ(u8, durable_oplog_path_buf[0..durable_oplog_path_len]) catch null;
-                if (oplog_path_z) |pz| {
-                    defer self.allocator.free(pz);
-                    _ = std.c.unlink(pz);
-                }
-            }
-            ds.deinit();
         };
 
         // === FAST PATH: Native dispatch for static routes ===
@@ -1261,20 +1272,6 @@ pub const Runtime = struct {
 
     /// Record response to trace or durable oplog if active.
     fn traceRecordResponse(self: *Self, response: *const HttpResponse) void {
-        // Durable mode: persist response and mark complete
-        if (self.ctx.getModuleState(zq.trace.DurableState, zq.trace.DURABLE_STATE_SLOT)) |durable| {
-            var h_names: [64][]const u8 = undefined;
-            var h_values: [64][]const u8 = undefined;
-            const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
-            durable.persistResponse(
-                response.status,
-                h_names[0..hcount],
-                h_values[0..hcount],
-                response.body,
-            );
-            durable.markComplete();
-        }
-
         // Trace mode: record to trace buffer
         const rec = self.trace_recorder orelse return;
         if (!rec.active) return;
@@ -1288,6 +1285,263 @@ pub const Runtime = struct {
             h_values[0..hcount],
             response.body,
         );
+    }
+
+    pub fn setPendingDurableRecovery(
+        self: *Self,
+        key: []const u8,
+        oplog_path: []const u8,
+        events: []const zq.trace.DurableEvent,
+    ) void {
+        self.pending_durable_recovery = .{
+            .key = key,
+            .oplog_path = oplog_path,
+            .events = events,
+        };
+    }
+
+    fn durableRun(self: *Self, ctx: *zq.Context, key: []const u8, run_val: zq.JSValue) anyerror!zq.JSValue {
+        if (self.active_durable_run != null) {
+            return zq.modules.util.throwError(ctx, "Error", "nested run() is not supported");
+        }
+        if (!run_val.isObject()) {
+            return zq.modules.util.throwError(ctx, "TypeError", "run() expects a callable function");
+        }
+        _ = self.active_request orelse {
+            return zq.modules.util.throwError(ctx, "Error", "run() is only valid during request handling");
+        };
+
+        if (try self.tryLoadCompletedDurableResponse(key)) |cached| {
+            return cached;
+        }
+
+        const active = self.openActiveDurableRun(key) catch |err| switch (err) {
+            error.DurableRecoveryKeyMismatch => return zq.modules.util.throwError(ctx, "Error", "durable recovery key did not match run() key"),
+            error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
+            else => return err,
+        };
+
+        self.active_durable_run = active;
+        self.ctx.setModuleState(
+            zq.trace.DURABLE_STATE_SLOT,
+            @ptrCast(self.active_durable_run.?.state),
+            &zq.trace.DurableState.deinitOpaque,
+        );
+        defer {
+            self.ctx.module_state[zq.trace.DURABLE_STATE_SLOT] = null;
+            if (self.active_durable_run) |*run| {
+                run.deinit(self.allocator);
+            }
+            self.active_durable_run = null;
+        }
+
+        const func_obj = run_val.toPtr(zq.JSObject);
+        const result = try self.callFunction(func_obj, &.{});
+        const upgraded = try upgradeResponseValue(self.ctx, result);
+        if (!self.isResponseLike(upgraded)) {
+            return zq.modules.util.throwError(ctx, "TypeError", "run() callback must return a Response");
+        }
+
+        var response = try self.extractResponseInternal(upgraded, false);
+        defer response.deinit();
+        self.persistActiveDurableResponse(&response);
+        return upgraded;
+    }
+
+    fn durableStep(self: *Self, ctx: *zq.Context, name: []const u8, step_val: zq.JSValue) anyerror!zq.JSValue {
+        const active = self.active_durable_run orelse {
+            return zq.modules.util.throwError(ctx, "Error", "step() must be called inside run()");
+        };
+        if (!step_val.isObject()) {
+            return zq.modules.util.throwError(ctx, "TypeError", "step() expects a callable function");
+        }
+        if (active.step_depth > 0) {
+            return zq.modules.util.throwError(ctx, "Error", "nested step() is not supported");
+        }
+
+        switch (active.state.beginStep(name)) {
+            .cached => |result_json| {
+                return zq.trace.jsonToJSValue(ctx, result_json);
+            },
+            .execute => {},
+            .live => {
+                active.state.persistStepStart(name);
+            },
+        }
+
+        self.active_durable_run.?.step_depth += 1;
+        defer self.active_durable_run.?.step_depth -= 1;
+
+        const func_obj = step_val.toPtr(zq.JSObject);
+        const result = try self.callFunction(func_obj, &.{});
+        self.active_durable_run.?.state.persistStepResult(name, ctx, result);
+        return result;
+    }
+
+    fn tryLoadCompletedDurableResponse(self: *Self, key: []const u8) !?zq.JSValue {
+        if (self.pending_durable_recovery != null) return null;
+
+        const path = try self.buildDurableOplogPath(key);
+        defer self.allocator.free(path);
+
+        const source = try self.readDurableLogIfExists(path) orelse return null;
+        defer self.allocator.free(source);
+
+        var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
+        defer parsed.deinit();
+
+        if (!parsed.complete) return null;
+        if (parsed.run_key) |existing_key| {
+            if (!std.mem.eql(u8, existing_key, key)) return error.DurableKeyCollision;
+        }
+
+        const response = parsed.response orelse return error.DurableMissingResponse;
+        return try self.buildStoredResponseValue(response);
+    }
+
+    fn openActiveDurableRun(self: *Self, key: []const u8) !ActiveDurableRun {
+        if (self.pending_durable_recovery) |pending| {
+            if (!std.mem.eql(u8, pending.key, key)) return error.DurableRecoveryKeyMismatch;
+
+            const fd = try openOplogAppendFile(self.allocator, pending.oplog_path);
+            const state = try self.allocator.create(zq.trace.DurableState);
+            state.* = zq.trace.DurableState.init(self.allocator, pending.events, fd);
+            return .{
+                .key = try self.allocator.dupe(u8, key),
+                .oplog_path = try self.allocator.dupe(u8, pending.oplog_path),
+                .oplog_fd = fd,
+                .state = state,
+            };
+        }
+
+        const path = try self.buildDurableOplogPath(key);
+        errdefer self.allocator.free(path);
+
+        if (try self.readDurableLogIfExists(path)) |source| {
+            errdefer self.allocator.free(source);
+
+            var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
+            defer parsed.deinit();
+
+            if (parsed.run_key) |existing_key| {
+                if (!std.mem.eql(u8, existing_key, key)) return error.DurableKeyCollision;
+            }
+            if (parsed.complete) return error.DurableAlreadyComplete;
+
+            const events = parsed.events;
+            parsed.events = &.{};
+
+            const fd = try openOplogAppendFile(self.allocator, path);
+            const state = try self.allocator.create(zq.trace.DurableState);
+            state.* = zq.trace.DurableState.init(self.allocator, events, fd);
+            return .{
+                .key = try self.allocator.dupe(u8, key),
+                .oplog_path = path,
+                .oplog_fd = fd,
+                .state = state,
+                .owned_events = events,
+                .source_snapshot = source,
+            };
+        }
+
+        const request = self.active_request orelse return error.NoActiveRequest;
+        const fd = try openOplogFile(self.allocator, path);
+        errdefer std.Io.Threaded.closeFd(fd);
+
+        const state = try self.allocator.create(zq.trace.DurableState);
+        errdefer self.allocator.destroy(state);
+        state.* = zq.trace.DurableState.init(self.allocator, &.{}, fd);
+        state.persistRunKey(key);
+
+        var h_names: [64][]const u8 = undefined;
+        var h_values: [64][]const u8 = undefined;
+        const hcount = splitHeaderKV(request.headers.items, &h_names, &h_values);
+        state.persistRequest(
+            request.method,
+            request.url,
+            h_names[0..hcount],
+            h_values[0..hcount],
+            request.body,
+        );
+
+        return .{
+            .key = try self.allocator.dupe(u8, key),
+            .oplog_path = path,
+            .oplog_fd = fd,
+            .state = state,
+        };
+    }
+
+    fn buildDurableOplogPath(self: *Self, key: []const u8) ![]u8 {
+        const dir = self.config.durable_oplog_dir orelse return error.DurableDisabled;
+        return std.fmt.allocPrint(
+            self.allocator,
+            "{s}/durable-{x}.jsonl",
+            .{ dir, std.hash.Fnv1a_64.hash(key) },
+        );
+    }
+
+    fn readDurableLogIfExists(self: *Self, path: []const u8) !?[]u8 {
+        return zq.file_io.readFile(self.allocator, path, 100 * 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => err,
+        };
+    }
+
+    fn buildStoredResponseValue(self: *Self, response: zq.trace.ResponseTrace) !zq.JSValue {
+        var headers: std.ArrayListUnmanaged(HttpHeader) = .{};
+        defer headers.deinit(self.allocator);
+        try parseHeadersFromJson(self.allocator, response.headers_json, &headers);
+        const body = try zq.trace.unescapeJson(self.allocator, response.body);
+        defer self.allocator.free(body);
+
+        var content_type: ?[]const u8 = null;
+        for (headers.items) |header| {
+            if (ascii.eqlIgnoreCase(header.key, "content-type")) {
+                content_type = header.value;
+                break;
+            }
+        }
+
+        const created = try createFetchResponse(
+            self,
+            response.status,
+            statusTextFor(response.status),
+            body,
+            content_type,
+        );
+
+        for (headers.items) |header| {
+            const key_atom = try getHeaderAtom(self.ctx, header.key);
+            const value_str = try self.ctx.createString(header.value);
+            try self.ctx.setPropertyChecked(created.headers, key_atom, value_str);
+        }
+
+        return created.value;
+    }
+
+    fn isResponseLike(self: *Self, value: zq.JSValue) bool {
+        if (!value.isObject()) return false;
+        const pool = self.ctx.hidden_class_pool orelse return false;
+        const obj = value.toPtr(zq.JSObject);
+        return obj.getProperty(pool, zq.Atom.status) != null and
+            obj.getProperty(pool, zq.Atom.body) != null and
+            obj.getProperty(pool, zq.Atom.headers) != null;
+    }
+
+    fn persistActiveDurableResponse(self: *Self, response: *const HttpResponse) void {
+        if (self.active_durable_run) |*active| {
+            var h_names: [64][]const u8 = undefined;
+            var h_values: [64][]const u8 = undefined;
+            const hcount = splitHeaderKV(response.headers.items, &h_names, &h_values);
+            active.state.persistResponse(
+                response.status,
+                h_names[0..hcount],
+                h_values[0..hcount],
+                response.body,
+            );
+            active.state.markComplete();
+        }
     }
 
     /// Try to dispatch request via native fast path.
@@ -2789,6 +3043,26 @@ fn ioCallThunk(runtime_ptr: *anyopaque, thunk_val: zq.JSValue) anyerror!zq.JSVal
     if (!thunk_val.isObject()) return error.NotCallable;
     const func_obj = thunk_val.toPtr(zq.JSObject);
     return rt.callFunction(func_obj, &.{});
+}
+
+fn durableRunCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    key: []const u8,
+    run_val: zq.JSValue,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableRun(ctx, key, run_val);
+}
+
+fn durableStepCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    name: []const u8,
+    step_val: zq.JSValue,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableStep(ctx, name, step_val);
 }
 
 /// IoCallbacks.execute_fetches_fn - execute HTTP fetches concurrently using threads.
@@ -4322,6 +4596,64 @@ fn writeTestResponse(
     try writer.interface.flush();
 }
 
+fn durableTestDirPath(allocator: std.mem.Allocator, tmp_dir: *const std.testing.TmpDir) ![]u8 {
+    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+}
+
+fn makeTestRequest(
+    allocator: std.mem.Allocator,
+    method: []const u8,
+    url: []const u8,
+    idempotency_key: ?[]const u8,
+) !HttpRequestOwned {
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, method),
+        .url = try allocator.dupe(u8, url),
+        .headers = .{},
+        .body = null,
+    };
+    errdefer request.deinit(allocator);
+
+    if (idempotency_key) |key| {
+        try request.headers.append(allocator, .{
+            .key = try allocator.dupe(u8, "idempotency-key"),
+            .value = try allocator.dupe(u8, key),
+        });
+    }
+
+    return request;
+}
+
+fn seedIncompleteDurableRandomStep(
+    allocator: std.mem.Allocator,
+    durable_dir: []const u8,
+    key: []const u8,
+    step_name: []const u8,
+    result_json: []const u8,
+) !void {
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const path = try rt.buildDurableOplogPath(key);
+    defer allocator.free(path);
+
+    const fd = try openOplogFile(allocator, path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    var state = zq.trace.DurableState.init(allocator, &.{}, fd);
+    defer state.deinit();
+
+    const header_names = [_][]const u8{"idempotency-key"};
+    const header_values = [_][]const u8{key};
+    const result = zq.trace.jsonToJSValue(rt.ctx, result_json);
+
+    state.persistRunKey(key);
+    state.persistRequest("GET", "/", &header_names, &header_values, null);
+    state.persistStepStart(step_name);
+    state.persistIO("builtin", "Math.random", rt.ctx, &.{}, result);
+    state.persistStepResult(step_name, rt.ctx, result);
+}
+
 test "Runtime creation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4358,6 +4690,149 @@ test "virtual module import alias resolves to callable binding" {
     var response = try rt.executeHandler(request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("function", response.body);
+}
+
+test "durable run reuses completed response for duplicate key" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run } from "zigttp:durable";
+        \\function handler(req) {
+        \\  const key = req.headers.get("idempotency-key") ?? "missing";
+        \\  return run(key, () => {
+        \\    return Response.json({
+        \\      key: key,
+        \\      value: Math.random()
+        \\    });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-duplicate>");
+
+    var first_request = try makeTestRequest(allocator, "GET", "/", "order:123");
+    defer first_request.deinit(allocator);
+    var first_response = try rt.executeHandler(first_request.asView());
+    defer first_response.deinit();
+    const first_body = try allocator.dupe(u8, first_response.body);
+
+    var second_request = try makeTestRequest(allocator, "GET", "/", "order:123");
+    defer second_request.deinit(allocator);
+    var second_response = try rt.executeHandler(second_request.asView());
+    defer second_response.deinit();
+
+    try std.testing.expectEqualStrings(first_body, second_response.body);
+
+    const path = try rt.buildDurableOplogPath("order:123");
+    defer allocator.free(path);
+
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Math.random\""));
+
+    var parsed = try zq.trace.parseDurableOplog(allocator, source);
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.complete);
+    try std.testing.expectEqualStrings("order:123", parsed.run_key.?);
+    try std.testing.expect(parsed.response != null);
+}
+
+test "durable run resumes from completed step state" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    try seedIncompleteDurableRandomStep(
+        allocator,
+        durable_dir,
+        "resume:123",
+        "seed",
+        "0.25",
+    );
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  const key = req.headers.get("idempotency-key") ?? "missing";
+        \\  return run(key, () => {
+        \\    const seed = step("seed", () => Math.random());
+        \\    const stamp = step("stamp", () => Date.now());
+        \\    return Response.json({ seed: seed, stamp: stamp });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-resume>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", "resume:123");
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed_json = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed_json.deinit();
+    const obj = parsed_json.value.object;
+
+    try std.testing.expectEqual(@as(f64, 0.25), obj.get("seed").?.float);
+    try std.testing.expect(obj.get("stamp") != null);
+
+    const path = try rt.buildDurableOplogPath("resume:123");
+    defer allocator.free(path);
+
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Math.random\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Date.now\""));
+
+    var parsed = try zq.trace.parseDurableOplog(allocator, source);
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.complete);
+    try std.testing.expectEqualStrings("resume:123", parsed.run_key.?);
+}
+
+test "durable step outside run fails" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { step } from "zigttp:durable";
+        \\function handler(req) {
+        \\  step("seed", () => 1);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-step-outside-run>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    const request_val = try rt.createRequestObject(request.asView());
+    current_runtime = rt;
+    defer current_runtime = null;
+    try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
+    rt.resetForNextRequest();
 }
 
 test "httpRequest native binding reports disabled bridge by default" {

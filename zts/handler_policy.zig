@@ -383,6 +383,11 @@ test "validate contract rejects disallowed literals and dynamic access" {
         .env = .{ .literal = env_literals, .dynamic = true },
         .egress = .{ .hosts = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = contract_mod.emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -441,6 +446,11 @@ test "contractToRuntimePolicy restricts static sections" {
         .env = .{ .literal = env_literals, .dynamic = false },
         .egress = .{ .hosts = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = contract_mod.emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -481,6 +491,11 @@ test "contractToRuntimePolicy leaves dynamic sections permissive" {
         .env = .{ .literal = env_literals, .dynamic = true }, // dynamic
         .egress = .{ .hosts = .empty, .dynamic = false }, // static, empty
         .cache = .{ .namespaces = .empty, .dynamic = true }, // dynamic
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = contract_mod.emptyApiInfo(),
         .verification = null,
         .aot = null,

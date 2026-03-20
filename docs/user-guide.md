@@ -134,6 +134,14 @@ OPTIONS:
   -q, --quiet           Disable request logging
                         Useful for production/benchmarks
 
+  --trace <FILE>        Record handler I/O traces to JSONL
+                        Useful for replay and verification
+
+  --replay <FILE>       Replay recorded traces instead of serving traffic
+
+  --durable <DIR>       Enable durable run/step oplogs in a directory
+                        Required for zigttp:durable
+
   --help                Show help message
 ```
 
@@ -151,6 +159,12 @@ OPTIONS:
 
 # Quiet mode with custom port
 ./zig-out/bin/zigttp-server -q -p 8000 handler.js
+
+# Record traces for replay
+./zig-out/bin/zigttp-server --trace traces.jsonl handler.js
+
+# Durable execution with persisted oplogs
+./zig-out/bin/zigttp-server --durable .zigttp-durable handler.js
 
 # Inline with all options
 ./zig-out/bin/zigttp-server -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
@@ -972,6 +986,53 @@ or omit for aggregate.
 const stats = cacheStats();           // aggregate
 const nsStats = cacheStats("api");    // per-namespace
 ```
+
+### zigttp:durable
+
+Crash-safe, replay-safe execution for handlers that need an idempotency key.
+Requires `--durable <DIR>` at runtime.
+
+```typescript
+import { run, step } from "zigttp:durable";
+```
+
+**run(key, fn)** - Start or resume a durable execution keyed by `key`. If a
+completed run already exists for that key, zigttp returns the recorded
+`Response` without re-running the callback.
+
+**step(name, fn)** - Memoize a named subcomputation inside `run()`. If the step
+already completed in a previous attempt, zigttp returns the recorded result and
+skips the callback body.
+
+```typescript
+import { run, step } from "zigttp:durable";
+
+function handler(req) {
+    const key = req.headers.get("idempotency-key") ?? req.path;
+
+    return run(key, function() {
+        const auth = step("auth", function() {
+            return req.headers.get("authorization") === "secret";
+        });
+        if (!auth) {
+            return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+
+        const charge = step("charge", function() {
+            return fetchSync("https://payments.internal/charge").json();
+        });
+
+        return Response.json({ ok: true, charge: charge });
+    });
+}
+```
+
+Current constraints:
+
+- `run()` callbacks must return a `Response`
+- `step()` must be called inside `run()`
+- Nested `run()` and nested `step()` are not supported in v1
+- `step()` results must be JSON-serializable
 
 ### zigttp:io
 
@@ -1820,6 +1881,7 @@ The contract extracts from the handler's IR:
 - Literal env var names from `env("NAME")` calls
 - Outbound hosts from `fetchSync("https://...")` URL arguments
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
+- Durable run keys, whether durable keys are dynamic, and literal `step()` names
 - Verification results (when combined with `-Dverify`)
 
 Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an

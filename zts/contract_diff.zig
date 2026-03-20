@@ -663,6 +663,11 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = handler_contract.emptyApiInfo(),
         .verification = null,
         .aot = null,

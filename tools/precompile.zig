@@ -630,7 +630,6 @@ fn replayOneBuildTime(
         try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.body, body_val);
     }
 
-
     // Execute handler
     const args = [_]zts.JSValue{req_obj.toValue()};
     const bc_data = handler_obj.getBytecodeFunctionData() orelse return error.NotCallable;
@@ -1327,6 +1326,11 @@ fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !H
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -1389,6 +1393,15 @@ fn mergeModuleContract(
         try appendUniqueString(allocator, &target.cache.namespaces, ns, false);
     }
     target.cache.dynamic = target.cache.dynamic or source.cache.dynamic;
+
+    target.durable.used = target.durable.used or source.durable.used;
+    for (source.durable.keys.literal.items) |key| {
+        try appendUniqueString(allocator, &target.durable.keys.literal, key, false);
+    }
+    target.durable.keys.dynamic = target.durable.keys.dynamic or source.durable.keys.dynamic;
+    for (source.durable.steps.items) |step| {
+        try appendUniqueString(allocator, &target.durable.steps, step, false);
+    }
 
     for (source.api.schemas.items) |schema| {
         try upsertApiSchema(allocator, &target.api.schemas, schema.name, schema.schema_json);

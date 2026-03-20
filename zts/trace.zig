@@ -393,11 +393,19 @@ pub fn makeTracingWrapper(
 // ============================================================================
 
 pub const TraceEntry = union(enum) {
+    durable_run: DurableRunTrace,
     request: RequestTrace,
     io: IoEntry,
+    step_start: StepStartTrace,
+    step_result: StepResultTrace,
     response: ResponseTrace,
     meta: MetaTrace,
+    complete: void,
     unknown: void,
+};
+
+pub const DurableRunTrace = struct {
+    key: []const u8,
 };
 
 pub const RequestTrace = struct {
@@ -413,6 +421,21 @@ pub const IoEntry = struct {
     func: []const u8,
     args_json: []const u8,
     result_json: []const u8,
+};
+
+pub const StepStartTrace = struct {
+    name: []const u8,
+};
+
+pub const StepResultTrace = struct {
+    name: []const u8,
+    result_json: []const u8,
+};
+
+pub const DurableEvent = union(enum) {
+    io: IoEntry,
+    step_start: StepStartTrace,
+    step_result: StepResultTrace,
 };
 
 pub const ResponseTrace = struct {
@@ -481,6 +504,7 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
                     current_meta = null;
                 }
             },
+            .durable_run, .step_start, .step_result, .complete => {},
             .unknown => {},
         }
     }
@@ -500,7 +524,11 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
 fn parseTraceLine(line: []const u8) !TraceEntry {
     const type_str = findJsonStringValue(line, "\"type\"") orelse return .unknown;
 
-    if (std.mem.eql(u8, type_str, "request")) {
+    if (std.mem.eql(u8, type_str, "durable_run")) {
+        return .{ .durable_run = .{
+            .key = findJsonStringValue(line, "\"key\"") orelse "",
+        } };
+    } else if (std.mem.eql(u8, type_str, "request")) {
         return .{ .request = .{
             .method = findJsonStringValue(line, "\"method\"") orelse "GET",
             .url = findJsonStringValue(line, "\"url\"") orelse "/",
@@ -513,6 +541,15 @@ fn parseTraceLine(line: []const u8) !TraceEntry {
             .module = findJsonStringValue(line, "\"module\"") orelse "",
             .func = findJsonStringValue(line, "\"fn\"") orelse "",
             .args_json = findJsonArrayValue(line, "\"args\"") orelse "[]",
+            .result_json = findJsonAnyValue(line, "\"result\"") orelse "null",
+        } };
+    } else if (std.mem.eql(u8, type_str, "step_start")) {
+        return .{ .step_start = .{
+            .name = findJsonStringValue(line, "\"name\"") orelse "",
+        } };
+    } else if (std.mem.eql(u8, type_str, "step_result")) {
+        return .{ .step_result = .{
+            .name = findJsonStringValue(line, "\"name\"") orelse "",
             .result_json = findJsonAnyValue(line, "\"result\"") orelse "null",
         } };
     } else if (std.mem.eql(u8, type_str, "response")) {
@@ -528,6 +565,8 @@ fn parseTraceLine(line: []const u8) !TraceEntry {
             .pool_slot = @intCast(findJsonIntValue(line, "\"pool_slot\"") orelse 0),
             .io_count = @intCast(findJsonIntValue(line, "\"io_count\"") orelse 0),
         } };
+    } else if (std.mem.eql(u8, type_str, "complete")) {
+        return .complete;
     }
     return .unknown;
 }
@@ -546,7 +585,10 @@ fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
     pos += 1;
     const start = pos;
     while (pos < json.len) : (pos += 1) {
-        if (json[pos] == '\\') { pos += 1; continue; }
+        if (json[pos] == '\\') {
+            pos += 1;
+            continue;
+        }
         if (json[pos] == '"') return json[start..pos];
     }
     return null;
@@ -589,7 +631,10 @@ fn findJsonAnyValue(json: []const u8, key: []const u8) ?[]const u8 {
         '"' => blk: {
             var p = pos + 1;
             while (p < json.len) : (p += 1) {
-                if (json[p] == '\\') { p += 1; continue; }
+                if (json[p] == '\\') {
+                    p += 1;
+                    continue;
+                }
                 if (json[p] == '"') break :blk json[pos .. p + 1];
             }
             break :blk null;
@@ -610,11 +655,17 @@ fn findMatchingBrace(json: []const u8, start: usize, open: u8, close: u8) ?[]con
     var in_string = false;
     while (pos < json.len) : (pos += 1) {
         if (in_string) {
-            if (json[pos] == '\\') { pos += 1; continue; }
+            if (json[pos] == '\\') {
+                pos += 1;
+                continue;
+            }
             if (json[pos] == '"') in_string = false;
             continue;
         }
-        if (json[pos] == '"') { in_string = true; continue; }
+        if (json[pos] == '"') {
+            in_string = true;
+            continue;
+        }
         if (json[pos] == open) depth += 1 else if (json[pos] == close) {
             depth -= 1;
             if (depth == 0) return json[start .. pos + 1];
@@ -943,6 +994,12 @@ fn allocFloat(_: *context.Context, f: f64) value.JSValue {
 
 pub const DURABLE_STATE_SLOT = @intFromEnum(module_slots.Slot.durable);
 
+pub const DurableStepReplay = union(enum) {
+    live: void,
+    execute: void,
+    cached: []const u8,
+};
+
 /// Per-request durable execution state.
 /// Combines oplog reading (replay phase) with write-ahead persistence (live phase).
 ///
@@ -950,8 +1007,8 @@ pub const DURABLE_STATE_SLOT = @intFromEnum(module_slots.Slot.durable);
 /// When the oplog is exhausted, the state transitions to live mode:
 /// each real I/O result is persisted to the oplog before returning.
 pub const DurableState = struct {
-    /// Pre-parsed I/O entries from an incomplete oplog (replay phase).
-    oplog_entries: []const IoEntry,
+    /// Pre-parsed oplog events from an incomplete durable run.
+    oplog_events: []const DurableEvent,
     /// Cursor tracking which oplog entry to return next.
     cursor: u32,
     /// Allocator for serialization buffers.
@@ -967,15 +1024,15 @@ pub const DurableState = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        oplog_entries: []const IoEntry,
+        oplog_events: []const DurableEvent,
         oplog_fd: std.c.fd_t,
     ) DurableState {
         return .{
-            .oplog_entries = oplog_entries,
+            .oplog_events = oplog_events,
             .cursor = 0,
             .allocator = allocator,
             .oplog_fd = oplog_fd,
-            .is_live = oplog_entries.len == 0,
+            .is_live = oplog_events.len == 0,
             .live_io_count = 0,
             .write_buf = .empty,
         };
@@ -996,11 +1053,18 @@ pub const DurableState = struct {
     /// when the oplog is exhausted.
     pub fn replayNext(self: *DurableState, module_name: []const u8, fn_name: []const u8) ?IoEntry {
         if (self.is_live) return null;
-        if (self.cursor >= self.oplog_entries.len) {
+        if (self.cursor >= self.oplog_events.len) {
             self.is_live = true;
             return null;
         }
-        const entry = self.oplog_entries[self.cursor];
+        const event = self.oplog_events[self.cursor];
+        const entry = switch (event) {
+            .io => |io| io,
+            else => {
+                self.is_live = true;
+                return null;
+            },
+        };
         // Verify call sequence matches (divergence = unrecoverable)
         if (!std.mem.eql(u8, entry.module, module_name) or !std.mem.eql(u8, entry.func, fn_name)) {
             self.is_live = true;
@@ -1008,6 +1072,51 @@ pub const DurableState = struct {
         }
         self.cursor += 1;
         return entry;
+    }
+
+    /// Enter a named durable step.
+    /// If a completed step result exists in the oplog, returns it immediately
+    /// and advances the cursor past the entire recorded step segment.
+    /// If the step was started but not completed before the crash, returns
+    /// `.execute` after consuming the start marker so the thunk can continue
+    /// replaying nested I/O and finish live.
+    pub fn beginStep(self: *DurableState, name: []const u8) DurableStepReplay {
+        if (self.is_live) return .live;
+        if (self.cursor >= self.oplog_events.len) {
+            self.is_live = true;
+            return .live;
+        }
+
+        const event = self.oplog_events[self.cursor];
+        const start = switch (event) {
+            .step_start => |s| s,
+            else => {
+                self.is_live = true;
+                return .live;
+            },
+        };
+
+        if (!std.mem.eql(u8, start.name, name)) {
+            self.is_live = true;
+            return .live;
+        }
+
+        self.cursor += 1; // consume step_start
+
+        var scan = self.cursor;
+        while (scan < self.oplog_events.len) : (scan += 1) {
+            switch (self.oplog_events[scan]) {
+                .step_result => |result| {
+                    if (std.mem.eql(u8, result.name, name)) {
+                        self.cursor = @intCast(scan + 1);
+                        return .{ .cached = result.result_json };
+                    }
+                },
+                else => {},
+            }
+        }
+
+        return .execute;
     }
 
     /// Persist an I/O call result to the oplog with write-ahead guarantee.
@@ -1046,6 +1155,40 @@ pub const DurableState = struct {
         fsyncFd(self.oplog_fd);
 
         self.live_io_count += 1;
+    }
+
+    pub fn persistRunKey(self: *DurableState, key: []const u8) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"durable_run\",\"key\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, key) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    pub fn persistStepStart(self: *DurableState, name: []const u8) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"step_start\",\"name\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    pub fn persistStepResult(
+        self: *DurableState,
+        name: []const u8,
+        ctx: *context.Context,
+        result: value.JSValue,
+    ) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"step_result\",\"name\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\",\"result\":") orelse return;
+        appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
     }
 
     /// Persist the response line to the oplog and fsync.
@@ -1310,38 +1453,82 @@ pub fn isIncompleteOplog(source: []const u8) bool {
     return has_request and !has_complete;
 }
 
-/// Parse an incomplete oplog into its constituent parts for recovery.
-/// Returns the request trace and any I/O entries that were persisted
-/// before the crash.
-pub const IncompleteOplog = struct {
-    request: RequestTrace,
-    io_calls: []const IoEntry,
+pub const DurableLog = struct {
+    run_key: ?[]const u8,
+    request: ?RequestTrace,
+    events: []const DurableEvent,
+    response: ?ResponseTrace,
+    complete: bool,
     allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *IncompleteOplog) void {
-        self.allocator.free(self.io_calls);
+    pub fn deinit(self: *DurableLog) void {
+        self.allocator.free(self.events);
     }
 };
 
-pub fn parseIncompleteOplog(allocator: std.mem.Allocator, source: []const u8) !IncompleteOplog {
-    var io_calls: std.ArrayList(IoEntry) = .empty;
-    errdefer io_calls.deinit(allocator);
+pub fn parseDurableOplog(allocator: std.mem.Allocator, source: []const u8) !DurableLog {
+    var events: std.ArrayList(DurableEvent) = .empty;
+    errdefer events.deinit(allocator);
+    var run_key: ?[]const u8 = null;
     var request: ?RequestTrace = null;
+    var response: ?ResponseTrace = null;
+    var complete = false;
 
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
         const entry = parseTraceLine(line) catch continue;
         switch (entry) {
+            .durable_run => |run| run_key = run.key,
             .request => |req| request = req,
-            .io => |io| try io_calls.append(allocator, io),
+            .io => |io| try events.append(allocator, .{ .io = io }),
+            .step_start => |start| try events.append(allocator, .{ .step_start = start }),
+            .step_result => |result| try events.append(allocator, .{ .step_result = result }),
+            .response => |resp| response = resp,
+            .complete => complete = true,
             else => {},
         }
     }
 
     return .{
-        .request = request orelse return error.NoRequestInOplog,
-        .io_calls = try io_calls.toOwnedSlice(allocator),
+        .run_key = run_key,
+        .request = request,
+        .events = try events.toOwnedSlice(allocator),
+        .response = response,
+        .complete = complete,
+        .allocator = allocator,
+    };
+}
+
+/// Parse an incomplete oplog into its constituent parts for recovery.
+/// Returns the request trace and any I/O entries that were persisted
+/// before the crash.
+pub const IncompleteOplog = struct {
+    run_key: ?[]const u8,
+    request: RequestTrace,
+    events: []const DurableEvent,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *IncompleteOplog) void {
+        self.allocator.free(self.events);
+    }
+};
+
+pub fn parseIncompleteOplog(allocator: std.mem.Allocator, source: []const u8) !IncompleteOplog {
+    var parsed = try parseDurableOplog(allocator, source);
+    errdefer parsed.deinit();
+
+    if (parsed.complete) return error.OplogAlreadyComplete;
+
+    const request = parsed.request orelse return error.NoRequestInOplog;
+    const events = parsed.events;
+    parsed.events = &.{};
+    parsed.deinit();
+
+    return .{
+        .run_key = parsed.run_key,
+        .request = request,
+        .events = events,
         .allocator = allocator,
     };
 }
@@ -1395,6 +1582,18 @@ test "parseTraceLine io" {
             try std.testing.expectEqual(@as(u32, 0), io.seq);
             try std.testing.expectEqualStrings("env", io.module);
             try std.testing.expectEqualStrings("env", io.func);
+        },
+        else => return error.UnexpectedTraceType,
+    }
+}
+
+test "parseTraceLine durable step result" {
+    const line = "{\"type\":\"step_result\",\"name\":\"charge\",\"result\":{\"ok\":true}}";
+    const entry = try parseTraceLine(line);
+    switch (entry) {
+        .step_result => |result| {
+            try std.testing.expectEqualStrings("charge", result.name);
+            try std.testing.expectEqualStrings("{\"ok\":true}", result.result_json);
         },
         else => return error.UnexpectedTraceType,
     }
@@ -1551,6 +1750,7 @@ test "isIncompleteOplog" {
 
 test "parseIncompleteOplog" {
     const source =
+        "{\"type\":\"durable_run\",\"key\":\"order:123\"}\n" ++
         "{\"type\":\"request\",\"method\":\"POST\",\"url\":\"/api/data\",\"headers\":{},\"body\":\"payload\"}\n" ++
         "{\"type\":\"io\",\"seq\":0,\"module\":\"env\",\"fn\":\"env\",\"args\":[\"KEY\"],\"result\":\"val\"}\n" ++
         "{\"type\":\"io\",\"seq\":1,\"module\":\"cache\",\"fn\":\"cacheGet\",\"args\":[\"ns\",\"k\"],\"result\":null}\n";
@@ -1560,18 +1760,25 @@ test "parseIncompleteOplog" {
 
     try std.testing.expectEqualStrings("POST", parsed.request.method);
     try std.testing.expectEqualStrings("/api/data", parsed.request.url);
-    try std.testing.expectEqual(@as(usize, 2), parsed.io_calls.len);
-    try std.testing.expectEqualStrings("env", parsed.io_calls[0].module);
-    try std.testing.expectEqualStrings("cache", parsed.io_calls[1].module);
+    try std.testing.expectEqualStrings("order:123", parsed.run_key.?);
+    try std.testing.expectEqual(@as(usize, 2), parsed.events.len);
+    switch (parsed.events[0]) {
+        .io => |io| try std.testing.expectEqualStrings("env", io.module),
+        else => return error.UnexpectedTraceType,
+    }
+    switch (parsed.events[1]) {
+        .io => |io| try std.testing.expectEqualStrings("cache", io.module),
+        else => return error.UnexpectedTraceType,
+    }
 }
 
 test "DurableState replay then live" {
-    const io_calls = [_]IoEntry{
-        .{ .seq = 0, .module = "env", .func = "env", .args_json = "[\"K\"]", .result_json = "\"V\"" },
+    const events = [_]DurableEvent{
+        .{ .io = .{ .seq = 0, .module = "env", .func = "env", .args_json = "[\"K\"]", .result_json = "\"V\"" } },
     };
     var state = DurableState.init(
         std.testing.allocator,
-        &io_calls,
+        &events,
         -1, // dummy fd, not used in this test
     );
     defer state.deinit();
@@ -1591,12 +1798,12 @@ test "DurableState replay then live" {
 }
 
 test "DurableState divergence triggers live mode" {
-    const io_calls = [_]IoEntry{
-        .{ .seq = 0, .module = "env", .func = "env", .args_json = "[\"K\"]", .result_json = "\"V\"" },
+    const events = [_]DurableEvent{
+        .{ .io = .{ .seq = 0, .module = "env", .func = "env", .args_json = "[\"K\"]", .result_json = "\"V\"" } },
     };
     var state = DurableState.init(
         std.testing.allocator,
-        &io_calls,
+        &events,
         -1,
     );
     defer state.deinit();
@@ -1618,4 +1825,34 @@ test "DurableState empty oplog starts in live mode" {
     try std.testing.expect(state.is_live);
     const entry = state.replayNext("env", "env");
     try std.testing.expect(entry == null);
+}
+
+test "DurableState beginStep returns cached result" {
+    const events = [_]DurableEvent{
+        .{ .step_start = .{ .name = "charge" } },
+        .{ .io = .{ .seq = 0, .module = "http", .func = "fetchSync", .args_json = "[\"https://payments.internal\"]", .result_json = "{\"ok\":true}" } },
+        .{ .step_result = .{ .name = "charge", .result_json = "{\"status\":\"paid\"}" } },
+    };
+    var state = DurableState.init(std.testing.allocator, &events, -1);
+    defer state.deinit();
+
+    const replay = state.beginStep("charge");
+    switch (replay) {
+        .cached => |result_json| try std.testing.expectEqualStrings("{\"status\":\"paid\"}", result_json),
+        else => return error.ExpectedCachedStep,
+    }
+    try std.testing.expectEqual(@as(u32, 3), state.cursor);
+}
+
+test "DurableState beginStep executes incomplete step" {
+    const events = [_]DurableEvent{
+        .{ .step_start = .{ .name = "charge" } },
+        .{ .io = .{ .seq = 0, .module = "http", .func = "fetchSync", .args_json = "[\"https://payments.internal\"]", .result_json = "{\"ok\":true}" } },
+    };
+    var state = DurableState.init(std.testing.allocator, &events, -1);
+    defer state.deinit();
+
+    const replay = state.beginStep("charge");
+    try std.testing.expectEqual(DurableStepReplay.execute, replay);
+    try std.testing.expectEqual(@as(u32, 1), state.cursor);
 }

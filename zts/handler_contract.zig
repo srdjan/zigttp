@@ -62,6 +62,28 @@ pub const CacheInfo = struct {
     dynamic: bool,
 };
 
+pub const DurableKeyInfo = struct {
+    literal: std.ArrayList([]const u8), // each entry owned
+    dynamic: bool,
+};
+
+pub const DurableInfo = struct {
+    used: bool,
+    keys: DurableKeyInfo,
+    steps: std.ArrayList([]const u8), // each entry owned
+
+    pub fn deinit(self: *DurableInfo, allocator: std.mem.Allocator) void {
+        for (self.keys.literal.items) |key| {
+            allocator.free(key);
+        }
+        self.keys.literal.deinit(allocator);
+        for (self.steps.items) |step| {
+            allocator.free(step);
+        }
+        self.steps.deinit(allocator);
+    }
+};
+
 pub const ApiSchemaInfo = struct {
     name: []const u8, // owned
     schema_json: []const u8, // owned JSON source
@@ -150,7 +172,7 @@ pub const AotInfo = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 2,
+    version: u32 = 3,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -158,6 +180,7 @@ pub const HandlerContract = struct {
     env: EnvInfo,
     egress: EgressInfo,
     cache: CacheInfo,
+    durable: DurableInfo,
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,
@@ -197,6 +220,7 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.cache.namespaces.deinit(allocator);
+        self.durable.deinit(allocator);
         self.api.deinit(allocator);
     }
 };
@@ -216,6 +240,8 @@ pub const ContractBuilder = struct {
     // Binding tracking: maps local slot -> category for call-site analysis
     env_binding_slots: std.ArrayList(u16),
     cache_binding_slots: std.ArrayList(CacheBinding),
+    durable_run_binding_slots: std.ArrayList(u16),
+    durable_step_binding_slots: std.ArrayList(u16),
     schema_compile_binding_slots: std.ArrayList(u16),
     request_schema_binding_slots: std.ArrayList(u16),
     parse_bearer_binding_slots: std.ArrayList(u16),
@@ -231,6 +257,10 @@ pub const ContractBuilder = struct {
     egress_dynamic: bool,
     cache_namespaces: std.ArrayList([]const u8),
     cache_dynamic: bool,
+    durable_used: bool,
+    durable_key_literals: std.ArrayList([]const u8),
+    durable_key_dynamic: bool,
+    durable_step_names: std.ArrayList([]const u8),
     api_schemas: std.ArrayList(ApiSchemaInfo),
     api_request_schema_refs: std.ArrayList([]const u8),
     api_request_schema_dynamic: bool,
@@ -252,6 +282,8 @@ pub const ContractBuilder = struct {
             .atoms = atoms,
             .env_binding_slots = .empty,
             .cache_binding_slots = .empty,
+            .durable_run_binding_slots = .empty,
+            .durable_step_binding_slots = .empty,
             .schema_compile_binding_slots = .empty,
             .request_schema_binding_slots = .empty,
             .parse_bearer_binding_slots = .empty,
@@ -265,6 +297,10 @@ pub const ContractBuilder = struct {
             .egress_dynamic = false,
             .cache_namespaces = .empty,
             .cache_dynamic = false,
+            .durable_used = false,
+            .durable_key_literals = .empty,
+            .durable_key_dynamic = false,
+            .durable_step_names = .empty,
             .api_schemas = .empty,
             .api_request_schema_refs = .empty,
             .api_request_schema_dynamic = false,
@@ -282,6 +318,8 @@ pub const ContractBuilder = struct {
     pub fn deinit(self: *ContractBuilder) void {
         self.env_binding_slots.deinit(self.allocator);
         self.cache_binding_slots.deinit(self.allocator);
+        self.durable_run_binding_slots.deinit(self.allocator);
+        self.durable_step_binding_slots.deinit(self.allocator);
         self.schema_compile_binding_slots.deinit(self.allocator);
         self.request_schema_binding_slots.deinit(self.allocator);
         self.parse_bearer_binding_slots.deinit(self.allocator);
@@ -293,6 +331,10 @@ pub const ContractBuilder = struct {
         self.egress_hosts.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
         self.cache_namespaces.deinit(self.allocator);
+        for (self.durable_key_literals.items) |s| self.allocator.free(s);
+        self.durable_key_literals.deinit(self.allocator);
+        for (self.durable_step_names.items) |s| self.allocator.free(s);
+        self.durable_step_names.deinit(self.allocator);
         for (self.modules_list.items) |s| self.allocator.free(s);
         self.modules_list.deinit(self.allocator);
         for (self.functions_map.items) |*entry| {
@@ -408,6 +450,14 @@ pub const ContractBuilder = struct {
                 .namespaces = self.cache_namespaces,
                 .dynamic = self.cache_dynamic,
             },
+            .durable = .{
+                .used = self.durable_used,
+                .keys = .{
+                    .literal = self.durable_key_literals,
+                    .dynamic = self.durable_key_dynamic,
+                },
+                .steps = self.durable_step_names,
+            },
             .api = .{
                 .schemas = self.api_schemas,
                 .requests = .{
@@ -432,6 +482,8 @@ pub const ContractBuilder = struct {
         self.env_literals = .empty;
         self.egress_hosts = .empty;
         self.cache_namespaces = .empty;
+        self.durable_key_literals = .empty;
+        self.durable_step_names = .empty;
         self.api_schemas = .empty;
         self.api_request_schema_refs = .empty;
         self.api_routes = .empty;
@@ -518,6 +570,15 @@ pub const ContractBuilder = struct {
                     });
                 }
 
+                if (vm == .durable) {
+                    if (std.mem.eql(u8, imported_name, "run")) {
+                        try self.durable_run_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
+                    if (std.mem.eql(u8, imported_name, "step")) {
+                        try self.durable_step_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
+                }
+
                 if (vm == .router and std.mem.eql(u8, imported_name, "routerMatch")) {
                     try self.router_match_binding_slots.append(self.allocator, spec.local_binding.slot);
                 }
@@ -594,6 +655,18 @@ pub const ContractBuilder = struct {
                     continue;
                 }
 
+                if (self.isDurableRunBinding(binding.slot)) {
+                    self.durable_used = true;
+                    try self.extractLiteralArg(call, &self.durable_key_literals, &self.durable_key_dynamic, null);
+                    continue;
+                }
+
+                if (self.isDurableStepBinding(binding.slot)) {
+                    self.durable_used = true;
+                    try self.extractLiteralArgStatic(call, &self.durable_step_names);
+                    continue;
+                }
+
                 // Check for schemaCompile() calls
                 if (self.isSchemaCompileBinding(binding.slot)) {
                     try self.extractSchemaCompile(call);
@@ -659,6 +732,26 @@ pub const ContractBuilder = struct {
         }
     }
 
+    fn extractLiteralArgStatic(
+        self: *ContractBuilder,
+        call: Node.CallExpr,
+        target: *std.ArrayList([]const u8),
+    ) !void {
+        if (call.args_count < 1) return;
+
+        const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
+        const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
+        if (arg_tag != .lit_string) return;
+
+        const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
+        const raw = self.ir_view.getString(str_idx) orelse return;
+        if (!containsString(target.items, raw)) {
+            const duped = try self.allocator.dupe(u8, raw);
+            errdefer self.allocator.free(duped);
+            try target.append(self.allocator, duped);
+        }
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -676,6 +769,14 @@ pub const ContractBuilder = struct {
 
     fn isSchemaCompileBinding(self: *const ContractBuilder, slot: u16) bool {
         return containsSlot(self.schema_compile_binding_slots.items, slot);
+    }
+
+    fn isDurableRunBinding(self: *const ContractBuilder, slot: u16) bool {
+        return containsSlot(self.durable_run_binding_slots.items, slot);
+    }
+
+    fn isDurableStepBinding(self: *const ContractBuilder, slot: u16) bool {
+        return containsSlot(self.durable_step_binding_slots.items, slot);
     }
 
     fn isRequestSchemaBinding(self: *const ContractBuilder, slot: u16) bool {
@@ -1232,6 +1333,11 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1269,6 +1375,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseDynamicSection(&parser, allocator, "hosts", &contract.egress.hosts, &contract.egress.dynamic);
         } else if (std.mem.eql(u8, key, "cache")) {
             try parseDynamicSection(&parser, allocator, "namespaces", &contract.cache.namespaces, &contract.cache.dynamic);
+        } else if (std.mem.eql(u8, key, "durable")) {
+            try parseDurableSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
             try parseVerification(&parser, &contract);
         } else {
@@ -1558,6 +1666,43 @@ fn parseDynamicSection(
     }
 }
 
+fn parseDurableSection(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "used")) {
+            contract.durable.used = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "keys")) {
+            try parseDynamicSection(
+                parser,
+                allocator,
+                "literal",
+                &contract.durable.keys.literal,
+                &contract.durable.keys.dynamic,
+            );
+        } else if (std.mem.eql(u8, key, "steps")) {
+            try parseStringArray(parser, allocator, &contract.durable.steps);
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
 fn parseVerification(parser: *JsonParser, contract: *HandlerContract) !void {
     parser.skipWhitespace();
     if (parser.readNull()) {
@@ -1743,6 +1888,26 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.print("    \"dynamic\": {s}\n", .{if (contract.cache.dynamic) "true" else "false"});
     try writer.writeAll("  },\n");
 
+    // durable
+    try writer.writeAll("  \"durable\": {\n");
+    try writer.print("    \"used\": {s},\n", .{if (contract.durable.used) "true" else "false"});
+    try writer.writeAll("    \"keys\": {\n");
+    try writer.writeAll("      \"literal\": [");
+    for (contract.durable.keys.literal.items, 0..) |key, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, key);
+    }
+    try writer.writeAll("],\n");
+    try writer.print("      \"dynamic\": {s}\n", .{if (contract.durable.keys.dynamic) "true" else "false"});
+    try writer.writeAll("    },\n");
+    try writer.writeAll("    \"steps\": [");
+    for (contract.durable.steps.items, 0..) |step, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, step);
+    }
+    try writer.writeAll("]\n");
+    try writer.writeAll("  },\n");
+
     // api
     try writer.writeAll("  \"api\": {\n");
 
@@ -1891,6 +2056,7 @@ test "parseFromJson minimal" {
     try std.testing.expectEqual(@as(u32, 1), contract.handler.line);
     try std.testing.expectEqual(@as(usize, 0), contract.routes.items.len);
     try std.testing.expect(!contract.env.dynamic);
+    try std.testing.expect(!contract.durable.used);
     try std.testing.expect(contract.verification == null);
 }
 
@@ -1937,6 +2103,7 @@ test "parseFromJson with data" {
     try std.testing.expectEqual(@as(usize, 1), contract.egress.hosts.items.len);
     try std.testing.expect(contract.egress.dynamic);
     try std.testing.expectEqual(@as(usize, 1), contract.cache.namespaces.items.len);
+    try std.testing.expect(!contract.durable.used);
     try std.testing.expect(contract.verification != null);
     try std.testing.expect(contract.verification.?.exhaustive_returns);
     try std.testing.expect(contract.verification.?.bytecode_verified);
@@ -1958,6 +2125,11 @@ test "parseFromJson roundtrip" {
         .env = .{ .literal = env_lit, .dynamic = true },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .durable = .{
+            .used = true,
+            .keys = .{ .literal = .empty, .dynamic = true },
+            .steps = .empty,
+        },
         .api = emptyApiInfo(),
         .verification = .{
             .exhaustive_returns = true,
@@ -1985,6 +2157,8 @@ test "parseFromJson roundtrip" {
     try std.testing.expectEqual(@as(usize, 1), parsed.env.literal.items.len);
     try std.testing.expectEqualStrings("SECRET", parsed.env.literal.items[0]);
     try std.testing.expect(parsed.env.dynamic);
+    try std.testing.expect(parsed.durable.used);
+    try std.testing.expect(parsed.durable.keys.dynamic);
     try std.testing.expect(parsed.verification != null);
     try std.testing.expect(parsed.verification.?.exhaustive_returns);
     try std.testing.expect(!parsed.verification.?.results_safe);
@@ -2022,6 +2196,11 @@ test "writeContractJson minimal" {
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -2036,9 +2215,10 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verification\": null") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"aot\": null") != null);
@@ -2085,6 +2265,12 @@ test "writeContractJson with data" {
     var request_schema_refs: std.ArrayList([]const u8) = .empty;
     try request_schema_refs.append(allocator, try allocator.dupe(u8, "user"));
 
+    var durable_keys: std.ArrayList([]const u8) = .empty;
+    try durable_keys.append(allocator, try allocator.dupe(u8, "order:123"));
+
+    var durable_steps: std.ArrayList([]const u8) = .empty;
+    try durable_steps.append(allocator, try allocator.dupe(u8, "charge"));
+
     var contract = HandlerContract{
         .handler = .{ .path = path, .line = 20, .column = 1 },
         .routes = .empty,
@@ -2093,6 +2279,11 @@ test "writeContractJson with data" {
         .env = .{ .literal = env_lit, .dynamic = false },
         .egress = .{ .hosts = hosts, .dynamic = true },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .durable = .{
+            .used = true,
+            .keys = .{ .literal = durable_keys, .dynamic = false },
+            .steps = durable_steps,
+        },
         .api = .{
             .schemas = schemas,
             .requests = .{ .schema_refs = request_schema_refs, .dynamic = false },
@@ -2122,6 +2313,8 @@ test "writeContractJson with data" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"JWT_SECRET\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api.example.com\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sessions\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"order:123\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"charge\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"schemaRefs\": [\"user\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"bearer\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"exhaustiveReturns\": true") != null);

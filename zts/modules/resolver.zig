@@ -24,6 +24,7 @@ const validate_mod = @import("validate.zig");
 const cache_mod = @import("cache.zig");
 const io_mod = @import("io.zig");
 const compose_mod = @import("compose.zig");
+const durable_mod = @import("durable.zig");
 
 /// A single exported function from a virtual module
 pub const ModuleExport = struct {
@@ -42,6 +43,7 @@ pub const VirtualModule = enum {
     cache,
     io,
     compose,
+    durable,
 
     pub fn fromSpecifier(specifier: []const u8) ?VirtualModule {
         if (std.mem.eql(u8, specifier, "zigttp:env")) return .env;
@@ -52,6 +54,7 @@ pub const VirtualModule = enum {
         if (std.mem.eql(u8, specifier, "zigttp:cache")) return .cache;
         if (std.mem.eql(u8, specifier, "zigttp:io")) return .io;
         if (std.mem.eql(u8, specifier, "zigttp:compose")) return .compose;
+        if (std.mem.eql(u8, specifier, "zigttp:durable")) return .durable;
         return null;
     }
 
@@ -65,9 +68,9 @@ pub const VirtualModule = enum {
             .cache => &cache_mod.exports,
             .io => &io_mod.exports,
             .compose => &compose_mod.exports,
+            .durable => &durable_mod.exports,
         };
     }
-
 };
 
 /// Resolution result
@@ -125,6 +128,9 @@ pub fn registerVirtualModule(ctx: *context.Context, module: VirtualModule, alloc
 /// to the TraceRecorder in module_state slot 7 (if present).
 /// The module enum must be comptime-known so we can generate wrappers.
 pub fn registerVirtualModuleTraced(comptime module: VirtualModule, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    if (module == .durable) {
+        return registerVirtualModule(ctx, module, allocator);
+    }
     const module_exports = comptime module.getExports();
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const module_name = comptime moduleEnumName(module);
@@ -156,6 +162,7 @@ fn moduleEnumName(comptime module: VirtualModule) []const u8 {
         .cache => "cache",
         .io => "io",
         .compose => "compose",
+        .durable => "durable",
     };
 }
 
@@ -163,6 +170,9 @@ fn moduleEnumName(comptime module: VirtualModule) []const u8 {
 /// Each NativeFn is replaced with a stub that reads recorded return values
 /// from the ReplayState in module_state slot 3.
 pub fn registerVirtualModuleReplay(comptime module: VirtualModule, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    if (module == .durable) {
+        return registerVirtualModule(ctx, module, allocator);
+    }
     const module_exports = comptime module.getExports();
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const module_name = comptime moduleEnumName(module);
@@ -187,6 +197,9 @@ pub fn registerVirtualModuleReplay(comptime module: VirtualModule, ctx: *context
 /// Each NativeFn is wrapped to replay from oplog, then record with write-ahead
 /// persistence once the oplog is exhausted. Uses DurableState in module_state slot 3.
 pub fn registerVirtualModuleDurable(comptime module: VirtualModule, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    if (module == .durable) {
+        return registerVirtualModule(ctx, module, allocator);
+    }
     const module_exports = comptime module.getExports();
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const module_name = comptime moduleEnumName(module);
