@@ -77,8 +77,26 @@ check_fail "tests/verify/missing_return_else.js" "missing else detected" "not al
 check_fail "tests/verify/missing_return_switch.js" "switch without default detected" "without default case"
 echo ""
 
+echo "Check 2: Result Checking"
+check_fail "tests/verify/unchecked_result.ts" "unchecked result.value detected" "result.value accessed without checking"
+check_pass "tests/verify/checked_result.ts" "result.ok checked before .value"
+echo ""
+
 echo "Check 3: Unreachable Code"
 check_warn "tests/verify/unreachable_code.js" "unreachable code after return" "unreachable code"
+echo ""
+
+echo "Check 4: Dead Variables"
+check_warn "tests/verify/unused_variable.ts" "unused variable detected" "declared variable is never used"
+echo ""
+
+echo "Check 6: Optional Value Checking"
+check_fail "tests/verify/unchecked_optional.ts" "unchecked optional use detected" "optional value used without checking"
+check_pass "tests/verify/optional_narrowed_truthiness.ts" "if (val) narrows optional"
+check_pass "tests/verify/optional_narrowed_negated.ts" "if (!val) return narrows optional"
+check_pass "tests/verify/optional_narrowed_undefined.ts" "if (val !== undefined) narrows optional"
+check_pass "tests/verify/optional_nullish_coalesce.ts" "env() ?? default resolves optionality"
+check_fail "tests/verify/optional_object_access.ts" "property access on optional detected" "property access on optional value"
 echo ""
 
 echo "=========================="

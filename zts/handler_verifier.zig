@@ -91,34 +91,56 @@ const BindingState = struct {
     name_idx: u16, // string constant index for the name (0 = unknown)
 
     fn key(self: BindingState) u32 {
-        return (@as(u32, self.scope_id) << 16) | @as(u32, self.slot);
+        return bindingKey(self.scope_id, self.slot);
     }
 };
 
 // ---------------------------------------------------------------------------
-// Known Result-producing functions from virtual modules
-// ---------------------------------------------------------------------------
-
-/// Functions that return Result objects with .ok/.value/.error fields.
-const result_producing_functions = [_]struct { module: []const u8, name: []const u8 }{
-    .{ .module = "zigttp:auth", .name = "jwtVerify" },
-    .{ .module = "zigttp:validate", .name = "validateJson" },
-    .{ .module = "zigttp:validate", .name = "validateObject" },
-    .{ .module = "zigttp:validate", .name = "coerceJson" },
-};
-
-fn isResultProducingFunction(name: []const u8) bool {
-    for (&result_producing_functions) |entry| {
-        if (std.mem.eql(u8, entry.name, name)) return true;
-    }
-    return false;
-}
-
-// ---------------------------------------------------------------------------
-// Known Optional-producing functions from virtual modules
+// Known tracked functions from virtual modules
 // ---------------------------------------------------------------------------
 
 const OptionalKind = enum { optional_string, optional_object };
+
+/// What a virtual module function produces that requires caller-side checking.
+const FunctionProduces = enum {
+    result, // Result object - must check .ok before .value
+    optional_string, // string | undefined - must narrow before use
+    optional_object, // object | undefined - must narrow before use
+
+    fn toOptionalKind(self: FunctionProduces) ?OptionalKind {
+        return switch (self) {
+            .optional_string => .optional_string,
+            .optional_object => .optional_object,
+            .result => null,
+        };
+    }
+};
+
+/// Unified table of all virtual module functions that need caller-side checking.
+const tracked_functions = [_]struct { module: []const u8, name: []const u8, produces: FunctionProduces }{
+    // Result-producing (Check 2)
+    .{ .module = "zigttp:auth", .name = "jwtVerify", .produces = .result },
+    .{ .module = "zigttp:validate", .name = "validateJson", .produces = .result },
+    .{ .module = "zigttp:validate", .name = "validateObject", .produces = .result },
+    .{ .module = "zigttp:validate", .name = "coerceJson", .produces = .result },
+    // Optional-producing (Check 6)
+    .{ .module = "zigttp:env", .name = "env", .produces = .optional_string },
+    .{ .module = "zigttp:cache", .name = "cacheGet", .produces = .optional_string },
+    .{ .module = "zigttp:auth", .name = "parseBearer", .produces = .optional_string },
+    .{ .module = "zigttp:router", .name = "routerMatch", .produces = .optional_object },
+};
+
+fn lookupTrackedFunction(name: []const u8) ?FunctionProduces {
+    for (&tracked_functions) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.produces;
+    }
+    return null;
+}
+
+/// Shared key computation for scope_id + slot binding lookups.
+fn bindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
+    return (@as(u32, scope_id) << 16) | @as(u32, slot);
+}
 
 const OptionalFnSlot = struct {
     slot: u16,
@@ -133,7 +155,7 @@ const OptionalBindingState = struct {
     decl_node: NodeIndex,
 
     fn key(self: OptionalBindingState) u32 {
-        return (@as(u32, self.scope_id) << 16) | @as(u32, self.slot);
+        return bindingKey(self.scope_id, self.slot);
     }
 };
 
@@ -144,21 +166,6 @@ const NarrowingInfo = struct {
     scope_id: ir.ScopeId,
     branch: NarrowingBranch,
 };
-
-/// Functions that return optional values (T | undefined).
-const optional_producing_functions = [_]struct { module: []const u8, name: []const u8, kind: OptionalKind }{
-    .{ .module = "zigttp:env", .name = "env", .kind = .optional_string },
-    .{ .module = "zigttp:cache", .name = "cacheGet", .kind = .optional_string },
-    .{ .module = "zigttp:auth", .name = "parseBearer", .kind = .optional_string },
-    .{ .module = "zigttp:router", .name = "routerMatch", .kind = .optional_object },
-};
-
-fn isOptionalProducingFunction(name: []const u8) ?OptionalKind {
-    for (&optional_producing_functions) |entry| {
-        if (std.mem.eql(u8, entry.name, name)) return entry.kind;
-    }
-    return null;
-}
 
 // ---------------------------------------------------------------------------
 // HandlerVerifier
@@ -436,9 +443,7 @@ pub const HandlerVerifier = struct {
     }
 
     /// for-of body returns .never because the iterable could be empty.
-    fn forOfReturns(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
-        _ = self;
-        _ = node;
+    fn forOfReturns(_: *HandlerVerifier, _: NodeIndex) ReturnStatus {
         return .never;
     }
 
@@ -447,7 +452,7 @@ pub const HandlerVerifier = struct {
     // -----------------------------------------------------------------------
 
     /// Scan top-level import declarations to identify which local bindings
-    /// map to Result-producing virtual module functions.
+    /// map to tracked virtual module functions (result-producing or optional-producing).
     fn scanImports(self: *HandlerVerifier) void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
@@ -458,22 +463,15 @@ pub const HandlerVerifier = struct {
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Check if this module has result-producing or optional-producing functions
-            var has_result_fns = false;
-            var has_optional_fns = false;
-            for (&result_producing_functions) |entry| {
+            // Check if this module has any tracked functions
+            var module_has_tracked = false;
+            for (&tracked_functions) |entry| {
                 if (std.mem.eql(u8, entry.module, module_str)) {
-                    has_result_fns = true;
+                    module_has_tracked = true;
                     break;
                 }
             }
-            for (&optional_producing_functions) |entry| {
-                if (std.mem.eql(u8, entry.module, module_str)) {
-                    has_optional_fns = true;
-                    break;
-                }
-            }
-            if (!has_result_fns and !has_optional_fns) continue;
+            if (!module_has_tracked) continue;
 
             // Scan specifiers to find which local bindings map to tracked functions
             var j: u8 = 0;
@@ -482,20 +480,18 @@ pub const HandlerVerifier = struct {
                 const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
 
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
+                const produces = lookupTrackedFunction(imported_name) orelse continue;
 
-                // Result-producing functions
-                if (has_result_fns and isResultProducingFunction(imported_name)) {
-                    self.result_function_slots.append(self.allocator, spec.local_binding.slot) catch continue;
-                }
-
-                // Optional-producing functions
-                if (has_optional_fns) {
-                    if (isOptionalProducingFunction(imported_name)) |kind| {
+                switch (produces) {
+                    .result => {
+                        self.result_function_slots.append(self.allocator, spec.local_binding.slot) catch continue;
+                    },
+                    .optional_string, .optional_object => {
                         self.optional_function_slots.append(self.allocator, .{
                             .slot = spec.local_binding.slot,
-                            .kind = kind,
+                            .kind = produces.toOptionalKind().?,
                         }) catch continue;
-                    }
+                    },
                 }
             }
         }
@@ -562,6 +558,11 @@ pub const HandlerVerifier = struct {
             .if_stmt => {
                 const if_stmt = self.ir_view.getIfStmt(node) orelse return;
 
+                // Always walk the condition for ref-counting (identifiers in
+                // conditions must be counted regardless of which extraction path
+                // matches). The extraction helpers are read-only so order is safe.
+                self.walkExprForRefs(if_stmt.condition);
+
                 // Check if condition is a result.ok check
                 const checked_slot = self.extractResultOkCheck(if_stmt.condition);
 
@@ -592,8 +593,6 @@ pub const HandlerVerifier = struct {
                     }
                 } else if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
                     // Check 6: optional narrowing via if (val) or if (val !== undefined)
-                    self.walkExprForRefs(if_stmt.condition);
-
                     switch (info.branch) {
                         .then => {
                             // if (val) - narrowed in then-branch only
@@ -625,7 +624,6 @@ pub const HandlerVerifier = struct {
                         },
                     }
                 } else {
-                    self.walkExprForRefs(if_stmt.condition);
                     self.walkForResultsAndRefs(if_stmt.then_branch);
                     if (if_stmt.else_branch != null_node) {
                         self.walkForResultsAndRefs(if_stmt.else_branch);
@@ -680,23 +678,15 @@ pub const HandlerVerifier = struct {
                 const binding = self.ir_view.getBinding(node) orelse return;
                 self.incrementRefCount(binding);
             },
-            .member_access => {
+            .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return;
                 self.walkExprForRefs(member.object);
-
-                // Check for result.value access without prior .ok check
                 self.checkResultValueAccess(member, node);
 
-                // Check 6: property access on un-narrowed optional_object
-                self.checkOptionalObjectAccess(member, node);
-            },
-            .optional_chain => {
-                const member = self.ir_view.getMember(node) orelse return;
-                self.walkExprForRefs(member.object);
-
-                // Check for result.value access without prior .ok check
-                self.checkResultValueAccess(member, node);
-                // optional_chain (val?.prop) is safe - do NOT flag
+                // optional_chain (val?.prop) safely handles undefined - skip optional check
+                if (tag == .member_access) {
+                    self.checkOptionalObjectAccess(member, node);
+                }
             },
             .binary_op => {
                 const binary = self.ir_view.getBinary(node) orelse return;
@@ -839,14 +829,14 @@ pub const HandlerVerifier = struct {
 
         // Direct: result.ok or result.isOk
         if (tag == .member_access or tag == .optional_chain) {
-            return self.extractOkMemberSlot(cond_node);
+            return self.extractResultMemberSlot(cond_node, &ok_atoms);
         }
 
         // Method call: result.isOk()
         if (tag == .call or tag == .method_call) {
             const call = self.ir_view.getCall(cond_node) orelse return null;
             if (call.args_count == 0) {
-                return self.extractOkMemberSlot(call.callee);
+                return self.extractResultMemberSlot(call.callee, &ok_atoms);
             }
         }
 
@@ -854,8 +844,8 @@ pub const HandlerVerifier = struct {
         if (tag == .binary_op) {
             const binary = self.ir_view.getBinary(cond_node) orelse return null;
             if (binary.op == .strict_eq or binary.op == .eq) {
-                if (self.extractOkMemberSlot(binary.left)) |slot| return slot;
-                if (self.extractOkMemberSlot(binary.right)) |slot| return slot;
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |slot| return slot;
+                if (self.extractResultMemberSlot(binary.right, &ok_atoms)) |slot| return slot;
             }
         }
 
@@ -879,7 +869,7 @@ pub const HandlerVerifier = struct {
         if (tag == .call or tag == .method_call) {
             const call = self.ir_view.getCall(cond_node) orelse return null;
             if (call.args_count == 0) {
-                return self.extractIsErrMemberSlot(call.callee);
+                return self.extractResultMemberSlot(call.callee, &err_atoms);
             }
         }
 
@@ -888,13 +878,13 @@ pub const HandlerVerifier = struct {
             const binary = self.ir_view.getBinary(cond_node) orelse return null;
             if (binary.op == .strict_neq or binary.op == .neq) {
                 // result.ok !== true
-                if (self.extractOkMemberSlot(binary.left)) |slot| {
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |slot| {
                     if (self.isTrueLiteral(binary.right)) return slot;
                 }
             }
             if (binary.op == .strict_eq or binary.op == .eq) {
                 // result.ok === false
-                if (self.extractOkMemberSlot(binary.left)) |slot| {
+                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |slot| {
                     if (self.isFalseLiteral(binary.right)) return slot;
                 }
             }
@@ -903,49 +893,41 @@ pub const HandlerVerifier = struct {
         return null;
     }
 
-    /// Given a member_access node, return the object's binding slot if
-    /// the property is "isErr" and the object is a tracked result binding.
-    fn extractIsErrMemberSlot(self: *HandlerVerifier, node: NodeIndex) ?u16 {
-        const tag = self.ir_view.getTag(node) orelse return null;
-        if (tag != .member_access and tag != .optional_chain) return null;
-
-        const member = self.ir_view.getMember(node) orelse return null;
-
-        // Check property is "isErr" (predefined atom 201)
-        if (member.property != @intFromEnum(object.Atom.isErr)) return null;
-
-        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
-        if (obj_tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(member.object) orelse return null;
-
-        for (self.result_bindings.items) |rb| {
-            if (rb.slot == binding.slot) return binding.slot;
+    /// Find a result binding by slot, or null if not tracked.
+    fn findResultBinding(self: *HandlerVerifier, slot: u16) ?*BindingState {
+        for (self.result_bindings.items) |*rb| {
+            if (rb.slot == slot) return rb;
         }
         return null;
     }
 
-    /// Given a member_access node, return the object's binding slot if
-    /// the property is "ok" and the object is a tracked result binding.
-    fn extractOkMemberSlot(self: *HandlerVerifier, node: NodeIndex) ?u16 {
+    const ok_atoms = [_]u16{ @intFromEnum(object.Atom.ok), @intFromEnum(object.Atom.isOk) };
+    const err_atoms = [_]u16{@intFromEnum(object.Atom.isErr)};
+
+    /// Given a member_access node, return the object's binding slot if the property
+    /// matches one of `accepted_atoms` and the object is a tracked result binding.
+    fn extractResultMemberSlot(self: *HandlerVerifier, node: NodeIndex, accepted_atoms: []const u16) ?u16 {
         const tag = self.ir_view.getTag(node) orelse return null;
         if (tag != .member_access and tag != .optional_chain) return null;
 
         const member = self.ir_view.getMember(node) orelse return null;
 
-        // Check property is "ok" (predefined atom 198) or "isOk" (200)
-        if (member.property != @intFromEnum(object.Atom.ok) and
-            member.property != @intFromEnum(object.Atom.isOk))
-            return null;
+        // Check property atom against accepted list
+        var found = false;
+        for (accepted_atoms) |atom| {
+            if (member.property == atom) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return null;
 
         // Check object is an identifier that's a tracked result
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
         if (obj_tag != .identifier) return null;
         const binding = self.ir_view.getBinding(member.object) orelse return null;
 
-        // Is this slot a result binding?
-        for (self.result_bindings.items) |rb| {
-            if (rb.slot == binding.slot) return binding.slot;
-        }
+        if (self.findResultBinding(binding.slot)) |_| return binding.slot;
         return null;
     }
 
@@ -958,7 +940,8 @@ pub const HandlerVerifier = struct {
     fn isFalseLiteral(self: *HandlerVerifier, node: NodeIndex) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
         if (tag != .lit_bool) return false;
-        return !(self.ir_view.getBoolValue(node) orelse true);
+        const val = self.ir_view.getBoolValue(node) orelse return false;
+        return !val;
     }
 
     /// Check if a member access on a result binding accesses .value/.unwrap()
@@ -975,33 +958,28 @@ pub const HandlerVerifier = struct {
         if (obj_tag != .identifier) return;
         const binding = self.ir_view.getBinding(member.object) orelse return;
 
-        for (self.result_bindings.items) |rb| {
-            if (rb.slot == binding.slot and !rb.ok_checked) {
-                self.addDiagnostic(.{
-                    .severity = .err,
-                    .kind = .unchecked_result_value,
-                    .node = node,
-                    .message = "result.value accessed without checking result.ok first",
-                    .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
-                });
-                return;
-            }
+        const rb = self.findResultBinding(binding.slot) orelse return;
+        if (!rb.ok_checked) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .unchecked_result_value,
+                .node = node,
+                .message = "result.value accessed without checking result.ok first",
+                .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
+            });
         }
     }
 
     /// Set the ok_checked state for a result binding slot.
     fn setResultChecked(self: *HandlerVerifier, slot: u16, checked: bool) void {
-        for (self.result_bindings.items) |*rb| {
-            if (rb.slot == slot) {
-                rb.ok_checked = checked;
-                return;
-            }
+        if (self.findResultBinding(slot)) |rb| {
+            rb.ok_checked = checked;
         }
     }
 
     /// Increment reference count for a binding (scope-aware).
     fn incrementRefCount(self: *HandlerVerifier, binding_ref: ir.BindingRef) void {
-        const target_key = (@as(u32, binding_ref.scope_id) << 16) | @as(u32, binding_ref.slot);
+        const target_key = bindingKey(binding_ref.scope_id, binding_ref.slot);
         for (self.all_bindings.items) |*binding| {
             if (binding.key() == target_key) {
                 binding.ref_count +|= 1;
@@ -1024,6 +1002,11 @@ pub const HandlerVerifier = struct {
     }
 
     /// Quick return status check (without emitting diagnostics).
+    /// Intentionally separate from stmtReturns: that function is the full Check 1 analysis
+    /// pass that emits diagnostics (unreachable code, missing default, etc.). This one is a
+    /// lightweight predicate used by Check 2 and Check 6 to decide if a then-branch always
+    /// returns (enabling post-dominator narrowing). Merging them would require threading a
+    /// "suppress diagnostics" flag through the entire Check 1 call tree.
     fn stmtReturnsQuick(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
         const tag = self.ir_view.getTag(node) orelse return .never;
         return switch (tag) {
@@ -1189,11 +1172,19 @@ pub const HandlerVerifier = struct {
 
     /// Find an optional binding by slot and scope.
     fn findOptionalBinding(self: *HandlerVerifier, slot: u16, scope_id: ir.ScopeId) ?*OptionalBindingState {
-        const target_key = (@as(u32, scope_id) << 16) | @as(u32, slot);
+        const target_key = bindingKey(scope_id, slot);
         for (self.optional_bindings.items) |*ob| {
             if (ob.key() == target_key) return ob;
         }
         return null;
+    }
+
+    /// Resolve an identifier node to its un-narrowed optional binding, if any.
+    fn getUnnarrowedOptional(self: *HandlerVerifier, identifier_node: NodeIndex) ?*OptionalBindingState {
+        const binding = self.ir_view.getBinding(identifier_node) orelse return null;
+        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return null;
+        if (ob.narrowed) return null;
+        return ob;
     }
 
     /// Set the narrowed state for an optional binding.
@@ -1207,10 +1198,7 @@ pub const HandlerVerifier = struct {
     fn checkOptionalUse(self: *HandlerVerifier, node: NodeIndex) void {
         const t = self.ir_view.getTag(node) orelse return;
         if (t != .identifier) return;
-
-        const binding = self.ir_view.getBinding(node) orelse return;
-        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
-        if (ob.narrowed) return;
+        if (self.getUnnarrowedOptional(node) == null) return;
 
         self.addDiagnostic(.{
             .severity = .err,
@@ -1226,9 +1214,7 @@ pub const HandlerVerifier = struct {
         const obj_tag = self.ir_view.getTag(member.object) orelse return;
         if (obj_tag != .identifier) return;
 
-        const binding = self.ir_view.getBinding(member.object) orelse return;
-        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
-        if (ob.narrowed) return;
+        const ob = self.getUnnarrowedOptional(member.object) orelse return;
         if (ob.kind != .optional_object) return;
 
         self.addDiagnostic(.{
@@ -1359,24 +1345,20 @@ test "DiagnosticKind enum values" {
     }
 }
 
-test "isResultProducingFunction" {
-    try std.testing.expect(isResultProducingFunction("jwtVerify"));
-    try std.testing.expect(isResultProducingFunction("validateJson"));
-    try std.testing.expect(isResultProducingFunction("validateObject"));
-    try std.testing.expect(isResultProducingFunction("coerceJson"));
-    try std.testing.expect(!isResultProducingFunction("sha256"));
-    try std.testing.expect(!isResultProducingFunction("env"));
-    try std.testing.expect(!isResultProducingFunction("cacheGet"));
-}
-
-test "isOptionalProducingFunction" {
-    try std.testing.expectEqual(OptionalKind.optional_string, isOptionalProducingFunction("env").?);
-    try std.testing.expectEqual(OptionalKind.optional_string, isOptionalProducingFunction("cacheGet").?);
-    try std.testing.expectEqual(OptionalKind.optional_string, isOptionalProducingFunction("parseBearer").?);
-    try std.testing.expectEqual(OptionalKind.optional_object, isOptionalProducingFunction("routerMatch").?);
-    try std.testing.expect(isOptionalProducingFunction("sha256") == null);
-    try std.testing.expect(isOptionalProducingFunction("jwtVerify") == null);
-    try std.testing.expect(isOptionalProducingFunction("cacheSet") == null);
+test "lookupTrackedFunction" {
+    // Result-producing
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("jwtVerify").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("validateJson").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("validateObject").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("coerceJson").?);
+    // Optional-producing
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("env").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("cacheGet").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("parseBearer").?);
+    try std.testing.expectEqual(FunctionProduces.optional_object, lookupTrackedFunction("routerMatch").?);
+    // Untracked
+    try std.testing.expect(lookupTrackedFunction("sha256") == null);
+    try std.testing.expect(lookupTrackedFunction("cacheSet") == null);
 }
 
 test "getSourceLine" {
