@@ -34,7 +34,7 @@ pub const object = @import("object.zig");
 pub const context = @import("context.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
-pub const builtins = @import("builtins.zig");
+pub const builtins = @import("builtins/root.zig");
 // New two-pass parser with proper function compilation
 pub const parser = @import("parser/root.zig");
 // Note: Legacy single-pass parser removed; use parser/root.zig
@@ -57,12 +57,11 @@ pub const type_env = @import("type_env.zig");
 pub const type_checker = @import("type_checker.zig");
 pub const bytecode_verifier = @import("bytecode_verifier.zig");
 pub const trace = @import("trace.zig");
+pub const file_io = @import("file_io.zig");
+pub const module_slots = @import("module_slots.zig");
 pub const contract_diff = @import("contract_diff.zig");
 pub const modules = @import("modules/root.zig");
 // Optional/experimental modules (not wired into runtime by default)
-// These are kept in zts/ for future development but not exported publicly.
-// To use: @import("zts/perf.zig") directly, or uncomment below.
-// pub const perf = @import("perf.zig");
 // pub const compiler = @import("compiler.zig");
 pub const jit = @import("jit/root.zig");
 
@@ -97,13 +96,6 @@ pub const emitLiteral = comptime_eval.emitLiteral;
 pub const InternPool = intern_pool.InternPool;
 pub const InternPoolIndex = intern_pool.Index;
 pub const BytecodeCache = bytecode_cache.BytecodeCache;
-// Perf types (uncomment if needed - perf.zig is experimental)
-// pub const PerfReport = perf.PerfReport;
-// pub const CompileStats = perf.CompileStats;
-// pub const RuntimeStats = perf.RuntimeStats;
-// pub const GCStats = perf.GCStats;
-// pub const OpcodeProfile = perf.OpcodeProfile;
-// pub const Timer = perf.Timer;
 pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
 pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
 pub const OptStats = bytecode_opt.OptStats;

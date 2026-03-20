@@ -25,8 +25,7 @@ const util = @import("util.zig");
 /// Maximum number of concurrent operations in a single parallel/race call.
 pub const MAX_PARALLEL: u32 = 8;
 
-/// Module state slot index (matches VirtualModule enum ordinal: io = 6).
-pub const MODULE_STATE_SLOT = 6;
+pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.io);
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
@@ -125,7 +124,7 @@ pub const ParallelCollector = struct {
 // ============================================================================
 
 fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     // Get runtime callbacks from module state
     const callbacks = getCallbacks(ctx) orelse {
@@ -227,7 +226,7 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
 // ============================================================================
 
 fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     const callbacks = getCallbacks(ctx) orelse {
         return util.throwError(ctx, "Error", "race() requires outbound HTTP to be enabled");

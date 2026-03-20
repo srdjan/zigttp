@@ -11,6 +11,7 @@ const value = @import("value.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const string = @import("string.zig");
+const util = @import("modules/util.zig");
 
 // ============================================================================
 // Function Component Callback
@@ -290,7 +291,7 @@ fn statusFromInitObject(ctx: *context.Context, init: *object.JSObject, default_s
 
 /// Response.json(data) - Create JSON response
 pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) {
         return createResponse(ctx, "{}", 200, "application/json");
@@ -312,7 +313,7 @@ pub fn responseJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 /// Response.rawJson(jsonString) - Create JSON response from pre-serialized string
 /// Bypasses object serialization for maximum performance when JSON is already built.
 pub fn responseRawJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) {
         return createResponse(ctx, "{}", 200, "application/json");
@@ -332,7 +333,7 @@ pub fn responseRawJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const valu
 
 /// Response.text(text) - Create text response
 pub fn responseText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) {
         return createResponse(ctx, "", 200, "text/plain; charset=utf-8");
@@ -350,7 +351,7 @@ pub fn responseText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
 /// Response.html(html) - Create HTML response
 pub fn responseHtml(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) {
         return createResponse(ctx, "", 200, "text/html; charset=utf-8");
@@ -368,7 +369,7 @@ pub fn responseHtml(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
 /// Response.redirect(url, status?) - Create redirect response
 pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) {
         return value.JSValue.undefined_val;
@@ -402,7 +403,7 @@ pub fn responseRedirect(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
 
 /// new Response(body, init) - Response constructor (Web API compatible)
 pub fn responseConstructor(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     // Default to empty text response
     var body: []const u8 = "";
@@ -476,7 +477,7 @@ fn appendChild(
 
 /// h(tag, props, ...children) - Create virtual DOM node
 pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     // Tag (first arg), defaults to "div"
     const tag_val = if (args.len > 0) args[0] else blk: {
@@ -519,7 +520,7 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
 
 /// renderToString(node) - Render virtual DOM to HTML string
 pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) {
         return ctx.createString("") catch return value.JSValue.undefined_val;

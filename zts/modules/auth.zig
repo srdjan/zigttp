@@ -22,7 +22,7 @@ const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
-const builtins = @import("../builtins.zig");
+const builtins = @import("../builtins/root.zig");
 const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
@@ -45,7 +45,7 @@ pub const exports = [_]resolver.ModuleExport{
 
 /// parseBearer(header) - extract token from "Bearer <token>"
 fn parseBearerNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) return value.JSValue.undefined_val;
     const header = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
@@ -65,7 +65,7 @@ fn parseBearerNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
 
 /// jwtVerify(token, secret, options?) - verify HS256 JWT
 fn jwtVerifyNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return util.createPlainResultErr(ctx, "missing arguments");
     const token_str = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "token must be a string");
@@ -151,7 +151,7 @@ fn jwtVerifyNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
 
 /// jwtSign(claims_json, secret) - create HS256 JWT
 fn jwtSignNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.undefined_val;
     const claims_json = util.extractString(args[0]) orelse return value.JSValue.undefined_val;

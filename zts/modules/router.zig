@@ -39,7 +39,7 @@ pub const exports = [_]resolver.ModuleExport{
 
 /// routerMatch(routes, req) -> { handler, params } | null
 fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.undefined_val;
 

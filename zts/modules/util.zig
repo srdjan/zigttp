@@ -11,6 +11,11 @@ const string = @import("../string.zig");
 const object = @import("../object.zig");
 const arena_mod = @import("../arena.zig");
 
+/// Cast an opaque NativeFn context pointer to *Context.
+pub fn castContext(ctx_ptr: *anyopaque) *context.Context {
+    return @ptrCast(@alignCast(ctx_ptr));
+}
+
 /// Extract string data from a JSValue.
 /// Handles flat JSString, SliceString, and RopeNode (flattened to leaf).
 pub fn extractString(val: value.JSValue) ?[]const u8 {

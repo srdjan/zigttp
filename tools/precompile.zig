@@ -69,29 +69,7 @@ const CompiledHandler = struct {
     }
 };
 
-/// Read a file synchronously using posix operations
-fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer std.Io.Threaded.closeFd(fd);
-
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const bytes_read = try std.posix.read(fd, &chunk);
-        if (bytes_read == 0) break;
-        if (buffer.items.len + bytes_read > max_size) {
-            return error.FileTooBig;
-        }
-        try buffer.appendSlice(allocator, chunk[0..bytes_read]);
-    }
-
-    return buffer.toOwnedSlice(allocator);
-}
+const readFilePosix = zts.file_io.readFile;
 
 /// Write a file synchronously using posix operations
 pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
@@ -1161,13 +1139,7 @@ fn compileMultiModule(
     };
 }
 
-/// Read file for module graph - matches ReadFileFn signature
-fn readFilePosixForGraph(allocator: std.mem.Allocator, path: []const u8) zts.modules.module_graph.ReadFileError![]const u8 {
-    const data = readFilePosix(allocator, path, 10 * 1024 * 1024) catch {
-        return error.FileNotFound;
-    };
-    return data;
-}
+const readFilePosixForGraph = zts.file_io.readFileForModuleGraph;
 
 fn analyzeAot(
     allocator: std.mem.Allocator,

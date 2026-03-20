@@ -21,7 +21,7 @@ pub const exports = [_]resolver.ModuleExport{
 
 /// env(name) - read environment variable
 fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) return value.JSValue.undefined_val;
 

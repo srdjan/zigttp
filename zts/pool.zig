@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const context = @import("context.zig");
-const builtins = @import("builtins.zig");
+const builtins = @import("builtins/root.zig");
 const gc = @import("gc.zig");
 const heap = @import("heap.zig");
 const arena_mod = @import("arena.zig");

@@ -13,9 +13,11 @@ const context = @import("context.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
+const util = @import("modules/util.zig");
 
-/// Module state slot for trace recorder (slot 7, after io at 6).
-pub const TRACE_STATE_SLOT = 7;
+const module_slots = @import("module_slots.zig");
+
+pub const TRACE_STATE_SLOT = @intFromEnum(module_slots.Slot.trace);
 
 /// Mutex wrapper compatible with Zig 0.16's Io.Mutex.
 pub const TraceMutex = struct {
@@ -377,7 +379,7 @@ pub fn makeTracingWrapper(
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const result = try original_fn(ctx_ptr, this, args);
-            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const ctx = util.castContext(ctx_ptr);
             if (ctx.getModuleState(TraceRecorder, TRACE_STATE_SLOT)) |recorder| {
                 recorder.recordIO(module_name, fn_name, ctx, args, result);
             }
@@ -625,8 +627,7 @@ fn findMatchingBrace(json: []const u8, start: usize, open: u8, close: u8) ?[]con
 // Replay Support - Stub Functions
 // ============================================================================
 
-/// Module state slot for replay state (slot 3, separate from trace at 7).
-pub const REPLAY_STATE_SLOT = 3;
+pub const REPLAY_STATE_SLOT = @intFromEnum(module_slots.Slot.replay);
 
 /// Per-request replay state. Holds the recorded I/O entries and a cursor
 /// tracking which entry to return next.
@@ -664,7 +665,7 @@ pub fn makeReplayStub(
 ) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const ctx = util.castContext(ctx_ptr);
             const state = ctx.getModuleState(ReplayState, REPLAY_STATE_SLOT) orelse {
                 return value.JSValue.undefined_val;
             };
@@ -940,9 +941,7 @@ fn allocFloat(_: *context.Context, f: f64) value.JSValue {
 // Durable Execution - Write-Ahead Oplog with Hybrid Replay/Record
 // ============================================================================
 
-/// Module state slot for durable state (slot 0, unused by other modules).
-/// Separate from REPLAY_STATE_SLOT (3) to avoid type confusion in getModuleState.
-pub const DURABLE_STATE_SLOT = 0;
+pub const DURABLE_STATE_SLOT = @intFromEnum(module_slots.Slot.durable);
 
 /// Per-request durable execution state.
 /// Combines oplog reading (replay phase) with write-ahead persistence (live phase).
@@ -1142,7 +1141,7 @@ pub fn makeDurableWrapper(
 ) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const ctx = util.castContext(ctx_ptr);
             const state = ctx.getModuleState(DurableState, DURABLE_STATE_SLOT) orelse {
                 // No durable state: fall through to real execution
                 return original_fn(ctx_ptr, this, args);

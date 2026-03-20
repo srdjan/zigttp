@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const zq = @import("zts");
 const compat = @import("compat.zig");
 const Io = std.Io;
 const net = std.Io.net;
@@ -34,28 +35,7 @@ const parseQueryString = http_parser.parseQueryString;
 const splitHeaderLine = http_parser.splitHeaderLine;
 const parseContentLength = http_parser.parseContentLength;
 
-/// Read a file synchronously using posix operations (for use before Io is initialized)
-fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
-    defer std.Io.Threaded.closeFd(fd);
-
-    // Read file in chunks without fstat (avoids libc/Linux compatibility issues)
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const bytes_read = try std.posix.read(fd, &chunk);
-        if (bytes_read == 0) break;
-        if (buffer.items.len + bytes_read > max_size) return error.FileTooBig;
-        try buffer.appendSlice(allocator, chunk[0..bytes_read]);
-    }
-
-    return buffer.toOwnedSlice(allocator);
-}
+const readFilePosix = zq.file_io.readFile;
 
 // ============================================================================
 // Connection Thread Pool (for macOS threaded backend)

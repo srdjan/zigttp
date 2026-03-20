@@ -26,7 +26,7 @@ pub const exports = [_]resolver.ModuleExport{
 
 /// sha256(data) -> hex string
 fn sha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) return value.JSValue.undefined_val;
     const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
@@ -42,7 +42,7 @@ fn sha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
 
 /// hmacSha256(key, data) -> hex string
 fn hmacSha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.undefined_val;
     const key = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
@@ -57,7 +57,7 @@ fn hmacSha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
 /// base64Encode(data) -> base64 string
 fn base64EncodeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) return value.JSValue.undefined_val;
     const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
@@ -74,7 +74,7 @@ fn base64EncodeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
 
 /// base64Decode(data) -> decoded string
 fn base64DecodeNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) return value.JSValue.undefined_val;
     const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;

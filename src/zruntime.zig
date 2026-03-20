@@ -147,35 +147,7 @@ fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context) void {
 // File reading for module graph (POSIX, no async I/O dependency)
 // ============================================================================
 
-/// Read a file using POSIX syscalls. Matches the ReadFileFn signature
-/// required by ModuleGraph.build().
-fn readFilePosixForGraph(allocator: std.mem.Allocator, path: []const u8) zq.modules.module_graph.ReadFileError![]const u8 {
-    const path_z = allocator.dupeZ(u8, path) catch return error.OutOfMemory;
-    defer allocator.free(path_z);
-
-    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch {
-        return error.FileNotFound;
-    };
-    defer std.Io.Threaded.closeFd(fd);
-
-    const max_size = 10 * 1024 * 1024; // 10MB limit
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const bytes_read = std.posix.read(fd, &chunk) catch {
-            return error.InputOutput;
-        };
-        if (bytes_read == 0) break;
-        if (buffer.items.len + bytes_read > max_size) {
-            return error.FileTooBig;
-        }
-        buffer.appendSlice(allocator, chunk[0..bytes_read]) catch return error.OutOfMemory;
-    }
-
-    return buffer.toOwnedSlice(allocator) catch return error.OutOfMemory;
-}
+const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 
 // ============================================================================
 // Thread-local Runtime for native function callbacks

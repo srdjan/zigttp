@@ -28,8 +28,7 @@ const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
 
-/// Module state slot index (must match VirtualModule enum ordinal for 'cache')
-const MODULE_STATE_SLOT = 5;
+const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.cache);
 
 /// Get current time in seconds (epoch)
 fn nowSeconds() i64 {
@@ -285,7 +284,7 @@ fn getOrCreateStore(ctx: *context.Context) !*CacheStore {
 
 /// cacheGet(namespace, key) -> string | null
 fn cacheGetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.undefined_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
@@ -300,7 +299,7 @@ fn cacheGetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
 
 /// cacheSet(namespace, key, value, ttl?) -> boolean
 fn cacheSetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 3) return value.JSValue.false_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.false_val;
@@ -324,7 +323,7 @@ fn cacheSetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
 
 /// cacheDelete(namespace, key) -> boolean
 fn cacheDeleteNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.false_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.false_val;
@@ -337,7 +336,7 @@ fn cacheDeleteNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
 
 /// cacheIncr(namespace, key, delta?, ttl?) -> number
 fn cacheIncrNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.undefined_val;
     const ns = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
@@ -375,7 +374,7 @@ fn cacheIncrNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
 
 /// cacheStats(namespace?) -> { hits, misses, entries, bytes }
 fn cacheStatsNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     const store = ctx.getModuleState(CacheStore, MODULE_STATE_SLOT) orelse {
         // No cache initialized yet - return zeros

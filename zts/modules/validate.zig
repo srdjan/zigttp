@@ -23,12 +23,11 @@ const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
-const builtins = @import("../builtins.zig");
+const builtins = @import("../builtins/root.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
 
-/// Module state slot index (must match VirtualModule enum ordinal for 'validate')
-const MODULE_STATE_SLOT = 4;
+const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.validate);
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
@@ -141,7 +140,7 @@ fn getOrCreateRegistry(ctx: *context.Context) !*SchemaRegistry {
 
 /// schemaCompile(name, schema_json) -> boolean
 fn schemaCompileNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return value.JSValue.false_val;
     const name = util.extractString(args[0]) orelse return value.JSValue.false_val;
@@ -180,7 +179,7 @@ fn schemaCompileNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const valu
 
 /// validateJson(name, json) -> { ok: true, value } | { ok: false, errors }
 fn validateJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return util.createPlainResultErr(ctx, "missing arguments");
     const name = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "name must be a string");
@@ -199,7 +198,7 @@ fn validateJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
 
 /// validateObject(name, obj) -> { ok: true, value } | { ok: false, errors }
 fn validateObjectNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return util.createPlainResultErr(ctx, "missing arguments");
     const name = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "name must be a string");
@@ -212,7 +211,7 @@ fn validateObjectNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
 
 /// coerceJson(name, json) -> { ok: true, value } | { ok: false, errors }
 fn coerceJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len < 2) return util.createPlainResultErr(ctx, "missing arguments");
     const name = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "name must be a string");
@@ -232,7 +231,7 @@ fn coerceJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
 
 /// schemaDrop(name) -> boolean
 fn schemaDropNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-    const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+    const ctx = util.castContext(ctx_ptr);
 
     if (args.len == 0) return value.JSValue.false_val;
     const name = util.extractString(args[0]) orelse return value.JSValue.false_val;

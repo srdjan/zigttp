@@ -13,7 +13,7 @@ const object = @import("object.zig");
 const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const type_feedback = @import("type_feedback.zig");
-const builtins = @import("builtins.zig");
+const builtins = @import("builtins/root.zig");
 
 const empty_code: [0]u8 = .{};
 

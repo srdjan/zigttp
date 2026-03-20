@@ -20,7 +20,7 @@ const object = @import("../object.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const type_feedback = @import("../type_feedback.zig");
 const arena_mod = @import("../arena.zig");
-const builtins = @import("../builtins.zig");
+const builtins = @import("../builtins/root.zig");
 
 const CodeAllocator = alloc.CodeAllocator;
 const CompiledCode = alloc.CompiledCode;

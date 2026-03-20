@@ -208,31 +208,7 @@ fn openOplogForAppend(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch {
-        return error.FileNotFound;
-    };
-    defer std.Io.Threaded.closeFd(fd);
-
-    const max_size = 100 * 1024 * 1024;
-    var buffer: std.ArrayList(u8) = .empty;
-    errdefer buffer.deinit(allocator);
-
-    var chunk: [8192]u8 = undefined;
-    while (true) {
-        const bytes_read = std.posix.read(fd, &chunk) catch {
-            return error.InputOutput;
-        };
-        if (bytes_read == 0) break;
-        if (buffer.items.len + bytes_read > max_size) {
-            return error.FileTooBig;
-        }
-        try buffer.appendSlice(allocator, chunk[0..bytes_read]);
-    }
-
-    return try buffer.toOwnedSlice(allocator);
+    return zq.file_io.readFile(allocator, path, 100 * 1024 * 1024);
 }
 
 fn deleteFile(allocator: std.mem.Allocator, path: []const u8) void {
@@ -241,39 +217,4 @@ fn deleteFile(allocator: std.mem.Allocator, path: []const u8) void {
     _ = std.c.unlink(path_z);
 }
 
-/// Parse a simple JSON object {"key":"value",...} into header list.
-fn parseHeadersFromJson(
-    allocator: std.mem.Allocator,
-    json: []const u8,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-) !void {
-    if (json.len < 2 or json[0] != '{') return;
-
-    var pos: usize = 1;
-    while (pos < json.len) {
-        while (pos < json.len and (json[pos] == ' ' or json[pos] == ',' or json[pos] == '\n')) : (pos += 1) {}
-        if (pos >= json.len or json[pos] == '}') break;
-
-        if (json[pos] != '"') break;
-        pos += 1;
-        const key_start = pos;
-        while (pos < json.len and json[pos] != '"') : (pos += 1) {
-            if (json[pos] == '\\') pos += 1;
-        }
-        const key = json[key_start..pos];
-        if (pos < json.len) pos += 1;
-
-        while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
-
-        if (pos >= json.len or json[pos] != '"') break;
-        pos += 1;
-        const val_start = pos;
-        while (pos < json.len and json[pos] != '"') : (pos += 1) {
-            if (json[pos] == '\\') pos += 1;
-        }
-        const val = json[val_start..pos];
-        if (pos < json.len) pos += 1;
-
-        try headers.append(allocator, .{ .key = key, .value = val });
-    }
-}
+const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
