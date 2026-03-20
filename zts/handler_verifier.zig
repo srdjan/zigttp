@@ -5,6 +5,8 @@
 //! 2. Result values are checked before access (result safety)
 //! 3. No unreachable code after unconditional returns
 //! 4. No unused variable declarations
+//! 5. Match expressions have default arms
+//! 6. Optional values from virtual modules are checked before use
 //!
 //! This is possible because zigttp's JS subset bans all non-trivial control flow:
 //! no while/do-while (no back-edges), no break/continue (no non-local jumps),
@@ -57,6 +59,10 @@ pub const DiagnosticKind = enum {
 
     // Match expression (Check 5)
     non_exhaustive_match,
+
+    // Optional checking (Check 6)
+    unchecked_optional_use,
+    unchecked_optional_access,
 };
 
 pub const Diagnostic = struct {
@@ -109,6 +115,52 @@ fn isResultProducingFunction(name: []const u8) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Known Optional-producing functions from virtual modules
+// ---------------------------------------------------------------------------
+
+const OptionalKind = enum { optional_string, optional_object };
+
+const OptionalFnSlot = struct {
+    slot: u16,
+    kind: OptionalKind,
+};
+
+const OptionalBindingState = struct {
+    scope_id: ir.ScopeId,
+    slot: u16,
+    kind: OptionalKind,
+    narrowed: bool,
+    decl_node: NodeIndex,
+
+    fn key(self: OptionalBindingState) u32 {
+        return (@as(u32, self.scope_id) << 16) | @as(u32, self.slot);
+    }
+};
+
+const NarrowingBranch = enum { then, then_returns_early };
+
+const NarrowingInfo = struct {
+    slot: u16,
+    scope_id: ir.ScopeId,
+    branch: NarrowingBranch,
+};
+
+/// Functions that return optional values (T | undefined).
+const optional_producing_functions = [_]struct { module: []const u8, name: []const u8, kind: OptionalKind }{
+    .{ .module = "zigttp:env", .name = "env", .kind = .optional_string },
+    .{ .module = "zigttp:cache", .name = "cacheGet", .kind = .optional_string },
+    .{ .module = "zigttp:auth", .name = "parseBearer", .kind = .optional_string },
+    .{ .module = "zigttp:router", .name = "routerMatch", .kind = .optional_object },
+};
+
+fn isOptionalProducingFunction(name: []const u8) ?OptionalKind {
+    for (&optional_producing_functions) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return entry.kind;
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 // HandlerVerifier
 // ---------------------------------------------------------------------------
 
@@ -123,6 +175,10 @@ pub const HandlerVerifier = struct {
     // Import-to-module mapping: local binding slot -> is from result-producing module
     result_function_slots: std.ArrayList(u16),
 
+    // Optional checking state (Check 6)
+    optional_bindings: std.ArrayList(OptionalBindingState),
+    optional_function_slots: std.ArrayList(OptionalFnSlot),
+
     // Dead variable tracking
     all_bindings: std.ArrayList(BindingState),
 
@@ -134,6 +190,8 @@ pub const HandlerVerifier = struct {
             .diagnostics = .empty,
             .result_bindings = .empty,
             .result_function_slots = .empty,
+            .optional_bindings = .empty,
+            .optional_function_slots = .empty,
             .all_bindings = .empty,
         };
     }
@@ -142,6 +200,8 @@ pub const HandlerVerifier = struct {
         self.diagnostics.deinit(self.allocator);
         self.result_bindings.deinit(self.allocator);
         self.result_function_slots.deinit(self.allocator);
+        self.optional_bindings.deinit(self.allocator);
+        self.optional_function_slots.deinit(self.allocator);
         self.all_bindings.deinit(self.allocator);
     }
 
@@ -398,26 +458,44 @@ pub const HandlerVerifier = struct {
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Check if this is a virtual module with result-producing functions
+            // Check if this module has result-producing or optional-producing functions
             var has_result_fns = false;
+            var has_optional_fns = false;
             for (&result_producing_functions) |entry| {
                 if (std.mem.eql(u8, entry.module, module_str)) {
                     has_result_fns = true;
                     break;
                 }
             }
-            if (!has_result_fns) continue;
+            for (&optional_producing_functions) |entry| {
+                if (std.mem.eql(u8, entry.module, module_str)) {
+                    has_optional_fns = true;
+                    break;
+                }
+            }
+            if (!has_result_fns and !has_optional_fns) continue;
 
-            // Scan specifiers to find which local bindings map to result-producers
+            // Scan specifiers to find which local bindings map to tracked functions
             var j: u8 = 0;
             while (j < import_decl.specifiers_count) : (j += 1) {
                 const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
                 const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
 
-                // Check if the imported name is a result-producing function
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
-                if (isResultProducingFunction(imported_name)) {
+
+                // Result-producing functions
+                if (has_result_fns and isResultProducingFunction(imported_name)) {
                     self.result_function_slots.append(self.allocator, spec.local_binding.slot) catch continue;
+                }
+
+                // Optional-producing functions
+                if (has_optional_fns) {
+                    if (isOptionalProducingFunction(imported_name)) |kind| {
+                        self.optional_function_slots.append(self.allocator, .{
+                            .slot = spec.local_binding.slot,
+                            .kind = kind,
+                        }) catch continue;
+                    }
                 }
             }
         }
@@ -465,6 +543,20 @@ pub const HandlerVerifier = struct {
                             .name_idx = 0,
                         }) catch {};
                     }
+
+                    // Check 6: track optional-producing calls
+                    // Skip if RHS is `optionalCall() ?? default` (nullish coalesce resolves)
+                    if (!self.isNullishCoalesceWithOptionalCall(decl.init)) {
+                        if (self.isOptionalProducingCall(decl.init)) |kind| {
+                            self.optional_bindings.append(self.allocator, .{
+                                .scope_id = decl.binding.scope_id,
+                                .slot = decl.binding.slot,
+                                .kind = kind,
+                                .narrowed = false,
+                                .decl_node = node,
+                            }) catch {};
+                        }
+                    }
                 }
             },
             .if_stmt => {
@@ -483,33 +575,60 @@ pub const HandlerVerifier = struct {
                     if (if_stmt.else_branch != null_node) {
                         self.walkForResultsAndRefs(if_stmt.else_branch);
                     }
+                } else if (self.extractNegatedResultOkCheck(if_stmt.condition)) |slot| {
+                    // Negated pattern: if (!result.ok) { return ...; }
+                    self.walkForResultsAndRefs(if_stmt.then_branch);
+
+                    // If the then branch always returns, code after is the ok path
+                    const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
+                    if (then_returns == .always) {
+                        self.setResultChecked(slot, true);
+                    }
+
+                    if (if_stmt.else_branch != null_node) {
+                        self.setResultChecked(slot, true);
+                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                        self.setResultChecked(slot, false);
+                    }
+                } else if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
+                    // Check 6: optional narrowing via if (val) or if (val !== undefined)
+                    self.walkExprForRefs(if_stmt.condition);
+
+                    switch (info.branch) {
+                        .then => {
+                            // if (val) - narrowed in then-branch only
+                            self.setOptionalNarrowed(info.slot, info.scope_id, true);
+                            self.walkForResultsAndRefs(if_stmt.then_branch);
+                            self.setOptionalNarrowed(info.slot, info.scope_id, false);
+                            if (if_stmt.else_branch != null_node) {
+                                self.walkForResultsAndRefs(if_stmt.else_branch);
+                            }
+                        },
+                        .then_returns_early => {
+                            // if (!val) { return ...; } - code after is narrowed
+                            self.walkForResultsAndRefs(if_stmt.then_branch);
+
+                            const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
+                            if (then_returns == .always) {
+                                // Then branch always returns, so subsequent code is narrowed
+                                self.setOptionalNarrowed(info.slot, info.scope_id, true);
+                            }
+
+                            if (if_stmt.else_branch != null_node) {
+                                self.setOptionalNarrowed(info.slot, info.scope_id, true);
+                                self.walkForResultsAndRefs(if_stmt.else_branch);
+                                // Don't restore if then_returns - leave narrowed for subsequent code
+                                if (then_returns != .always) {
+                                    self.setOptionalNarrowed(info.slot, info.scope_id, false);
+                                }
+                            }
+                        },
+                    }
                 } else {
-                    // Check for negated pattern: if (!result.ok) { return ...; }
-                    const negated_slot = self.extractNegatedResultOkCheck(if_stmt.condition);
-                    if (negated_slot) |slot| {
-                        // In the then branch, ok is false (error path)
-                        self.walkForResultsAndRefs(if_stmt.then_branch);
-
-                        // If the then branch always returns, code after is the ok path
-                        const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
-                        if (then_returns == .always) {
-                            self.setResultChecked(slot, true);
-                        }
-
-                        if (if_stmt.else_branch != null_node) {
-                            self.setResultChecked(slot, true);
-                            self.walkForResultsAndRefs(if_stmt.else_branch);
-                            self.setResultChecked(slot, false);
-                        }
-
-                        // If then-branch returns, the result stays checked for subsequent code
-                        // (handled by the caller continuing to walk)
-                    } else {
-                        self.walkExprForRefs(if_stmt.condition);
-                        self.walkForResultsAndRefs(if_stmt.then_branch);
-                        if (if_stmt.else_branch != null_node) {
-                            self.walkForResultsAndRefs(if_stmt.else_branch);
-                        }
+                    self.walkExprForRefs(if_stmt.condition);
+                    self.walkForResultsAndRefs(if_stmt.then_branch);
+                    if (if_stmt.else_branch != null_node) {
+                        self.walkForResultsAndRefs(if_stmt.else_branch);
                     }
                 }
             },
@@ -561,17 +680,37 @@ pub const HandlerVerifier = struct {
                 const binding = self.ir_view.getBinding(node) orelse return;
                 self.incrementRefCount(binding);
             },
-            .member_access, .optional_chain => {
+            .member_access => {
                 const member = self.ir_view.getMember(node) orelse return;
                 self.walkExprForRefs(member.object);
 
                 // Check for result.value access without prior .ok check
                 self.checkResultValueAccess(member, node);
+
+                // Check 6: property access on un-narrowed optional_object
+                self.checkOptionalObjectAccess(member, node);
+            },
+            .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExprForRefs(member.object);
+
+                // Check for result.value access without prior .ok check
+                self.checkResultValueAccess(member, node);
+                // optional_chain (val?.prop) is safe - do NOT flag
             },
             .binary_op => {
                 const binary = self.ir_view.getBinary(node) orelse return;
                 self.walkExprForRefs(binary.left);
                 self.walkExprForRefs(binary.right);
+
+                // Check 6: optional used in non-nullish, non-comparison binary ops
+                if (binary.op != .nullish and
+                    binary.op != .strict_eq and binary.op != .strict_neq and
+                    binary.op != .eq and binary.op != .neq)
+                {
+                    self.checkOptionalUse(binary.left);
+                    self.checkOptionalUse(binary.right);
+                }
             },
             .unary_op => {
                 const unary = self.ir_view.getUnary(node) orelse return;
@@ -584,6 +723,8 @@ pub const HandlerVerifier = struct {
                 while (i < call.args_count) : (i += 1) {
                     const arg_idx = self.ir_view.getListIndex(call.args_start, i);
                     self.walkExprForRefs(arg_idx);
+                    // Check 6: optional passed as argument
+                    self.checkOptionalUse(arg_idx);
                 }
             },
             .ternary => {
@@ -617,6 +758,9 @@ pub const HandlerVerifier = struct {
                 const assign = self.ir_view.getAssignment(node) orelse return;
                 self.walkExprForRefs(assign.target);
                 self.walkExprForRefs(assign.value);
+
+                // Check 6: reassignment to non-optional clears tracking
+                self.handleOptionalReassignment(assign);
             },
             .array_literal => {
                 const arr = self.ir_view.getArray(node) orelse return;
@@ -633,6 +777,8 @@ pub const HandlerVerifier = struct {
                     const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
                     self.walkExprForRefs(prop.value);
+                    // Check 6: optional used as property value
+                    self.checkOptionalUse(prop.value);
                 }
             },
             .template_literal => {
@@ -643,7 +789,11 @@ pub const HandlerVerifier = struct {
                     const part_tag = self.ir_view.getTag(part_idx) orelse continue;
                     if (part_tag == .template_part_expr) {
                         const opt_val = self.ir_view.getOptValue(part_idx);
-                        if (opt_val) |val| self.walkExprForRefs(val);
+                        if (opt_val) |val| {
+                            self.walkExprForRefs(val);
+                            // Check 6: optional in template literal
+                            self.checkOptionalUse(val);
+                        }
                     }
                 }
             },
@@ -935,6 +1085,178 @@ pub const HandlerVerifier = struct {
     }
 
     // -----------------------------------------------------------------------
+    // Check 6: Optional Value Checking
+    // -----------------------------------------------------------------------
+
+    /// Check if a call expression calls an optional-producing function.
+    fn isOptionalProducingCall(self: *HandlerVerifier, node: NodeIndex) ?OptionalKind {
+        const call_tag = self.ir_view.getTag(node) orelse return null;
+        if (call_tag != .call and call_tag != .method_call) return null;
+
+        const call = self.ir_view.getCall(node) orelse return null;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+
+        if (callee_tag == .identifier) {
+            const binding = self.ir_view.getBinding(call.callee) orelse return null;
+            for (self.optional_function_slots.items) |opt_fn| {
+                if (opt_fn.slot == binding.slot) return opt_fn.kind;
+            }
+        }
+
+        return null;
+    }
+
+    /// Check if the init is `optionalCall() ?? default` (nullish coalesce resolves optionality).
+    fn isNullishCoalesceWithOptionalCall(self: *HandlerVerifier, node: NodeIndex) bool {
+        const t = self.ir_view.getTag(node) orelse return false;
+        if (t != .binary_op) return false;
+
+        const binary = self.ir_view.getBinary(node) orelse return false;
+        if (binary.op != .nullish) return false;
+
+        // LHS must be an optional-producing call
+        return self.isOptionalProducingCall(binary.left) != null;
+    }
+
+    /// Extract optional narrowing info from an if-condition.
+    /// Recognizes: if (val), if (!val), if (val !== undefined), if (val === undefined).
+    fn extractOptionalNarrowingCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?NarrowingInfo {
+        const cond_tag = self.ir_view.getTag(cond_node) orelse return null;
+
+        // if (val) - truthiness check
+        if (cond_tag == .identifier) {
+            const binding = self.ir_view.getBinding(cond_node) orelse return null;
+            if (self.findOptionalBinding(binding.slot, binding.scope_id)) |_| {
+                return .{ .slot = binding.slot, .scope_id = binding.scope_id, .branch = .then };
+            }
+        }
+
+        // if (!val) - negated truthiness
+        if (cond_tag == .unary_op) {
+            const unary = self.ir_view.getUnary(cond_node) orelse return null;
+            if (unary.op == .not) {
+                const inner_tag = self.ir_view.getTag(unary.operand) orelse return null;
+                if (inner_tag == .identifier) {
+                    const binding = self.ir_view.getBinding(unary.operand) orelse return null;
+                    if (self.findOptionalBinding(binding.slot, binding.scope_id)) |_| {
+                        return .{ .slot = binding.slot, .scope_id = binding.scope_id, .branch = .then_returns_early };
+                    }
+                }
+            }
+        }
+
+        // if (val !== undefined) or if (val === undefined)
+        if (cond_tag == .binary_op) {
+            const binary = self.ir_view.getBinary(cond_node) orelse return null;
+            if (binary.op == .strict_neq) {
+                if (self.extractUndefinedComparisonSlot(binary)) |info| {
+                    return .{ .slot = info.slot, .scope_id = info.scope_id, .branch = .then };
+                }
+            }
+            if (binary.op == .strict_eq) {
+                if (self.extractUndefinedComparisonSlot(binary)) |info| {
+                    return .{ .slot = info.slot, .scope_id = info.scope_id, .branch = .then_returns_early };
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// Extract slot from `val !== undefined` or `undefined !== val`.
+    fn extractUndefinedComparisonSlot(self: *HandlerVerifier, binary: Node.BinaryExpr) ?struct { slot: u16, scope_id: ir.ScopeId } {
+        // Check left=identifier, right=undefined
+        const left_tag = self.ir_view.getTag(binary.left) orelse return null;
+        const right_tag = self.ir_view.getTag(binary.right) orelse return null;
+
+        if (left_tag == .identifier and right_tag == .lit_undefined) {
+            const binding = self.ir_view.getBinding(binary.left) orelse return null;
+            if (self.findOptionalBinding(binding.slot, binding.scope_id) != null) {
+                return .{ .slot = binding.slot, .scope_id = binding.scope_id };
+            }
+        }
+
+        // Check left=undefined, right=identifier
+        if (left_tag == .lit_undefined and right_tag == .identifier) {
+            const binding = self.ir_view.getBinding(binary.right) orelse return null;
+            if (self.findOptionalBinding(binding.slot, binding.scope_id) != null) {
+                return .{ .slot = binding.slot, .scope_id = binding.scope_id };
+            }
+        }
+
+        return null;
+    }
+
+    /// Find an optional binding by slot and scope.
+    fn findOptionalBinding(self: *HandlerVerifier, slot: u16, scope_id: ir.ScopeId) ?*OptionalBindingState {
+        const target_key = (@as(u32, scope_id) << 16) | @as(u32, slot);
+        for (self.optional_bindings.items) |*ob| {
+            if (ob.key() == target_key) return ob;
+        }
+        return null;
+    }
+
+    /// Set the narrowed state for an optional binding.
+    fn setOptionalNarrowed(self: *HandlerVerifier, slot: u16, scope_id: ir.ScopeId, narrowed: bool) void {
+        if (self.findOptionalBinding(slot, scope_id)) |ob| {
+            ob.narrowed = narrowed;
+        }
+    }
+
+    /// Check if a node is an un-narrowed optional identifier, and emit diagnostic.
+    fn checkOptionalUse(self: *HandlerVerifier, node: NodeIndex) void {
+        const t = self.ir_view.getTag(node) orelse return;
+        if (t != .identifier) return;
+
+        const binding = self.ir_view.getBinding(node) orelse return;
+        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
+        if (ob.narrowed) return;
+
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unchecked_optional_use,
+            .node = node,
+            .message = "optional value used without checking for undefined",
+            .help = "check before use: if (val !== undefined) { ... }\n           or provide a default: val ?? \"fallback\"",
+        });
+    }
+
+    /// Check if a member_access is on an un-narrowed optional_object binding.
+    fn checkOptionalObjectAccess(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
+        const obj_tag = self.ir_view.getTag(member.object) orelse return;
+        if (obj_tag != .identifier) return;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return;
+        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
+        if (ob.narrowed) return;
+        if (ob.kind != .optional_object) return;
+
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unchecked_optional_access,
+            .node = node,
+            .message = "property access on optional value without checking for undefined",
+            .help = "check before access: if (val) { ... val.prop ... }\n           or use optional chaining: val?.prop",
+        });
+    }
+
+    /// Handle reassignment: if target is a tracked optional and RHS is not optional-producing,
+    /// mark as permanently narrowed.
+    fn handleOptionalReassignment(self: *HandlerVerifier, assign: Node.AssignExpr) void {
+        const target_tag = self.ir_view.getTag(assign.target) orelse return;
+        if (target_tag != .identifier) return;
+
+        const binding = self.ir_view.getBinding(assign.target) orelse return;
+        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
+
+        // If RHS is another optional-producing call, keep tracking
+        if (self.isOptionalProducingCall(assign.value) != null) return;
+
+        // Reassignment to non-optional resolves optionality
+        ob.narrowed = true;
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
@@ -1025,6 +1347,8 @@ test "DiagnosticKind enum values" {
         .unused_variable,
         .unused_import,
         .non_exhaustive_match,
+        .unchecked_optional_use,
+        .unchecked_optional_access,
     };
     for (kinds, 0..) |k, i| {
         for (kinds, 0..) |k2, j| {
@@ -1043,6 +1367,16 @@ test "isResultProducingFunction" {
     try std.testing.expect(!isResultProducingFunction("sha256"));
     try std.testing.expect(!isResultProducingFunction("env"));
     try std.testing.expect(!isResultProducingFunction("cacheGet"));
+}
+
+test "isOptionalProducingFunction" {
+    try std.testing.expectEqual(OptionalKind.optional_string, isOptionalProducingFunction("env").?);
+    try std.testing.expectEqual(OptionalKind.optional_string, isOptionalProducingFunction("cacheGet").?);
+    try std.testing.expectEqual(OptionalKind.optional_string, isOptionalProducingFunction("parseBearer").?);
+    try std.testing.expectEqual(OptionalKind.optional_object, isOptionalProducingFunction("routerMatch").?);
+    try std.testing.expect(isOptionalProducingFunction("sha256") == null);
+    try std.testing.expect(isOptionalProducingFunction("jwtVerify") == null);
+    try std.testing.expect(isOptionalProducingFunction("cacheSet") == null);
 }
 
 test "getSourceLine" {

@@ -100,6 +100,54 @@ verify warning: unreachable code after return statement
    = help: remove the unreachable code, or restructure the control flow
 ```
 
+### 6. Exhaustive Optional Handling
+
+Four virtual module functions return optional values (`T | undefined`):
+
+- `env("KEY")` - returns `string | undefined`
+- `cacheGet("ns", "key")` - returns `string | undefined`
+- `parseBearer(header)` - returns `string | undefined`
+- `routerMatch(routes, req)` - returns `object | undefined`
+
+The verifier tracks these optional bindings and requires them to be narrowed before use. Using an optional value as a function argument, object property value, template literal expression, or in arithmetic/string concatenation without first checking for `undefined` is an error.
+
+```javascript
+import { env } from "zigttp:env";
+
+function handler(req) {
+    const appName = env("APP_NAME");
+
+    // ERROR: optional value used without checking for undefined
+    return Response.json({ app: appName });
+}
+```
+
+```
+verify error: optional value used without checking for undefined
+  --> handler.ts:6:30
+   |
+  6 |     return Response.json({ app: appName });
+   |                              ^
+   = help: check before use: if (val !== undefined) { ... }
+           or provide a default: val ?? "fallback"
+```
+
+Property access on an un-narrowed `optional_object` (from `routerMatch`) is also an error:
+
+```
+verify error: property access on optional value without checking for undefined
+```
+
+**Recognized narrowing patterns:**
+
+- `if (val) { ... }` - truthiness narrows in then-branch
+- `if (!val) { return ...; }` - negated early return narrows subsequent code
+- `if (val !== undefined) { ... }` - explicit check narrows in then-branch
+- `if (val === undefined) { return ...; }` - explicit check with early return
+- `const x = env("KEY") ?? "default"` - nullish coalesce resolves at declaration
+- `val = "override"` - reassignment to non-optional clears tracking
+- `val?.prop` - optional chaining is safe (not flagged)
+
 ## Running Tests
 
 ```bash

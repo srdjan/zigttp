@@ -17,12 +17,12 @@ function verifyWebhook(body: string, signature: string): boolean {
 }
 
 function handler(req: Request): Response {
-    const appName = env("APP_NAME");
+    const appName = env("APP_NAME") ?? "zigttp";
     const hash = sha256(req.body);
 
     return Response.json({
         app: appName,
         bodyHash: hash,
-        greeting: base64Encode("Hello from " + (appName ?? "zigttp")),
+        greeting: base64Encode("Hello from " + appName),
     });
 }
