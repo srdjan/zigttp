@@ -811,7 +811,7 @@ const routes = {
 
 function handler(req) {
     const match = routerMatch(routes, req);
-    if (match !== null) {
+    if (match) {
         req.params = match.params;
         return match.handler(req);
     }
@@ -829,7 +829,7 @@ import { parseBearer, jwtVerify, jwtSign, verifyWebhookSignature, timingSafeEqua
 ```
 
 **parseBearer(header)** - Extract token from "Bearer \<token\>" header. Returns
-string or null.
+string or undefined.
 
 ```typescript
 const token = parseBearer(req.headers["authorization"]);
@@ -937,8 +937,8 @@ expiry. Cache persists across requests within the same runtime pool slot.
 import { cacheGet, cacheSet, cacheDelete, cacheIncr, cacheStats } from "zigttp:cache";
 ```
 
-**cacheGet(namespace, key)** - Retrieve a cached value. Returns string or null.
-Expired entries are removed on access.
+**cacheGet(namespace, key)** - Retrieve a cached value. Returns string or
+undefined. Expired entries are removed on access.
 
 ```typescript
 const cached = cacheGet("sessions", sessionId);
@@ -1768,15 +1768,18 @@ zigttp can statically prove your handler is correct at build time. Add `-Dverify
 zig build -Dhandler=handler.ts -Dverify
 ```
 
-The verifier checks three properties:
+The verifier checks six properties:
 
 1. **Exhaustive returns** - every code path through the handler returns a Response
 2. **Result safety** - Result values from `jwtVerify`, `validateJson`, etc. have `.ok` checked before `.value` is accessed
 3. **Unreachable code** - statements after unconditional returns are flagged (warning)
+4. **Unused variables** - declared variables that are never referenced (warning, suppress with `_` prefix)
+5. **Non-exhaustive match** - match expressions without a default arm (warning)
+6. **Optional safety** - optional values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed before use
 
 This is possible because zigttp's JS subset bans all non-trivial control flow (`while`, `try/catch`, `break/continue`). The IR tree is the control flow graph.
 
-Example diagnostic:
+Example diagnostics:
 
 ```
 verify error: not all code paths return a Response
@@ -1786,6 +1789,18 @@ verify error: not all code paths return a Response
    |                 ^
    = help: ensure every branch (if/else, switch/default) ends with a return statement
 ```
+
+```
+verify error: optional value used without checking for undefined
+  --> handler.ts:6:14
+   |
+  6 |         app: appName,
+   |              ^
+   = help: check before use: if (val !== undefined) { ... }
+           or provide a default: val ?? "fallback"
+```
+
+Optional values are narrowed by `if (val)`, `if (!val) return`, `val !== undefined`, `val ?? default`, or reassignment. Optional chaining (`val?.prop`) is safe.
 
 See [verification.md](verification.md) for the full specification, recognized patterns, and test fixtures.
 
