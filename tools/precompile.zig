@@ -4,7 +4,7 @@
 //! This eliminates runtime parsing overhead and removes the need for source files
 //! in deployment.
 //!
-//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--policy policy.json] <handler.ts> <output.zig>
+//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
 const zts = @import("zts");
@@ -19,6 +19,7 @@ const handler_policy = zts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
 const openapi_manifest = @import("openapi_manifest.zig");
+const prove_upgrade = @import("prove_upgrade.zig");
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -93,7 +94,7 @@ fn readFilePosix(allocator: std.mem.Allocator, path: []const u8, max_size: usize
 }
 
 /// Write a file synchronously using posix operations
-fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
+pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -104,7 +105,6 @@ fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocat
         0o644,
     );
     defer std.Io.Threaded.closeFd(fd);
-    if (std.c.ftruncate(fd, 0) != 0) return error.WriteFailure;
 
     var total_written: usize = 0;
     while (total_written < data.len) {
@@ -134,6 +134,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var policy_path: ?[]const u8 = null;
     var deploy_target_str: ?[]const u8 = null;
     var replay_trace_path: ?[]const u8 = null;
+    var prove_spec: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
@@ -175,6 +176,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
             continue;
         }
+        if (std.mem.eql(u8, arg, "--prove")) {
+            prove_spec = args.next() orelse {
+                std.debug.print("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
 
         if (handler_path == null) {
             handler_path = arg;
@@ -190,13 +198,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -423,6 +431,88 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 deploy_target.toString(),
                 extract.facts.proof_level.toString(),
             });
+        }
+
+        // Run proven evolution pipeline if --prove was passed
+        if (prove_spec) |spec| {
+            // Parse spec format: "contract.json" or "contract.json:traces.jsonl"
+            var old_contract_path: []const u8 = spec;
+            var prove_trace_path: ?[]const u8 = null;
+
+            if (std.mem.indexOf(u8, spec, ":")) |colon_pos| {
+                old_contract_path = spec[0..colon_pos];
+                if (colon_pos + 1 < spec.len) {
+                    prove_trace_path = spec[colon_pos + 1 ..];
+                }
+            }
+
+            // Read old contract JSON
+            const old_contract_json = readFilePosix(allocator, old_contract_path, 10 * 1024 * 1024) catch |err| {
+                std.debug.print("Error reading old contract '{s}': {}\n", .{ old_contract_path, err });
+                return err;
+            };
+            defer allocator.free(old_contract_json);
+
+            // Run replay against traces if provided
+            var prove_replay: ?prove_upgrade.ReplaySummary = null;
+            if (prove_trace_path) |trace_path| {
+                const prove_trace_source = readFilePosix(allocator, trace_path, 100 * 1024 * 1024) catch |err| {
+                    std.debug.print("Error reading trace file '{s}': {}\n", .{ trace_path, err });
+                    return err;
+                };
+                defer allocator.free(prove_trace_source);
+
+                const groups = zts.trace.parseTraceFile(allocator, prove_trace_source) catch |err| {
+                    std.debug.print("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
+                    return err;
+                };
+                defer {
+                    for (groups) |g| allocator.free(g.io_calls);
+                    allocator.free(groups);
+                }
+
+                if (groups.len > 0) {
+                    std.debug.print("Replaying {d} traces for proven evolution...\n", .{groups.len});
+                    const replay_result = runBuildTimeReplay(allocator, source, handler_path_final, groups) catch |err| {
+                        std.debug.print("Replay verification failed: {}\n", .{err});
+                        return err;
+                    };
+                    prove_replay = .{
+                        .total = replay_result.total,
+                        .identical = replay_result.pass,
+                        .status_changed = 0,
+                        .body_changed = 0,
+                        .diverged = replay_result.fail,
+                    };
+                }
+            }
+
+            // Run the prove pipeline
+            var result = prove_upgrade.prove(
+                allocator,
+                old_contract_json,
+                contract,
+                prove_replay,
+                handler_path_final,
+            ) catch |err| {
+                std.debug.print("Proven evolution failed: {}\n", .{err});
+                return err;
+            };
+            defer result.deinit(allocator);
+
+            // Write outputs
+            const prove_dir = deriveSiblingPath(allocator, output_path_final, "") catch |err| {
+                std.debug.print("Error deriving prove output dir: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(prove_dir);
+
+            prove_upgrade.writeProofOutputs(allocator, &result.certificate, prove_dir) catch |err| {
+                std.debug.print("Error writing proof outputs: {}\n", .{err});
+                return err;
+            };
+
+            std.debug.print("Proven evolution: {s}\n", .{result.certificate.classification.toString()});
         }
     }
 }

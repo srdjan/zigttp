@@ -57,6 +57,7 @@ pub const type_env = @import("type_env.zig");
 pub const type_checker = @import("type_checker.zig");
 pub const bytecode_verifier = @import("bytecode_verifier.zig");
 pub const trace = @import("trace.zig");
+pub const contract_diff = @import("contract_diff.zig");
 pub const modules = @import("modules/root.zig");
 // Optional/experimental modules (not wired into runtime by default)
 // These are kept in zts/ for future development but not exported publicly.

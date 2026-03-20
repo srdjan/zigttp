@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
     const replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time");
+    const prove_spec = b.option([]const u8, "prove", "Prove upgrade safety (format: contract.json or contract.json:traces.jsonl)");
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -106,6 +107,10 @@ pub fn build(b: *std.Build) void {
         if (replay_path) |rp| {
             run_precompile.addArg("--replay");
             run_precompile.addArg(rp);
+        }
+        if (prove_spec) |ps| {
+            run_precompile.addArg("--prove");
+            run_precompile.addArg(ps);
         }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");

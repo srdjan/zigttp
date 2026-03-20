@@ -9,29 +9,16 @@
 //! Usage: called by precompile.zig when --deploy <target> is passed.
 
 const std = @import("std");
-const handler_contract = @import("zts").handler_contract;
+const zts = @import("zts");
+const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
+const contract_diff = zts.contract_diff;
 
 // -------------------------------------------------------------------------
 // Platform-agnostic proven facts
 // -------------------------------------------------------------------------
 
-pub const ProofLevel = enum {
-    /// All sections fully proven (no dynamic flags, verification passed)
-    complete,
-    /// Some sections proven, some need manual review
-    partial,
-    /// No verification ran
-    none,
-
-    pub fn toString(self: ProofLevel) []const u8 {
-        return switch (self) {
-            .complete => "complete",
-            .partial => "partial",
-            .none => "none",
-        };
-    }
-};
+pub const ProofLevel = contract_diff.ProofLevel;
 
 pub const ProvenRoute = struct {
     pattern: []const u8,
@@ -159,17 +146,7 @@ fn extractHandlerName(path: []const u8) []const u8 {
     return filename[0..end];
 }
 
-pub fn deriveProofLevel(contract: *const HandlerContract) ProofLevel {
-    const has_verification = contract.verification != null;
-    if (!has_verification) return .none;
-
-    const v = contract.verification.?;
-    const all_checks = v.exhaustive_returns and v.results_safe and v.bytecode_verified;
-    const no_dynamic = !contract.env.dynamic and !contract.egress.dynamic and !contract.cache.dynamic;
-
-    if (all_checks and no_dynamic) return .complete;
-    return .partial;
-}
+pub const deriveProofLevel = contract_diff.deriveProofLevel;
 
 // -------------------------------------------------------------------------
 // Renderer dispatch
