@@ -77,6 +77,8 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 
 **Hybrid Arena Allocation**: Request-scoped arena with O(1) bulk reset. Write barriers detect arena escape. GC disabled in hybrid mode.
 
+**Guard Composition** (`zts/parser/parse.zig`, `zts/modules/compose.zig`): Compile-time handler composition via `guard()` + pipe operator. The parser collects pipe chains containing `guard()` calls and desugars them into a single flat arrow function with sequential if-checks. Pre-guards (before the handler) receive `req` and short-circuit on non-undefined return. Post-guards (after the handler) receive the response and can replace it. The desugared form uses standard IR nodes (var_decl, if_stmt, return_stmt) so the verifier, contract extractor, and precompiler handle it transparently. Errors: exactly one non-guard handler required, `guard()` must be imported from `zigttp:compose`.
+
 ### Performance Optimizations
 
 The request pipeline includes several optimizations for low-latency FaaS workloads:
@@ -247,8 +249,9 @@ Native `zigttp:*` modules provide common FaaS functionality with zero JS interpr
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema subset (type, required, properties, min/maxLength, min/max, enum, items). Per-runtime SchemaRegistry via module_state. |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory KV cache with namespace isolation, LRU eviction, lazy TTL. Per-runtime CacheStore via module_state. Persists across requests in same pool slot. |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O. `parallel(thunks)` executes fetchSync calls concurrently using threads, returns results in declaration order. `race(thunks)` returns the first successful result. Requires outbound HTTP enabled. IoCallbacks via module_state slot 6, set by runtime layer. |
+| `zigttp:compose` | `guard` | Compile-time handler composition. `guard(fn)` marks a function as a guard in a pipe chain. The parser desugars `guard(g1) \|> guard(g2) \|> handler \|> guard(post)` into a single flat function with sequential if-checks. Pre-guards `(req) => Response \| undefined` short-circuit; post-guards `(res) => Response \| undefined` transform. No runtime overhead - pure compile-time macro. |
 
-Module implementations: `zts/modules/{auth,validate,cache,env,crypto,router,io,util}.zig`. Shared helpers in `util.zig`. Resolver/wiring in `resolver.zig` and `root.zig`.
+Module implementations: `zts/modules/{auth,validate,cache,env,crypto,router,io,compose,util}.zig`. Shared helpers in `util.zig`. Resolver/wiring in `resolver.zig` and `root.zig`.
 
 Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size array of opaque pointers with deinit callbacks, indexed by VirtualModule enum ordinal. Lazy-initialized on first use (validate, cache) or set by runtime during init (io).
 

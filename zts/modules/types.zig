@@ -76,6 +76,8 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         // zigttp:io
         .{ .name = "parallel", .sig = makeSig(&.{}, pool.idx_string) }, // takes array of thunks
         .{ .name = "race", .sig = makeSig(&.{}, pool.idx_string) }, // takes array of thunks
+        // zigttp:compose
+        .{ .name = "guard", .sig = makeSig(&.{pool.idx_string}, pool.idx_string) }, // compile-time marker
     };
 
     for (sigs) |entry| {

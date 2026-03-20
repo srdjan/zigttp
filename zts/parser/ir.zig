@@ -993,6 +993,18 @@ pub const IRStore = struct {
         };
     }
 
+    /// Unpack call expression data
+    pub fn getCallData(self: *const IRStore, idx: NodeIndex) ?Node.CallExpr {
+        if (idx >= self.data.items.len) return null;
+        const d = self.data.items[idx];
+        return .{
+            .callee = d.a,
+            .args_start = @truncate(d.b >> 8),
+            .args_count = @truncate(d.b),
+            .is_optional = (d.b >> 24) != 0,
+        };
+    }
+
     // ============================================================
     // Node Adapter: Accept full Node struct for seamless migration
     // ============================================================
@@ -1738,17 +1750,7 @@ pub const IrView = struct {
     pub fn getCall(self: IrView, idx: NodeIndex) ?Node.CallExpr {
         return switch (self.impl) {
             .node_list => |nl| if (nl.get(idx)) |node| node.data.call else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                // Call packed: a = callee, b[0:8] = args_count, b[8:24] = args_start, b[24] = is_optional
-                break :blk .{
-                    .callee = d.a,
-                    .args_start = @truncate(d.b >> 8),
-                    .args_count = @truncate(d.b),
-                    .is_optional = (d.b >> 24) != 0,
-                };
-            },
+            .ir_store => |ir| ir.getCallData(idx),
         };
     }
 

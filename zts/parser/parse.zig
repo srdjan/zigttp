@@ -93,6 +93,9 @@ pub const Parser = struct {
     in_switch: bool,
     in_function: bool,
 
+    // Guard composition: binding slot for `guard` imported from zigttp:compose
+    guard_binding_slot: ?u16 = null,
+
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         var parser = Parser{
             .allocator = allocator,
@@ -1411,6 +1414,9 @@ pub const Parser = struct {
         var specifiers = std.ArrayList(NodeIndex).empty;
         defer specifiers.deinit(self.allocator);
 
+        // Track guard binding candidate (confirmed after module string is known)
+        var guard_candidate_slot: ?u16 = null;
+
         // Must have { for named imports
         if (!self.check(.lbrace)) {
             // Check for `import "module"` (side-effect import) or `import X from`
@@ -1479,6 +1485,12 @@ pub const Parser = struct {
 
             try specifiers.append(self.allocator, spec_node);
 
+            // Track guard binding candidate for zigttp:compose detection
+            const imported_text = imported_name.text(self.source);
+            if (std.mem.eql(u8, imported_text, "guard")) {
+                guard_candidate_slot = binding.slot;
+            }
+
             if (!self.match(.comma)) break;
         }
 
@@ -1499,6 +1511,13 @@ pub const Parser = struct {
         const module_idx = try self.addString(module_str);
 
         try self.expectSemicolon();
+
+        // Confirm guard binding from zigttp:compose for pipe chain desugaring
+        if (std.mem.eql(u8, module_str, "zigttp:compose")) {
+            if (guard_candidate_slot) |slot| {
+                self.guard_binding_slot = slot;
+            }
+        }
 
         const specs_start = if (specifiers.items.len > 0)
             try self.addNodeList(specifiers.items)
@@ -1777,22 +1796,63 @@ pub const Parser = struct {
             },
 
             // Pipe operator: a |> f desugars to f(a)
+            // When guard() calls are present, the entire chain is desugared
+            // into a flat guard composition function at compile time.
             .pipe_gt => {
-                self.advance();
-                // Parse the right-hand side (the function to call)
-                const func = try self.parseExpression(prec);
-                // Desugar to f(a): create a call node with left as the single argument
-                const args_start = try self.addNodeList(&[_]NodeIndex{left});
-                return try self.nodes.add(.{
-                    .tag = .call,
-                    .loc = loc,
-                    .data = .{ .call = .{
-                        .callee = func,
-                        .args_start = args_start,
-                        .args_count = 1,
-                        .is_optional = false,
-                    } },
-                });
+                if (self.guard_binding_slot == null) {
+                    // Fast path: no guard imports, zero-allocation fold
+                    var result = left;
+                    while (true) {
+                        self.advance(); // consume |>
+                        const func = try self.parseExpression(@enumFromInt(@intFromEnum(prec)));
+                        const args_start = try self.addNodeList(&[_]NodeIndex{result});
+                        result = try self.nodes.add(.{
+                            .tag = .call,
+                            .loc = loc,
+                            .data = .{ .call = .{
+                                .callee = func,
+                                .args_start = args_start,
+                                .args_count = 1,
+                                .is_optional = false,
+                            } },
+                        });
+                        if (self.getInfixPrecedence(self.current.type) != .pipe_op) break;
+                    }
+                    return result;
+                }
+
+                // Slow path: guard() may be present, collect chain for analysis
+                var chain = std.ArrayList(NodeIndex).empty;
+                defer chain.deinit(self.allocator);
+                try chain.append(self.allocator, left);
+
+                while (true) {
+                    self.advance(); // consume |>
+                    const elem = try self.parseExpression(@enumFromInt(@intFromEnum(prec)));
+                    try chain.append(self.allocator, elem);
+                    if (self.getInfixPrecedence(self.current.type) != .pipe_op) break;
+                }
+
+                if (self.chainHasGuards(chain.items)) {
+                    return self.desugarGuardComposition(loc, chain.items);
+                }
+
+                // No guards found despite import - normal fold
+                var result = chain.items[0];
+                for (chain.items[1..]) |func| {
+                    const args_start = try self.addNodeList(&[_]NodeIndex{result});
+                    result = try self.nodes.add(.{
+                        .tag = .call,
+                        .loc = loc,
+                        .data = .{ .call = .{
+                            .callee = func,
+                            .args_start = args_start,
+                            .args_count = 1,
+                            .is_optional = false,
+                        } },
+                    });
+                }
+                return result;
             },
 
             // instanceof not supported - use discriminated unions with tag property
@@ -3216,6 +3276,275 @@ pub const Parser = struct {
         self.errors.exitPanicMode();
     }
 
+    // ============ Guard Composition ============
+
+    /// Check if a node is a guard() call (callee matches guard_binding_slot)
+    fn isGuardCall(self: *const Parser, node_idx: NodeIndex) bool {
+        const guard_slot = self.guard_binding_slot orelse return false;
+        if (self.nodes.getTag(node_idx) != .call) return false;
+        const call = self.nodes.getCallData(node_idx) orelse return false;
+        if (call.args_count != 1) return false;
+        if (self.nodes.getTag(call.callee) != .identifier) return false;
+        const binding = self.nodes.getBinding(call.callee);
+        return binding.slot == guard_slot;
+    }
+
+    /// Extract the guard function argument from a guard(fn) call node
+    fn extractGuardArg(self: *const Parser, node_idx: NodeIndex) ?NodeIndex {
+        const call = self.nodes.getCallData(node_idx) orelse return null;
+        return self.nodes.getListIndex(call.args_start, 0);
+    }
+
+    /// Check if any element in a pipe chain is a guard() call
+    fn chainHasGuards(self: *const Parser, chain: []const NodeIndex) bool {
+        for (chain) |elem| {
+            if (self.isGuardCall(elem)) return true;
+        }
+        return false;
+    }
+
+    /// Desugar a guard pipe chain into a flat arrow function.
+    ///
+    /// Input chain: [guard(g1), guard(g2), handler, guard(p1)]
+    /// Output: (req) => {
+    ///     const __g0 = g1(req); if (__g0 !== undefined) return __g0;
+    ///     const __g1 = g2(req); if (__g1 !== undefined) return __g1;
+    ///     const __res = handler(req);
+    ///     const __p0 = p1(__res); if (__p0 !== undefined) return __p0;
+    ///     return __res;
+    /// }
+    fn desugarGuardComposition(self: *Parser, loc: SourceLocation, chain: []const NodeIndex) anyerror!NodeIndex {
+        // Classify chain elements into pre-guards, handler, post-guards
+        var handler_idx: ?usize = null;
+        var non_guard_count: usize = 0;
+
+        for (chain, 0..) |elem, i| {
+            if (!self.isGuardCall(elem)) {
+                non_guard_count += 1;
+                if (handler_idx == null) {
+                    handler_idx = i;
+                }
+            }
+        }
+
+        // Validation
+        if (non_guard_count == 0) {
+            self.errorAt(loc, "guard composition requires a handler function");
+            return error.ParseError;
+        }
+        if (non_guard_count > 1) {
+            self.errorAt(loc, "guard composition allows exactly one handler");
+            return error.ParseError;
+        }
+
+        const handler_pos = handler_idx.?;
+
+        // Create a new function scope for the synthetic arrow function
+        const scope_id = try self.scopes.pushScope(.function);
+        const was_in_function = self.in_function;
+        self.in_function = true;
+
+        // Declare the req parameter
+        const req_atom = try self.addAtom("__req");
+        const req_binding = self.scopes.declareBinding(
+            "__req",
+            req_atom,
+            .parameter,
+            false,
+        ) catch return error.TooManyLocals;
+
+        // Create parameter node
+        const param_node = try self.nodes.add(.{
+            .tag = .pattern_element,
+            .loc = loc,
+            .data = .{ .pattern_elem = .{
+                .kind = .simple,
+                .binding = req_binding,
+                .key = null_node,
+                .key_atom = 0,
+                .default_value = null_node,
+            } },
+        });
+
+        // Build the body statements
+        var stmts = std.ArrayList(NodeIndex).empty;
+        defer stmts.deinit(self.allocator);
+
+        // Pre-guards: all elements before handler_pos are guards (by classification invariant)
+        var local_counter: u16 = 0;
+        for (chain[0..handler_pos]) |elem| {
+            const guard_fn = self.extractGuardArg(elem) orelse continue;
+            try self.emitGuardCheck(&stmts, loc, guard_fn, req_binding, &local_counter);
+        }
+
+        // Handler call - check if post-guards exist (all post-handler elements are guards)
+        const has_post_guards = handler_pos + 1 < chain.len;
+
+        if (has_post_guards) {
+            // Capture handler result for post-guards
+            const res_atom = try self.addAtom("__res");
+            const res_binding = self.scopes.declareBinding(
+                "__res",
+                res_atom,
+                .variable,
+                true,
+            ) catch return error.TooManyLocals;
+
+            // __res = handler(req)
+            const handler_call = try self.emitCallWithArg(loc, chain[handler_pos], req_binding);
+            const res_decl = try self.nodes.add(.{
+                .tag = .var_decl,
+                .loc = loc,
+                .data = .{ .var_decl = .{
+                    .binding = res_binding,
+                    .pattern = null_node,
+                    .init = handler_call,
+                    .kind = .@"const",
+                } },
+            });
+            try stmts.append(self.allocator, res_decl);
+
+            // Post-guards: all elements after handler are guards (by classification invariant)
+            for (chain[handler_pos + 1 ..]) |elem| {
+                const guard_fn = self.extractGuardArg(elem) orelse continue;
+                try self.emitGuardCheck(&stmts, loc, guard_fn, res_binding, &local_counter);
+            }
+
+            // return __res
+            const res_ref = try self.nodes.addIdentifier(loc, res_binding);
+            const final_return = try self.nodes.add(.{
+                .tag = .return_stmt,
+                .loc = loc,
+                .data = .{ .opt_value = res_ref },
+            });
+            try stmts.append(self.allocator, final_return);
+        } else {
+            // No post-guards: return handler(req) directly
+            const handler_call = try self.emitCallWithArg(loc, chain[handler_pos], req_binding);
+            const handler_return = try self.nodes.add(.{
+                .tag = .return_stmt,
+                .loc = loc,
+                .data = .{ .opt_value = handler_call },
+            });
+            try stmts.append(self.allocator, handler_return);
+        }
+
+        // Create the block body. Push/pop an empty scope to get a valid scope_id
+        // for BlockData (all bindings live in the enclosing function scope).
+        const block_scope = try self.scopes.pushScope(.block);
+        self.scopes.popScope();
+
+        const stmts_start = try self.addStmtList(stmts.items);
+        const body = try self.nodes.add(.{
+            .tag = .block,
+            .loc = loc,
+            .data = .{ .block = .{
+                .stmts_start = stmts_start,
+                .stmts_count = @intCast(stmts.items.len),
+                .scope_id = block_scope,
+            } },
+        });
+
+        self.in_function = was_in_function;
+        self.scopes.popScope();
+
+        // Create the arrow function
+        const params_start = try self.addNodeList(&[_]NodeIndex{param_node});
+        return try self.nodes.add(.{
+            .tag = .arrow_function,
+            .loc = loc,
+            .data = .{ .function = .{
+                .scope_id = scope_id,
+                .name_atom = 0,
+                .params_start = params_start,
+                .params_count = 1,
+                .body = body,
+                .flags = .{ .is_arrow = true },
+            } },
+        });
+    }
+
+    /// Emit a guard check: const __gN = guard_fn(arg); if (__gN !== undefined) return __gN;
+    fn emitGuardCheck(
+        self: *Parser,
+        stmts: *std.ArrayList(NodeIndex),
+        loc: SourceLocation,
+        guard_fn: NodeIndex,
+        arg_binding: BindingRef,
+        counter: *u16,
+    ) !void {
+
+        // Create temp variable name: __g0, __g1, etc.
+        var name_buf: [16]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "__g{d}", .{counter.*}) catch unreachable;
+        counter.* += 1;
+
+        const temp_atom = try self.addAtom(name);
+        const temp_binding = self.scopes.declareBinding(
+            name,
+            temp_atom,
+            .variable,
+            true,
+        ) catch return error.TooManyLocals;
+
+        // const __gN = guard_fn(arg)
+        const call_node = try self.emitCallWithArg(loc, guard_fn, arg_binding);
+        const var_decl = try self.nodes.add(.{
+            .tag = .var_decl,
+            .loc = loc,
+            .data = .{ .var_decl = .{
+                .binding = temp_binding,
+                .pattern = null_node,
+                .init = call_node,
+                .kind = .@"const",
+            } },
+        });
+        try stmts.append(self.allocator, var_decl);
+
+        // if (__gN !== undefined) return __gN
+        const temp_ref1 = try self.nodes.addIdentifier(loc, temp_binding);
+        const undef_node = try self.nodes.add(.{
+            .tag = .lit_undefined,
+            .loc = loc,
+            .data = .{ .none = {} },
+        });
+        const condition = try self.nodes.add(Node.binaryOp(loc, .strict_neq, temp_ref1, undef_node));
+
+        const temp_ref2 = try self.nodes.addIdentifier(loc, temp_binding);
+        const return_stmt = try self.nodes.add(.{
+            .tag = .return_stmt,
+            .loc = loc,
+            .data = .{ .opt_value = temp_ref2 },
+        });
+
+        const if_stmt = try self.nodes.add(.{
+            .tag = .if_stmt,
+            .loc = loc,
+            .data = .{ .if_stmt = .{
+                .condition = condition,
+                .then_branch = return_stmt,
+                .else_branch = null_node,
+            } },
+        });
+        try stmts.append(self.allocator, if_stmt);
+    }
+
+    /// Create a call node: callee(arg_binding)
+    fn emitCallWithArg(self: *Parser, loc: SourceLocation, callee: NodeIndex, arg_binding: BindingRef) !NodeIndex {
+        const arg_ref = try self.nodes.addIdentifier(loc, arg_binding);
+        const args_start = try self.addNodeList(&[_]NodeIndex{arg_ref});
+        return try self.nodes.add(.{
+            .tag = .call,
+            .loc = loc,
+            .data = .{ .call = .{
+                .callee = callee,
+                .args_start = args_start,
+                .args_count = 1,
+                .is_optional = false,
+            } },
+        });
+    }
+
     // ============ Node List Helpers ============
 
     fn addNodeList(self: *Parser, indices: []const NodeIndex) anyerror!NodeIndex {
@@ -3904,6 +4233,125 @@ test "pipe operator: chained" {
     };
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+// ============================================================================
+// Guard Composition Tests
+// ============================================================================
+
+test "guard composition: pre-guards with handler" {
+    const source =
+        \\import { guard } from "zigttp:compose";
+        \\const g1 = (req) => { if (req.method === "OPTIONS") return Response.text(""); };
+        \\const g2 = (req) => { if (!req.headers.get("auth")) return Response.json({error: "no"}); };
+        \\function handler(req) { return Response.json({ok: true}); }
+        \\const h = guard(g1) |> guard(g2) |> handler;
+    ;
+
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+    // Guard binding should have been detected
+    try std.testing.expect(parser.guard_binding_slot != null);
+}
+
+test "guard composition: pre-guards and post-guards" {
+    const source =
+        \\import { guard } from "zigttp:compose";
+        \\const pre = (req) => { };
+        \\function handler(req) { return Response.json({ok: true}); }
+        \\const post = (res) => { };
+        \\const h = guard(pre) |> handler |> guard(post);
+    ;
+
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "guard composition: single guard with handler" {
+    const source =
+        \\import { guard } from "zigttp:compose";
+        \\const authGuard = (req) => { };
+        \\function handler(req) { return Response.json({ok: true}); }
+        \\const h = guard(authGuard) |> handler;
+    ;
+
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "guard composition: error on no handler" {
+    const source =
+        \\import { guard } from "zigttp:compose";
+        \\const g1 = (req) => { };
+        \\const g2 = (req) => { };
+        \\const h = guard(g1) |> guard(g2);
+    ;
+
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        return;
+    };
+    try std.testing.expect(false);
+}
+
+test "guard composition: error on multiple handlers" {
+    const source =
+        \\import { guard } from "zigttp:compose";
+        \\const g1 = (req) => { };
+        \\function h1(req) { return Response.json({ok: true}); }
+        \\function h2(req) { return Response.json({ok: true}); }
+        \\const h = guard(g1) |> h1 |> h2;
+    ;
+
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        return;
+    };
+    try std.testing.expect(false);
+}
+
+test "guard composition: normal pipe without guard import" {
+    // Without zigttp:compose import, pipe should work normally
+    const source = "const r = x |> f |> g;";
+
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+    // No guard binding should be detected
+    try std.testing.expect(parser.guard_binding_slot == null);
 }
 
 test "unsupported: instanceof operator" {
