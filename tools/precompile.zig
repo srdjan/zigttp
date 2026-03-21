@@ -4,7 +4,7 @@
 //! This eliminates runtime parsing overhead and removes the need for source files
 //! in deployment.
 //!
-//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
+//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -21,6 +21,8 @@ const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
 const openapi_manifest = @import("openapi_manifest.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
+const sqlite = zts.sqlite;
+const sql_analysis = zts.sql_analysis;
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -113,6 +115,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var emit_verify = false;
     var emit_contract = false;
     var emit_openapi = false;
+    var sql_schema_path: ?[]const u8 = null;
     var policy_path: ?[]const u8 = null;
     var deploy_target_str: ?[]const u8 = null;
     var replay_trace_path: ?[]const u8 = null;
@@ -135,6 +138,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
         if (std.mem.eql(u8, arg, "--openapi")) {
             emit_openapi = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--sql-schema")) {
+            sql_schema_path = args.next() orelse {
+                std.debug.print("Missing path after --sql-schema\n", .{});
+                return error.MissingArgument;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--policy")) {
@@ -180,13 +190,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
         return error.MissingArgument;
     };
 
     const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
+        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
         std.debug.print("\nMissing output path.\n", .{});
         return error.MissingArgument;
     };
@@ -224,6 +234,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         emit_verify,
         emit_contract,
         policy,
+        sql_schema_path,
     ) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
@@ -679,6 +690,7 @@ fn compileHandler(
     emit_verify: bool,
     emit_contract: bool,
     policy: ?HandlerPolicy,
+    sql_schema_path: ?[]const u8,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
     var strip_result: ?zts.StripResult = null;
@@ -758,6 +770,7 @@ fn compileHandler(
             needs_contract,
             emit_contract,
             policy,
+            sql_schema_path,
         );
     }
 
@@ -961,6 +974,7 @@ fn compileHandler(
                     aot,
                     verify_info,
                     policy,
+                    sql_schema_path,
                 )
             else
                 null;
@@ -1005,6 +1019,7 @@ fn compileHandler(
             effective_aot,
             verify_info,
             policy,
+            sql_schema_path,
         );
     }
 
@@ -1048,6 +1063,7 @@ fn compileMultiModule(
     needs_contract: bool,
     emit_contract: bool,
     policy: ?HandlerPolicy,
+    sql_schema_path: ?[]const u8,
 ) !CompiledHandler {
     // Build module graph
     var graph = zts.modules.ModuleGraph.init(allocator);
@@ -1132,6 +1148,7 @@ fn compileMultiModule(
             filename,
             emit_contract,
             policy,
+            sql_schema_path,
         );
     }
 
@@ -1247,6 +1264,7 @@ fn buildContractWithPolicy(
     aot: ?AotAnalysis,
     verify_info: ?VerificationInfo,
     policy: ?HandlerPolicy,
+    sql_schema_path: ?[]const u8,
 ) !HandlerContract {
     var contract = try buildContract(
         allocator,
@@ -1259,6 +1277,7 @@ fn buildContractWithPolicy(
     );
     errdefer contract.deinit(allocator);
 
+    try validateSqlContract(allocator, &contract, sql_schema_path);
     try enforcePolicyForContract(allocator, filename, &contract, policy);
     if (policy != null) {
         if (!builtin.is_test) std.debug.print("Capability policy check passed\n", .{});
@@ -1275,6 +1294,7 @@ fn buildMultiModuleContract(
     entry_filename: []const u8,
     emit_contract: bool,
     policy: ?HandlerPolicy,
+    sql_schema_path: ?[]const u8,
 ) !HandlerContract {
     var merged = try initMergedContract(allocator, entry_filename);
     errdefer merged.deinit(allocator);
@@ -1304,6 +1324,7 @@ fn buildMultiModuleContract(
         );
         defer module_contract.deinit(allocator);
 
+        try validateSqlContract(allocator, &module_contract, sql_schema_path);
         try enforcePolicyForContract(allocator, module.path, &module_contract, policy);
         if (policy != null) policy_checked = true;
 
@@ -1330,6 +1351,7 @@ fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !H
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
@@ -1397,6 +1419,11 @@ fn mergeModuleContract(
         try appendUniqueString(allocator, &target.cache.namespaces, ns, false);
     }
     target.cache.dynamic = target.cache.dynamic or source.cache.dynamic;
+
+    for (source.sql.queries.items) |query| {
+        try appendSqlQuery(allocator, &target.sql.queries, query);
+    }
+    target.sql.dynamic = target.sql.dynamic or source.sql.dynamic;
 
     target.durable.used = target.durable.used or source.durable.used;
     for (source.durable.keys.literal.items) |key| {
@@ -1487,6 +1514,32 @@ fn appendUniqueString(
     try list.append(allocator, try allocator.dupe(u8, value));
 }
 
+fn appendSqlQuery(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(handler_contract.SqlQueryInfo),
+    query: handler_contract.SqlQueryInfo,
+) !void {
+    for (list.items) |*existing| {
+        if (!std.mem.eql(u8, existing.name, query.name)) continue;
+        if (!std.mem.eql(u8, existing.statement, query.statement)) return error.DuplicateSqlQueryName;
+        return;
+    }
+
+    var copy = handler_contract.SqlQueryInfo{
+        .name = try allocator.dupe(u8, query.name),
+        .statement = try allocator.dupe(u8, query.statement),
+        .operation = query.operation,
+        .tables = .empty,
+    };
+    errdefer copy.deinit(allocator);
+
+    for (query.tables.items) |table| {
+        try appendUniqueString(allocator, &copy.tables, table, false);
+    }
+
+    try list.append(allocator, copy);
+}
+
 fn upsertApiSchema(
     allocator: std.mem.Allocator,
     list: *std.ArrayList(handler_contract.ApiSchemaInfo),
@@ -1511,6 +1564,77 @@ fn hasApiRoute(routes: []const handler_contract.ApiRouteInfo, method: []const u8
         if (std.mem.eql(u8, route.method, method) and std.mem.eql(u8, route.path, path)) return true;
     }
     return false;
+}
+
+fn validateSqlContract(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    sql_schema_path: ?[]const u8,
+) !void {
+    if (contract.sql.queries.items.len == 0) return;
+
+    const schema_path = sql_schema_path orelse {
+        if (!builtin.is_test) {
+            std.debug.print("zigttp:sql queries require --sql-schema <schema.sql|schema.sqlite>\n", .{});
+        }
+        return error.MissingSqlSchema;
+    };
+
+    var db = try openSqlSchemaDatabase(allocator, schema_path);
+    defer db.close();
+
+    for (contract.sql.queries.items) |*query| {
+        var analysis = sql_analysis.analyzeStatement(allocator, query.statement) catch |err| {
+            if (!builtin.is_test) {
+                std.debug.print("Unsupported SQL statement for query '{s}': {s}\n", .{ query.name, query.statement });
+            }
+            return err;
+        };
+        defer analysis.deinit(allocator);
+
+        var stmt = db.prepare(query.statement) catch {
+            if (!builtin.is_test) {
+                std.debug.print("SQL validation failed for query '{s}': {s}\n", .{ query.name, db.errmsg() });
+            }
+            return error.InvalidSqlQuery;
+        };
+        defer stmt.finalize();
+
+        try ensureNamedParameters(&stmt, query.name);
+
+        query.operation = analysis.operation.toString();
+        for (query.tables.items) |table| allocator.free(table);
+        query.tables.clearAndFree(allocator);
+        for (analysis.tables.items) |table| {
+            try appendUniqueString(allocator, &query.tables, table, false);
+        }
+    }
+}
+
+fn openSqlSchemaDatabase(allocator: std.mem.Allocator, schema_path: []const u8) !sqlite.Db {
+    if (std.mem.endsWith(u8, schema_path, ".sql")) {
+        const schema_source = try readFilePosix(allocator, schema_path, 10 * 1024 * 1024);
+        defer allocator.free(schema_source);
+
+        var db = try sqlite.Db.openInMemory();
+        errdefer db.close();
+        try db.exec(allocator, schema_source);
+        return db;
+    }
+
+    return sqlite.Db.openReadOnly(allocator, schema_path);
+}
+
+fn ensureNamedParameters(stmt: *sqlite.Stmt, query_name: []const u8) !void {
+    const count = stmt.paramCount();
+    for (1..count + 1) |idx| {
+        if (stmt.paramName(idx) == null) {
+            if (!builtin.is_test) {
+                std.debug.print("SQL query '{s}' uses positional parameters; only named parameters are supported\n", .{query_name});
+            }
+            return error.PositionalSqlParameter;
+        }
+    }
 }
 
 fn enforcePolicyForContract(
@@ -1544,8 +1668,9 @@ fn printSandboxReport(contract: *const HandlerContract) void {
     const env_restricted = !contract.env.dynamic;
     const egress_restricted = !contract.egress.dynamic;
     const cache_restricted = !contract.cache.dynamic;
+    const sql_restricted = !contract.sql.dynamic;
 
-    if (env_restricted and egress_restricted and cache_restricted) {
+    if (env_restricted and egress_restricted and cache_restricted and sql_restricted) {
         std.debug.print("Sandbox: complete (all access statically proven)\n", .{});
     } else {
         std.debug.print("Sandbox derived from contract:\n", .{});
@@ -1554,6 +1679,25 @@ fn printSandboxReport(contract: *const HandlerContract) void {
     printSandboxSection("env", contract.env.literal.items, env_restricted, "no dynamic access");
     printSandboxSection("egress", contract.egress.hosts.items, egress_restricted, "no dynamic access");
     printSandboxSection("cache", contract.cache.namespaces.items, cache_restricted, "no dynamic access");
+    printSqlSandboxSection(contract);
+}
+
+fn printSqlSandboxSection(contract: *const HandlerContract) void {
+    if (contract.sql.dynamic) {
+        std.debug.print("  sql: unrestricted (dynamic access detected)\n", .{});
+        return;
+    }
+    if (contract.sql.queries.items.len == 0) {
+        std.debug.print("  sql: restricted to [] (none proven, no dynamic access)\n", .{});
+        return;
+    }
+
+    std.debug.print("  sql: restricted to [", .{});
+    for (contract.sql.queries.items, 0..) |query, idx| {
+        if (idx > 0) std.debug.print(", ", .{});
+        std.debug.print("{s}", .{query.name});
+    }
+    std.debug.print("] ({d} proven, no dynamic access)\n", .{contract.sql.queries.items.len});
 }
 
 fn printSandboxSection(name: []const u8, items: []const []const u8, restricted: bool, reason: []const u8) void {
@@ -1851,16 +1995,19 @@ fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*co
         try writePolicySectionFromAllowList(writer, "env", p.env);
         try writePolicySectionFromAllowList(writer, "egress", p.egress);
         try writePolicySectionFromAllowList(writer, "cache", p.cache);
+        try writePolicySectionFromAllowList(writer, "sql", p.sql);
     } else if (contract) |c| {
         // Auto-derive from contract proven facts
         try writeContractDerivedSection(writer, "env", c.env.literal.items, c.env.dynamic);
         try writeContractDerivedSection(writer, "egress", c.egress.hosts.items, c.egress.dynamic);
         try writeContractDerivedSection(writer, "cache", c.cache.namespaces.items, c.cache.dynamic);
+        try writeSqlContractDerivedSection(writer, c);
     } else {
         // No policy, no contract: permissive
         try writePolicySectionFromAllowList(writer, "env", null);
         try writePolicySectionFromAllowList(writer, "egress", null);
         try writePolicySectionFromAllowList(writer, "cache", null);
+        try writePolicySectionFromAllowList(writer, "sql", null);
     }
     try writer.writeAll("};\n");
 }
@@ -1902,6 +2049,24 @@ fn writeContractDerivedSection(writer: anytype, field_name: []const u8, literals
         try writer.writeAll("    },\n");
     } else {
         // Dynamic: can't restrict
+        try writer.writeAll(".{},\n");
+    }
+}
+
+fn writeSqlContractDerivedSection(writer: anytype, contract: *const HandlerContract) !void {
+    try writer.writeAll("    .sql = ");
+    if (!contract.sql.dynamic) {
+        try writer.writeAll(".{\n");
+        try writer.writeAll("        .enabled = true,\n");
+        try writer.writeAll("        .values = &[_][]const u8{\n");
+        for (contract.sql.queries.items) |query| {
+            try writer.writeAll("            ");
+            try writeZigStringLiteral(writer, query.name);
+            try writer.writeAll(",\n");
+        }
+        try writer.writeAll("        },\n");
+        try writer.writeAll("    },\n");
+    } else {
         try writer.writeAll(".{},\n");
     }
 }
@@ -1998,6 +2163,7 @@ test "compileHandler aggregates contract across file imports" {
         false,
         true,
         policy,
+        null,
     );
     defer compiled.deinit(allocator);
 
@@ -2044,6 +2210,104 @@ test "compileHandler rejects disallowed policy from imported module" {
             false,
             false,
             policy,
+            null,
         ),
+    );
+}
+
+fn buildTestContractForSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    filename: []const u8,
+    sql_schema_path: ?[]const u8,
+) !HandlerContract {
+    var strings = zts.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var atoms = zts.context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var js_parser = zts.parser.JsParser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+
+    const root = try js_parser.parse();
+    return buildContractWithPolicy(
+        allocator,
+        &js_parser,
+        &atoms,
+        filename,
+        root,
+        null,
+        null,
+        null,
+        sql_schema_path,
+    );
+}
+
+test "buildContractWithPolicy validates zigttp:sql queries against schema" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\import { sql } from "zigttp:sql";
+        \\
+        \\sql("createUser", "INSERT INTO users (name) VALUES (:name)");
+        \\sql("getUser", "SELECT id, name FROM users WHERE id = :id");
+        \\
+        \\export function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const schema =
+        \\CREATE TABLE users (
+        \\  id INTEGER PRIMARY KEY,
+        \\  name TEXT NOT NULL
+        \\);
+    ;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.js", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "schema.sql", .data = schema });
+
+    const allocator = std.testing.allocator;
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.js", allocator);
+    defer allocator.free(entry_path);
+    const schema_path = try tmp.dir.realPathFileAlloc(std.testing.io, "schema.sql", allocator);
+    defer allocator.free(schema_path);
+
+    var contract = try buildTestContractForSource(allocator, source, entry_path, schema_path);
+    defer contract.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), contract.sql.queries.items.len);
+    try std.testing.expectEqualStrings("createUser", contract.sql.queries.items[0].name);
+    try std.testing.expectEqualStrings("insert", contract.sql.queries.items[0].operation);
+    try std.testing.expectEqual(@as(usize, 1), contract.sql.queries.items[0].tables.items.len);
+    try std.testing.expectEqualStrings("users", contract.sql.queries.items[0].tables.items[0]);
+    try std.testing.expectEqualStrings("getUser", contract.sql.queries.items[1].name);
+    try std.testing.expectEqualStrings("select", contract.sql.queries.items[1].operation);
+}
+
+test "buildContractWithPolicy requires sql schema when zigttp:sql is used" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\import { sql } from "zigttp:sql";
+        \\
+        \\sql("getUser", "SELECT id, name FROM users WHERE id = :id");
+        \\
+        \\export function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.js", .data = source });
+
+    const allocator = std.testing.allocator;
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.js", allocator);
+    defer allocator.free(entry_path);
+
+    try std.testing.expectError(
+        error.MissingSqlSchema,
+        buildTestContractForSource(allocator, source, entry_path, null),
     );
 }

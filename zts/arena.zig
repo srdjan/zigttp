@@ -108,6 +108,7 @@ pub const Arena = struct {
         const new_ptr = aligned_ptr + aligned_size;
 
         if (new_ptr <= @intFromPtr(self.limit)) {
+            @branchHint(.likely);
             self.ptr = @ptrFromInt(new_ptr);
             self.alloc_count += 1;
 

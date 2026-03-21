@@ -1319,7 +1319,7 @@ test "CodeVersion concurrent retain/release" {
     var contexts: [thread_count]ThreadCtx = undefined;
     for (0..thread_count) |i| {
         contexts[i] = .{ .cv = cv };
-        threads[i] = std.Thread.spawn(.{}, Worker.run, .{&contexts[i]}) catch unreachable;
+        threads[i] = std.Thread.spawn(.{}, Worker.run, .{&contexts[i]}) catch @trap();
     }
     for (threads) |t| t.join();
 
