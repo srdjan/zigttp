@@ -30,6 +30,14 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Proven deployment manifests.** `-Ddeploy=aws` generates platform-specific deployment configurations (AWS SAM templates) directly from compiler-proven contracts. Env vars become parameters, routes become API events, egress hosts become tags. Proof levels (complete/partial/none) signal what was statically verified vs what needs manual review.
 
+**Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
+
+**Durable execution.** `--durable <dir>` enables crash recovery via write-ahead oplog. Wrap work in `run(key, fn)` from `zigttp:durable` with an idempotency key; each I/O call is persisted before returning to the handler. On crash recovery, recorded results are replayed without touching the network. Completed runs are deduplicated by key.
+
+**Guard composition.** `guard()` from `zigttp:compose` combined with the pipe operator (`|>`) composes handlers with pre/post guards at compile time. The parser desugars `guard(auth) |> guard(log) |> handler |> guard(cors)` into a single flat function with sequential if-checks - zero runtime overhead.
+
+**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts and replaying recorded traces. The result is classified as equivalent, additive, or breaking with a machine-readable proof certificate.
+
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 
 ### Numbers
@@ -141,6 +149,8 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
+| `zigttp:compose` | `guard` | Compile-time handler composition via pipe operator |
+| `zigttp:durable` | `run`, `step` | Durable execution with write-ahead oplog and crash recovery |
 
 ### Auth Example
 
@@ -239,6 +249,9 @@ Options:
   --outbound-host <H>   Restrict outbound bridge to exact host H
   --outbound-timeout-ms Connect timeout for outbound bridge (ms)
   --outbound-max-response <SIZE>
+  --trace <FILE>        Record handler I/O traces to JSONL file
+  --replay <FILE>       Replay recorded traces and verify handler output
+  --durable <DIR>       Enable durable execution with write-ahead oplog
 ```
 
 ## Key Features
@@ -251,13 +264,13 @@ Options:
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
-**Deployment Pipeline**: Contract manifests (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), and auto-derived runtime sandboxing form a pipeline from source analysis to platform-specific deployment configuration.
+**Deployment Pipeline**: Contract manifests (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution (`-Dprove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
 
-**Language Support**: ES5 + select ES6 features (for...of, typed arrays, exponentiation), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing.
+**Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression.
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
@@ -321,17 +334,26 @@ zig build -Dhandler=handler.ts -Dpolicy=policy.json
 # Generate proven AWS SAM deployment manifest
 zig build -Dhandler=handler.ts -Ddeploy=aws
 
+# Replay-verify handler against recorded traces before embedding
+zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
+
+# Compare handler versions (equivalent, additive, or breaking)
+zig build -Dhandler=handler.ts -Dprove=old-contract.json:traces.jsonl
+
 # Combine all passes
 zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Ddeploy=aws
 ```
 
 ### Handler Verification (`-Dverify`)
 
-The verifier statically proves three properties of your handler at compile time:
+The verifier statically proves six properties of your handler at compile time:
 
 1. **Every code path returns a Response.** Missing `else` branches, `switch` cases without `default`, and paths that fall through without returning are all caught.
 2. **Result values are checked before access.** Calls like `jwtVerify` and `validateJson` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
 3. **No unreachable code.** Statements after an unconditional return produce a warning.
+4. **No unused variables.** Declared variables that are never referenced produce a warning. Suppress with an underscore prefix (`_unused`).
+5. **Match expressions have default arms.** A `match` without a default arm produces a warning.
+6. **Optional values are checked before use.** Values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed via `if (val)`, `val !== undefined`, `val ?? default`, or reassignment before use in expressions.
 
 This works because zigttp's JS subset eliminates most non-trivial control flow - no `while`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
@@ -410,6 +432,100 @@ Currently supported targets:
 - **aws**: Generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata.
 
 Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). A deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
+
+### Deterministic Replay (`--trace` / `--replay` / `-Dreplay`)
+
+zigttp's restricted JS subset (no async, no exceptions, no side-effecting builtins) makes handlers deterministic pure functions of their request and virtual module responses. The replay system exploits this property.
+
+**Record** traces during normal operation:
+
+```bash
+zigttp-server handler.ts --trace traces.jsonl
+```
+
+Every virtual module call, `fetchSync` response, `Date.now()` timestamp, and `Math.random()` value is recorded alongside the request and response.
+
+**Replay** traces against a modified handler to detect regressions:
+
+```bash
+zigttp-server --replay traces.jsonl handler-v2.ts
+```
+
+Reports identical, status-changed, and body-changed results with structured diffs.
+
+**Build-time replay** fails the build if regressions are detected:
+
+```bash
+zig build -Dhandler=handler-v2.ts -Dreplay=traces.jsonl
+```
+
+### Durable Execution (`--durable`)
+
+Enable crash recovery with a write-ahead oplog:
+
+```bash
+zigttp-server handler.ts --durable ./oplogs
+```
+
+Handlers opt into durability via the `zigttp:durable` virtual module:
+
+```typescript
+import { run, step } from "zigttp:durable";
+
+function handler(req: Request): Response {
+    return run(req.url, () => {
+        const user = step("fetch-user", () => fetchSync("https://api.internal/user/1"));
+        const order = step("create-order", () => fetchSync("https://api.internal/orders", {
+            method: "POST",
+            body: JSON.stringify({ userId: user.json().id })
+        }));
+        return Response.json(order.json());
+    });
+}
+```
+
+`run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. On crash recovery, recorded step results are replayed without touching the network. Completed runs are deduplicated by key - calling `run` with the same key returns the previously recorded response.
+
+### Proven Evolution (`-Dprove`)
+
+Compare two handler versions and classify the upgrade:
+
+```bash
+zig build -Dhandler=handler-v2.ts -Dprove=old-contract.json:traces.jsonl
+```
+
+The system diffs the old and new contracts (env vars, egress hosts, cache namespaces, routes) and replays recorded traces against the new handler. Results are classified as:
+
+- **equivalent**: Same contract, same responses for all recorded traces
+- **additive**: New capabilities added (new env vars, new routes) but all existing behavior preserved
+- **breaking**: Existing behavior changed or capabilities removed
+
+Output is a machine-readable proof certificate and a human-readable report.
+
+### Guard Composition (`zigttp:compose`)
+
+Compose handlers with pre/post guards using the pipe operator:
+
+```typescript
+import { guard } from "zigttp:compose";
+
+const withAuth = guard((req: Request): Response | undefined => {
+    if (req.headers["authorization"] === undefined)
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+    return undefined;
+});
+
+const withCors = guard((res: Response): Response | undefined => {
+    return Response.json(res.body, {
+        status: res.status,
+        headers: { "access-control-allow-origin": "*" }
+    });
+});
+
+const handler = withAuth |> mainHandler |> withCors;
+```
+
+The parser desugars the pipe chain into a single flat function with sequential if-checks at compile time. Pre-guards receive the request and short-circuit on non-undefined return. Post-guards receive the response and can replace it. Exactly one non-guard handler is required.
 
 ### Precompiled Bytecode
 
