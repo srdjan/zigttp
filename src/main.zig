@@ -36,6 +36,7 @@
 //!   - httpRequest(jsonString) when outbound bridge is enabled
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
 const HandlerSource = @import("server.zig").HandlerSource;
@@ -49,9 +50,12 @@ const durable_scheduler = @import("durable_scheduler.zig");
 const embedded_handler = @import("embedded_handler");
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
+        if (builtin.mode == .Debug) .init else {};
+    defer if (builtin.mode == .Debug) {
+        _ = debug_alloc.deinit();
+    };
+    const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
     const config = parseArgs(init.args) catch |err| {
         if (err == error.HelpRequested) {

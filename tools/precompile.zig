@@ -95,9 +95,12 @@ pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.All
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
+        if (builtin.mode == .Debug) .init else {};
+    defer if (builtin.mode == .Debug) {
+        _ = debug_alloc.deinit();
+    };
+    const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
     // Parse command line arguments
     var args = std.process.Args.Iterator.init(init.args);

@@ -5,6 +5,7 @@
 //! locally whether its pending timer/signal is ready yet.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const durable_recovery = @import("durable_recovery.zig");
 const ServerConfig = @import("server.zig").ServerConfig;
 
@@ -26,9 +27,12 @@ pub const DurableScheduler = struct {
     }
 
     fn runLoop(self: *DurableScheduler) void {
-        var gpa: std.heap.DebugAllocator(.{}) = .init;
-        defer _ = gpa.deinit();
-        const allocator = gpa.allocator();
+        var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
+            if (builtin.mode == .Debug) .init else {};
+        defer if (builtin.mode == .Debug) {
+            _ = debug_alloc.deinit();
+        };
+        const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
         while (!self.stop_requested.load(.acquire)) {
             _ = durable_recovery.recoverIncompleteOplogs(allocator, self.config) catch |err| {
