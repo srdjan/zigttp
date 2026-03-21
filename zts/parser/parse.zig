@@ -183,16 +183,8 @@ pub const Parser = struct {
             },
             .kw_for => self.parseForStatement(),
             .kw_return => self.parseReturnStatement(),
-            .kw_break => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'break' is not supported; use early return or filter instead");
-                self.advance();
-                return error.ParseError;
-            },
-            .kw_continue => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'continue' is not supported; use filter or conditional logic instead");
-                self.advance();
-                return error.ParseError;
-            },
+            .kw_break => self.parseBreakStatement(),
+            .kw_continue => self.parseContinueStatement(),
             .kw_throw => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'throw' is not supported; use Result types for error handling");
                 self.advance();
@@ -1007,18 +999,18 @@ pub const Parser = struct {
             self.errorAt(loc, "'break' outside of loop or switch");
         }
 
-        // Optional label
-        var label: ?u16 = null;
+        // Labeled break is not supported
         if (self.check(.identifier)) {
-            label = try self.addAtom(self.current.text(self.source));
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'labeled break' is not supported; use a conditional instead");
             self.advance();
+            return error.ParseError;
         }
         try self.expectSemicolon();
 
         return try self.nodes.add(.{
             .tag = .break_stmt,
             .loc = loc,
-            .data = .{ .opt_label = label },
+            .data = .{ .opt_label = null },
         });
     }
 
@@ -1030,17 +1022,18 @@ pub const Parser = struct {
             self.errorAt(loc, "'continue' outside of loop");
         }
 
-        var label: ?u16 = null;
+        // Labeled continue is not supported
         if (self.check(.identifier)) {
-            label = try self.addAtom(self.current.text(self.source));
+            self.errors.addErrorAt(.unsupported_feature, self.current, "'labeled continue' is not supported; use a conditional instead");
             self.advance();
+            return error.ParseError;
         }
         try self.expectSemicolon();
 
         return try self.nodes.add(.{
             .tag = .continue_stmt,
             .loc = loc,
-            .data = .{ .opt_label = label },
+            .data = .{ .opt_label = null },
         });
     }
 
@@ -4017,46 +4010,83 @@ test "unsupported: do-while loop" {
     try std.testing.expect(false);
 }
 
-test "unsupported: break statement" {
-    const allocator = std.testing.allocator;
-    const source = "for (const x of arr) { break; }";
+test "break in for-of" {
+    var parser = Parser.init(std.testing.allocator, "for (const x of arr) { break; }");
+    defer parser.deinit();
 
-    var parser = Parser.init(allocator, source);
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "continue in for-of" {
+    var parser = Parser.init(std.testing.allocator, "for (const x of arr) { continue; }");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "break outside loop" {
+    var parser = Parser.init(std.testing.allocator, "break;");
     defer parser.deinit();
 
     _ = parser.parse() catch {
         try std.testing.expect(parser.hasErrors());
-        const errors = parser.getErrors();
-        try std.testing.expect(errors.len > 0);
-        const err = errors[0];
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "break") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "filter") != null or std.mem.indexOf(u8, err.message, "return") != null);
         return;
     };
 
     try std.testing.expect(false);
 }
 
-test "unsupported: continue statement" {
-    const allocator = std.testing.allocator;
-    const source = "for (const x of arr) { continue; }";
+test "continue outside loop" {
+    var parser = Parser.init(std.testing.allocator, "continue;");
+    defer parser.deinit();
 
-    var parser = Parser.init(allocator, source);
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "labeled break rejected" {
+    var parser = Parser.init(std.testing.allocator, "for (const x of arr) { break label; }");
     defer parser.deinit();
 
     _ = parser.parse() catch {
         try std.testing.expect(parser.hasErrors());
         const errors = parser.getErrors();
         try std.testing.expect(errors.len > 0);
-        const err = errors[0];
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "continue") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "filter") != null);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "labeled break") != null);
         return;
     };
 
     try std.testing.expect(false);
+}
+
+test "break with conditional" {
+    var parser = Parser.init(std.testing.allocator, "for (const x of arr) { if (x === 3) break; }");
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "unsupported: throw statement" {

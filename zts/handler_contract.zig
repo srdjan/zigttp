@@ -1246,6 +1246,7 @@ pub const ContractBuilder = struct {
                 const arm = self.ir_view.getMatchArm(node_idx) orelse return;
                 try self.scanFunctionNodeForApiFacts(arm.body, route);
             },
+            .break_stmt, .continue_stmt => {},
             .function_decl, .function_expr, .arrow_function => return,
             else => {},
         }

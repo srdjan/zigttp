@@ -412,6 +412,19 @@ pub const CodeGen = struct {
 
             .empty_stmt, .debugger_stmt => {},
 
+            .break_stmt => {
+                if (self.loop_stack.items.len > 0) {
+                    const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
+                    try self.emitJump(.goto, ctx.break_label);
+                }
+            },
+            .continue_stmt => {
+                if (self.loop_stack.items.len > 0) {
+                    const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
+                    try self.emitJump(.goto, ctx.continue_label);
+                }
+            },
+
             // JSX - emit as h() calls
             .jsx_element, .jsx_fragment => try self.emitJsxElementByIndex(index),
 

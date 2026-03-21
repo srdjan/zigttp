@@ -85,10 +85,13 @@ These were previously detected by the stripper but moved to the parser for consi
 
 ### Loop Control Flow
 
-| Feature | Suggested Alternative |
-|---------|----------------------|
-| `break` statement | Use early return or filter |
-| `continue` statement | Use filter or conditional logic |
+| Feature | Status |
+|---------|--------|
+| `break` in `for-of` | Supported |
+| `continue` in `for-of` | Supported |
+| `break` outside loop | Error: "'break' outside of loop or switch" |
+| `continue` outside loop | Error: "'continue' outside of loop" |
+| Labeled `break`/`continue` | Error: use a conditional instead |
 
 ### Error Handling
 

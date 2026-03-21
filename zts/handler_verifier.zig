@@ -8,9 +8,10 @@
 //! 5. Match expressions have default arms
 //! 6. Optional values from virtual modules are checked before use
 //!
-//! This is possible because zigttp's JS subset bans all non-trivial control flow:
-//! no while/do-while (no back-edges), no break/continue (no non-local jumps),
-//! no try/catch (no exceptional paths). The IR tree IS the control flow graph.
+//! This is possible because zigttp's JS subset bans most non-trivial control flow:
+//! no while/do-while (no back-edges), no try/catch (no exceptional paths).
+//! break/continue are allowed within for-of only (forward jumps, no new back-edges).
+//! The IR tree IS the control flow graph.
 //! Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 const std = @import("std");
@@ -323,6 +324,8 @@ pub const HandlerVerifier = struct {
             .import_decl,
             .export_decl,
             .function_decl,
+            .break_stmt,
+            .continue_stmt,
             => .never,
 
             else => .never,
