@@ -16,7 +16,7 @@ pub const VERSION_MAJOR: u8 = 1;
 pub const VERSION_MINOR: u8 = 0;
 
 /// Bytecode header
-pub const BytecodeHeader = packed struct {
+pub const BytecodeHeader = packed struct(u88) {
     magic: u32 = MAGIC,
     version_major: u8 = VERSION_MAJOR,
     version_minor: u8 = VERSION_MINOR,
