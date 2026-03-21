@@ -1100,7 +1100,7 @@ pub const AtomRemap = struct {
 
 /// Collect all atoms referenced in bytecode (for serialization)
 pub fn collectAtoms(func: *const bytecode.FunctionBytecode, allocator: std.mem.Allocator) ![]u32 {
-    var atoms = std.AutoHashMapUnmanaged(u32, void){};
+    var atoms: std.AutoHashMapUnmanaged(u32, void) = .empty;
     defer atoms.deinit(allocator);
 
     // Add function name atom
@@ -1383,7 +1383,7 @@ pub fn serializeBytecodeWithAtomsAndShapes(
     allocator: std.mem.Allocator,
 ) !void {
     // Collect all referenced atoms (from bytecode AND shapes)
-    var all_atoms = std.AutoHashMapUnmanaged(u32, void){};
+    var all_atoms: std.AutoHashMapUnmanaged(u32, void) = .empty;
     defer all_atoms.deinit(allocator);
 
     // Atoms from bytecode

@@ -126,6 +126,7 @@ pub const CodeAllocator = struct {
 
         // Fast path: try hint position first (O(1) in common case)
         if (len > 0 and self.free_hint < len) {
+            @branchHint(.likely);
             const page = &self.pages.items[self.free_hint];
             if (page.writable) {
                 if (page.alloc(size)) |slice| {

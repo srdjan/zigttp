@@ -309,7 +309,7 @@ pub const BytecodeOptimizer = struct {
     /// Also updates jump offsets to account for removed NOPs
     pub fn compact(self: *BytecodeOptimizer, code: []u8) !usize {
         // Build offset mapping: old position -> new position
-        var offset_map = std.AutoHashMapUnmanaged(u32, u32){};
+        var offset_map: std.AutoHashMapUnmanaged(u32, u32) = .empty;
         defer offset_map.deinit(self.allocator);
 
         // First pass: calculate new positions

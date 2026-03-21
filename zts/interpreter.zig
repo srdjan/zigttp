@@ -1350,10 +1350,10 @@ pub const Interpreter = struct {
                     @branchHint(.likely);
                     const ai = a.getInt();
                     const bi = b.getInt();
-                    const result = @addWithOverflow(ai, bi);
-                    if (result[1] == 0) {
+                    const sum, const overflow = @addWithOverflow(ai, bi);
+                    if (overflow == 0) {
                         @branchHint(.likely);
-                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(sum);
                         self.ctx.sp = sp - 1;
                         return .handled;
                     }
@@ -1378,10 +1378,10 @@ pub const Interpreter = struct {
                     @branchHint(.likely);
                     const ai = a.getInt();
                     const bi = b.getInt();
-                    const result = @subWithOverflow(ai, bi);
-                    if (result[1] == 0) {
+                    const diff, const overflow = @subWithOverflow(ai, bi);
+                    if (overflow == 0) {
                         @branchHint(.likely);
-                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(diff);
                         self.ctx.sp = sp - 1;
                         return .handled;
                     }
@@ -1405,10 +1405,10 @@ pub const Interpreter = struct {
                     @branchHint(.likely);
                     const ai = a.getInt();
                     const bi = b.getInt();
-                    const result = @mulWithOverflow(ai, bi);
-                    if (result[1] == 0) {
+                    const product, const overflow = @mulWithOverflow(ai, bi);
+                    if (overflow == 0) {
                         @branchHint(.likely);
-                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result[0]);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(product);
                         self.ctx.sp = sp - 1;
                         return .handled;
                     }
@@ -1465,10 +1465,10 @@ pub const Interpreter = struct {
                 if (a.isInt()) {
                     @branchHint(.likely);
                     const ai = a.getInt();
-                    const result = @addWithOverflow(ai, 1);
-                    if (result[1] == 0) {
+                    const sum, const overflow = @addWithOverflow(ai, 1);
+                    if (overflow == 0) {
                         @branchHint(.likely);
-                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(sum);
                         return .handled;
                     }
                     // Overflow - convert to float
@@ -1486,9 +1486,9 @@ pub const Interpreter = struct {
                 const a = self.ctx.stack[sp - 1];
                 if (a.isInt()) {
                     const ai = a.getInt();
-                    const result = @subWithOverflow(ai, 1);
-                    if (result[1] == 0) {
-                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                    const diff, const overflow = @subWithOverflow(ai, 1);
+                    if (overflow == 0) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(diff);
                         return .handled;
                     }
                     self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - 1.0);
@@ -3012,9 +3012,9 @@ pub const Interpreter = struct {
 
                     if (a.isInt()) {
                         @branchHint(.likely);
-                        const result = @addWithOverflow(a.getInt(), constant);
-                        if (result[1] == 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                        const sum, const overflow = @addWithOverflow(a.getInt(), constant);
+                        if (overflow == 0) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(sum);
                             continue :dispatch;
                         }
                         // Overflow - convert to float
@@ -3034,9 +3034,9 @@ pub const Interpreter = struct {
 
                     if (a.isInt()) {
                         @branchHint(.likely);
-                        const result = @subWithOverflow(a.getInt(), constant);
-                        if (result[1] == 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                        const diff, const overflow = @subWithOverflow(a.getInt(), constant);
+                        if (overflow == 0) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(diff);
                             continue :dispatch;
                         }
                         // Overflow - convert to float
@@ -3129,9 +3129,9 @@ pub const Interpreter = struct {
         // Integer fast path FIRST - most common case in arithmetic benchmarks
         // Checking integers before strings saves a branch in the hot path
         if (a.isInt() and b.isInt()) {
-            const result = @addWithOverflow(a.getInt(), b.getInt());
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const sum, const overflow = @addWithOverflow(a.getInt(), b.getInt());
+            if (overflow == 0) {
+                return value.JSValue.fromInt(sum);
             }
             // Overflow - convert to float
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
@@ -3163,9 +3163,9 @@ pub const Interpreter = struct {
     inline fn subValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Integer fast path
         if (a.isInt() and b.isInt()) {
-            const result = @subWithOverflow(a.getInt(), b.getInt());
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const diff, const overflow = @subWithOverflow(a.getInt(), b.getInt());
+            if (overflow == 0) {
+                return value.JSValue.fromInt(diff);
             }
             // Overflow - convert to float
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
@@ -3191,9 +3191,9 @@ pub const Interpreter = struct {
     inline fn mulValues(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
         // Integer fast path
         if (a.isInt() and b.isInt()) {
-            const result = @mulWithOverflow(a.getInt(), b.getInt());
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const product, const overflow = @mulWithOverflow(a.getInt(), b.getInt());
+            if (overflow == 0) {
+                return value.JSValue.fromInt(product);
             }
             // Overflow - convert to float
             return try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));

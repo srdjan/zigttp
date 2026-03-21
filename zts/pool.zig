@@ -223,6 +223,7 @@ pub const LockFreePool = struct {
 
         // Try hint position first (fast path)
         if (self.tryAcquireSlot(hint)) |runtime| {
+            @branchHint(.likely);
             self.free_hint.store((hint + 1) % len, .monotonic);
             return runtime;
         }

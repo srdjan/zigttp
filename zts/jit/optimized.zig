@@ -2445,19 +2445,19 @@ pub const OptimizedCompiler = struct {
 fn getSpCacheReg() Register {
     if (is_x86_64) return .r13;
     if (is_aarch64) return .x21;
-    unreachable;
+    @trap();
 }
 
 fn getStackPtrCacheReg() Register {
     if (is_x86_64) return .r14;
     if (is_aarch64) return .x20;
-    unreachable;
+    @trap();
 }
 
 fn getFramePointerReg() Register {
     if (is_x86_64) return .r15;
     if (is_aarch64) return .x22;
-    unreachable;
+    @trap();
 }
 
 fn readU16(code: []const u8, offset: u32) u16 {

@@ -1158,9 +1158,9 @@ pub const Context = struct {
     /// On error, sets exception and returns exception_val.
     pub fn jitAdd(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
-            const result = @addWithOverflow(a.getInt(), b.getInt());
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const sum, const overflow = @addWithOverflow(a.getInt(), b.getInt());
+            if (overflow == 0) {
+                return value.JSValue.fromInt(sum);
             }
             return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(b.getInt())));
         }
@@ -1186,9 +1186,9 @@ pub const Context = struct {
     /// JIT helper: subtract two values.
     pub fn jitSub(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
-            const result = @subWithOverflow(a.getInt(), b.getInt());
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const diff, const overflow = @subWithOverflow(a.getInt(), b.getInt());
+            if (overflow == 0) {
+                return value.JSValue.fromInt(diff);
             }
             return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(b.getInt())));
         }
@@ -1200,9 +1200,9 @@ pub const Context = struct {
     /// JIT helper: multiply two values.
     pub fn jitMul(self: *Context, a: value.JSValue, b: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt() and b.isInt()) {
-            const result = @mulWithOverflow(a.getInt(), b.getInt());
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const product, const overflow = @mulWithOverflow(a.getInt(), b.getInt());
+            if (overflow == 0) {
+                return value.JSValue.fromInt(product);
             }
             return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) * @as(f64, @floatFromInt(b.getInt())));
         }
@@ -1253,9 +1253,9 @@ pub const Context = struct {
     /// JIT helper: increment
     pub fn jitInc(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt()) {
-            const result = @addWithOverflow(a.getInt(), 1);
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const sum, const overflow = @addWithOverflow(a.getInt(), 1);
+            if (overflow == 0) {
+                return value.JSValue.fromInt(sum);
             }
             return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) + 1.0);
         }
@@ -1268,9 +1268,9 @@ pub const Context = struct {
     /// JIT helper: decrement
     pub fn jitDec(self: *Context, a: value.JSValue) callconv(.c) value.JSValue {
         if (a.isInt()) {
-            const result = @subWithOverflow(a.getInt(), 1);
-            if (result[1] == 0) {
-                return value.JSValue.fromInt(result[0]);
+            const diff, const overflow = @subWithOverflow(a.getInt(), 1);
+            if (overflow == 0) {
+                return value.JSValue.fromInt(diff);
             }
             return self.jitAllocFloat(@as(f64, @floatFromInt(a.getInt())) - 1.0);
         }

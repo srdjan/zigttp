@@ -500,6 +500,7 @@ pub const UpvaluePool = struct {
     /// Acquire an upvalue from the pool or allocate a new one
     pub fn acquire(self: *UpvaluePool) !*object.Upvalue {
         if (self.free_list) |uv| {
+            @branchHint(.likely);
             // Fast path: reuse from pool
             self.free_list = uv.next;
             self.free_count -= 1;

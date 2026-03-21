@@ -584,16 +584,16 @@ pub const CodeGen = struct {
     fn tryFoldIntBinaryOp(op: BinaryOp, a: i32, b: i32) ?i32 {
         return switch (op) {
             .add => blk: {
-                const result = @addWithOverflow(a, b);
-                break :blk if (result[1] == 0) result[0] else null;
+                const sum, const overflow = @addWithOverflow(a, b);
+                break :blk if (overflow == 0) sum else null;
             },
             .sub => blk: {
-                const result = @subWithOverflow(a, b);
-                break :blk if (result[1] == 0) result[0] else null;
+                const diff, const overflow = @subWithOverflow(a, b);
+                break :blk if (overflow == 0) diff else null;
             },
             .mul => blk: {
-                const result = @mulWithOverflow(a, b);
-                break :blk if (result[1] == 0) result[0] else null;
+                const product, const overflow = @mulWithOverflow(a, b);
+                break :blk if (overflow == 0) product else null;
             },
             .mod => if (b != 0) @mod(a, b) else null,
             .bit_and => a & b,
