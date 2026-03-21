@@ -1049,7 +1049,7 @@ pub const HotReloadManager = struct {
 
     pub fn init(allocator: std.mem.Allocator) HotReloadManager {
         return .{
-            .versions = .{},
+            .versions = .empty,
             .current_epoch = 0,
             .allocator = allocator,
             .mutex = .{},

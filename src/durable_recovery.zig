@@ -85,7 +85,7 @@ pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfi
             continue;
         };
 
-        std.log.info("Recovering durable run: {s} {s} ({d} recorded events)", .{
+        std.log.info("Recovering durable run: {s} {s} {s} ({d} recorded events)", .{
             run_key,
             parsed.request.method,
             parsed.request.url,
@@ -147,7 +147,7 @@ fn recoverOne(
     );
 
     // Build request from oplog
-    var headers_list: std.ArrayListUnmanaged(HttpHeader) = .{};
+    var headers_list: std.ArrayListUnmanaged(HttpHeader) = .empty;
     defer headers_list.deinit(allocator);
     try parseHeadersFromJson(allocator, parsed.request.headers_json, &headers_list);
     const body = if (parsed.request.body) |raw|

@@ -23,7 +23,7 @@ pub const MemTag = enum(u4) {
 };
 
 /// Memory block header (packed for minimal overhead)
-pub const MemBlockHeader = packed struct {
+pub const MemBlockHeader = packed struct(u32) {
     gc_mark: bool = false,
     tag: MemTag,
     // Size in words (for variable-size blocks) - u26 supports up to 512MB objects

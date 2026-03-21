@@ -896,7 +896,7 @@ pub const GeneratorData = struct {
 };
 
 /// Property descriptor flags
-pub const PropertyFlags = packed struct {
+pub const PropertyFlags = packed struct(u8) {
     writable: bool = true,
     enumerable: bool = true,
     configurable: bool = true,
@@ -1346,7 +1346,7 @@ pub const JSObject = extern struct {
         pub const RANGE_LENGTH: usize = 3;
     };
 
-    pub const ObjectFlags = packed struct {
+    pub const ObjectFlags = packed struct(u8) {
         extensible: bool = true,
         is_exotic: bool = false, // Array, TypedArray, etc.
         is_callable: bool = false,

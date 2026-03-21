@@ -187,7 +187,7 @@ fn replayOne(
     try rt.loadCode(handler_code, handler_filename);
 
     // Build request from trace
-    var headers_list: std.ArrayListUnmanaged(HttpHeader) = .{};
+    var headers_list: std.ArrayListUnmanaged(HttpHeader) = .empty;
     defer headers_list.deinit(allocator);
 
     try parseHeadersFromJson(allocator, group.request.headers_json, &headers_list);

@@ -122,7 +122,7 @@ pub const X86Emitter = struct {
 
     pub fn init(allocator: std.mem.Allocator) X86Emitter {
         return .{
-            .buffer = .{},
+            .buffer = .empty,
             .allocator = allocator,
         };
     }

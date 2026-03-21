@@ -233,10 +233,10 @@ pub const OptimizedCompiler = struct {
             .feedback_site_map = func.feedback_site_map,
             .hidden_class_pool = hidden_class_pool,
             .labels = .{},
-            .pending_jumps = .{},
+            .pending_jumps = .empty,
             .jump_targets = .{},
             .next_local_label = 0,
-            .deopt_points = .{},
+            .deopt_points = .empty,
         };
     }
 

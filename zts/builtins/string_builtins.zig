@@ -479,7 +479,7 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
     };
 
     // Collect all strings to concatenate
-    var strings: std.ArrayListUnmanaged(*const string.JSString) = .{};
+    var strings: std.ArrayListUnmanaged(*const string.JSString) = .empty;
     defer strings.deinit(allocator);
 
     strings.append(allocator, this_str) catch return this;

@@ -11,6 +11,7 @@ const ascii = std.ascii;
 // Import zts module
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
+const durable_store_mod = @import("durable_store.zig");
 const http_parser = @import("http_parser.zig");
 
 // Bytecode caching for faster cold starts
@@ -219,6 +220,18 @@ pub const Runtime = struct {
 
     const Self = @This();
 
+    const PendingDurableWait = union(enum) {
+        timer: i64,
+        signal: []const u8,
+
+        fn deinit(self: *PendingDurableWait, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .signal => |name| allocator.free(name),
+                .timer => {},
+            }
+        }
+    };
+
     const ActiveDurableRun = struct {
         key: []const u8,
         oplog_path: []const u8,
@@ -227,12 +240,28 @@ pub const Runtime = struct {
         owned_events: ?[]const zq.trace.DurableEvent = null,
         source_snapshot: ?[]u8 = null,
         step_depth: u32 = 0,
+        pending_wait: ?PendingDurableWait = null,
+
+        fn setPendingTimer(self: *ActiveDurableRun, allocator: std.mem.Allocator, until_ms: i64) !void {
+            if (self.pending_wait) |*wait| {
+                wait.deinit(allocator);
+            }
+            self.pending_wait = .{ .timer = until_ms };
+        }
+
+        fn setPendingSignal(self: *ActiveDurableRun, allocator: std.mem.Allocator, name: []const u8) !void {
+            if (self.pending_wait) |*wait| {
+                wait.deinit(allocator);
+            }
+            self.pending_wait = .{ .signal = try allocator.dupe(u8, name) };
+        }
 
         fn deinit(self: *ActiveDurableRun, allocator: std.mem.Allocator) void {
             allocator.free(self.key);
             allocator.free(self.oplog_path);
             if (self.owned_events) |events| allocator.free(events);
             if (self.source_snapshot) |source| allocator.free(source);
+            if (self.pending_wait) |*wait| wait.deinit(allocator);
             self.state.deinit();
             allocator.destroy(self.state);
             std.Io.Threaded.closeFd(self.oplog_fd);
@@ -821,6 +850,10 @@ pub const Runtime = struct {
         durable_state.* = .{
             .run_fn = durableRunCallback,
             .step_fn = durableStepCallback,
+            .sleep_until_fn = durableSleepUntilCallback,
+            .wait_signal_fn = durableWaitSignalCallback,
+            .signal_fn = durableSignalCallback,
+            .signal_at_fn = durableSignalAtCallback,
             .runtime_ptr = self,
         };
         self.ctx.setModuleState(
@@ -1336,7 +1369,10 @@ pub const Runtime = struct {
         }
 
         const func_obj = run_val.toPtr(zq.JSObject);
-        const result = try self.callFunction(func_obj, &.{});
+        const result = self.callFunction(func_obj, &.{}) catch |err| switch (err) {
+            error.DurableSuspended => return try self.buildPendingDurableResponseValue(),
+            else => return err,
+        };
         const upgraded = try upgradeResponseValue(self.ctx, result);
         if (!self.isResponseLike(upgraded)) {
             return zq.modules.util.throwError(ctx, "TypeError", "run() callback must return a Response");
@@ -1376,6 +1412,187 @@ pub const Runtime = struct {
         const result = try self.callFunction(func_obj, &.{});
         self.active_durable_run.?.state.persistStepResult(name, ctx, result);
         return result;
+    }
+
+    fn durableSleepUntil(self: *Self, ctx: *zq.Context, until_ms: i64) anyerror!zq.JSValue {
+        if (self.active_durable_run == null) {
+            return zq.modules.util.throwError(ctx, "Error", "sleepUntil() must be called inside run()");
+        }
+        const active = &self.active_durable_run.?;
+        if (active.step_depth > 0) {
+            return zq.modules.util.throwError(ctx, "Error", "sleepUntil() is not supported inside step()");
+        }
+
+        const now_ms = unixMillis();
+        switch (active.state.beginTimerWait(until_ms)) {
+            .ready => return zq.JSValue.undefined_val,
+            .pending => |wait| {
+                if (wait.until_ms <= now_ms) {
+                    active.state.persistResumeTimer(now_ms);
+                    return zq.JSValue.undefined_val;
+                }
+                try active.setPendingTimer(self.allocator, wait.until_ms);
+                return error.DurableSuspended;
+            },
+            .live => {
+                active.state.persistWaitTimer(until_ms);
+                if (until_ms <= now_ms) {
+                    active.state.persistResumeTimer(now_ms);
+                    return zq.JSValue.undefined_val;
+                }
+                try active.setPendingTimer(self.allocator, until_ms);
+                return error.DurableSuspended;
+            },
+        }
+    }
+
+    fn durableWaitSignal(self: *Self, ctx: *zq.Context, name: []const u8) anyerror!zq.JSValue {
+        if (self.active_durable_run == null) {
+            return zq.modules.util.throwError(ctx, "Error", "waitSignal() must be called inside run()");
+        }
+        const active = &self.active_durable_run.?;
+        if (active.step_depth > 0) {
+            return zq.modules.util.throwError(ctx, "Error", "waitSignal() is not supported inside step()");
+        }
+
+        var store = try self.initDurableStore();
+        const now_ms = unixMillis();
+
+        switch (active.state.beginSignalWait(name)) {
+            .delivered => |payload_json| return zq.trace.jsonToJSValue(ctx, payload_json),
+            .pending => {
+                if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
+                    var consumed = payload;
+                    defer consumed.deinit();
+                    active.state.persistResumeSignal(name, consumed.payload_json);
+                    return zq.trace.jsonToJSValue(ctx, consumed.payload_json);
+                }
+                try active.setPendingSignal(self.allocator, name);
+                return error.DurableSuspended;
+            },
+            .live => {
+                active.state.persistWaitSignal(name);
+                if (try store.tryConsumeSignal(active.key, name, now_ms)) |payload| {
+                    var consumed = payload;
+                    defer consumed.deinit();
+                    active.state.persistResumeSignal(name, consumed.payload_json);
+                    return zq.trace.jsonToJSValue(ctx, consumed.payload_json);
+                }
+                try active.setPendingSignal(self.allocator, name);
+                return error.DurableSuspended;
+            },
+        }
+    }
+
+    fn durableSignal(self: *Self, ctx: *zq.Context, key: []const u8, name: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
+        const exists = self.durableSignalTargetExists(key) catch |err| switch (err) {
+            error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
+            else => return err,
+        };
+        if (!exists) return zq.JSValue.false_val;
+
+        const payload_json = self.serializeDurablePayload(ctx, payload) catch |err| switch (err) {
+            error.InvalidDurablePayload => return zq.modules.util.throwError(ctx, "TypeError", "signal() payload must be JSON-serializable"),
+            else => return err,
+        };
+        defer self.allocator.free(payload_json);
+
+        var store = try self.initDurableStore();
+        try store.enqueueSignal(key, name, payload_json);
+        return zq.JSValue.true_val;
+    }
+
+    fn durableSignalAt(
+        self: *Self,
+        ctx: *zq.Context,
+        key: []const u8,
+        name: []const u8,
+        at_ms: i64,
+        payload: zq.JSValue,
+    ) anyerror!zq.JSValue {
+        const exists = self.durableSignalTargetExists(key) catch |err| switch (err) {
+            error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
+            else => return err,
+        };
+        if (!exists) return zq.JSValue.false_val;
+
+        const payload_json = self.serializeDurablePayload(ctx, payload) catch |err| switch (err) {
+            error.InvalidDurablePayload => return zq.modules.util.throwError(ctx, "TypeError", "signalAt() payload must be JSON-serializable"),
+            else => return err,
+        };
+        defer self.allocator.free(payload_json);
+
+        var store = try self.initDurableStore();
+        try store.enqueueSignalAt(key, name, at_ms, payload_json);
+        return zq.JSValue.true_val;
+    }
+
+    fn initDurableStore(self: *Self) !durable_store_mod.DurableStore {
+        const dir = self.config.durable_oplog_dir orelse return error.DurableDisabled;
+        var store = durable_store_mod.DurableStore.initFs(self.allocator, dir);
+        try store.ensureDirs();
+        return store;
+    }
+
+    fn durableSignalTargetExists(self: *Self, key: []const u8) !bool {
+        const path = try self.buildDurableOplogPath(key);
+        defer self.allocator.free(path);
+
+        const source = try self.readDurableLogIfExists(path) orelse return false;
+        defer self.allocator.free(source);
+
+        var parsed = try zq.trace.parseDurableOplog(self.allocator, source);
+        defer parsed.deinit();
+
+        if (parsed.run_key) |existing_key| {
+            if (!std.mem.eql(u8, existing_key, key)) return error.DurableKeyCollision;
+        }
+
+        return !parsed.complete;
+    }
+
+    fn serializeDurablePayload(self: *Self, ctx: *zq.Context, payload: zq.JSValue) ![]u8 {
+        if (payload.isUndefined()) {
+            return self.allocator.dupe(u8, "null");
+        }
+
+        const json_val = zq.builtins.jsonStringify(ctx, zq.JSValue.undefined_val, &.{payload});
+        if (ctx.hasException()) {
+            ctx.clearException();
+            return error.InvalidDurablePayload;
+        }
+
+        const json = getStringData(json_val) orelse return error.InvalidDurablePayload;
+        return self.allocator.dupe(u8, json);
+    }
+
+    fn buildPendingDurableResponseValue(self: *Self) !zq.JSValue {
+        const active = self.active_durable_run orelse return error.NoActiveDurableRun;
+        const wait = active.pending_wait orelse return error.MissingDurableWait;
+        var body: std.ArrayList(u8) = .empty;
+        defer body.deinit(self.allocator);
+
+        try body.appendSlice(self.allocator, "{\"pending\":true,\"durableKey\":\"");
+        try appendEscapedJsonString(self.allocator, &body, active.key);
+        try body.appendSlice(self.allocator, "\",\"wait\":{");
+
+        switch (wait) {
+            .timer => |until_ms| {
+                try body.appendSlice(self.allocator, "\"type\":\"timer\",\"until\":");
+                var tmp: [32]u8 = undefined;
+                const printed = try std.fmt.bufPrint(&tmp, "{d}", .{until_ms});
+                try body.appendSlice(self.allocator, printed);
+            },
+            .signal => |name| {
+                try body.appendSlice(self.allocator, "\"type\":\"signal\",\"name\":\"");
+                try appendEscapedJsonString(self.allocator, &body, name);
+                try body.appendSlice(self.allocator, "\"");
+            },
+        }
+
+        try body.appendSlice(self.allocator, "}}");
+        const created = try createFetchResponse(self, 202, "Accepted", body.items, "application/json");
+        return created.value;
     }
 
     fn tryLoadCompletedDurableResponse(self: *Self, key: []const u8) !?zq.JSValue {
@@ -1489,7 +1706,7 @@ pub const Runtime = struct {
     }
 
     fn buildStoredResponseValue(self: *Self, response: zq.trace.ResponseTrace) !zq.JSValue {
-        var headers: std.ArrayListUnmanaged(HttpHeader) = .{};
+        var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
         defer headers.deinit(self.allocator);
         try parseHeadersFromJson(self.allocator, response.headers_json, &headers);
         const body = try zq.trace.unescapeJson(self.allocator, response.body);
@@ -2096,6 +2313,40 @@ const FetchResponseObjects = struct {
     headers: *zq.JSObject,
 };
 
+fn appendEscapedJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), data: []const u8) !void {
+    const hex = "0123456789abcdef";
+    for (data) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            else => {
+                if (c < 0x20) {
+                    try buf.appendSlice(allocator, "\\u00");
+                    try buf.append(allocator, hex[c >> 4]);
+                    try buf.append(allocator, hex[c & 0x0f]);
+                } else {
+                    try buf.append(allocator, c);
+                }
+            },
+        }
+    }
+}
+
+fn unixMillis() i64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {
+            const secs: i64 = @intCast(ts.sec);
+            const nanos: i64 = @intCast(ts.nsec);
+            return (secs * 1000) + @divTrunc(nanos, 1_000_000);
+        },
+        else => return 0,
+    }
+}
+
 fn getStringData(val: zq.JSValue) ?[]const u8 {
     if (val.isString()) {
         return val.toPtr(zq.JSString).data();
@@ -2349,7 +2600,7 @@ const OwnedResponseHeader = struct {
 
 const OwnedResponseHead = struct {
     reason: []u8,
-    headers: std.ArrayListUnmanaged(OwnedResponseHeader) = .{},
+    headers: std.ArrayListUnmanaged(OwnedResponseHeader) = .empty,
 
     fn deinit(self: *OwnedResponseHead, allocator: std.mem.Allocator) void {
         allocator.free(self.reason);
@@ -3063,6 +3314,47 @@ fn durableStepCallback(
 ) anyerror!zq.JSValue {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
     return rt.durableStep(ctx, name, step_val);
+}
+
+fn durableSleepUntilCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    until_ms: i64,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableSleepUntil(ctx, until_ms);
+}
+
+fn durableWaitSignalCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    name: []const u8,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableWaitSignal(ctx, name);
+}
+
+fn durableSignalCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    key: []const u8,
+    name: []const u8,
+    payload: zq.JSValue,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableSignal(ctx, key, name, payload);
+}
+
+fn durableSignalAtCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    key: []const u8,
+    name: []const u8,
+    at_ms: i64,
+    payload: zq.JSValue,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableSignalAt(ctx, key, name, at_ms, payload);
 }
 
 /// IoCallbacks.execute_fetches_fn - execute HTTP fetches concurrently using threads.
@@ -4273,7 +4565,7 @@ const TestCapturedHeader = struct {
 const TestCapturedRequest = struct {
     method: []u8,
     path: []u8,
-    headers: std.ArrayListUnmanaged(TestCapturedHeader) = .{},
+    headers: std.ArrayListUnmanaged(TestCapturedHeader) = .empty,
     body: []u8,
     raw: []u8,
 
@@ -4442,7 +4734,7 @@ fn captureRequest(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io: 
     const path = try allocator.dupe(u8, rest[0..second_space_rel]);
     errdefer allocator.free(path);
 
-    var headers = std.ArrayListUnmanaged(TestCapturedHeader){};
+    var headers: std.ArrayListUnmanaged(TestCapturedHeader) = .empty;
     errdefer {
         for (headers.items) |header| {
             allocator.free(header.name);
@@ -4609,7 +4901,7 @@ fn makeTestRequest(
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, method),
         .url = try allocator.dupe(u8, url),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     errdefer request.deinit(allocator);
@@ -4682,7 +4974,7 @@ test "virtual module import alias resolves to callable binding" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -4804,6 +5096,150 @@ test "durable run resumes from completed step state" {
     try std.testing.expectEqualStrings("resume:123", parsed.run_key.?);
 }
 
+test "durable sleepUntil returns pending response without duplicating wait" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, sleepUntil } from "zigttp:durable";
+        \\function handler(req) {
+        \\  return run("timer:123", () => {
+        \\    sleepUntil(4102444800000);
+        \\    return Response.json({ ok: true });
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-sleep>");
+
+    var first_request = try makeTestRequest(allocator, "GET", "/", null);
+    defer first_request.deinit(allocator);
+    var first_response = try rt.executeHandler(first_request.asView());
+    defer first_response.deinit();
+    try std.testing.expectEqual(@as(u16, 202), first_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, first_response.body, "\"type\":\"timer\"") != null);
+
+    var second_request = try makeTestRequest(allocator, "GET", "/", null);
+    defer second_request.deinit(allocator);
+    var second_response = try rt.executeHandler(second_request.asView());
+    defer second_response.deinit();
+    try std.testing.expectEqual(@as(u16, 202), second_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, second_response.body, "\"pending\":true") != null);
+
+    const path = try rt.buildDurableOplogPath("timer:123");
+    defer allocator.free(path);
+
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"type\":\"wait_timer\""));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "\"type\":\"resume_timer\""));
+}
+
+test "durable waitSignal resumes from queued signal" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, waitSignal, signal } from "zigttp:durable";
+        \\function handler(req) {
+        \\  if (req.url === "/signal") {
+        \\    return Response.json({ delivered: signal("job:123", "approved", { ok: true }) });
+        \\  }
+        \\  return run("job:123", () => {
+        \\    const payload = waitSignal("approved");
+        \\    return Response.json(payload);
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-signal>");
+
+    var wait_request = try makeTestRequest(allocator, "GET", "/wait", null);
+    defer wait_request.deinit(allocator);
+    var pending_response = try rt.executeHandler(wait_request.asView());
+    defer pending_response.deinit();
+    try std.testing.expectEqual(@as(u16, 202), pending_response.status);
+    try std.testing.expect(std.mem.indexOf(u8, pending_response.body, "\"type\":\"signal\"") != null);
+
+    var signal_request = try makeTestRequest(allocator, "GET", "/signal", null);
+    defer signal_request.deinit(allocator);
+    var signal_response = try rt.executeHandler(signal_request.asView());
+    defer signal_response.deinit();
+
+    var parsed_signal = try std.json.parseFromSlice(std.json.Value, allocator, signal_response.body, .{});
+    defer parsed_signal.deinit();
+    try std.testing.expect(parsed_signal.value.object.get("delivered").?.bool);
+
+    var resume_request = try makeTestRequest(allocator, "GET", "/wait", null);
+    defer resume_request.deinit(allocator);
+    var resumed_response = try rt.executeHandler(resume_request.asView());
+    defer resumed_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resumed_response.status);
+
+    var parsed_payload = try std.json.parseFromSlice(std.json.Value, allocator, resumed_response.body, .{});
+    defer parsed_payload.deinit();
+    try std.testing.expect(parsed_payload.value.object.get("ok").?.bool);
+
+    const path = try rt.buildDurableOplogPath("job:123");
+    defer allocator.free(path);
+
+    const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"type\":\"wait_signal\""));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"type\":\"resume_signal\""));
+}
+
+test "durable signal returns false after completion" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
+
+    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { run, signal } from "zigttp:durable";
+        \\function handler(req) {
+        \\  if (req.url === "/signal") {
+        \\    return Response.json({ delivered: signal("done:123", "approved", { ok: true }) });
+        \\  }
+        \\  return run("done:123", () => Response.json({ ok: true }));
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<durable-signal-false>");
+
+    var run_request = try makeTestRequest(allocator, "GET", "/run", null);
+    defer run_request.deinit(allocator);
+    var run_response = try rt.executeHandler(run_request.asView());
+    defer run_response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), run_response.status);
+
+    var signal_request = try makeTestRequest(allocator, "GET", "/signal", null);
+    defer signal_request.deinit(allocator);
+    var signal_response = try rt.executeHandler(signal_request.asView());
+    defer signal_response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, signal_response.body, .{});
+    defer parsed.deinit();
+    try std.testing.expect(!parsed.value.object.get("delivered").?.bool);
+}
+
 test "durable step outside run fails" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -4854,7 +5290,7 @@ test "httpRequest native binding reports disabled bridge by default" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -4895,7 +5331,7 @@ test "httpRequest native binding enforces allowlisted host before dialing" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -4940,7 +5376,7 @@ test "request helpers expose body parsing and case-insensitive headers" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = try allocator.dupe(u8, "{\"name\":\"zigttp\"}"),
     };
     defer request.deinit(allocator);
@@ -4993,7 +5429,7 @@ test "request helpers define empty and invalid body semantics" {
     var empty_request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer empty_request.deinit(allocator);
@@ -5011,7 +5447,7 @@ test "request helpers define empty and invalid body semantics" {
     var invalid_request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = try allocator.dupe(u8, "{invalid json"),
     };
     defer invalid_request.deinit(allocator);
@@ -5078,7 +5514,7 @@ test "Headers Request and Response factories share the HTTP model" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5123,7 +5559,7 @@ test "body readers are single-use for inbound and constructed HTTP objects" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = try allocator.dupe(u8, "ping"),
     };
     defer request.deinit(allocator);
@@ -5173,7 +5609,7 @@ test "fetchSync returns response helpers and direct response objects" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5231,7 +5667,7 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5280,7 +5716,7 @@ test "fetchSync respects embedded capability policy host allowlist" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5351,7 +5787,7 @@ test "fetchSync sends request data and exposes response helpers" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5422,7 +5858,7 @@ test "fetchSync enforces response byte limits" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5453,7 +5889,7 @@ test "HandlerPool basic operations" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5478,7 +5914,7 @@ test "HandlerPool bytecode cache" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5505,7 +5941,7 @@ test "HandlerPool handler remains callable across resets" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5532,7 +5968,7 @@ test "AOT override fallback and success" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5605,7 +6041,7 @@ test "HandlerPool concurrent stress" {
             var request = HttpRequestOwned{
                 .method = method,
                 .url = url,
-                .headers = .{},
+                .headers = .empty,
                 .body = null,
             };
             defer request.deinit(ctx.allocator);
@@ -5654,7 +6090,7 @@ test "string prototype methods are callable" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5680,7 +6116,7 @@ test "request body split works" {
     var req1 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
 
@@ -5699,7 +6135,7 @@ test "request body split works" {
     var req2 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = try allocator.dupe(u8, "test"),
     };
 
@@ -5718,7 +6154,7 @@ test "request body split works" {
     var req3 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
 
@@ -5738,7 +6174,7 @@ test "request body split works" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5764,7 +6200,7 @@ test "for loop locals preserve numeric values" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5796,7 +6232,7 @@ test "object property access works" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5829,7 +6265,7 @@ test "array indexing works" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5860,7 +6296,7 @@ test "JSX rendering works" {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
         .url = try allocator.dupe(u8, "/"),
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5887,7 +6323,7 @@ test "HandlerPool exhaustion and recovery" {
     var request = HttpRequestOwned{
         .method = method,
         .url = url,
-        .headers = .{},
+        .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
@@ -5942,7 +6378,7 @@ test "HandlerPool high contention stress" {
             var request = HttpRequestOwned{
                 .method = method,
                 .url = url,
-                .headers = .{},
+                .headers = .empty,
                 .body = null,
             };
             defer request.deinit(ctx.allocator);

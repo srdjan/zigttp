@@ -71,6 +71,9 @@ pub const DurableInfo = struct {
     used: bool,
     keys: DurableKeyInfo,
     steps: std.ArrayList([]const u8), // each entry owned
+    timers: bool = false,
+    signals: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
+    producer_keys: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
 
     pub fn deinit(self: *DurableInfo, allocator: std.mem.Allocator) void {
         for (self.keys.literal.items) |key| {
@@ -81,6 +84,14 @@ pub const DurableInfo = struct {
             allocator.free(step);
         }
         self.steps.deinit(allocator);
+        for (self.signals.literal.items) |signal| {
+            allocator.free(signal);
+        }
+        self.signals.literal.deinit(allocator);
+        for (self.producer_keys.literal.items) |key| {
+            allocator.free(key);
+        }
+        self.producer_keys.literal.deinit(allocator);
     }
 };
 
@@ -172,7 +183,7 @@ pub const AotInfo = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 3,
+    version: u32 = 4,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -242,6 +253,11 @@ pub const ContractBuilder = struct {
     cache_binding_slots: std.ArrayList(CacheBinding),
     durable_run_binding_slots: std.ArrayList(u16),
     durable_step_binding_slots: std.ArrayList(u16),
+    durable_sleep_binding_slots: std.ArrayList(u16) = .empty,
+    durable_sleep_until_binding_slots: std.ArrayList(u16) = .empty,
+    durable_wait_signal_binding_slots: std.ArrayList(u16) = .empty,
+    durable_signal_binding_slots: std.ArrayList(u16) = .empty,
+    durable_signal_at_binding_slots: std.ArrayList(u16) = .empty,
     schema_compile_binding_slots: std.ArrayList(u16),
     request_schema_binding_slots: std.ArrayList(u16),
     parse_bearer_binding_slots: std.ArrayList(u16),
@@ -261,6 +277,11 @@ pub const ContractBuilder = struct {
     durable_key_literals: std.ArrayList([]const u8),
     durable_key_dynamic: bool,
     durable_step_names: std.ArrayList([]const u8),
+    durable_timers: bool = false,
+    durable_signal_names: std.ArrayList([]const u8) = .empty,
+    durable_signal_dynamic: bool = false,
+    durable_producer_key_literals: std.ArrayList([]const u8) = .empty,
+    durable_producer_key_dynamic: bool = false,
     api_schemas: std.ArrayList(ApiSchemaInfo),
     api_request_schema_refs: std.ArrayList([]const u8),
     api_request_schema_dynamic: bool,
@@ -320,6 +341,11 @@ pub const ContractBuilder = struct {
         self.cache_binding_slots.deinit(self.allocator);
         self.durable_run_binding_slots.deinit(self.allocator);
         self.durable_step_binding_slots.deinit(self.allocator);
+        self.durable_sleep_binding_slots.deinit(self.allocator);
+        self.durable_sleep_until_binding_slots.deinit(self.allocator);
+        self.durable_wait_signal_binding_slots.deinit(self.allocator);
+        self.durable_signal_binding_slots.deinit(self.allocator);
+        self.durable_signal_at_binding_slots.deinit(self.allocator);
         self.schema_compile_binding_slots.deinit(self.allocator);
         self.request_schema_binding_slots.deinit(self.allocator);
         self.parse_bearer_binding_slots.deinit(self.allocator);
@@ -335,6 +361,10 @@ pub const ContractBuilder = struct {
         self.durable_key_literals.deinit(self.allocator);
         for (self.durable_step_names.items) |s| self.allocator.free(s);
         self.durable_step_names.deinit(self.allocator);
+        for (self.durable_signal_names.items) |s| self.allocator.free(s);
+        self.durable_signal_names.deinit(self.allocator);
+        for (self.durable_producer_key_literals.items) |s| self.allocator.free(s);
+        self.durable_producer_key_literals.deinit(self.allocator);
         for (self.modules_list.items) |s| self.allocator.free(s);
         self.modules_list.deinit(self.allocator);
         for (self.functions_map.items) |*entry| {
@@ -457,6 +487,15 @@ pub const ContractBuilder = struct {
                     .dynamic = self.durable_key_dynamic,
                 },
                 .steps = self.durable_step_names,
+                .timers = self.durable_timers,
+                .signals = .{
+                    .literal = self.durable_signal_names,
+                    .dynamic = self.durable_signal_dynamic,
+                },
+                .producer_keys = .{
+                    .literal = self.durable_producer_key_literals,
+                    .dynamic = self.durable_producer_key_dynamic,
+                },
             },
             .api = .{
                 .schemas = self.api_schemas,
@@ -484,6 +523,8 @@ pub const ContractBuilder = struct {
         self.cache_namespaces = .empty;
         self.durable_key_literals = .empty;
         self.durable_step_names = .empty;
+        self.durable_signal_names = .empty;
+        self.durable_producer_key_literals = .empty;
         self.api_schemas = .empty;
         self.api_request_schema_refs = .empty;
         self.api_routes = .empty;
@@ -577,6 +618,21 @@ pub const ContractBuilder = struct {
                     if (std.mem.eql(u8, imported_name, "step")) {
                         try self.durable_step_binding_slots.append(self.allocator, spec.local_binding.slot);
                     }
+                    if (std.mem.eql(u8, imported_name, "sleep")) {
+                        try self.durable_sleep_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
+                    if (std.mem.eql(u8, imported_name, "sleepUntil")) {
+                        try self.durable_sleep_until_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
+                    if (std.mem.eql(u8, imported_name, "waitSignal")) {
+                        try self.durable_wait_signal_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
+                    if (std.mem.eql(u8, imported_name, "signal")) {
+                        try self.durable_signal_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
+                    if (std.mem.eql(u8, imported_name, "signalAt")) {
+                        try self.durable_signal_at_binding_slots.append(self.allocator, spec.local_binding.slot);
+                    }
                 }
 
                 if (vm == .router and std.mem.eql(u8, imported_name, "routerMatch")) {
@@ -667,6 +723,25 @@ pub const ContractBuilder = struct {
                     continue;
                 }
 
+                if (self.isDurableSleepBinding(binding.slot)) {
+                    self.durable_used = true;
+                    self.durable_timers = true;
+                    continue;
+                }
+
+                if (self.isDurableWaitSignalBinding(binding.slot)) {
+                    self.durable_used = true;
+                    try self.extractLiteralArg(call, &self.durable_signal_names, &self.durable_signal_dynamic, null);
+                    continue;
+                }
+
+                if (self.isDurableSignalBinding(binding.slot)) {
+                    self.durable_used = true;
+                    try self.extractLiteralArg(call, &self.durable_producer_key_literals, &self.durable_producer_key_dynamic, null);
+                    try self.extractLiteralArgAt(call, 1, &self.durable_signal_names, &self.durable_signal_dynamic, null);
+                    continue;
+                }
+
                 // Check for schemaCompile() calls
                 if (self.isSchemaCompileBinding(binding.slot)) {
                     try self.extractSchemaCompile(call);
@@ -709,9 +784,20 @@ pub const ContractBuilder = struct {
         dynamic_flag: *bool,
         transform: ?*const fn ([]const u8) []const u8,
     ) !void {
-        if (call.args_count < 1) return;
+        try self.extractLiteralArgAt(call, 0, target, dynamic_flag, transform);
+    }
 
-        const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
+    fn extractLiteralArgAt(
+        self: *ContractBuilder,
+        call: Node.CallExpr,
+        arg_pos: u8,
+        target: *std.ArrayList([]const u8),
+        dynamic_flag: *bool,
+        transform: ?*const fn ([]const u8) []const u8,
+    ) !void {
+        if (call.args_count <= arg_pos) return;
+
+        const arg_idx = self.ir_view.getListIndex(call.args_start, arg_pos);
         const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
 
         if (arg_tag == .lit_string) {
@@ -737,9 +823,18 @@ pub const ContractBuilder = struct {
         call: Node.CallExpr,
         target: *std.ArrayList([]const u8),
     ) !void {
-        if (call.args_count < 1) return;
+        try self.extractLiteralArgStaticAt(call, 0, target);
+    }
 
-        const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
+    fn extractLiteralArgStaticAt(
+        self: *ContractBuilder,
+        call: Node.CallExpr,
+        arg_pos: u8,
+        target: *std.ArrayList([]const u8),
+    ) !void {
+        if (call.args_count <= arg_pos) return;
+
+        const arg_idx = self.ir_view.getListIndex(call.args_start, arg_pos);
         const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
         if (arg_tag != .lit_string) return;
 
@@ -777,6 +872,20 @@ pub const ContractBuilder = struct {
 
     fn isDurableStepBinding(self: *const ContractBuilder, slot: u16) bool {
         return containsSlot(self.durable_step_binding_slots.items, slot);
+    }
+
+    fn isDurableSleepBinding(self: *const ContractBuilder, slot: u16) bool {
+        return containsSlot(self.durable_sleep_binding_slots.items, slot) or
+            containsSlot(self.durable_sleep_until_binding_slots.items, slot);
+    }
+
+    fn isDurableWaitSignalBinding(self: *const ContractBuilder, slot: u16) bool {
+        return containsSlot(self.durable_wait_signal_binding_slots.items, slot);
+    }
+
+    fn isDurableSignalBinding(self: *const ContractBuilder, slot: u16) bool {
+        return containsSlot(self.durable_signal_binding_slots.items, slot) or
+            containsSlot(self.durable_signal_at_binding_slots.items, slot);
     }
 
     fn isRequestSchemaBinding(self: *const ContractBuilder, slot: u16) bool {
@@ -1698,6 +1807,24 @@ fn parseDurableSection(
             );
         } else if (std.mem.eql(u8, key, "steps")) {
             try parseStringArray(parser, allocator, &contract.durable.steps);
+        } else if (std.mem.eql(u8, key, "timers")) {
+            contract.durable.timers = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "signals")) {
+            try parseDynamicSection(
+                parser,
+                allocator,
+                "literal",
+                &contract.durable.signals.literal,
+                &contract.durable.signals.dynamic,
+            );
+        } else if (std.mem.eql(u8, key, "producerKeys")) {
+            try parseDynamicSection(
+                parser,
+                allocator,
+                "literal",
+                &contract.durable.producer_keys.literal,
+                &contract.durable.producer_keys.dynamic,
+            );
         } else {
             parser.skipValue();
         }
@@ -1906,7 +2033,26 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         if (i > 0) try writer.writeAll(", ");
         try writeJsonString(writer, step);
     }
-    try writer.writeAll("]\n");
+    try writer.writeAll("],\n");
+    try writer.print("    \"timers\": {s},\n", .{if (contract.durable.timers) "true" else "false"});
+    try writer.writeAll("    \"signals\": {\n");
+    try writer.writeAll("      \"literal\": [");
+    for (contract.durable.signals.literal.items, 0..) |signal, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, signal);
+    }
+    try writer.writeAll("],\n");
+    try writer.print("      \"dynamic\": {s}\n", .{if (contract.durable.signals.dynamic) "true" else "false"});
+    try writer.writeAll("    },\n");
+    try writer.writeAll("    \"producerKeys\": {\n");
+    try writer.writeAll("      \"literal\": [");
+    for (contract.durable.producer_keys.literal.items, 0..) |key, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, key);
+    }
+    try writer.writeAll("],\n");
+    try writer.print("      \"dynamic\": {s}\n", .{if (contract.durable.producer_keys.dynamic) "true" else "false"});
+    try writer.writeAll("    }\n");
     try writer.writeAll("  },\n");
 
     // api
@@ -2216,7 +2362,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 4") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);

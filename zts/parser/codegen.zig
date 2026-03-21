@@ -134,7 +134,7 @@ pub const CodeGen = struct {
             .current_stack_depth = 0,
             .ic_cache_idx = 0,
             .opt_stats = .{},
-            .shapes = .{},
+            .shapes = .empty,
             .shape_dedup = .{},
         };
     }
@@ -164,7 +164,7 @@ pub const CodeGen = struct {
             .current_stack_depth = 0,
             .ic_cache_idx = 0,
             .opt_stats = .{},
-            .shapes = .{},
+            .shapes = .empty,
             .shape_dedup = .{},
         };
     }

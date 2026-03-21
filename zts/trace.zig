@@ -398,6 +398,10 @@ pub const TraceEntry = union(enum) {
     io: IoEntry,
     step_start: StepStartTrace,
     step_result: StepResultTrace,
+    wait_timer: WaitTimerTrace,
+    resume_timer: ResumeTimerTrace,
+    wait_signal: WaitSignalTrace,
+    resume_signal: ResumeSignalTrace,
     response: ResponseTrace,
     meta: MetaTrace,
     complete: void,
@@ -432,10 +436,31 @@ pub const StepResultTrace = struct {
     result_json: []const u8,
 };
 
+pub const WaitTimerTrace = struct {
+    until_ms: i64,
+};
+
+pub const ResumeTimerTrace = struct {
+    fired_at_ms: i64,
+};
+
+pub const WaitSignalTrace = struct {
+    name: []const u8,
+};
+
+pub const ResumeSignalTrace = struct {
+    name: []const u8,
+    payload_json: []const u8,
+};
+
 pub const DurableEvent = union(enum) {
     io: IoEntry,
     step_start: StepStartTrace,
     step_result: StepResultTrace,
+    wait_timer: WaitTimerTrace,
+    resume_timer: ResumeTimerTrace,
+    wait_signal: WaitSignalTrace,
+    resume_signal: ResumeSignalTrace,
 };
 
 pub const ResponseTrace = struct {
@@ -504,7 +529,7 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
                     current_meta = null;
                 }
             },
-            .durable_run, .step_start, .step_result, .complete => {},
+            .durable_run, .step_start, .step_result, .wait_timer, .resume_timer, .wait_signal, .resume_signal, .complete => {},
             .unknown => {},
         }
     }
@@ -551,6 +576,23 @@ fn parseTraceLine(line: []const u8) !TraceEntry {
         return .{ .step_result = .{
             .name = findJsonStringValue(line, "\"name\"") orelse "",
             .result_json = findJsonAnyValue(line, "\"result\"") orelse "null",
+        } };
+    } else if (std.mem.eql(u8, type_str, "wait_timer")) {
+        return .{ .wait_timer = .{
+            .until_ms = findJsonIntValue(line, "\"until_ms\"") orelse 0,
+        } };
+    } else if (std.mem.eql(u8, type_str, "resume_timer")) {
+        return .{ .resume_timer = .{
+            .fired_at_ms = findJsonIntValue(line, "\"fired_at_ms\"") orelse 0,
+        } };
+    } else if (std.mem.eql(u8, type_str, "wait_signal")) {
+        return .{ .wait_signal = .{
+            .name = findJsonStringValue(line, "\"name\"") orelse "",
+        } };
+    } else if (std.mem.eql(u8, type_str, "resume_signal")) {
+        return .{ .resume_signal = .{
+            .name = findJsonStringValue(line, "\"name\"") orelse "",
+            .payload_json = findJsonAnyValue(line, "\"payload\"") orelse "null",
         } };
     } else if (std.mem.eql(u8, type_str, "response")) {
         return .{ .response = .{
@@ -1000,6 +1042,18 @@ pub const DurableStepReplay = union(enum) {
     cached: []const u8,
 };
 
+pub const DurableTimerWaitReplay = union(enum) {
+    live: void,
+    ready: void,
+    pending: WaitTimerTrace,
+};
+
+pub const DurableSignalWaitReplay = union(enum) {
+    live: void,
+    delivered: []const u8,
+    pending: WaitSignalTrace,
+};
+
 /// Per-request durable execution state.
 /// Combines oplog reading (replay phase) with write-ahead persistence (live phase).
 ///
@@ -1119,6 +1173,78 @@ pub const DurableState = struct {
         return .execute;
     }
 
+    pub fn beginTimerWait(self: *DurableState, until_ms: i64) DurableTimerWaitReplay {
+        if (self.is_live) return .live;
+        if (self.cursor >= self.oplog_events.len) {
+            self.is_live = true;
+            return .live;
+        }
+
+        const event = self.oplog_events[self.cursor];
+        const wait = switch (event) {
+            .wait_timer => |w| w,
+            else => {
+                self.is_live = true;
+                return .live;
+            },
+        };
+        if (wait.until_ms != until_ms) {
+            self.is_live = true;
+            return .live;
+        }
+
+        self.cursor += 1;
+        if (self.cursor < self.oplog_events.len) {
+            switch (self.oplog_events[self.cursor]) {
+                .resume_timer => {
+                    self.cursor += 1;
+                    return .ready;
+                },
+                else => {},
+            }
+        }
+
+        self.is_live = true;
+        return .{ .pending = wait };
+    }
+
+    pub fn beginSignalWait(self: *DurableState, name: []const u8) DurableSignalWaitReplay {
+        if (self.is_live) return .live;
+        if (self.cursor >= self.oplog_events.len) {
+            self.is_live = true;
+            return .live;
+        }
+
+        const event = self.oplog_events[self.cursor];
+        const wait = switch (event) {
+            .wait_signal => |w| w,
+            else => {
+                self.is_live = true;
+                return .live;
+            },
+        };
+        if (!std.mem.eql(u8, wait.name, name)) {
+            self.is_live = true;
+            return .live;
+        }
+
+        self.cursor += 1;
+        if (self.cursor < self.oplog_events.len) {
+            switch (self.oplog_events[self.cursor]) {
+                .resume_signal => |signal_resume| {
+                    if (std.mem.eql(u8, signal_resume.name, name)) {
+                        self.cursor += 1;
+                        return .{ .delivered = signal_resume.payload_json };
+                    }
+                },
+                else => {},
+            }
+        }
+
+        self.is_live = true;
+        return .{ .pending = wait };
+    }
+
     /// Persist an I/O call result to the oplog with write-ahead guarantee.
     /// Serializes as JSONL, writes, and fsyncs before returning.
     pub fn persistIO(
@@ -1186,6 +1312,44 @@ pub const DurableState = struct {
         appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
         appendSlice(&self.write_buf, self.allocator, "\",\"result\":") orelse return;
         appendJSValueBuf(&self.write_buf, self.allocator, ctx, result, 0) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    pub fn persistWaitTimer(self: *DurableState, until_ms: i64) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_timer\",\"until_ms\":") orelse return;
+        appendInt(&self.write_buf, self.allocator, until_ms) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    pub fn persistResumeTimer(self: *DurableState, fired_at_ms: i64) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"resume_timer\",\"fired_at_ms\":") orelse return;
+        appendInt(&self.write_buf, self.allocator, fired_at_ms) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    pub fn persistWaitSignal(self: *DurableState, name: []const u8) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"wait_signal\",\"name\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\"}\n") orelse return;
+        writeAll(self.oplog_fd, self.write_buf.items);
+        fsyncFd(self.oplog_fd);
+    }
+
+    pub fn persistResumeSignal(self: *DurableState, name: []const u8, payload_json: []const u8) void {
+        self.write_buf.clearRetainingCapacity();
+        appendSlice(&self.write_buf, self.allocator, "{\"type\":\"resume_signal\",\"name\":\"") orelse return;
+        appendEscapedSlice(&self.write_buf, self.allocator, name) orelse return;
+        appendSlice(&self.write_buf, self.allocator, "\",\"payload\":") orelse return;
+        appendSlice(&self.write_buf, self.allocator, payload_json) orelse return;
         appendSlice(&self.write_buf, self.allocator, "}\n") orelse return;
         writeAll(self.oplog_fd, self.write_buf.items);
         fsyncFd(self.oplog_fd);
@@ -1484,6 +1648,10 @@ pub fn parseDurableOplog(allocator: std.mem.Allocator, source: []const u8) !Dura
             .io => |io| try events.append(allocator, .{ .io = io }),
             .step_start => |start| try events.append(allocator, .{ .step_start = start }),
             .step_result => |result| try events.append(allocator, .{ .step_result = result }),
+            .wait_timer => |wait| try events.append(allocator, .{ .wait_timer = wait }),
+            .resume_timer => |timer_resume| try events.append(allocator, .{ .resume_timer = timer_resume }),
+            .wait_signal => |wait| try events.append(allocator, .{ .wait_signal = wait }),
+            .resume_signal => |signal_resume| try events.append(allocator, .{ .resume_signal = signal_resume }),
             .response => |resp| response = resp,
             .complete => complete = true,
             else => {},
@@ -1594,6 +1762,27 @@ test "parseTraceLine durable step result" {
         .step_result => |result| {
             try std.testing.expectEqualStrings("charge", result.name);
             try std.testing.expectEqualStrings("{\"ok\":true}", result.result_json);
+        },
+        else => return error.UnexpectedTraceType,
+    }
+}
+
+test "parseTraceLine durable wait and resume signal" {
+    const wait_line = "{\"type\":\"wait_signal\",\"name\":\"approval\"}";
+    const wait_entry = try parseTraceLine(wait_line);
+    switch (wait_entry) {
+        .wait_signal => |wait| {
+            try std.testing.expectEqualStrings("approval", wait.name);
+        },
+        else => return error.UnexpectedTraceType,
+    }
+
+    const resume_line = "{\"type\":\"resume_signal\",\"name\":\"approval\",\"payload\":{\"ok\":true}}";
+    const resume_entry = try parseTraceLine(resume_line);
+    switch (resume_entry) {
+        .resume_signal => |signal_resume| {
+            try std.testing.expectEqualStrings("approval", signal_resume.name);
+            try std.testing.expectEqualStrings("{\"ok\":true}", signal_resume.payload_json);
         },
         else => return error.UnexpectedTraceType,
     }

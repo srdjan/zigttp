@@ -519,7 +519,8 @@ test "HybridAllocator routing" {
     const pers = hybrid.alloc(.persistent, 64);
     try std.testing.expect(pers != null);
     // Must manually free persistent allocations
-    std.testing.allocator.free(@as([*]align(8) u8, @ptrCast(@alignCast(pers.?)))[0..64]);
+    const pers_bytes: []u8 = @as([*]u8, @ptrCast(pers.?))[0..64];
+    std.testing.allocator.rawFree(pers_bytes, .@"8", @returnAddress());
 
     // Reset only clears ephemeral
     hybrid.resetEphemeral();

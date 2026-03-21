@@ -81,6 +81,11 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         // zigttp:durable
         .{ .name = "run", .sig = makeSig(&.{ pool.idx_string, pool.idx_unknown }, pool.idx_unknown) },
         .{ .name = "step", .sig = makeSig(&.{ pool.idx_string, pool.idx_unknown }, pool.idx_unknown) },
+        .{ .name = "sleep", .sig = makeSig(&.{pool.idx_number}, pool.idx_undefined) },
+        .{ .name = "sleepUntil", .sig = makeSig(&.{pool.idx_number}, pool.idx_undefined) },
+        .{ .name = "waitSignal", .sig = makeSig(&.{pool.idx_string}, pool.idx_unknown) },
+        .{ .name = "signal", .sig = makeSig(&.{ pool.idx_string, pool.idx_string }, pool.idx_boolean) },
+        .{ .name = "signalAt", .sig = makeSig(&.{ pool.idx_string, pool.idx_string, pool.idx_number }, pool.idx_boolean) },
     };
 
     for (sigs) |entry| {

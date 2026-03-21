@@ -172,11 +172,19 @@ straight-line function that the verifier and type checker can fully analyze.
 
 zigttp extends the same straight-line model to crash recovery through
 `zigttp:durable`. A handler opts in with `run(key, fn)` and can bracket
-idempotent subcomputations with `step(name, fn)`. The runtime writes a JSONL
-oplog under `--durable`, replays deterministic effects from that oplog after a
-restart, and resumes live execution at the first incomplete step. Completed
-logs stay on disk so duplicate keys can return the previously recorded
-`Response` without repeating side effects.
+idempotent subcomputations with `step(name, fn)`. The same oplog now also
+captures durable waits: `sleep()` / `sleepUntil()` record timer waits, and
+`waitSignal()` records named signal waits. The runtime writes a JSONL oplog
+under `--durable`, replays deterministic effects from that oplog after a
+restart, and resumes live execution at the first incomplete step or wait.
+Completed logs stay on disk so duplicate keys can return the previously
+recorded `Response` without repeating side effects.
+
+Signals are stored beside the oplog directory in a small filesystem-backed
+queue. A background scheduler thread reuses the existing durable recovery path:
+it polls incomplete runs, lets the runtime decide whether a timer is due or a
+signal is now available, and resumes the run through the same replay logic used
+for crash recovery.
 
 ## Runtime Model
 

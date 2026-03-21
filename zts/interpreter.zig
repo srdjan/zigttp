@@ -1137,6 +1137,7 @@ pub const Interpreter = struct {
         ArenaObjectEscape, // Arena object stored into persistent object
         NoHiddenClassPool,
         SoundModeViolation, // Non-boolean value in boolean context
+        DurableSuspended,
     };
 
     /// Main bytecode dispatch loop - executes opcodes until halt, return, or error.
@@ -3569,7 +3570,7 @@ pub const Interpreter = struct {
         @memcpy(buf[prefix.len..][0..type_copy_len], type_name[0..type_copy_len]);
         const suffix_len = @min(suffix.len, total - prefix.len - type_copy_len);
         @memcpy(buf[prefix.len + type_copy_len ..][0..suffix_len], suffix[0..suffix_len]);
-        const msg = buf[0..prefix.len + type_copy_len + suffix_len];
+        const msg = buf[0 .. prefix.len + type_copy_len + suffix_len];
         const js_str = blk: {
             if (self.ctx.hybrid) |h| {
                 break :blk string.createStringWithArena(h.arena, msg) orelse return error.OutOfMemory;
@@ -3687,6 +3688,7 @@ pub const Interpreter = struct {
                 .none => blk: {
                     // Generic path for non-hot builtins
                     break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
+                        if (err == error.DurableSuspended) return error.DurableSuspended;
                         const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
                         std.log.err("Native function '{s}' error: {}", .{ func_name, err });
                         self.ctx.throwException(value.JSValue.exception_val);

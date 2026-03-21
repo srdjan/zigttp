@@ -21,7 +21,7 @@ pub const JSString = extern struct {
     hash: u64, // Cached XXHash64
     // Followed by UTF-8 data
 
-    pub const Flags = packed struct {
+    pub const Flags = packed struct(u8) {
         is_unique: bool = false, // Interned string
         is_ascii: bool = false, // All bytes < 128
         is_numeric: bool = false, // Valid array index
@@ -171,7 +171,7 @@ pub const RopeNode = extern struct {
     /// Payload depends on kind
     payload: RopePayload,
 
-    pub const RopeFlags = packed struct {
+    pub const RopeFlags = packed struct(u8) {
         is_ascii: bool = false,
         is_flattened: bool = false, // Has been flattened to a JSString
         _reserved: u6 = 0,
@@ -1162,7 +1162,7 @@ pub const StringBuilder = struct {
 
     pub fn init(allocator: std.mem.Allocator) StringBuilder {
         return .{
-            .parts = .{},
+            .parts = .empty,
             .allocator = allocator,
         };
     }

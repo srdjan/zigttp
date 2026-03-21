@@ -99,7 +99,7 @@ pub const CodeAllocator = struct {
 
     pub fn init(allocator: std.mem.Allocator) CodeAllocator {
         return .{
-            .pages = .{},
+            .pages = .empty,
             .allocator = allocator,
             .free_hint = 0,
         };

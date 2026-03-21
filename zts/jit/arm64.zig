@@ -113,7 +113,7 @@ pub const Arm64Emitter = struct {
 
     pub fn init(allocator: std.mem.Allocator) Arm64Emitter {
         return .{
-            .buffer = .{},
+            .buffer = .empty,
             .allocator = allocator,
         };
     }

@@ -993,7 +993,15 @@ Crash-safe, replay-safe execution for handlers that need an idempotency key.
 Requires `--durable <DIR>` at runtime.
 
 ```typescript
-import { run, step } from "zigttp:durable";
+import {
+  run,
+  step,
+  sleep,
+  sleepUntil,
+  waitSignal,
+  signal,
+  signalAt,
+} from "zigttp:durable";
 ```
 
 **run(key, fn)** - Start or resume a durable execution keyed by `key`. If a
@@ -1003,6 +1011,20 @@ completed run already exists for that key, zigttp returns the recorded
 **step(name, fn)** - Memoize a named subcomputation inside `run()`. If the step
 already completed in a previous attempt, zigttp returns the recorded result and
 skips the callback body.
+
+**sleep(ms)** / **sleepUntil(unixMs)** - Suspend a durable run until the timer
+is due. Pending runs return a framework-owned `202 Accepted` response with a
+JSON body describing the outstanding timer.
+
+**waitSignal(name)** - Suspend a durable run until a named signal arrives. When
+the signal is delivered, the recorded JSON payload is returned to the handler.
+
+**signal(key, name, payload?)** - Queue an immediate signal for an incomplete
+durable run. Returns `false` if `key` does not identify an incomplete run.
+
+**signalAt(key, name, atUnixMs, payload?)** - Queue a scheduled signal that
+becomes available at or after `atUnixMs`. Delivery uses the same replay-safe
+path as `signal()`.
 
 ```typescript
 import { run, step } from "zigttp:durable";
@@ -1031,8 +1053,12 @@ Current constraints:
 
 - `run()` callbacks must return a `Response`
 - `step()` must be called inside `run()`
+- `sleep()`, `sleepUntil()`, and `waitSignal()` must be called inside `run()`
+- `sleep*()` and `waitSignal()` are not supported inside `step()`
 - Nested `run()` and nested `step()` are not supported in v1
-- `step()` results must be JSON-serializable
+- `step()` results and signal payloads must be JSON-serializable
+- Pending durable waits return `202 Accepted` with a JSON body of the form
+  `{"pending":true,"durableKey":"...","wait":{...}}`
 
 ### zigttp:io
 

@@ -92,7 +92,7 @@ pub const HttpResponse = struct {
     pub fn init(allocator: std.mem.Allocator) HttpResponse {
         return .{
             .status = 200,
-            .headers = .{},
+            .headers = .empty,
             .body = "",
             .body_owned = false,
             .body_owner = null,

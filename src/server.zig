@@ -1073,7 +1073,7 @@ pub const Server = struct {
         request_started: *bool,
     ) !ParsedRequest {
         var reader_buf: [8192]u8 = undefined;
-        var headers = std.ArrayListUnmanaged(HttpHeader){};
+        var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
         errdefer headers.deinit(allocator);
         try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 
@@ -1136,7 +1136,7 @@ pub const Server = struct {
 
     /// Parse HTTP request from a pre-read buffer (synchronous path for thread pool).
     fn parseRequestFromBuffer(self: *Self, allocator: std.mem.Allocator, data: []const u8) !ParsedRequest {
-        var headers = std.ArrayListUnmanaged(HttpHeader){};
+        var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
         errdefer headers.deinit(allocator);
         try headers.ensureTotalCapacity(allocator, self.config.max_headers);
 

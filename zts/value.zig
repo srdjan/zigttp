@@ -14,7 +14,7 @@ const std = @import("std");
 const heap = @import("heap.zig");
 
 /// 64-bit NaN-boxed JavaScript value
-pub const JSValue = packed struct {
+pub const JSValue = packed struct(u64) {
     raw: u64,
 
     // ========================================================================

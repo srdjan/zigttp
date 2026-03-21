@@ -94,7 +94,7 @@ pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.All
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1402,6 +1402,15 @@ fn mergeModuleContract(
     for (source.durable.steps.items) |step| {
         try appendUniqueString(allocator, &target.durable.steps, step, false);
     }
+    target.durable.timers = target.durable.timers or source.durable.timers;
+    for (source.durable.signals.literal.items) |signal| {
+        try appendUniqueString(allocator, &target.durable.signals.literal, signal, false);
+    }
+    target.durable.signals.dynamic = target.durable.signals.dynamic or source.durable.signals.dynamic;
+    for (source.durable.producer_keys.literal.items) |key| {
+        try appendUniqueString(allocator, &target.durable.producer_keys.literal, key, false);
+    }
+    target.durable.producer_keys.dynamic = target.durable.producer_keys.dynamic or source.durable.producer_keys.dynamic;
 
     for (source.api.schemas.items) |schema| {
         try upsertApiSchema(allocator, &target.api.schemas, schema.name, schema.schema_json);
