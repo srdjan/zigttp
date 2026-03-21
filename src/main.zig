@@ -17,6 +17,7 @@
 //!   --outbound-host <H>   Restrict outbound bridge to exact host H
 //!   --outbound-timeout-ms Connect timeout for outbound bridge (default: 10000)
 //!   --outbound-max-response <SIZE>  Max captured response bytes (default: 1mb)
+//!   --sqlite <FILE>       SQLite database path for zigttp:sql
 //!   --durable <DIR>       Enable durable execution with write-ahead oplog
 //!   --help                Show this help message
 //!
@@ -163,6 +164,8 @@ fn parseArgs(args_vector: std.process.Args) !ServerConfig {
             const size_str = args.next() orelse return error.MissingOutboundMaxResponse;
             config.runtime_config.outbound_http_enabled = true;
             config.runtime_config.outbound_max_response_bytes = parseSize(size_str) catch return error.InvalidOutboundMaxResponse;
+        } else if (std.mem.eql(u8, arg, "--sqlite")) {
+            config.runtime_config.sqlite_path = args.next() orelse return error.MissingSqlitePath;
         } else if (std.mem.eql(u8, arg, "--trace")) {
             config.runtime_config.trace_file_path = args.next() orelse return error.MissingTraceFile;
         } else if (std.mem.eql(u8, arg, "--replay")) {
@@ -240,6 +243,7 @@ fn printHelp() void {
         \\  --outbound-timeout-ms Connect timeout for outbound bridge in ms
         \\  --outbound-max-response <SIZE>
         \\                        Max captured response bytes (supports k/m/g suffixes)
+        \\  --sqlite <FILE>       SQLite database path for zigttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog

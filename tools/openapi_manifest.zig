@@ -323,6 +323,7 @@ test "writeOpenApiJson renders schema and route" {
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = handler_contract.emptySqlInfo(),
         .api = .{
             .schemas = schemas,
             .requests = .{ .schema_refs = global_requests, .dynamic = false },

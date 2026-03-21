@@ -70,6 +70,9 @@ pub const RuntimeConfig = struct {
     /// Connect timeout in milliseconds for outbound HTTP requests.
     outbound_timeout_ms: u32 = 10_000,
 
+    /// SQLite database path for zigttp:sql.
+    sqlite_path: ?[]const u8 = null,
+
     /// Trace output file path. When set, all handler I/O is recorded as JSONL.
     trace_file_path: ?[]const u8 = null,
 
@@ -487,6 +490,7 @@ pub const Runtime = struct {
         // This ensures import bindings resolve correctly whether the handler
         // was parsed or loaded from bytecode cache.
         try self.installVirtualModules();
+        try self.installSqlModuleState();
 
         // Install io module callbacks for parallel/race (requires outbound HTTP)
         if (self.config.outbound_http_enabled) {
@@ -861,6 +865,10 @@ pub const Runtime = struct {
             @ptrCast(durable_state),
             &zq.modules.durable.DurableCallbacks.deinitOpaque,
         );
+    }
+
+    fn installSqlModuleState(self: *Self) !void {
+        try zq.modules.sql.installStore(self.ctx, self.config.sqlite_path);
     }
 
     /// Load and compile JavaScript code

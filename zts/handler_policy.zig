@@ -1,7 +1,7 @@
 //! Capability policy parsing, validation, and runtime views.
 //!
 //! Policies are opt-in and restrict precompiled handlers to an explicit set of
-//! env vars, outbound hosts, and cache namespaces.
+//! env vars, outbound hosts, cache namespaces, and SQL query names.
 
 const std = @import("std");
 const contract_mod = @import("handler_contract.zig");
@@ -40,11 +40,13 @@ pub const HandlerPolicy = struct {
     env: ?AllowList = null,
     egress: ?AllowList = null,
     cache: ?AllowList = null,
+    sql: ?AllowList = null,
 
     pub fn deinit(self: *HandlerPolicy, allocator: std.mem.Allocator) void {
         if (self.env) |*section| section.deinit(allocator);
         if (self.egress) |*section| section.deinit(allocator);
         if (self.cache) |*section| section.deinit(allocator);
+        if (self.sql) |*section| section.deinit(allocator);
     }
 };
 
@@ -69,10 +71,28 @@ pub const RuntimeAllowList = struct {
     }
 };
 
+pub const RuntimeSqlAllowList = struct {
+    enabled: bool = false,
+    values: []const []const u8 = &.{},
+    queries: []const contract_mod.SqlQueryInfo = &.{},
+
+    pub fn allows(self: RuntimeSqlAllowList, candidate: []const u8) bool {
+        if (!self.enabled) return true;
+        for (self.values) |value| {
+            if (std.mem.eql(u8, value, candidate)) return true;
+        }
+        for (self.queries) |query| {
+            if (std.mem.eql(u8, query.name, candidate)) return true;
+        }
+        return false;
+    }
+};
+
 pub const RuntimePolicy = struct {
     env: RuntimeAllowList = .{},
     egress: RuntimeAllowList = .{},
     cache: RuntimeAllowList = .{},
+    sql: RuntimeSqlAllowList = .{},
 
     pub fn allowsEnv(self: RuntimePolicy, key: []const u8) bool {
         return self.env.allows(key);
@@ -84,6 +104,10 @@ pub const RuntimePolicy = struct {
 
     pub fn allowsCacheNamespace(self: RuntimePolicy, ns: []const u8) bool {
         return self.cache.allows(ns);
+    }
+
+    pub fn allowsSqlQuery(self: RuntimePolicy, name: []const u8) bool {
+        return self.sql.allows(name);
     }
 };
 
@@ -115,6 +139,12 @@ pub fn contractToRuntimePolicy(contract: *const HandlerContract) RuntimePolicy {
             .{ .enabled = true, .values = &.{} }
         else
             .{},
+        .sql = if (!contract.sql.dynamic and contract.sql.queries.items.len > 0)
+            .{ .enabled = true, .queries = contract.sql.queries.items }
+        else if (!contract.sql.dynamic)
+            .{ .enabled = true, .queries = &.{} }
+        else
+            .{},
     };
 }
 
@@ -122,6 +152,7 @@ pub const PolicyCategory = enum {
     env,
     egress,
     cache,
+    sql,
 };
 
 pub const ViolationKind = enum {
@@ -159,7 +190,8 @@ pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !Handle
         const key = entry.key_ptr.*;
         if (!std.mem.eql(u8, key, "env") and
             !std.mem.eql(u8, key, "egress") and
-            !std.mem.eql(u8, key, "cache"))
+            !std.mem.eql(u8, key, "cache") and
+            !std.mem.eql(u8, key, "sql"))
         {
             return error.InvalidPolicy;
         }
@@ -169,6 +201,7 @@ pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !Handle
         .env = try parseSection(allocator, root, "env", "allow"),
         .egress = try parseSection(allocator, root, "egress", "allow_hosts"),
         .cache = try parseSection(allocator, root, "cache", "allow_namespaces"),
+        .sql = try parseSection(allocator, root, "sql", "allow_queries"),
     };
 }
 
@@ -234,6 +267,24 @@ pub fn validateContract(
         }
     }
 
+    if (policy.sql) |section| {
+        for (contract.sql.queries.items) |query| {
+            if (!section.contains(query.name, false)) {
+                try report.violations.append(allocator, .{
+                    .category = .sql,
+                    .kind = .literal_not_allowed,
+                    .value = query.name,
+                });
+            }
+        }
+        if (contract.sql.dynamic) {
+            try report.violations.append(allocator, .{
+                .category = .sql,
+                .kind = .dynamic_not_allowed,
+            });
+        }
+    }
+
     return report;
 }
 
@@ -290,6 +341,7 @@ fn categoryLiteralLabel(category: PolicyCategory) []const u8 {
         .env => "env var",
         .egress => "outbound host",
         .cache => "cache namespace",
+        .sql => "sql query",
     };
 }
 
@@ -298,6 +350,7 @@ fn categoryDynamicLabel(category: PolicyCategory) []const u8 {
         .env => "env",
         .egress => "outbound host",
         .cache => "cache namespace",
+        .sql => "sql query",
     };
 }
 
@@ -352,6 +405,7 @@ test "validate contract rejects disallowed literals and dynamic access" {
         .env = .{ .literal = env_literals, .dynamic = true },
         .egress = .{ .hosts = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .sql = contract_mod.emptySqlInfo(),
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
@@ -415,6 +469,7 @@ test "contractToRuntimePolicy restricts static sections" {
         .env = .{ .literal = env_literals, .dynamic = false },
         .egress = .{ .hosts = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .sql = contract_mod.emptySqlInfo(),
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
@@ -460,6 +515,7 @@ test "contractToRuntimePolicy leaves dynamic sections permissive" {
         .env = .{ .literal = env_literals, .dynamic = true }, // dynamic
         .egress = .{ .hosts = .empty, .dynamic = false }, // static, empty
         .cache = .{ .namespaces = .empty, .dynamic = true }, // dynamic
+        .sql = contract_mod.emptySqlInfo(),
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },

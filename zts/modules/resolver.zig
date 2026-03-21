@@ -22,6 +22,7 @@ const router_mod = @import("router.zig");
 const auth_mod = @import("auth.zig");
 const validate_mod = @import("validate.zig");
 const cache_mod = @import("cache.zig");
+const sql_mod = @import("sql.zig");
 const io_mod = @import("io.zig");
 const compose_mod = @import("compose.zig");
 const durable_mod = @import("durable.zig");
@@ -41,6 +42,7 @@ pub const VirtualModule = enum {
     auth,
     validate,
     cache,
+    sql,
     io,
     compose,
     durable,
@@ -52,6 +54,7 @@ pub const VirtualModule = enum {
         if (std.mem.eql(u8, specifier, "zigttp:auth")) return .auth;
         if (std.mem.eql(u8, specifier, "zigttp:validate")) return .validate;
         if (std.mem.eql(u8, specifier, "zigttp:cache")) return .cache;
+        if (std.mem.eql(u8, specifier, "zigttp:sql")) return .sql;
         if (std.mem.eql(u8, specifier, "zigttp:io")) return .io;
         if (std.mem.eql(u8, specifier, "zigttp:compose")) return .compose;
         if (std.mem.eql(u8, specifier, "zigttp:durable")) return .durable;
@@ -66,6 +69,7 @@ pub const VirtualModule = enum {
             .auth => &auth_mod.exports,
             .validate => &validate_mod.exports,
             .cache => &cache_mod.exports,
+            .sql => &sql_mod.exports,
             .io => &io_mod.exports,
             .compose => &compose_mod.exports,
             .durable => &durable_mod.exports,
@@ -136,7 +140,10 @@ pub fn registerVirtualModuleTraced(comptime module: VirtualModule, ctx: *context
     const module_name = comptime moduleEnumName(module);
 
     inline for (module_exports) |exp| {
-        const wrapped = comptime trace.makeTracingWrapper(module_name, exp.name, exp.func);
+        const wrapped = if (comptime shouldWrapExport(module, exp.name))
+            comptime trace.makeTracingWrapper(module_name, exp.name, exp.func)
+        else
+            exp.func;
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
@@ -160,6 +167,7 @@ fn moduleEnumName(comptime module: VirtualModule) []const u8 {
         .auth => "auth",
         .validate => "validate",
         .cache => "cache",
+        .sql => "sql",
         .io => "io",
         .compose => "compose",
         .durable => "durable",
@@ -178,13 +186,16 @@ pub fn registerVirtualModuleReplay(comptime module: VirtualModule, ctx: *context
     const module_name = comptime moduleEnumName(module);
 
     inline for (module_exports) |exp| {
-        const stub = comptime trace.makeReplayStub(module_name, exp.name);
+        const func = if (comptime shouldWrapExport(module, exp.name))
+            comptime trace.makeReplayStub(module_name, exp.name)
+        else
+            exp.func;
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
             pool,
             ctx.root_class_idx,
-            stub,
+            func,
             name_atom,
             exp.arg_count,
         );
@@ -205,7 +216,10 @@ pub fn registerVirtualModuleDurable(comptime module: VirtualModule, ctx: *contex
     const module_name = comptime moduleEnumName(module);
 
     inline for (module_exports) |exp| {
-        const wrapped = comptime trace.makeDurableWrapper(module_name, exp.name, exp.func);
+        const wrapped = if (comptime shouldWrapExport(module, exp.name))
+            comptime trace.makeDurableWrapper(module_name, exp.name, exp.func)
+        else
+            exp.func;
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
@@ -218,6 +232,14 @@ pub fn registerVirtualModuleDurable(comptime module: VirtualModule, ctx: *contex
         try ctx.builtin_objects.append(allocator, fn_obj);
         try ctx.setGlobal(name_atom, fn_obj.toValue());
     }
+}
+
+fn shouldWrapExport(comptime module: VirtualModule, comptime export_name: []const u8) bool {
+    return switch (module) {
+        .validate => !std.mem.eql(u8, export_name, "schemaCompile") and !std.mem.eql(u8, export_name, "schemaDrop"),
+        .sql => !std.mem.eql(u8, export_name, "sql"),
+        else => true,
+    };
 }
 
 /// Validate that all import specifiers from a module are actually exported.

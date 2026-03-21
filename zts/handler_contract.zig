@@ -62,6 +62,31 @@ pub const CacheInfo = struct {
     dynamic: bool,
 };
 
+pub const SqlQueryInfo = struct {
+    name: []const u8, // owned
+    statement: []const u8, // owned
+    operation: []const u8 = "", // static literal after validation
+    tables: std.ArrayList([]const u8) = .empty,
+
+    pub fn deinit(self: *SqlQueryInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.statement);
+        for (self.tables.items) |table| allocator.free(table);
+        self.tables.deinit(allocator);
+    }
+};
+
+pub const SqlInfo = struct {
+    backend: []const u8 = "sqlite",
+    queries: std.ArrayList(SqlQueryInfo),
+    dynamic: bool,
+
+    pub fn deinit(self: *SqlInfo, allocator: std.mem.Allocator) void {
+        for (self.queries.items) |*query| query.deinit(allocator);
+        self.queries.deinit(allocator);
+    }
+};
+
 pub const DurableKeyInfo = struct {
     literal: std.ArrayList([]const u8), // each entry owned
     dynamic: bool,
@@ -169,6 +194,14 @@ pub fn emptyApiInfo() ApiInfo {
     };
 }
 
+pub fn emptySqlInfo() SqlInfo {
+    return .{
+        .backend = "sqlite",
+        .queries = .empty,
+        .dynamic = false,
+    };
+}
+
 pub const VerificationInfo = struct {
     exhaustive_returns: bool,
     results_safe: bool,
@@ -183,7 +216,7 @@ pub const AotInfo = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 4,
+    version: u32 = 5,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -191,6 +224,7 @@ pub const HandlerContract = struct {
     env: EnvInfo,
     egress: EgressInfo,
     cache: CacheInfo,
+    sql: SqlInfo,
     durable: DurableInfo,
     api: ApiInfo,
     verification: ?VerificationInfo,
@@ -231,6 +265,7 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.cache.namespaces.deinit(allocator);
+        self.sql.deinit(allocator);
         self.durable.deinit(allocator);
         self.api.deinit(allocator);
     }
@@ -251,6 +286,7 @@ pub const ContractBuilder = struct {
     // Binding tracking: maps local slot -> category for call-site analysis
     env_binding_slots: std.ArrayList(u16),
     cache_binding_slots: std.ArrayList(CacheBinding),
+    sql_binding_slots: std.ArrayList(u16),
     durable_run_binding_slots: std.ArrayList(u16),
     durable_step_binding_slots: std.ArrayList(u16),
     durable_sleep_binding_slots: std.ArrayList(u16) = .empty,
@@ -273,6 +309,8 @@ pub const ContractBuilder = struct {
     egress_dynamic: bool,
     cache_namespaces: std.ArrayList([]const u8),
     cache_dynamic: bool,
+    sql_queries: std.ArrayList(SqlQueryInfo),
+    sql_dynamic: bool,
     durable_used: bool,
     durable_key_literals: std.ArrayList([]const u8),
     durable_key_dynamic: bool,
@@ -303,6 +341,7 @@ pub const ContractBuilder = struct {
             .atoms = atoms,
             .env_binding_slots = .empty,
             .cache_binding_slots = .empty,
+            .sql_binding_slots = .empty,
             .durable_run_binding_slots = .empty,
             .durable_step_binding_slots = .empty,
             .schema_compile_binding_slots = .empty,
@@ -318,6 +357,8 @@ pub const ContractBuilder = struct {
             .egress_dynamic = false,
             .cache_namespaces = .empty,
             .cache_dynamic = false,
+            .sql_queries = .empty,
+            .sql_dynamic = false,
             .durable_used = false,
             .durable_key_literals = .empty,
             .durable_key_dynamic = false,
@@ -339,6 +380,7 @@ pub const ContractBuilder = struct {
     pub fn deinit(self: *ContractBuilder) void {
         self.env_binding_slots.deinit(self.allocator);
         self.cache_binding_slots.deinit(self.allocator);
+        self.sql_binding_slots.deinit(self.allocator);
         self.durable_run_binding_slots.deinit(self.allocator);
         self.durable_step_binding_slots.deinit(self.allocator);
         self.durable_sleep_binding_slots.deinit(self.allocator);
@@ -357,6 +399,8 @@ pub const ContractBuilder = struct {
         self.egress_hosts.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
         self.cache_namespaces.deinit(self.allocator);
+        for (self.sql_queries.items) |*query| query.deinit(self.allocator);
+        self.sql_queries.deinit(self.allocator);
         for (self.durable_key_literals.items) |s| self.allocator.free(s);
         self.durable_key_literals.deinit(self.allocator);
         for (self.durable_step_names.items) |s| self.allocator.free(s);
@@ -480,6 +524,11 @@ pub const ContractBuilder = struct {
                 .namespaces = self.cache_namespaces,
                 .dynamic = self.cache_dynamic,
             },
+            .sql = .{
+                .backend = "sqlite",
+                .queries = self.sql_queries,
+                .dynamic = self.sql_dynamic,
+            },
             .durable = .{
                 .used = self.durable_used,
                 .keys = .{
@@ -521,6 +570,7 @@ pub const ContractBuilder = struct {
         self.env_literals = .empty;
         self.egress_hosts = .empty;
         self.cache_namespaces = .empty;
+        self.sql_queries = .empty;
         self.durable_key_literals = .empty;
         self.durable_step_names = .empty;
         self.durable_signal_names = .empty;
@@ -609,6 +659,10 @@ pub const ContractBuilder = struct {
                         .slot = spec.local_binding.slot,
                         .has_namespace_arg = has_ns,
                     });
+                }
+
+                if (vm == .sql and std.mem.eql(u8, imported_name, "sql")) {
+                    try self.sql_binding_slots.append(self.allocator, spec.local_binding.slot);
                 }
 
                 if (vm == .durable) {
@@ -708,6 +762,11 @@ pub const ContractBuilder = struct {
                 // Check for cache calls
                 if (self.isCacheBindingWithNamespace(binding.slot)) {
                     try self.extractLiteralArg(call, &self.cache_namespaces, &self.cache_dynamic, null);
+                    continue;
+                }
+
+                if (self.isSqlBinding(binding.slot)) {
+                    try self.extractSqlRegistration(call);
                     continue;
                 }
 
@@ -862,6 +921,10 @@ pub const ContractBuilder = struct {
         return false;
     }
 
+    fn isSqlBinding(self: *const ContractBuilder, slot: u16) bool {
+        return containsSlot(self.sql_binding_slots.items, slot);
+    }
+
     fn isSchemaCompileBinding(self: *const ContractBuilder, slot: u16) bool {
         return containsSlot(self.schema_compile_binding_slots.items, slot);
     }
@@ -936,6 +999,38 @@ pub const ContractBuilder = struct {
         errdefer self.allocator.free(schema_json);
 
         try self.upsertApiSchema(name, schema_json);
+    }
+
+    fn extractSqlRegistration(self: *ContractBuilder, call: Node.CallExpr) !void {
+        if (call.args_count < 2) {
+            self.sql_dynamic = true;
+            return;
+        }
+
+        const name_idx = self.ir_view.getListIndex(call.args_start, 0);
+        const query_name = self.getLiteralString(name_idx) orelse {
+            self.sql_dynamic = true;
+            return;
+        };
+
+        const stmt_idx = self.ir_view.getListIndex(call.args_start, 1);
+        const statement = self.getLiteralString(stmt_idx) orelse {
+            self.sql_dynamic = true;
+            return;
+        };
+
+        for (self.sql_queries.items) |query| {
+            if (!std.mem.eql(u8, query.name, query_name)) continue;
+            if (std.mem.eql(u8, query.statement, statement)) return;
+            return error.DuplicateSqlQueryName;
+        }
+
+        try self.sql_queries.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, query_name),
+            .statement = try self.allocator.dupe(u8, statement),
+            .operation = "",
+            .tables = .empty,
+        });
     }
 
     fn extractSchemaJson(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
@@ -1443,6 +1538,7 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
@@ -1485,6 +1581,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseDynamicSection(&parser, allocator, "hosts", &contract.egress.hosts, &contract.egress.dynamic);
         } else if (std.mem.eql(u8, key, "cache")) {
             try parseDynamicSection(&parser, allocator, "namespaces", &contract.cache.namespaces, &contract.cache.dynamic);
+        } else if (std.mem.eql(u8, key, "sql")) {
+            try parseSqlSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "durable")) {
             try parseDurableSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
@@ -1776,6 +1874,100 @@ fn parseDynamicSection(
     }
 }
 
+fn parseSqlSection(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "backend")) {
+            _ = parser.readString() orelse "sqlite";
+        } else if (std.mem.eql(u8, key, "queries")) {
+            try parseSqlQueries(parser, allocator, &contract.sql.queries);
+        } else if (std.mem.eql(u8, key, "dynamic")) {
+            contract.sql.dynamic = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseSqlQueries(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(SqlQueryInfo),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var query = SqlQueryInfo{
+            .name = try allocator.dupe(u8, ""),
+            .statement = try allocator.dupe(u8, ""),
+            .operation = "",
+            .tables = .empty,
+        };
+        errdefer query.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "name")) {
+                allocator.free(query.name);
+                query.name = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "operation")) {
+                query.operation = parseOwnedStaticOperation(parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "tables")) {
+                try parseStringArray(parser, allocator, &query.tables);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        allocator.free(query.statement);
+        query.statement = try allocator.dupe(u8, "");
+        try list.append(allocator, query);
+    }
+}
+
+fn parseOwnedStaticOperation(raw: []const u8) []const u8 {
+    if (std.mem.eql(u8, raw, "select")) return "select";
+    if (std.mem.eql(u8, raw, "insert")) return "insert";
+    if (std.mem.eql(u8, raw, "update")) return "update";
+    if (std.mem.eql(u8, raw, "delete")) return "delete";
+    return "";
+}
+
 fn parseDurableSection(
     parser: *JsonParser,
     allocator: std.mem.Allocator,
@@ -2014,6 +2206,34 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     }
     try writer.writeAll("],\n");
     try writer.print("    \"dynamic\": {s}\n", .{if (contract.cache.dynamic) "true" else "false"});
+    try writer.writeAll("  },\n");
+
+    // sql
+    try writer.writeAll("  \"sql\": {\n");
+    try writer.writeAll("    \"backend\": \"sqlite\",\n");
+    try writer.writeAll("    \"queries\": [");
+    for (contract.sql.queries.items, 0..) |query, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n      {\n");
+        try writer.writeAll("        \"name\": ");
+        try writeJsonString(writer, query.name);
+        try writer.writeAll(",\n");
+        try writer.writeAll("        \"operation\": ");
+        try writeJsonString(writer, query.operation);
+        try writer.writeAll(",\n");
+        try writer.writeAll("        \"tables\": [");
+        for (query.tables.items, 0..) |table, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, table);
+        }
+        try writer.writeAll("]\n");
+        try writer.writeAll("      }");
+    }
+    if (contract.sql.queries.items.len > 0) {
+        try writer.writeAll("\n    ");
+    }
+    try writer.writeAll("],\n");
+    try writer.print("    \"dynamic\": {s}\n", .{if (contract.sql.dynamic) "true" else "false"});
     try writer.writeAll("  },\n");
 
     // durable
@@ -2272,6 +2492,7 @@ test "parseFromJson roundtrip" {
         .env = .{ .literal = env_lit, .dynamic = true },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
         .durable = .{
             .used = true,
             .keys = .{ .literal = .empty, .dynamic = true },
@@ -2343,6 +2564,7 @@ test "writeContractJson minimal" {
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
@@ -2362,7 +2584,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 5") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
@@ -2426,6 +2648,7 @@ test "writeContractJson with data" {
         .env = .{ .literal = env_lit, .dynamic = false },
         .egress = .{ .hosts = hosts, .dynamic = true },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
+        .sql = emptySqlInfo(),
         .durable = .{
             .used = true,
             .keys = .{ .literal = durable_keys, .dynamic = false },

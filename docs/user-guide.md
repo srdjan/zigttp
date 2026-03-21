@@ -139,6 +139,9 @@ OPTIONS:
 
   --replay <FILE>       Replay recorded traces instead of serving traffic
 
+  --sqlite <FILE>       SQLite database path for zigttp:sql
+                        Required for zigttp:sql query execution
+
   --durable <DIR>       Enable durable run/step oplogs in a directory
                         Required for zigttp:durable
 
@@ -985,6 +988,88 @@ or omit for aggregate.
 ```typescript
 const stats = cacheStats();           // aggregate
 const nsStats = cacheStats("api");    // per-namespace
+```
+
+### zigttp:sql
+
+Registered SQLite queries with build-time schema validation. Build with
+`-Dsql-schema=<schema.sql|schema.sqlite>` and run with `--sqlite <FILE>`.
+
+```typescript
+import { sql, sqlOne, sqlMany, sqlExec } from "zigttp:sql";
+```
+
+**sql(name, statement)** - Register a literal SQL statement at load time.
+Returns `true`. Query names must be unique. Statements are validated against the
+build-time schema snapshot.
+
+```typescript
+sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
+sql("getTodo", "SELECT id, title, done FROM todos WHERE id = :id");
+sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
+```
+
+**sqlOne(name, params?)** - Execute a registered `SELECT` and return the first
+row as an object, or `undefined` when no rows match.
+
+**sqlMany(name, params?)** - Execute a registered `SELECT` and return an array
+of row objects.
+
+**sqlExec(name, params?)** - Execute a registered `INSERT`, `UPDATE`, or
+`DELETE`. Returns `{ rowsAffected, lastInsertRowId? }`.
+
+Current constraints:
+
+- Only SQLite is supported in v1
+- Only registered literal statements are allowed
+- Only named parameters are supported (`:id`, `:title`, `@name`, `$name`)
+- `SELECT`, `INSERT`, `UPDATE`, and `DELETE` are supported
+- `sqlOne`/`sqlMany` require `SELECT`; `sqlExec` requires a write statement
+
+```typescript
+import { routerMatch } from "zigttp:router";
+import { schemaCompile, validateJson } from "zigttp:validate";
+import { sql, sqlExec, sqlMany, sqlOne } from "zigttp:sql";
+
+schemaCompile("todo.create", JSON.stringify({
+    type: "object",
+    required: ["title"],
+    properties: { title: { type: "string", minLength: 1, maxLength: 120 } }
+}));
+
+sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
+sql("getTodo", "SELECT id, title, done FROM todos WHERE id = :id");
+sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
+
+const routes = {
+    "GET /todos": function(req) {
+        return Response.json({ items: sqlMany("listTodos") });
+    },
+    "GET /todos/:id": function(req) {
+        const todo = sqlOne("getTodo", { id: req.params.id });
+        return todo ? Response.json(todo) : Response.json({ error: "not_found" }, { status: 404 });
+    },
+    "POST /todos": function(req) {
+        const parsed = validateJson("todo.create", req.body);
+        if (!parsed.ok) return Response.json({ errors: parsed.errors }, { status: 400 });
+        return Response.json(sqlExec("createTodo", { title: parsed.value.title }), { status: 201 });
+    },
+};
+
+export function handler(req) {
+    const match = routerMatch(routes, req);
+    if (!match) return Response.json({ error: "not_found" }, { status: 404 });
+    req.params = match.params;
+    return match.handler(req);
+}
+```
+
+Example commands:
+
+```bash
+sqlite3 examples/sql/app.sqlite < examples/sql/schema.sql
+zig build -Dhandler=examples/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
+zig build run -- --sqlite examples/sql/app.sqlite examples/sql-crud.ts
 ```
 
 ### zigttp:durable
@@ -1907,7 +1992,8 @@ The contract extracts from the handler's IR:
 - Literal env var names from `env("NAME")` calls
 - Outbound hosts from `fetchSync("https://...")` URL arguments
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
-- Durable run keys, whether durable keys are dynamic, and literal `step()` names
+- Registered SQL query names, operations, and touched tables from `sql("name", "...")`
+- Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
 - Verification results (when combined with `-Dverify`)
 
 Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an
@@ -1948,7 +2034,7 @@ and embeds it in the generated code.
 
 ### How It Works
 
-The contract records whether each capability section (env, egress, cache) uses
+The contract records whether each capability section (env, egress, cache, sql) uses
 only literal string arguments or includes dynamic (computed) access:
 
 - **Static access** (`dynamic: false`): the compiler proved all calls use string
@@ -1965,6 +2051,7 @@ Sandbox: complete (all access statically proven)
   env: restricted to [API_KEY, DATABASE_URL] (2 proven, no dynamic access)
   egress: restricted to [api.stripe.com] (1 proven, no dynamic access)
   cache: restricted to [sessions] (1 proven, no dynamic access)
+  sql: restricted to [listTodos, createTodo] (2 proven, no dynamic access)
 ```
 
 Or for partial proof:
@@ -1974,6 +2061,7 @@ Sandbox derived from contract:
   env: restricted to [API_KEY] (1 proven, no dynamic access)
   egress: unrestricted (dynamic access detected)
   cache: restricted to [] (none proven, no dynamic access)
+  sql: restricted to [] (none proven, no dynamic access)
 ```
 
 ### Explicit Policy Override
@@ -1989,7 +2077,8 @@ zig build -Dhandler=handler.ts -Dpolicy=policy.json
 {
   "env": { "allow": ["JWT_SECRET"] },
   "egress": { "allow_hosts": ["api.example.com"] },
-  "cache": { "allow_namespaces": ["sessions"] }
+  "cache": { "allow_namespaces": ["sessions"] },
+  "sql": { "allow_queries": ["listTodos", "createTodo"] }
 }
 ```
 

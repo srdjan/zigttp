@@ -42,7 +42,8 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
 
     // Optional types (T | undefined)
     const optional_string = pool.addNullable(allocator, pool.idx_string);
-    const optional_object = pool.addNullable(allocator, pool.addRef(allocator, "object"));
+    const object_ref = pool.addRef(allocator, "object");
+    const optional_object = pool.addNullable(allocator, object_ref);
 
     // Store module function signatures in the env by name
     const sigs = [_]struct { name: []const u8, sig: type_env_mod.FunctionSig }{
@@ -69,6 +70,11 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         .{ .name = "cacheIncr", .sig = makeSig(&.{pool.idx_string}, pool.idx_number) },
         .{ .name = "cacheStats", .sig = makeSig(&.{}, pool.idx_string) },
         .{ .name = "cacheGet", .sig = makeSig(&.{pool.idx_string}, optional_string) },
+        // zigttp:sql
+        .{ .name = "sql", .sig = makeSig(&.{ pool.idx_string, pool.idx_string }, pool.idx_boolean) },
+        .{ .name = "sqlOne", .sig = makeSig(&.{ pool.idx_string, object_ref }, optional_object) },
+        .{ .name = "sqlMany", .sig = makeSig(&.{ pool.idx_string, object_ref }, object_ref) },
+        .{ .name = "sqlExec", .sig = makeSig(&.{ pool.idx_string, object_ref }, object_ref) },
         // zigttp:env
         .{ .name = "env", .sig = makeSig(&.{pool.idx_string}, optional_string) },
         // zigttp:router

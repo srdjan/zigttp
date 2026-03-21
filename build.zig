@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false;
     const contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false;
     const openapi_enabled = b.option(bool, "openapi", "Emit OpenAPI manifest (openapi.json)") orelse false;
+    const sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zigttp:sql validation");
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
     const replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time");
@@ -22,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    zts_mod.linkSystemLibrary("sqlite3", .{});
 
     // zts tests
     const zts_tests = b.addTest(.{
@@ -92,6 +94,10 @@ pub fn build(b: *std.Build) void {
         }
         if (openapi_enabled) {
             run_precompile.addArg("--openapi");
+        }
+        if (sql_schema_path) |sql_schema| {
+            run_precompile.addArg("--sql-schema");
+            run_precompile.addArg(sql_schema);
         }
         if (contract_enabled or deploy_target != null) {
             run_precompile.addArg("--contract");

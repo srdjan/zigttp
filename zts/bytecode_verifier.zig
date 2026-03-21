@@ -283,8 +283,10 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
             .call_ic => @as(i32, code[pc + 1]) + 1,
             // concat_n: pop N values
             .concat_n => @as(i32, code[pc + 1]),
-            // push_const_call: pop argc (operand at pc+3)
-            .push_const_call => @as(i32, code[pc + 3]) + 1,
+            // push_const_call fuses `push_const` of the final argument with `call`.
+            // The opcode contributes one argument itself, so the pre-op stack only
+            // contains the callee plus argc-1 already-pushed arguments.
+            .push_const_call => @as(i32, code[pc + 3]),
             // get_field_call: pop argc (operand at pc+3)
             .get_field_call => @as(i32, code[pc + 3]) + 2,
             else => @as(i32, info.n_pop),
@@ -449,7 +451,7 @@ test "verify: constant index out of bounds rejected" {
         .flags = .{},
         .code = &.{
             @intFromEnum(Opcode.push_const),
-            0x05, 0x00, // index 5, but constants is empty
+            0x05,                     0x00, // index 5, but constants is empty
             @intFromEnum(Opcode.ret),
         },
         .constants = &.{},
@@ -536,6 +538,29 @@ test "verify: jump within bounds passes" {
             @intFromEnum(Opcode.ret_undefined), // offset 5 (jump target)
         },
         .constants = &.{},
+        .source_map = null,
+    };
+    const result = verify(&func);
+    try std.testing.expect(result.valid);
+}
+
+test "verify: push_const_call accounts for fused argument" {
+    const func = FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 1,
+        .stack_size = 256,
+        .flags = .{},
+        .code = &.{
+            @intFromEnum(Opcode.get_loc_0),
+            @intFromEnum(Opcode.push_const_call),
+            0x00, 0x00, // const index 0
+            0x01, // argc = 1
+            @intFromEnum(Opcode.drop),
+            @intFromEnum(Opcode.ret_undefined),
+        },
+        .constants = &.{bytecode.JSValue.fromInt(1)},
         .source_map = null,
     };
     const result = verify(&func);

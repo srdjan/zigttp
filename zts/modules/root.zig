@@ -13,6 +13,7 @@ pub const router = @import("router.zig");
 pub const auth = @import("auth.zig");
 pub const validate = @import("validate.zig");
 pub const cache = @import("cache.zig");
+pub const sql = @import("sql.zig");
 pub const io = @import("io.zig");
 pub const compose = @import("compose.zig");
 pub const durable = @import("durable.zig");

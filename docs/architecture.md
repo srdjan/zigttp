@@ -295,18 +295,20 @@ Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode
 
 ### Compiler-Derived Sandboxing
 
-Every precompilation extracts a handler contract by walking the IR for virtual module imports and call sites. The contract records which env vars, outbound hosts, and cache namespaces the handler accesses, and whether each section uses only literal strings (`dynamic: false`) or includes computed access (`dynamic: true`).
+Every precompilation extracts a handler contract by walking the IR for virtual module imports and call sites. The contract records which env vars, outbound hosts, cache namespaces, and SQL queries the handler accesses, and whether each section uses only literal strings (`dynamic: false`) or includes computed access (`dynamic: true`).
 
 When no explicit `--policy` file is provided, the precompiler auto-derives a `RuntimePolicy` from the contract and embeds it in the generated code. Static sections are restricted to exactly the proven literals. Dynamic sections remain permissive. The result is zero-configuration least-privilege sandboxing for every precompiled handler.
 
 **Key files**:
 - `zts/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
 - `zts/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
-- `tools/precompile.zig` - `writeContractDerivedSection()` embeds derived policy in generated code
+- `tools/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
+- `zts/modules/sql.zig` / `zts/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
 
 **Enforcement points** (existing, activated by the embedded policy):
 - `zts/modules/env.zig` - `allowsEnv()` check on env var access
 - `zts/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
+- `zts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
 - `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
 
 ## Deployment Patterns

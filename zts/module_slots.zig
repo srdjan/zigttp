@@ -4,7 +4,7 @@
 pub const Slot = enum(u3) {
     durable = 0,
     durable_api = 1,
-    // 2 unused
+    sql = 2,
     replay = 3,
     validate = 4,
     cache = 5,

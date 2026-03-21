@@ -85,9 +85,9 @@ pub const TypeEnv = struct {
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
 
-    /// Name storage for interned type alias/interface names.
-    /// We need to own copies of name strings since TypeMap references original source.
-    name_storage: std.ArrayListUnmanaged(u8),
+    /// Stable storage for interned names used as hash-map keys.
+    /// Keys must not move after insertion, so each name owns its own allocation.
+    name_storage: std.ArrayListUnmanaged([]const u8),
 
     pub fn init(allocator: std.mem.Allocator, pool: *TypePool) TypeEnv {
         return .{
@@ -112,6 +112,9 @@ pub const TypeEnv = struct {
         self.var_types_by_name.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
+        for (self.name_storage.items) |name| {
+            self.allocator.free(name);
+        }
         self.name_storage.deinit(self.allocator);
     }
 
@@ -308,9 +311,12 @@ pub const TypeEnv = struct {
     // -------------------------------------------------------------------
 
     pub fn internName(self: *TypeEnv, name: []const u8) []const u8 {
-        const start = self.name_storage.items.len;
-        self.name_storage.appendSlice(self.allocator, name) catch return "";
-        return self.name_storage.items[start .. start + name.len];
+        const owned = self.allocator.dupe(u8, name) catch return "";
+        self.name_storage.append(self.allocator, owned) catch {
+            self.allocator.free(owned);
+            return "";
+        };
+        return owned;
     }
 };
 

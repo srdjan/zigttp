@@ -39,7 +39,7 @@ pub fn deriveProofLevel(contract: *const HandlerContract) ProofLevel {
 
     const v = contract.verification.?;
     const all_checks = v.exhaustive_returns and v.results_safe and v.bytecode_verified;
-    const no_dynamic = !contract.env.dynamic and !contract.egress.dynamic and !contract.cache.dynamic;
+    const no_dynamic = !contract.env.dynamic and !contract.egress.dynamic and !contract.cache.dynamic and !contract.sql.dynamic;
 
     if (all_checks and no_dynamic) return .complete;
     return .partial;
@@ -107,6 +107,7 @@ pub const ContractDiff = struct {
     env_changes: std.ArrayList(ItemChange),
     egress_changes: std.ArrayList(ItemChange),
     cache_changes: std.ArrayList(ItemChange),
+    sql_changes: std.ArrayList(ItemChange),
     dynamic_changes: std.ArrayList(DynamicChange),
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
@@ -114,6 +115,7 @@ pub const ContractDiff = struct {
         self.env_changes.deinit(allocator);
         self.egress_changes.deinit(allocator);
         self.cache_changes.deinit(allocator);
+        self.sql_changes.deinit(allocator);
         self.dynamic_changes.deinit(allocator);
     }
 
@@ -140,7 +142,7 @@ pub const ContractDiff = struct {
             if (r.status == .removed) return .breaking;
             if (r.status == .added) has_added = true;
         }
-        inline for (.{ self.env_changes.items, self.egress_changes.items, self.cache_changes.items }) |items| {
+        inline for (.{ self.env_changes.items, self.egress_changes.items, self.cache_changes.items, self.sql_changes.items }) |items| {
             for (items) |c| {
                 if (c.status == .removed) return .breaking;
                 if (c.status == .added) has_added = true;
@@ -200,6 +202,9 @@ pub fn diffContracts(
     var cache_changes: std.ArrayList(ItemChange) = .empty;
     errdefer cache_changes.deinit(allocator);
 
+    var sql_changes: std.ArrayList(ItemChange) = .empty;
+    errdefer sql_changes.deinit(allocator);
+
     var dynamic_changes: std.ArrayList(DynamicChange) = .empty;
     errdefer dynamic_changes.deinit(allocator);
 
@@ -238,11 +243,15 @@ pub fn diffContracts(
     // Cache comparison
     try diffStringList(allocator, old.cache.namespaces.items, new.cache.namespaces.items, &cache_changes);
 
+    // SQL comparison
+    try diffSqlList(allocator, old.sql.queries.items, new.sql.queries.items, &sql_changes);
+
     // Dynamic flag changes
     inline for (.{
         .{ "env", old.env.dynamic, new.env.dynamic },
         .{ "egress", old.egress.dynamic, new.egress.dynamic },
         .{ "cache", old.cache.dynamic, new.cache.dynamic },
+        .{ "sql", old.sql.dynamic, new.sql.dynamic },
     }) |entry| {
         if (entry[1] != entry[2]) {
             try dynamic_changes.append(allocator, .{
@@ -258,6 +267,7 @@ pub fn diffContracts(
         .env_changes = env_changes,
         .egress_changes = egress_changes,
         .cache_changes = cache_changes,
+        .sql_changes = sql_changes,
         .dynamic_changes = dynamic_changes,
     };
 }
@@ -296,6 +306,10 @@ pub fn writeProofJson(cert: *const ProofCertificate, writer: anytype) !void {
     try writeItemChangesJson(writer, "egress_added", cert.diff.egress_changes.items, .added);
     try writer.writeAll(",\n");
     try writeItemChangesJson(writer, "egress_removed", cert.diff.egress_changes.items, .removed);
+    try writer.writeAll(",\n");
+    try writeItemChangesJson(writer, "sql_added", cert.diff.sql_changes.items, .added);
+    try writer.writeAll(",\n");
+    try writeItemChangesJson(writer, "sql_removed", cert.diff.sql_changes.items, .removed);
     try writer.writeAll(",\n");
     try writer.print("    \"capabilities_widened\": {s},\n", .{if (cert.diff.capabilitiesWidened()) "true" else "false"});
     try writer.print("    \"capabilities_narrowed\": {s}\n", .{if (cert.diff.capabilitiesNarrowed()) "true" else "false"});
@@ -423,6 +437,23 @@ pub fn writeProofReport(writer: anytype, cert: *const ProofCertificate) !void {
         }
     }
 
+    // SQL
+    for (cert.diff.sql_changes.items) |c| {
+        switch (c.status) {
+            .added => {
+                try writer.writeAll("  + ADDED    sql: ");
+                try writer.writeAll(c.value);
+                try writer.writeAll("\n");
+            },
+            .removed => {
+                try writer.writeAll("  - REMOVED  sql: ");
+                try writer.writeAll(c.value);
+                try writer.writeAll("\n");
+            },
+            .unchanged => {},
+        }
+    }
+
     // Dynamic changes
     for (cert.diff.dynamic_changes.items) |dc| {
         try writer.writeAll("  ~ CHANGED  ");
@@ -527,6 +558,17 @@ pub fn generateRecommendation(
             if (egress_adds > 0) {
                 if (has_additions) try w.writeAll(", ");
                 try w.print("{d} new egress host(s)", .{egress_adds});
+                has_additions = true;
+            }
+
+            var sql_adds: u32 = 0;
+            for (diff.sql_changes.items) |c| {
+                if (c.status == .added) sql_adds += 1;
+            }
+            if (sql_adds > 0) {
+                if (has_additions) try w.writeAll(", ");
+                try w.print("{d} new SQL query(s)", .{sql_adds});
+                has_additions = true;
             }
 
             if (replay) |r| {
@@ -562,6 +604,14 @@ pub fn generateRecommendation(
                 if (c.status == .removed) {
                     if (has_removals) try w.writeAll(", ");
                     try w.writeAll("env removed: ");
+                    try w.writeAll(c.value);
+                    has_removals = true;
+                }
+            }
+            for (diff.sql_changes.items) |c| {
+                if (c.status == .removed) {
+                    if (has_removals) try w.writeAll(", ");
+                    try w.writeAll("sql removed: ");
                     try w.writeAll(c.value);
                     has_removals = true;
                 }
@@ -612,11 +662,42 @@ fn diffStringList(
     }
 }
 
+fn diffSqlList(
+    allocator: std.mem.Allocator,
+    old_items: []const handler_contract.SqlQueryInfo,
+    new_items: []const handler_contract.SqlQueryInfo,
+    changes: *std.ArrayList(ItemChange),
+) !void {
+    for (old_items) |old_query| {
+        if (findSqlQuery(new_items, old_query.name, old_query.statement) != null) {
+            try changes.append(allocator, .{ .value = old_query.name, .status = .unchanged });
+        } else {
+            try changes.append(allocator, .{ .value = old_query.name, .status = .removed });
+        }
+    }
+    for (new_items) |new_query| {
+        if (findSqlQuery(old_items, new_query.name, new_query.statement) == null) {
+            try changes.append(allocator, .{ .value = new_query.name, .status = .added });
+        }
+    }
+}
+
 fn containsString(haystack: []const []const u8, needle: []const u8) bool {
     for (haystack) |item| {
         if (std.mem.eql(u8, item, needle)) return true;
     }
     return false;
+}
+
+fn findSqlQuery(
+    haystack: []const handler_contract.SqlQueryInfo,
+    name: []const u8,
+    statement: []const u8,
+) ?*const handler_contract.SqlQueryInfo {
+    for (haystack) |*item| {
+        if (std.mem.eql(u8, item.name, name) and std.mem.eql(u8, item.statement, statement)) return item;
+    }
+    return null;
 }
 
 const writeJsonString = handler_contract.writeJsonString;
@@ -663,6 +744,7 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = handler_contract.emptySqlInfo(),
         .durable = .{
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
@@ -759,6 +841,30 @@ test "diffContracts added env var is additive" {
     try std.testing.expectEqual(Classification.additive, diff.classify());
     try std.testing.expectEqual(@as(usize, 1), diff.env_changes.items.len);
     try std.testing.expectEqualStrings("API_KEY", diff.env_changes.items[0].value);
+}
+
+test "diffContracts added sql query is additive" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.sql.queries.append(allocator, .{
+        .name = try allocator.dupe(u8, "getUser"),
+        .statement = try allocator.dupe(u8, "SELECT id FROM users WHERE id = :id"),
+        .operation = "select",
+        .tables = .empty,
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.additive, diff.classify());
+    try std.testing.expectEqual(@as(usize, 1), diff.sql_changes.items.len);
+    try std.testing.expectEqualStrings("getUser", diff.sql_changes.items[0].value);
+    try std.testing.expectEqual(ChangeStatus.added, diff.sql_changes.items[0].status);
 }
 
 test "diffContracts removed env var is breaking" {

@@ -22,7 +22,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
 
-**Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`.
+**Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces, SQL query names) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`.
 
 **Full TypeScript type checking.** Beyond stripping type annotations, the compiler checks them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are all validated at build time. Interface declarations with all-function members are treated as nominal types to prevent structural forgery.
 
@@ -148,6 +148,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
+| `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:compose` | `guard` | Compile-time handler composition via pipe operator |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, and signals |
@@ -232,6 +233,30 @@ function handler(req: Request): Response {
 
 See [examples/modules_all.ts](examples/modules_all.ts) for an integration example using all modules together.
 
+### SQL Example
+
+```typescript
+import { sql, sqlMany, sqlExec } from "zigttp:sql";
+
+sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
+sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
+
+function handler(req: Request): Response {
+    if (req.method === "GET") {
+        return Response.json({ items: sqlMany("listTodos") });
+    }
+
+    const body = JSON.parse(req.body);
+    return Response.json(sqlExec("createTodo", { title: body.title }), { status: 201 });
+}
+```
+
+Build-time validation requires a schema snapshot:
+
+```bash
+zig build -Dhandler=examples/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
+```
+
 ## CLI Options
 
 ```bash
@@ -251,6 +276,7 @@ Options:
   --outbound-max-response <SIZE>
   --trace <FILE>        Record handler I/O traces to JSONL file
   --replay <FILE>       Replay recorded traces and verify handler output
+  --sqlite <FILE>       SQLite database path for zigttp:sql
   --durable <DIR>       Enable durable execution with write-ahead oplog
 ```
 
@@ -260,7 +286,7 @@ Options:
 
 **HTTP/FaaS Optimizations**: Shape preallocation for Request/Response objects, pre-interned HTTP atoms, HTTP string caching, LockFreePool handler isolation, zero-copy response mode.
 
-**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract extraction and auto-sandboxing restrict runtime capabilities to proven values. Boolean enforcement rejects truthy/falsy coercion. Full TypeScript type checking validates annotations against virtual module signatures.
+**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract extraction and auto-sandboxing restrict runtime capabilities to proven values. `zigttp:sql` queries are prepared against a build-time schema snapshot via `-Dsql-schema=...`. Boolean enforcement rejects truthy/falsy coercion. Full TypeScript type checking validates annotations against virtual module signatures.
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
@@ -270,7 +296,7 @@ Options:
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
@@ -328,6 +354,9 @@ zig build -Dhandler=handler.ts -Dverify
 # Emit contract manifest (what the handler is allowed to do)
 zig build -Dhandler=handler.ts -Dcontract
 
+# Validate zigttp:sql queries against a schema snapshot
+zig build -Dhandler=examples/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
+
 # Override auto-derived sandbox with an explicit capability policy
 zig build -Dhandler=handler.ts -Dpolicy=policy.json
 
@@ -378,6 +407,7 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **Environment variables** accessed via `env("NAME")` - literal names are enumerated, dynamic access is flagged
 - **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
+- **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
 - **Verification results** (when combined with `-Dverify`)
 - **Route patterns** (when combined with `-Daot`)
 
@@ -391,7 +421,14 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
   },
   "env": { "literal": ["JWT_SECRET"], "dynamic": false },
   "egress": { "hosts": ["api.example.com"], "dynamic": false },
-  "cache": { "namespaces": ["sessions"], "dynamic": false }
+  "cache": { "namespaces": ["sessions"], "dynamic": false },
+  "sql": {
+    "backend": "sqlite",
+    "queries": [
+      { "name": "listTodos", "operation": "select", "tables": ["todos"] }
+    ],
+    "dynamic": false
+  }
 }
 ```
 
@@ -404,6 +441,7 @@ Sandbox: complete (all access statically proven)
   env: restricted to [JWT_SECRET] (1 proven, no dynamic access)
   egress: restricted to [api.example.com] (1 proven, no dynamic access)
   cache: restricted to [sessions] (1 proven, no dynamic access)
+  sql: restricted to [listTodos] (1 proven, no dynamic access)
 ```
 
 ### Explicit Policy Override (`-Dpolicy`)
@@ -414,7 +452,8 @@ To override auto-derived sandboxing with a stricter or different policy, pass an
 {
   "env": { "allow": ["JWT_SECRET"] },
   "egress": { "allow_hosts": ["api.example.com"] },
-  "cache": { "allow_namespaces": ["sessions"] }
+  "cache": { "allow_namespaces": ["sessions"] },
+  "sql": { "allow_queries": ["listTodos"] }
 }
 ```
 
@@ -504,7 +543,7 @@ Compare two handler versions and classify the upgrade:
 zig build -Dhandler=handler-v2.ts -Dprove=old-contract.json:traces.jsonl
 ```
 
-The system diffs the old and new contracts (env vars, egress hosts, cache namespaces, routes) and replays recorded traces against the new handler. Results are classified as:
+The system diffs the old and new contracts (env vars, egress hosts, cache namespaces, SQL query names, routes) and replays recorded traces against the new handler. Results are classified as:
 
 - **equivalent**: Same contract, same responses for all recorded traces
 - **additive**: New capabilities added (new env vars, new routes) but all existing behavior preserved
