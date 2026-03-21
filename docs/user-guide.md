@@ -1838,7 +1838,7 @@ The verifier checks six properties:
 5. **Non-exhaustive match** - match expressions without a default arm (warning)
 6. **Optional safety** - optional values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed before use
 
-This is possible because zigttp's JS subset bans all non-trivial control flow (`while`, `try/catch`, `break/continue`). The IR tree is the control flow graph.
+This is possible because zigttp's JS subset bans most non-trivial control flow (`while`, `try/catch`). `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph.
 
 Example diagnostics:
 

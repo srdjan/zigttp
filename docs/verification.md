@@ -16,14 +16,15 @@ Verification runs after parsing and before bytecode generation. If any error-sev
 
 ## Why This Works
 
-zigttp's JavaScript subset bans all sources of non-trivial control flow:
+zigttp's JavaScript subset bans most sources of non-trivial control flow:
 
 - No `while`/`do-while` (no back-edges)
-- No `break`/`continue` (no non-local jumps)
 - No `try`/`catch` (no exceptional paths)
 - No `goto`, no labeled statements
 
-The only control flow is: `if`/`else` (forward branching), `switch`/`case` (forward branching), `for-of` (bounded iteration), and `return` (function exit). The IR tree IS the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+`break` and `continue` are allowed within `for-of` loops. Both are forward jumps only (break jumps past the loop end, continue jumps to the next iteration) and do not introduce back-edges, so the verification invariant holds.
+
+The only control flow is: `if`/`else` (forward branching), `switch`/`case` (forward branching), `for-of` (bounded iteration with `break`/`continue`), and `return` (function exit). The IR tree IS the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 ## Checks
 

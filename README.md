@@ -16,7 +16,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
 
-**Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges, no exceptions, and no non-local jumps - the IR tree IS the control flow graph. See [verification docs](docs/verification.md).
+**Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges and no exceptions - the IR tree IS the control flow graph. `break` and `continue` within `for-of` are forward jumps only and don't compromise this property. See [verification docs](docs/verification.md).
 
 **Boolean enforcement.** Truthy/falsy coercion is rejected in conditions and logical operators - always, not behind a flag. The BoolChecker performs progressive type inference for virtual-module return types, `match` expressions, optional returns like `env()`/`cacheGet()`, and Result-shaped values like `jwtVerify(...).ok`. Values the static checker cannot prove are caught by runtime VM assertions. See [boolean enforcement docs](docs/sound-mode.md).
 
@@ -333,7 +333,7 @@ The verifier statically proves three properties of your handler at compile time:
 2. **Result values are checked before access.** Calls like `jwtVerify` and `validateJson` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
 3. **No unreachable code.** Statements after an unconditional return produce a warning.
 
-This works because zigttp's JS subset eliminates all non-trivial control flow - no `while`, no `try/catch`, no `break/continue`. The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+This works because zigttp's JS subset eliminates most non-trivial control flow - no `while`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 ```
 $ zig build -Dhandler=handler.ts -Dverify
@@ -466,9 +466,9 @@ See [Performance](docs/performance.md) for detailed profiling analysis and deplo
 
 zts implements ES5 with select ES6+ extensions:
 
-**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays), optional chaining, nullish coalescing, typed arrays, exponentiation operator, compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, bitwise), pipe operator (`|>`), array higher-order methods (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`), `Object.keys()` / `.values()` / `.entries()`, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range()`, `match` expression (pattern matching).
+**Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays) with `break`/`continue`, optional chaining, nullish coalescing, typed arrays, exponentiation operator, compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, bitwise), pipe operator (`|>`), array higher-order methods (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`), `Object.keys()` / `.values()` / `.entries()`, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range()`, `match` expression (pattern matching).
 
-**Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, `null`, regular expressions, `as`/`satisfies` type assertions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives. Use `undefined` as the sole absent-value sentinel.
+**Not Supported**: Classes, async/await, Promises, `var`, `while`/`do-while` loops, `this`, `new`, `try/catch`, `null`, regular expressions, labeled `break`/`continue`, `as`/`satisfies` type assertions. All unsupported features are detected at parse time with helpful error messages suggesting alternatives. Use `undefined` as the sole absent-value sentinel.
 
 See [User Guide](docs/user-guide.md#javascript-subset-reference) for full details.
 
