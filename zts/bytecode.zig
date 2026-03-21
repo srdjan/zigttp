@@ -25,7 +25,7 @@ pub const BytecodeHeader = packed struct {
 };
 
 /// Bytecode flags
-pub const BytecodeFlags = packed struct {
+pub const BytecodeFlags = packed struct(u8) {
     has_source_map: bool = false,
     optimized: bool = false,
     jit_hints: bool = false,
@@ -495,7 +495,7 @@ pub const FunctionBytecode = struct {
     }
 };
 
-pub const FunctionFlags = packed struct {
+pub const FunctionFlags = packed struct(u8) {
     is_strict: bool = true,
     is_generator: bool = false,
     is_async: bool = false,
@@ -509,7 +509,7 @@ pub const FunctionFlags = packed struct {
 // ============================================================================
 
 /// Handler flags for fast path optimization
-pub const HandlerFlags = packed struct {
+pub const HandlerFlags = packed struct(u8) {
     is_http_handler: bool = false,
     has_static_routes: bool = false,
     pure_dispatch: bool = false, // All routes are static (no dynamic fallback needed)

@@ -151,10 +151,7 @@ pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !Handle
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
     defer parsed.deinit();
 
-    if (parsed.value != .object) {
-        std.debug.print("Policy root must be a JSON object\n", .{});
-        return error.InvalidPolicy;
-    }
+    if (parsed.value != .object) return error.InvalidPolicy;
 
     const root = parsed.value.object;
     var iter = root.iterator();
@@ -164,7 +161,6 @@ pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !Handle
             !std.mem.eql(u8, key, "egress") and
             !std.mem.eql(u8, key, "cache"))
         {
-            std.debug.print("Unknown policy section '{s}'\n", .{key});
             return error.InvalidPolicy;
         }
     }
@@ -267,49 +263,22 @@ fn parseSection(
     field_name: []const u8,
 ) !?AllowList {
     const raw_section = root.get(section_name) orelse return null;
-    if (raw_section != .object) {
-        std.debug.print("Policy section '{s}' must be an object\n", .{section_name});
-        return error.InvalidPolicy;
-    }
+    if (raw_section != .object) return error.InvalidPolicy;
 
     const section_obj = raw_section.object;
     var iter = section_obj.iterator();
     while (iter.next()) |entry| {
-        if (!std.mem.eql(u8, entry.key_ptr.*, field_name)) {
-            std.debug.print(
-                "Policy section '{s}' only supports '{s}'\n",
-                .{ section_name, field_name },
-            );
-            return error.InvalidPolicy;
-        }
+        if (!std.mem.eql(u8, entry.key_ptr.*, field_name)) return error.InvalidPolicy;
     }
 
-    const raw_allow = section_obj.get(field_name) orelse {
-        std.debug.print(
-            "Policy section '{s}' requires '{s}'\n",
-            .{ section_name, field_name },
-        );
-        return error.InvalidPolicy;
-    };
-    if (raw_allow != .array) {
-        std.debug.print(
-            "Policy field '{s}.{s}' must be an array of strings\n",
-            .{ section_name, field_name },
-        );
-        return error.InvalidPolicy;
-    }
+    const raw_allow = section_obj.get(field_name) orelse return error.InvalidPolicy;
+    if (raw_allow != .array) return error.InvalidPolicy;
 
     var section = AllowList{};
     errdefer section.deinit(allocator);
 
     for (raw_allow.array.items) |item| {
-        if (item != .string or item.string.len == 0) {
-            std.debug.print(
-                "Policy field '{s}.{s}' must contain only non-empty strings\n",
-                .{ section_name, field_name },
-            );
-            return error.InvalidPolicy;
-        }
+        if (item != .string or item.string.len == 0) return error.InvalidPolicy;
         try section.appendUnique(allocator, item.string);
     }
 

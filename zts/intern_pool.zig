@@ -74,7 +74,7 @@ pub const Item = struct {
 };
 
 /// String key for the deduplication map - stable across reallocations
-const StringKey = packed struct {
+const StringKey = packed struct(u64) {
     offset: u32,
     length: u32,
 };

@@ -7,6 +7,7 @@
 //! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zts = @import("zts");
 const ir = zts.parser;
 const IrTranspiler = @import("transpiler.zig").IrTranspiler;
@@ -744,7 +745,7 @@ fn compileHandler(
     const has_file_imports = hasFileImports(&js_parser, root);
 
     if (has_file_imports) {
-        std.debug.print("File imports detected, building module graph...\n", .{});
+        if (!builtin.is_test) std.debug.print("File imports detected, building module graph...\n", .{});
         return compileMultiModule(
             allocator,
             source_to_parse,
@@ -1050,11 +1051,11 @@ fn compileMultiModule(
     defer graph.deinit();
 
     graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
-        std.debug.print("Module graph error: {}\n", .{err});
+        if (!builtin.is_test) std.debug.print("Module graph error: {}\n", .{err});
         return err;
     };
 
-    std.debug.print("Module graph: {d} modules ({d} dependencies)\n", .{
+    if (!builtin.is_test) std.debug.print("Module graph: {d} modules ({d} dependencies)\n", .{
         graph.module_list.items.len,
         graph.dependencyCount(),
     });
@@ -1116,7 +1117,7 @@ fn compileMultiModule(
     const entry_bytecode = try allocator.dupe(u8, entry_writer.getWritten());
     errdefer allocator.free(entry_bytecode);
 
-    std.debug.print("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
+    if (!builtin.is_test) std.debug.print("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
 
     var contract: ?HandlerContract = null;
     if (needs_contract) {
@@ -1257,7 +1258,7 @@ fn buildContractWithPolicy(
 
     try enforcePolicyForContract(allocator, filename, &contract, policy);
     if (policy != null) {
-        std.debug.print("Capability policy check passed\n", .{});
+        if (!builtin.is_test) std.debug.print("Capability policy check passed\n", .{});
     }
 
     return contract;
@@ -1307,7 +1308,7 @@ fn buildMultiModuleContract(
     }
 
     if (policy_checked) {
-        std.debug.print("Capability policy check passed\n", .{});
+        if (!builtin.is_test) std.debug.print("Capability policy check passed\n", .{});
     }
 
     return merged;
@@ -1522,14 +1523,16 @@ fn enforcePolicyForContract(
 
     if (!report.hasViolations()) return;
 
-    std.debug.print("\nCapability policy violations in {s}:\n", .{label_path});
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-    try handler_policy.formatViolations(&report, &aw.writer);
-    output = aw.toArrayList();
-    if (output.items.len > 0) {
-        std.debug.print("{s}", .{output.items});
+    if (!@import("builtin").is_test) {
+        std.debug.print("\nCapability policy violations in {s}:\n", .{label_path});
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+        handler_policy.formatViolations(&report, &aw.writer) catch {};
+        output = aw.toArrayList();
+        if (output.items.len > 0) {
+            std.debug.print("{s}", .{output.items});
+        }
     }
     return error.PolicyViolation;
 }

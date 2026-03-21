@@ -79,7 +79,7 @@ pub const FuncParam = struct {
 };
 
 /// Packed payload for a TypeNode, interpreted based on the tag.
-pub const TypeData = packed struct {
+pub const TypeData = packed struct(u32) {
     a: u16 = 0, // meaning depends on tag
     b: u16 = 0, // meaning depends on tag
 };

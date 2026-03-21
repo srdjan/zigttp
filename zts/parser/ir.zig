@@ -114,7 +114,7 @@ pub const UnaryOp = enum(u4) {
 };
 
 /// Function flags
-pub const FunctionFlags = packed struct {
+pub const FunctionFlags = packed struct(u8) {
     is_generator: bool = false,
     is_async: bool = false,
     is_arrow: bool = false,

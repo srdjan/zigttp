@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const zq = @import("zts");
+const trace = zq.trace;
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -48,21 +49,21 @@ pub const DurableStore = union(enum) {
         };
     }
 
-    pub fn scanSignals(self: *DurableStore, allocator: std.mem.Allocator, now_ms: i64) ![]SignalCandidate {
+    pub fn scanSignals(self: *DurableStore, allocator: std.mem.Allocator, now_ms: i64) ![]Signal {
         return switch (self.*) {
             .fs => |*store| store.scanSignals(allocator, now_ms),
         };
     }
 
-    pub fn tryClaimSignal(self: *DurableStore, candidate: *const SignalCandidate) !?ClaimedSignal {
+    pub fn tryClaimSignal(self: *DurableStore, candidate: *const Signal) !?Signal {
         return switch (self.*) {
             .fs => |*store| store.tryClaimSignal(candidate),
         };
     }
 
-    pub fn deleteClaimedSignal(self: *DurableStore, claimed: *const ClaimedSignal) void {
+    pub fn deleteSignal(self: *DurableStore, claimed: *const Signal) void {
         switch (self.*) {
-            .fs => |*store| store.deleteClaimedSignal(claimed),
+            .fs => |*store| store.deleteSignal(claimed),
         }
     }
 
@@ -78,7 +79,7 @@ pub const DurableStore = union(enum) {
     }
 };
 
-pub const SignalCandidate = struct {
+pub const Signal = struct {
     key: []const u8,
     name: []const u8,
     payload_json: []const u8,
@@ -86,23 +87,7 @@ pub const SignalCandidate = struct {
     at_ms: ?i64,
     allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *SignalCandidate) void {
-        self.allocator.free(self.key);
-        self.allocator.free(self.name);
-        self.allocator.free(self.payload_json);
-        self.allocator.free(self.path);
-    }
-};
-
-pub const ClaimedSignal = struct {
-    key: []const u8,
-    name: []const u8,
-    payload_json: []const u8,
-    path: []const u8,
-    at_ms: ?i64,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *ClaimedSignal) void {
+    pub fn deinit(self: *Signal) void {
         self.allocator.free(self.key);
         self.allocator.free(self.name);
         self.allocator.free(self.payload_json);
@@ -122,6 +107,7 @@ pub const ConsumedSignal = struct {
 const FsDurableStore = struct {
     allocator: std.mem.Allocator,
     durable_dir: []const u8,
+    dirs_ready: bool = false,
 
     const Self = @This();
     const counter = struct {
@@ -136,6 +122,7 @@ const FsDurableStore = struct {
     }
 
     fn ensureDirs(self: *Self) !void {
+        if (self.dirs_ready) return;
         try self.ensureDir(self.durable_dir);
         const signals_dir = try self.allocSignalsDir();
         defer self.allocator.free(signals_dir);
@@ -144,6 +131,7 @@ const FsDurableStore = struct {
         const scheduled_dir = try self.allocScheduledDir();
         defer self.allocator.free(scheduled_dir);
         try self.ensureDir(scheduled_dir);
+        self.dirs_ready = true;
     }
 
     fn enqueueSignal(self: *Self, key: []const u8, name: []const u8, payload_json: []const u8) !void {
@@ -167,9 +155,9 @@ const FsDurableStore = struct {
         try writeSignalEnvelope(self.allocator, path, key, name, payload_json, at_ms);
     }
 
-    fn scanSignals(self: *Self, allocator: std.mem.Allocator, now_ms: i64) ![]SignalCandidate {
+    fn scanSignals(self: *Self, allocator: std.mem.Allocator, now_ms: i64) ![]Signal {
         try self.ensureDirs();
-        var out: std.ArrayList(SignalCandidate) = .empty;
+        var out: std.ArrayList(Signal) = .empty;
         errdefer {
             for (out.items) |*candidate| candidate.deinit();
             out.deinit(allocator);
@@ -186,7 +174,7 @@ const FsDurableStore = struct {
         return out.toOwnedSlice(allocator);
     }
 
-    fn tryClaimSignal(self: *Self, candidate: *const SignalCandidate) !?ClaimedSignal {
+    fn tryClaimSignal(self: *Self, candidate: *const Signal) !?Signal {
         const claimed_path = try self.allocClaimedPath(candidate.path);
         errdefer self.allocator.free(claimed_path);
         if (!try renamePath(candidate.path, claimed_path)) return null;
@@ -201,7 +189,7 @@ const FsDurableStore = struct {
         };
     }
 
-    fn deleteClaimedSignal(_: *Self, claimed: *const ClaimedSignal) void {
+    fn deleteSignal(_: *Self, claimed: *const Signal) void {
         deletePath(claimed.path);
     }
 
@@ -218,7 +206,7 @@ const FsDurableStore = struct {
 
             var claimed = (try self.tryClaimSignal(candidate)) orelse continue;
             defer claimed.deinit();
-            defer self.deleteClaimedSignal(&claimed);
+            defer self.deleteSignal(&claimed);
 
             return .{
                 .payload_json = try self.allocator.dupe(u8, claimed.payload_json),
@@ -232,7 +220,7 @@ const FsDurableStore = struct {
     fn scanDirSignals(
         self: *Self,
         allocator: std.mem.Allocator,
-        out: *std.ArrayList(SignalCandidate),
+        out: *std.ArrayList(Signal),
         dir_path: []const u8,
         scheduled_only: bool,
         now_ms: i64,
@@ -319,17 +307,7 @@ const FsDurableStore = struct {
     }
 };
 
-fn unixMillis() i64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => {
-            const secs: i64 = @intCast(ts.sec);
-            const nanos: i64 = @intCast(ts.nsec);
-            return (secs * 1000) + @divTrunc(nanos, 1_000_000);
-        },
-        else => return 0,
-    }
-}
+const unixMillis = trace.unixMillis;
 
 const ParsedSignalEnvelope = struct {
     key: []const u8,
@@ -418,7 +396,7 @@ fn writeSignalEnvelope(
     writeAll(fd, buf.items);
 }
 
-fn appendEscaped(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
+pub fn appendEscaped(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
     const hex = "0123456789abcdef";
     for (data) |char| {
         switch (char) {
@@ -456,14 +434,7 @@ fn deletePath(path: []const u8) void {
     _ = std.c.unlink(path_z);
 }
 
-fn writeAll(fd: std.c.fd_t, data: []const u8) void {
-    var remaining = data;
-    while (remaining.len > 0) {
-        const result = std.c.write(fd, remaining.ptr, remaining.len);
-        if (result < 0) break;
-        remaining = remaining[@intCast(result)..];
-    }
-}
+const writeAll = trace.writeAll;
 
 test "durable store enqueue and consume immediate signal" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

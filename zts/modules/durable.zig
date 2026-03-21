@@ -194,14 +194,4 @@ fn getCallbacks(ctx: *context.Context) ?*DurableCallbacks {
     return ctx.getModuleState(DurableCallbacks, MODULE_STATE_SLOT);
 }
 
-fn unixMillis() i64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => {
-            const secs: i64 = @intCast(ts.sec);
-            const nanos: i64 = @intCast(ts.nsec);
-            return (secs * 1000) + @divTrunc(nanos, 1_000_000);
-        },
-        else => return 0,
-    }
-}
+const unixMillis = @import("../trace.zig").unixMillis;

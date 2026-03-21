@@ -1529,9 +1529,7 @@ pub const Runtime = struct {
 
     fn initDurableStore(self: *Self) !durable_store_mod.DurableStore {
         const dir = self.config.durable_oplog_dir orelse return error.DurableDisabled;
-        var store = durable_store_mod.DurableStore.initFs(self.allocator, dir);
-        try store.ensureDirs();
-        return store;
+        return durable_store_mod.DurableStore.initFs(self.allocator, dir);
     }
 
     fn durableSignalTargetExists(self: *Self, key: []const u8) !bool {
@@ -1573,7 +1571,7 @@ pub const Runtime = struct {
         defer body.deinit(self.allocator);
 
         try body.appendSlice(self.allocator, "{\"pending\":true,\"durableKey\":\"");
-        try appendEscapedJsonString(self.allocator, &body, active.key);
+        try appendEscapedJson(&body, self.allocator, active.key);
         try body.appendSlice(self.allocator, "\",\"wait\":{");
 
         switch (wait) {
@@ -1585,7 +1583,7 @@ pub const Runtime = struct {
             },
             .signal => |name| {
                 try body.appendSlice(self.allocator, "\"type\":\"signal\",\"name\":\"");
-                try appendEscapedJsonString(self.allocator, &body, name);
+                try appendEscapedJson(&body, self.allocator, name);
                 try body.appendSlice(self.allocator, "\"");
             },
         }
@@ -2313,39 +2311,9 @@ const FetchResponseObjects = struct {
     headers: *zq.JSObject,
 };
 
-fn appendEscapedJsonString(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), data: []const u8) !void {
-    const hex = "0123456789abcdef";
-    for (data) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    try buf.appendSlice(allocator, "\\u00");
-                    try buf.append(allocator, hex[c >> 4]);
-                    try buf.append(allocator, hex[c & 0x0f]);
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-}
+const appendEscapedJson = durable_store_mod.appendEscaped;
 
-fn unixMillis() i64 {
-    var ts: std.posix.timespec = undefined;
-    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
-        .SUCCESS => {
-            const secs: i64 = @intCast(ts.sec);
-            const nanos: i64 = @intCast(ts.nsec);
-            return (secs * 1000) + @divTrunc(nanos, 1_000_000);
-        },
-        else => return 0,
-    }
-}
+const unixMillis = zq.trace.unixMillis;
 
 fn getStringData(val: zq.JSValue) ?[]const u8 {
     if (val.isString()) {

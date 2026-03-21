@@ -1587,8 +1587,21 @@ fn appendJSValueBuf(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, ctx: 
     }
 }
 
+/// Current wall-clock time in milliseconds since Unix epoch.
+pub fn unixMillis() i64 {
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => {
+            const secs: i64 = @intCast(ts.sec);
+            const nanos: i64 = @intCast(ts.nsec);
+            return (secs * 1000) + @divTrunc(nanos, 1_000_000);
+        },
+        else => return 0,
+    }
+}
+
 /// Write all bytes to fd, retrying on partial writes.
-fn writeAll(fd: std.c.fd_t, data: []const u8) void {
+pub fn writeAll(fd: std.c.fd_t, data: []const u8) void {
     var remaining = data;
     while (remaining.len > 0) {
         const result = std.c.write(fd, remaining.ptr, remaining.len);

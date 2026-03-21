@@ -32,7 +32,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
-**Durable execution.** `--durable <dir>` enables crash recovery via write-ahead oplog. Wrap work in `run(key, fn)` from `zigttp:durable` with an idempotency key; each I/O call is persisted before returning to the handler. On crash recovery, recorded results are replayed without touching the network. Completed runs are deduplicated by key.
+**Durable execution.** `--durable <dir>` enables crash recovery and long-running workflows via write-ahead oplog. Wrap work in `run(key, fn)` from `zigttp:durable` with an idempotency key; each I/O call is persisted before returning to the handler. On crash recovery, recorded results are replayed without touching the network. Completed runs are deduplicated by key. Durable runs can suspend with `sleep(ms)`, `sleepUntil(unixMs)`, or `waitSignal(name)` and resume when the timer fires or a signal arrives via `signal(key, name, payload)`. A background scheduler polls for ready timers and signals using the same replay-safe recovery path.
 
 **Guard composition.** `guard()` from `zigttp:compose` combined with the pipe operator (`|>`) composes handlers with pre/post guards at compile time. The parser desugars `guard(auth) |> guard(log) |> handler |> guard(cors)` into a single flat function with sequential if-checks - zero runtime overhead.
 
@@ -150,7 +150,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:compose` | `guard` | Compile-time handler composition via pipe operator |
-| `zigttp:durable` | `run`, `step` | Durable execution with write-ahead oplog and crash recovery |
+| `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, and signals |
 
 ### Auth Example
 
@@ -470,21 +470,31 @@ zigttp-server handler.ts --durable ./oplogs
 Handlers opt into durability via the `zigttp:durable` virtual module:
 
 ```typescript
-import { run, step } from "zigttp:durable";
+import { run, step, sleep, waitSignal, signal } from "zigttp:durable";
 
 function handler(req: Request): Response {
-    return run(req.url, () => {
-        const user = step("fetch-user", () => fetchSync("https://api.internal/user/1"));
-        const order = step("create-order", () => fetchSync("https://api.internal/orders", {
-            method: "POST",
-            body: JSON.stringify({ userId: user.json().id })
-        }));
-        return Response.json(order.json());
+    // Deliver a signal to a waiting run
+    if (req.url === "/approve") {
+        signal("order:42", "approved", { by: "admin" });
+        return Response.json({ ok: true });
+    }
+
+    // Durable workflow with steps, timers, and signals
+    return run("order:42", () => {
+        const order = step("create", () =>
+            fetchSync("https://api.internal/orders", { method: "POST", body: "{}" }));
+        sleep(5000);
+        const approval = waitSignal("approved");
+        const confirmed = step("confirm", () =>
+            fetchSync("https://api.internal/orders/42/confirm", {
+                method: "POST", body: JSON.stringify(approval)
+            }));
+        return Response.json(confirmed.json());
     });
 }
 ```
 
-`run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. On crash recovery, recorded step results are replayed without touching the network. Completed runs are deduplicated by key - calling `run` with the same key returns the previously recorded response.
+`run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. `sleep(ms)` and `sleepUntil(unixMs)` suspend the run until a timer fires. `waitSignal(name)` suspends until a signal arrives via `signal(key, name, payload)` or `signalAt(key, name, unixMs, payload)`. Pending runs return `202 Accepted` with a JSON body describing the wait. On crash recovery, recorded results are replayed without touching the network. A background scheduler polls for ready timers and signals. Completed runs are deduplicated by key.
 
 ### Proven Evolution (`-Dprove`)
 

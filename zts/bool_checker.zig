@@ -1378,10 +1378,7 @@ fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32
     var parser = @import("parser/parse.zig").Parser.init(allocator, source);
     defer parser.deinit();
 
-    const root = parser.parse() catch |err| {
-        std.debug.print("Parse error: {}\n", .{err});
-        return err;
-    };
+    const root = parser.parse() catch |err| return err;
 
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var checker = BoolChecker.init(allocator, ir_view, null);
