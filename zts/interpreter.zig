@@ -1157,91 +1157,105 @@ pub const Interpreter = struct {
     /// - goto/goto_if_false: Absolute jump by modifying pc
     /// - call/call_method: Recursive dispatch via callBytecodeFunction
     ///
-    // Dispatch helpers to keep the core loop readable.
-    const DispatchResult = union(enum) {
-        unhandled,
-        handled,
-        ret: value.JSValue,
-    };
-
-    inline fn dispatchStackOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
-            .nop => return .handled,
+    /// Public because native callbacks may need to call back into JS.
+    pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
+        @setEvalBranchQuota(10000);
+        return sw: switch (@as(bytecode.Opcode, @enumFromInt(self.pc[0]))) {
+            // ========================================
+            // Stack Operations
+            // ========================================
+            .nop => {
+                self.advanceOp();
+                continue :sw @enumFromInt(self.pc[0]);
+            },
             .halt => {
-                // End of script - return last value on stack or undefined
-                if (self.ctx.sp > 0) {
-                    return .{ .ret = self.ctx.pop() };
-                }
-                return .{ .ret = value.JSValue.undefined_val };
+                self.advanceOp();
+                break :sw if (self.ctx.sp > 0) self.ctx.pop() else value.JSValue.undefined_val;
             },
             .push_0 => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.fromInt(0));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_1 => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.fromInt(1));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_2 => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.fromInt(2));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_3 => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.fromInt(3));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_null => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.null_val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_undefined => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.undefined_val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_true => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.true_val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_false => {
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.false_val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_i8 => {
+                self.advanceOp();
                 const val: i8 = @bitCast(self.pc[0]);
                 self.pc += 1;
                 try self.ctx.push(value.JSValue.fromInt(val));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_i16 => {
+                self.advanceOp();
                 const val = readI16(self.pc);
                 self.pc += 2;
                 try self.ctx.push(value.JSValue.fromInt(val));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .push_const => {
+                self.advanceOp();
                 const idx = readU16(self.pc);
                 self.pc += 2;
                 try self.ctx.push(try self.getConstant(idx));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .dup => {
+                self.advanceOp();
                 const top = self.ctx.peek();
                 try self.ctx.push(top);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .drop => {
+                self.advanceOp();
                 _ = self.ctx.pop();
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .swap => {
+                self.advanceOp();
                 self.ctx.swap2();
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .rot3 => {
+                self.advanceOp();
                 self.ctx.rot3();
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_length => {
+                self.advanceOp();
                 // Optimized - modify stack in place
                 const sp = self.ctx.sp;
                 const obj_val = self.ctx.stack[sp - 1];
@@ -1249,96 +1263,101 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     if (obj.class_id == .array) {
                         self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH];
-                        return .handled;
                     } else if (obj.class_id == .range_iterator) {
                         self.ctx.stack[sp - 1] = obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH];
-                        return .handled;
                     } else {
                         // Fallback to property lookup
                         const pool = self.ctx.hidden_class_pool orelse {
                             self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         };
                         if (obj.getProperty(pool, .length)) |len| {
                             self.ctx.stack[sp - 1] = len;
                         } else {
                             self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
                         }
-                        return .handled;
                     }
                 } else if (obj_val.isAnyString()) {
                     self.ctx.stack[sp - 1] = getAnyStringLength(obj_val);
                 } else {
                     self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .dup2 => {
+                self.advanceOp();
                 // Duplicate top 2 stack values: [a, b] -> [a, b, a, b]
                 const b = self.ctx.peekAt(0);
                 const a = self.ctx.peekAt(1);
                 try self.ctx.push(a);
                 try self.ctx.push(b);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            else => return .unhandled,
-        }
-    }
 
-    inline fn dispatchLocalOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
+            // ========================================
+            // Local Variables
+            // ========================================
             .get_loc => {
+                self.advanceOp();
                 const idx = self.pc[0];
                 self.pc += 1;
                 try self.ctx.push(self.ctx.getLocal(idx));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_loc => {
+                self.advanceOp();
                 const idx = self.pc[0];
                 self.pc += 1;
                 const val = self.ctx.pop();
                 self.ctx.setLocal(idx, val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_loc_0 => {
+                self.advanceOp();
                 try self.ctx.push(self.ctx.getLocal(0));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_loc_1 => {
+                self.advanceOp();
                 try self.ctx.push(self.ctx.getLocal(1));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_loc_2 => {
+                self.advanceOp();
                 try self.ctx.push(self.ctx.getLocal(2));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_loc_3 => {
+                self.advanceOp();
                 try self.ctx.push(self.ctx.getLocal(3));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_loc_0 => {
+                self.advanceOp();
                 self.ctx.setLocal(0, self.ctx.pop());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_loc_1 => {
+                self.advanceOp();
                 self.ctx.setLocal(1, self.ctx.pop());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_loc_2 => {
+                self.advanceOp();
                 self.ctx.setLocal(2, self.ctx.pop());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_loc_3 => {
+                self.advanceOp();
                 self.ctx.setLocal(3, self.ctx.pop());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            else => return .unhandled,
-        }
-    }
 
-    inline fn dispatchArithmeticOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
+            // ========================================
+            // Arithmetic
+            // ========================================
             .add => {
+                self.advanceOp();
                 // Direct stack manipulation avoids push bounds check
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
@@ -1355,21 +1374,22 @@ pub const Interpreter = struct {
                         @branchHint(.likely);
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(sum);
                         self.ctx.sp = sp - 1;
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                     // Integer overflow - convert to float
                     self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     // Slow path for strings/floats
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
                     self.ctx.pushUnchecked(try self.addValuesSlow(a, b));
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
             },
             .sub => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -1383,20 +1403,21 @@ pub const Interpreter = struct {
                         @branchHint(.likely);
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(diff);
                         self.ctx.sp = sp - 1;
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                     // Integer overflow - convert to float
                     self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
                     self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
             },
             .mul => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -1410,27 +1431,29 @@ pub const Interpreter = struct {
                         @branchHint(.likely);
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(product);
                         self.ctx.sp = sp - 1;
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                     // Integer overflow - convert to float
                     self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
                     self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
             },
             .div => {
+                self.advanceOp();
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
                 self.recordBinaryOpFeedback(a, b);
                 self.ctx.pushUnchecked(try self.divValues(a, b));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .mod => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -1442,23 +1465,26 @@ pub const Interpreter = struct {
                         @branchHint(.likely);
                         self.ctx.stack[sp - 2] = value.JSValue.fromInt(@rem(a.getInt(), bv));
                         self.ctx.sp = sp - 1;
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                 }
                 return error.DivisionByZero;
             },
             .pow => {
+                self.advanceOp();
                 const b = self.ctx.pop();
                 const a = self.ctx.pop();
                 try self.ctx.push(try self.powValues(a, b));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .neg => {
+                self.advanceOp();
                 const a = self.ctx.pop();
                 try self.ctx.push(try self.negValue(a));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .inc => {
+                self.advanceOp();
                 // Optimize for common integer case - modify stack in place
                 const sp = self.ctx.sp;
                 const a = self.ctx.stack[sp - 1];
@@ -1469,19 +1495,20 @@ pub const Interpreter = struct {
                     if (overflow == 0) {
                         @branchHint(.likely);
                         self.ctx.stack[sp - 1] = value.JSValue.fromInt(sum);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                     // Overflow - convert to float
                     self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + 1.0);
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else if (a.isFloat64()) {
                     self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() + 1.0);
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     return error.TypeError;
                 }
             },
             .dec => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const a = self.ctx.stack[sp - 1];
                 if (a.isInt()) {
@@ -1489,177 +1516,329 @@ pub const Interpreter = struct {
                     const diff, const overflow = @subWithOverflow(ai, 1);
                     if (overflow == 0) {
                         self.ctx.stack[sp - 1] = value.JSValue.fromInt(diff);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                     self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - 1.0);
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else if (a.isFloat64()) {
                     self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() - 1.0);
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     return error.TypeError;
                 }
             },
-            else => return .unhandled,
-        }
-    }
+            .concat_n => {
+                self.advanceOp();
+                const count = self.pc[0];
+                self.pc += 1;
+                const result = try self.concatNValues(count);
+                try self.ctx.push(result);
+                continue :sw @enumFromInt(self.pc[0]);
+            },
 
-    inline fn dispatchComparisonOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
-            .lt => {
+            // ========================================
+            // Math Builtins
+            // ========================================
+            .math_floor => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const arg = self.ctx.stack[sp - 1];
+                if (arg.isInt()) {
+                    // floor(int) = int
+                } else if (arg.isFloat64()) {
+                    const n = arg.getFloat64();
+                    const floored = @floor(n);
+                    if (floored >= -2147483648 and floored <= 2147483647) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(floored));
+                    } else {
+                        self.ctx.stack[sp - 1] = try self.allocFloat(floored);
+                    }
+                } else {
+                    self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .math_ceil => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const arg = self.ctx.stack[sp - 1];
+                if (arg.isInt()) {
+                    // ceil(int) = int
+                } else if (arg.isFloat64()) {
+                    const n = arg.getFloat64();
+                    const ceiled = @ceil(n);
+                    if (ceiled >= -2147483648 and ceiled <= 2147483647) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(ceiled));
+                    } else {
+                        self.ctx.stack[sp - 1] = try self.allocFloat(ceiled);
+                    }
+                } else {
+                    self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .math_round => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const arg = self.ctx.stack[sp - 1];
+                if (arg.isInt()) {
+                    // round(int) = int
+                } else if (arg.isFloat64()) {
+                    const n = arg.getFloat64();
+                    const rounded = @round(n);
+                    if (rounded >= -2147483648 and rounded <= 2147483647) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(rounded));
+                    } else {
+                        self.ctx.stack[sp - 1] = try self.allocFloat(rounded);
+                    }
+                } else {
+                    self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .math_abs => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const arg = self.ctx.stack[sp - 1];
+                if (arg.isInt()) {
+                    const v = arg.getInt();
+                    if (v == std.math.minInt(i32)) {
+                        const result = try self.allocFloat(@as(f64, 2147483648.0));
+                        self.ctx.stack[sp - 1] = result;
+                    } else if (v < 0) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(-v);
+                    }
+                } else if (arg.isFloat64()) {
+                    const n = arg.getFloat64();
+                    const absed = @abs(n);
+                    if (absed >= 0 and absed <= 2147483647) {
+                        const truncated = @floor(absed);
+                        if (truncated == absed) {
+                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(absed));
+                        } else {
+                            self.ctx.stack[sp - 1] = try self.allocFloat(absed);
+                        }
+                    } else {
+                        self.ctx.stack[sp - 1] = try self.allocFloat(absed);
+                    }
+                } else {
+                    self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .math_min2 => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                // Inline integer fast path
+                if (a.isInt() and b.isInt()) {
+                    const av = a.getInt();
+                    const bv = b.getInt();
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(@min(av, bv));
+                } else {
+                    const an = a.toNumber() orelse std.math.nan(f64);
+                    const bn = b.toNumber() orelse std.math.nan(f64);
+                    if (std.math.isNan(an) or std.math.isNan(bn)) {
+                        self.ctx.stack[sp - 2] = try self.allocFloat(std.math.nan(f64));
+                    } else {
+                        self.ctx.stack[sp - 2] = try self.allocFloat(@min(an, bn));
+                    }
+                }
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .math_max2 => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    const av = a.getInt();
+                    const bv = b.getInt();
+                    self.ctx.stack[sp - 2] = value.JSValue.fromInt(@max(av, bv));
+                } else {
+                    const an = a.toNumber() orelse std.math.nan(f64);
+                    const bn = b.toNumber() orelse std.math.nan(f64);
+                    if (std.math.isNan(an) or std.math.isNan(bn)) {
+                        self.ctx.stack[sp - 2] = try self.allocFloat(std.math.nan(f64));
+                    } else {
+                        self.ctx.stack[sp - 2] = try self.allocFloat(@max(an, bn));
+                    }
+                }
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+
+            // ========================================
+            // Comparison / Logical
+            // ========================================
+            .lt => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);
                     self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() < b.getInt());
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 } else {
                     @branchHint(.cold);
                     self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
             },
             .lte => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 if (a.isInt() and b.isInt()) {
                     self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() <= b.getInt());
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
                 const cmp = try compareValues(a, b);
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .lt or cmp == .eq);
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .gt => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 if (a.isInt() and b.isInt()) {
                     self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() > b.getInt());
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .gt);
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .gte => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 if (a.isInt() and b.isInt()) {
                     self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() >= b.getInt());
                     self.ctx.sp = sp - 1;
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 }
                 const cmp = try compareValues(a, b);
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .gt or cmp == .eq);
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .eq => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(looseEquals(a, b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .neq => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(!looseEquals(a, b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .strict_eq => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.strictEquals(b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .strict_neq => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromBool(!a.strictEquals(b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .not => {
+                self.advanceOp();
                 const a = self.ctx.pop();
                 const cond_bool = a.toConditionBool() orelse {
                     self.ctx.exception = try self.createBoolError(a);
-                    return .{ .ret = value.JSValue.undefined_val };
+                    break :sw value.JSValue.undefined_val;
                 };
                 try self.ctx.push(value.JSValue.fromBool(!cond_bool));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            else => return .unhandled,
-        }
-    }
 
-    inline fn dispatchBitwiseOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
+            // ========================================
+            // Bitwise Operations
+            // ========================================
             .bit_and => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) & toInt32(b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .bit_or => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) | toInt32(b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .bit_xor => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) ^ toInt32(b));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .bit_not => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const a = self.ctx.stack[sp - 1];
                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(~toInt32(a));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .shl => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) << shift);
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .shr => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
                 const shift: u5 = @intCast(@as(u32, @bitCast(toInt32(b))) & 0x1F);
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(toInt32(a) >> shift);
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .ushr => {
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
@@ -1667,18 +1846,16 @@ pub const Interpreter = struct {
                 const ua: u32 = @bitCast(toInt32(a));
                 self.ctx.stack[sp - 2] = value.JSValue.fromInt(@bitCast(ua >> shift));
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            else => return .unhandled,
-        }
-    }
 
-    inline fn dispatchControlFlowOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
+            // ========================================
+            // Control Flow
+            // ========================================
             .goto => {
+                self.advanceOp();
                 const offset = readI16(self.pc);
                 self.pc += 2;
-                // Profile backward jumps (loop back-edges) for hot loop detection
                 if (offset < 0) {
                     if (false) {
                         if (self.current_func) |func| {
@@ -1686,105 +1863,106 @@ pub const Interpreter = struct {
                             if (func_mut.tier == .interpreted) {
                                 func_mut.tier = .baseline_candidate;
                             }
-                            // Also update function's backedge count for cross-call tracking
                             func_mut.backedge_count = self.backedge_count;
                         }
                         self.backedge_count = 0;
                     }
                 }
                 self.offsetPc(offset);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .loop => {
+                self.advanceOp();
                 const offset = readI16(self.pc);
                 self.pc += 2;
-                // Profile back-edge for hot loop detection (interpreted code only)
-                // If loop is hot, promote containing function to baseline candidate
                 if (false) {
                     if (self.current_func) |func| {
                         const func_mut = @constCast(func);
                         if (func_mut.tier == .interpreted) {
                             func_mut.tier = .baseline_candidate;
                         }
-                        // Also update function's backedge count for cross-call tracking
                         func_mut.backedge_count = self.backedge_count;
                     }
-                    self.backedge_count = 0; // Reset to avoid repeated promotion
+                    self.backedge_count = 0;
                 }
                 self.offsetPc(-offset);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .if_true => {
+                self.advanceOp();
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
                     self.ctx.exception = try self.createBoolError(cond);
-                    return .{ .ret = value.JSValue.undefined_val };
+                    break :sw value.JSValue.undefined_val;
                 };
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (cond_bool) {
                     self.offsetPc(offset);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .if_false => {
+                self.advanceOp();
                 const cond = self.ctx.pop();
                 const cond_bool = cond.toConditionBool() orelse {
                     self.ctx.exception = try self.createBoolError(cond);
-                    return .{ .ret = value.JSValue.undefined_val };
+                    break :sw value.JSValue.undefined_val;
                 };
                 const offset = readI16(self.pc);
                 self.pc += 2;
                 if (!cond_bool) {
                     self.offsetPc(offset);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            .ret => return .{ .ret = self.ctx.pop() },
-            .ret_undefined => return .{ .ret = value.JSValue.undefined_val },
-            else => return .unhandled,
-        }
-    }
+            .ret => {
+                self.advanceOp();
+                break :sw self.ctx.pop();
+            },
+            .ret_undefined => {
+                self.advanceOp();
+                break :sw value.JSValue.undefined_val;
+            },
 
-    inline fn dispatchObjectOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
+            // ========================================
+            // Object Operations
+            // ========================================
             .new_object => {
+                self.advanceOp();
                 const obj = try self.createObject();
                 try self.ctx.push(obj.toValue());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .new_array => {
+                self.advanceOp();
                 const length = readU16(self.pc);
                 self.pc += 2;
-                // Create array object with Array.prototype
                 const obj = try self.createArray();
                 obj.setArrayLength(@intCast(length));
                 try self.ctx.push(obj.toValue());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .new_object_literal => {
-                // Create object with pre-compiled shape (O(1) class allocation)
+                self.advanceOp();
                 const shape_idx = readU16(self.pc);
                 self.pc += 2;
                 const prop_count = self.pc[0];
                 self.pc += 1;
-                _ = prop_count; // Used for verification in debug builds
+                _ = prop_count;
 
-                // Look up pre-built hidden class from materialized shapes
                 const class_idx = self.ctx.getLiteralShape(shape_idx) orelse {
-                    // Fallback: create empty object if shape not found
                     const obj = try self.createObject();
                     try self.ctx.push(obj.toValue());
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 };
 
-                // Create object with final class directly (no transitions needed)
                 const obj = try self.ctx.createObjectWithClass(class_idx, null);
                 try self.ctx.push(obj.toValue());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .set_slot => {
-                // Direct slot write for pre-compiled object literals
+                self.advanceOp();
                 const slot_idx: u16 = self.pc[0];
                 self.pc += 1;
                 const val = self.ctx.pop();
@@ -1794,9 +1972,10 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     obj.setSlot(slot_idx, val);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_field => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
@@ -1806,7 +1985,7 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     const pool = self.ctx.hidden_class_pool orelse {
                         try self.ctx.push(value.JSValue.undefined_val);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (obj.getProperty(pool, atom)) |prop_val| {
                         try self.ctx.push(prop_val);
@@ -1814,14 +1993,12 @@ pub const Interpreter = struct {
                         try self.ctx.push(value.JSValue.undefined_val);
                     }
                 } else if (obj_val.isAnyString()) {
-                    // Primitive string property access (flat, rope, or slice)
                     if (atom == .length) {
                         try self.ctx.push(getAnyStringLength(obj_val));
                     } else if (self.ctx.string_prototype) |proto| {
-                        // Look up method on String.prototype
                         const pool = self.ctx.hidden_class_pool orelse {
                             try self.ctx.push(value.JSValue.undefined_val);
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         };
                         if (proto.getProperty(pool, atom)) |prop_val| {
                             try self.ctx.push(prop_val);
@@ -1834,9 +2011,10 @@ pub const Interpreter = struct {
                 } else {
                     try self.ctx.push(value.JSValue.undefined_val);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_field => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
@@ -1847,11 +2025,10 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     try self.ctx.setPropertyChecked(obj, atom, val);
                 }
-                // Non-object assignment silently fails in non-strict mode
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_field_keep => {
-                // Same as put_field but keeps the value on the stack
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
@@ -1862,11 +2039,11 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     try self.ctx.setPropertyChecked(obj, atom, val);
                 }
-                // Push value back as assignment expression result
                 try self.ctx.push(val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_field_ic => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 const cache_idx = readU16(self.pc + 2);
                 self.pc += 4;
@@ -1878,36 +2055,32 @@ pub const Interpreter = struct {
                     const obj = object.JSObject.fromValue(obj_val);
                     const pic = &self.pic_cache[cache_idx];
 
-                    // PIC lookup: check all cached entries
                     if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
-                        self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
+                        self.pic_hits +%= 1;
                         try self.ctx.push(obj.getSlot(slot_offset));
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
 
-                    // Cache miss: full lookup and update PIC
-                    self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
+                    self.pic_misses +%= 1;
                     const pool = self.ctx.hidden_class_pool orelse {
                         try self.ctx.push(value.JSValue.undefined_val);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
                         _ = pic.update(obj.hidden_class_idx, slot_offset);
                         try self.ctx.push(obj.getSlot(slot_offset));
                     } else if (obj.getProperty(pool, atom)) |prop_val| {
-                        // Property found in prototype chain (don't cache)
                         try self.ctx.push(prop_val);
                     } else {
                         try self.ctx.push(value.JSValue.undefined_val);
                     }
                 } else if (obj_val.isAnyString()) {
-                    // Primitive string property access (flat, rope, or slice)
                     if (atom == .length) {
                         try self.ctx.push(getAnyStringLength(obj_val));
                     } else if (self.ctx.string_prototype) |proto| {
                         const pool = self.ctx.hidden_class_pool orelse {
                             try self.ctx.push(value.JSValue.undefined_val);
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         };
                         if (proto.getProperty(pool, atom)) |prop_val| {
                             try self.ctx.push(prop_val);
@@ -1920,9 +2093,10 @@ pub const Interpreter = struct {
                 } else {
                     try self.ctx.push(value.JSValue.undefined_val);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_field_ic => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 const cache_idx = readU16(self.pc + 2);
                 self.pc += 4;
@@ -1938,35 +2112,28 @@ pub const Interpreter = struct {
                         return error.ArenaObjectEscape;
                     }
 
-                    // PIC lookup: check all cached entries
                     if (pic.lookup(obj.hidden_class_idx)) |slot_offset| {
-                        self.pic_hits +%= 1; // Profile PIC hit (Phase 11)
+                        self.pic_hits +%= 1;
                         obj.setSlot(slot_offset, val);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
 
-                    // Cache miss: check if property exists
-                    self.pic_misses +%= 1; // Profile PIC miss (Phase 11)
+                    self.pic_misses +%= 1;
                     const pool = self.ctx.hidden_class_pool orelse {
-                        // No pool, use full setProperty path
                         try self.ctx.setPropertyChecked(obj, atom, val);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                        // Property exists, update PIC and set value
                         _ = pic.update(obj.hidden_class_idx, slot_offset);
                         obj.setSlot(slot_offset, val);
                     } else {
-                        // Property doesn't exist, use full setProperty (may transition)
-                        // Don't cache transitions as hidden class will change
                         try self.ctx.setPropertyChecked(obj, atom, val);
                     }
                 }
-                // Non-object assignment silently fails in non-strict mode
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_elem => {
-                // Optimized with direct stack access
+                self.advanceOp();
                 const sp = self.ctx.sp;
                 const index_val = self.ctx.stack[sp - 1];
                 const obj_val = self.ctx.stack[sp - 2];
@@ -1977,7 +2144,6 @@ pub const Interpreter = struct {
                     if (idx >= 0) {
                         const idx_u: u32 = @intCast(idx);
                         if (obj.class_id == .array) {
-                            // Fast path: check bounds once, then unchecked access
                             const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt()));
                             if (idx_u < len) {
                                 self.ctx.stack[sp - 2] = obj.getIndexUnchecked(idx_u);
@@ -1985,9 +2151,8 @@ pub const Interpreter = struct {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                             }
                             self.ctx.sp = sp - 1;
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         } else if (obj.class_id == .range_iterator) {
-                            // Inline range iterator computation
                             const len = @as(u32, @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt()));
                             if (idx_u < len) {
                                 const start = obj.inline_slots[object.JSObject.Slots.RANGE_START].getInt();
@@ -1997,35 +2162,36 @@ pub const Interpreter = struct {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                             }
                             self.ctx.sp = sp - 1;
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         } else {
                             var idx_buf: [32]u8 = undefined;
                             const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                                 self.ctx.sp = sp - 1;
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             };
                             const atom = self.ctx.atoms.intern(idx_slice) catch {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                                 self.ctx.sp = sp - 1;
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             };
                             const pool = self.ctx.hidden_class_pool orelse {
                                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                                 self.ctx.sp = sp - 1;
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             };
                             self.ctx.stack[sp - 2] = obj.getProperty(pool, atom) orelse value.JSValue.undefined_val;
                             self.ctx.sp = sp - 1;
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         }
                     }
                 }
                 self.ctx.stack[sp - 2] = value.JSValue.undefined_val;
                 self.ctx.sp = sp - 1;
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_elem => {
+                self.advanceOp();
                 const val = self.ctx.pop();
                 const index_val = self.ctx.pop();
                 const obj_val = self.ctx.pop();
@@ -2038,15 +2204,20 @@ pub const Interpreter = struct {
                             try self.ctx.setIndexChecked(obj, @intCast(idx), val);
                         } else {
                             var idx_buf: [32]u8 = undefined;
-                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch return .handled;
-                            const atom = self.ctx.atoms.intern(idx_slice) catch return .handled;
+                            const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch {
+                                continue :sw @enumFromInt(self.pc[0]);
+                            };
+                            const atom = self.ctx.atoms.intern(idx_slice) catch {
+                                continue :sw @enumFromInt(self.pc[0]);
+                            };
                             try self.ctx.setPropertyChecked(obj, atom, val);
                         }
                     }
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_global => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
@@ -2055,41 +2226,37 @@ pub const Interpreter = struct {
                 } else {
                     try self.ctx.push(value.JSValue.undefined_val);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_global => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
                 try self.ctx.setGlobal(atom, val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .define_global => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 self.pc += 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
                 const val = self.ctx.pop();
                 try self.ctx.defineGlobal(atom, val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            else => return .unhandled,
-        }
-    }
 
-    inline fn dispatchCallOps(self: *Interpreter, op: bytecode.Opcode) InterpreterError!DispatchResult {
-        switch (op) {
             // ========================================
             // Function / Closure Creation
             // ========================================
             .make_function => {
+                self.advanceOp();
                 const const_idx = readU16(self.pc);
                 self.pc += 2;
-                // Get bytecode pointer from constant pool
                 const bc_val = try self.getConstant(const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
-                // Create function object
                 const root_class_idx = self.ctx.root_class_idx;
                 const func_obj = try object.JSObject.createBytecodeFunction(
                     self.ctx.allocator,
@@ -2098,16 +2265,15 @@ pub const Interpreter = struct {
                     @enumFromInt(bc_ptr.name_atom),
                 );
                 try self.ctx.push(func_obj.toValue());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .make_async => {
+                self.advanceOp();
                 const const_idx = readU16(self.pc);
                 self.pc += 2;
-                // Get bytecode pointer from constant pool
                 const bc_val = try self.getConstant(const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
-                // Create async function object (marked as async via slot 3)
                 const root_class_idx = self.ctx.root_class_idx;
                 const func_obj = try object.JSObject.createBytecodeFunction(
                     self.ctx.allocator,
@@ -2115,38 +2281,32 @@ pub const Interpreter = struct {
                     bc_ptr,
                     @enumFromInt(bc_ptr.name_atom),
                 );
-                // Mark as async function using flag (more efficient than inline slot check)
                 func_obj.flags.is_async = true;
                 try self.ctx.push(func_obj.toValue());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .make_closure => {
+                self.advanceOp();
                 const const_idx = readU16(self.pc);
                 self.pc += 2;
                 const upvalue_count: u8 = self.pc[0];
                 self.pc += 1;
 
-                // Get bytecode pointer from constant pool
                 const bc_val = try self.getConstant(const_idx);
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
 
-                // Allocate upvalue array
                 const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
                 errdefer self.ctx.allocator.free(upvalues);
 
-                // Capture upvalues based on bytecode info
                 for (0..upvalue_count) |i| {
                     const info = bc_ptr.upvalue_info[i];
                     if (info.is_local) {
-                        // Capture from current function's locals
                         upvalues[i] = try self.captureUpvalue(info.index);
                     } else {
-                        // Capture from current closure's upvalues
                         if (self.current_closure) |closure| {
                             upvalues[i] = closure.upvalues[info.index];
                         } else {
-                            // Create a new closed upvalue with undefined from pool
                             const uv = try self.ctx.gc_state.acquireUpvalue();
                             uv.* = .{
                                 .location = .{ .closed = value.JSValue.undefined_val },
@@ -2157,7 +2317,6 @@ pub const Interpreter = struct {
                     }
                 }
 
-                // Create closure object
                 const root_class_idx = self.ctx.root_class_idx;
                 const closure_obj = try object.JSObject.createClosure(
                     self.ctx.allocator,
@@ -2167,12 +2326,12 @@ pub const Interpreter = struct {
                     upvalues,
                 );
                 try self.ctx.push(closure_obj.toValue());
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .get_upvalue => {
+                self.advanceOp();
                 const idx = self.pc[0];
                 self.pc += 1;
-                // Get the upvalue from the current closure
                 if (self.current_closure) |closure| {
                     if (idx < closure.upvalues.len) {
                         const uv = closure.upvalues[idx];
@@ -2183,53 +2342,50 @@ pub const Interpreter = struct {
                 } else {
                     try self.ctx.push(value.JSValue.undefined_val);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .put_upvalue => {
+                self.advanceOp();
                 const idx = self.pc[0];
                 self.pc += 1;
                 const val = self.ctx.pop();
-                // Set the upvalue in the current closure
                 if (self.current_closure) |closure| {
                     if (idx < closure.upvalues.len) {
                         closure.upvalues[idx].set(val);
                     }
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .close_upvalue => {
+                self.advanceOp();
                 const local_idx = self.pc[0];
                 self.pc += 1;
-                // Close any open upvalues pointing to this local slot
                 self.closeUpvaluesAbove(local_idx);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
 
             // ========================================
-            // Await / typeof / spread helpers
+            // Await / typeof / spread
             // ========================================
             .await_val => {
-                // For synchronous execution, await just returns the value directly
-                // A full implementation would integrate with an event loop and Promises
-                // For now, if the value is a Promise-like object with .then(), we don't support it
-                // Just pass the value through (works for non-Promise values)
+                self.advanceOp();
                 const awaited = self.ctx.peek();
                 _ = awaited;
-                // Value stays on stack unchanged for sync execution
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .typeof => {
+                self.advanceOp();
                 const a = self.ctx.pop();
                 const type_str = a.typeOf();
-                // Create JS string for typeof result
                 const js_str = self.createString(type_str) catch {
                     try self.ctx.push(value.JSValue.undefined_val);
-                    return .handled;
+                    continue :sw @enumFromInt(self.pc[0]);
                 };
                 try self.ctx.push(value.JSValue.fromPtr(js_str));
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .to_number => {
+                self.advanceOp();
                 const a = self.ctx.pop();
                 if (a.isInt()) {
                     try self.ctx.push(a);
@@ -2238,10 +2394,11 @@ pub const Interpreter = struct {
                 } else {
                     try self.ctx.push(value.JSValue.nan_val);
                 }
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .array_spread => {
                 // Stack: [target_array, current_index, source_array]
+                self.advanceOp();
                 const source_val = self.ctx.pop();
                 const idx_val = self.ctx.pop();
                 const target_val = self.ctx.peek();
@@ -2252,14 +2409,12 @@ pub const Interpreter = struct {
                     var idx: usize = @intCast(idx_val.getInt());
                     const pool = self.ctx.hidden_class_pool orelse {
                         try self.ctx.push(idx_val);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     };
 
-                    // Get source array length
                     if (source.getProperty(pool, .length)) |len_val| {
                         if (len_val.isInt()) {
                             const src_len: usize = @intCast(len_val.getInt());
-                            // Copy each element from source to target
                             for (0..src_len) |i| {
                                 const elem = source.getSlot(@intCast(i));
                                 if (self.ctx.enforce_arena_escape and self.ctx.hybrid != null and !target.flags.is_arena and self.ctx.isEphemeralValue(elem)) {
@@ -2268,113 +2423,102 @@ pub const Interpreter = struct {
                                 target.setSlot(@intCast(idx), elem);
                                 idx += 1;
                             }
-                            // Push new index for subsequent elements
                             try self.ctx.push(value.JSValue.fromInt(@intCast(idx)));
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         }
                     }
                 }
-                // If spread failed, just push the original index back
                 try self.ctx.push(idx_val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .call_spread => {
-                // For now, call_spread is not fully implemented
-                // Would need to collect spread arguments into a single args array
+                self.advanceOp();
                 try self.ctx.push(value.JSValue.undefined_val);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
 
             // ========================================
             // Function Calls
             // ========================================
             .call => {
+                self.advanceOp();
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
                 try self.doCall(argc, false);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .call_method => {
+                self.advanceOp();
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
                 try self.doCall(argc, true);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .tail_call => {
+                self.advanceOp();
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
-                // TODO: Implement proper tail call optimization
                 try self.doCall(argc, false);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            // Fused push_const + call: load constant and call in one dispatch
             .push_const_call => {
+                self.advanceOp();
                 const const_idx = readU16(self.pc);
                 const argc: u8 = self.pc[2];
                 self.pc += 3;
-                // Push the constant (function to call)
                 try self.ctx.push(try self.getConstant(const_idx));
-                // Set correct pc-to-opcode distance for call site feedback
-                // push_const_call = opcode(1) + u16(2) + argc(1) = 4 bytes
                 self.call_opcode_offset = 4;
                 try self.doCall(argc, false);
-                self.call_opcode_offset = 2; // restore default
-                return .handled;
+                self.call_opcode_offset = 2;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            // Fused get_field + call_method: load method and call in one dispatch
             .get_field_call => {
+                self.advanceOp();
                 const atom_idx = readU16(self.pc);
                 const argc: u8 = self.pc[2];
                 self.pc += 3;
-                // Set correct pc-to-opcode distance for call site feedback
-                // get_field_call = opcode(1) + u16(2) + argc(1) = 4 bytes
                 self.call_opcode_offset = 4;
-                defer self.call_opcode_offset = 2; // restore default
+                defer self.call_opcode_offset = 2;
                 const atom: object.Atom = @enumFromInt(atom_idx);
 
-                // Stack: [obj, obj] (dup from codegen)
-                // Need to: get method from top obj (pop), then call_method with original obj as 'this'
                 const obj = self.ctx.pop();
                 if (obj.isObject()) {
                     const js_obj = object.JSObject.fromValue(obj);
                     const pool = self.ctx.hidden_class_pool orelse {
                         try self.ctx.push(value.JSValue.undefined_val);
                         try self.doCall(argc, true);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (js_obj.getProperty(pool, atom)) |method| {
-                        // Push method on stack (obj is still there)
                         try self.ctx.push(method);
-                        // Call as method (will use obj as 'this')
                         try self.doCall(argc, true);
-                        return .handled;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
                 } else if (obj.isAnyString()) {
-                    // String method call (flat, rope, or slice)
                     if (self.ctx.string_prototype) |proto| {
                         const pool = self.ctx.hidden_class_pool orelse {
                             try self.ctx.push(value.JSValue.undefined_val);
                             try self.doCall(argc, true);
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         };
                         if (proto.getProperty(pool, atom)) |method| {
                             try self.ctx.push(method);
                             try self.doCall(argc, true);
-                            return .handled;
+                            continue :sw @enumFromInt(self.pc[0]);
                         }
                     }
                 }
-                // Fallback: property not found, push undefined and call
                 try self.ctx.push(value.JSValue.undefined_val);
                 try self.doCall(argc, true);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
 
             // ========================================
             // Iterator Operations
             // ========================================
             .for_of_next => {
-                // Stack: [iterable, index] -> [iterable, index+1, element] or end
+                // Stack: [iterable, index] -> [iterable, index+1, element] or jump to end
+                self.advanceOp();
                 const end_offset = readI16(self.pc);
                 self.pc += 2;
                 const sp = self.ctx.sp;
@@ -2388,12 +2532,10 @@ pub const Interpreter = struct {
                     if (idx >= 0) {
                         @branchHint(.likely);
                         const idx_u: u32 = @intCast(idx);
-                        // Array fast path
                         if (obj.class_id == .array) {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                // Profile backedge for hot loop detection (for-of loops)
                                 if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
@@ -2404,18 +2546,14 @@ pub const Interpreter = struct {
                                     }
                                     self.backedge_count = 0;
                                 }
-                                // Push element, increment index in-place
                                 try self.ctx.push(obj.getIndexUnchecked(idx_u));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             }
-                        }
-                        // Range iterator fast path
-                        else if (obj.class_id == .range_iterator) {
+                        } else if (obj.class_id == .range_iterator) {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                // Profile backedge for hot loop detection (for-of loops)
                                 if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
@@ -2430,18 +2568,19 @@ pub const Interpreter = struct {
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
                                 try self.ctx.push(value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             }
                         }
                     }
                 }
                 // Loop done - jump to cleanup
                 self.offsetPc(end_offset);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
             .for_of_next_put_loc => {
-                // Fused: for_of_next + put_loc (stores element directly to local)
+                // Fused for_of_next + put_loc: stores element directly to local
                 // Stack: [iterable, index] -> [iterable, index+1] (no element pushed)
+                self.advanceOp();
                 const local_idx = self.pc[0];
                 self.pc += 1;
                 const end_offset = readI16(self.pc);
@@ -2457,12 +2596,10 @@ pub const Interpreter = struct {
                     if (idx >= 0) {
                         @branchHint(.likely);
                         const idx_u: u32 = @intCast(idx);
-                        // Array fast path
                         if (obj.class_id == .array) {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.ARRAY_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                // Profile backedge for hot loop detection (for-of loops)
                                 if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
@@ -2473,18 +2610,14 @@ pub const Interpreter = struct {
                                     }
                                     self.backedge_count = 0;
                                 }
-                                // Store element directly to local, increment index in-place
                                 self.ctx.setLocal(local_idx, obj.getIndexUnchecked(idx_u));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             }
-                        }
-                        // Range iterator fast path
-                        else if (obj.class_id == .range_iterator) {
+                        } else if (obj.class_id == .range_iterator) {
                             const len: u32 = @intCast(obj.inline_slots[object.JSObject.Slots.RANGE_LENGTH].getInt());
                             if (idx_u < len) {
                                 @branchHint(.likely);
-                                // Profile backedge for hot loop detection (for-of loops)
                                 if (false) {
                                     if (self.current_func) |func| {
                                         const func_mut = @constCast(func);
@@ -2499,625 +2632,391 @@ pub const Interpreter = struct {
                                 const step = obj.inline_slots[object.JSObject.Slots.RANGE_STEP].getInt();
                                 self.ctx.setLocal(local_idx, value.JSValue.fromInt(start + @as(i32, @intCast(idx_u)) * step));
                                 self.ctx.stack[sp - 1] = value.JSValue.fromInt(idx + 1);
-                                return .handled;
+                                continue :sw @enumFromInt(self.pc[0]);
                             }
                         }
                     }
                 }
                 // Loop done - jump to cleanup
                 self.offsetPc(end_offset);
-                return .handled;
+                continue :sw @enumFromInt(self.pc[0]);
             },
-            else => return .unhandled,
-        }
-    }
-    /// Public because native callbacks may need to call back into JS.
-    pub fn dispatch(self: *Interpreter) InterpreterError!value.JSValue {
-        @setEvalBranchQuota(10000);
-        dispatch: while (@intFromPtr(self.pc) < @intFromPtr(self.code_end)) {
-            const op: bytecode.Opcode = @enumFromInt(self.pc[0]);
-            self.pc += 1;
-            self.last_op = op;
 
-            const stack_result = try self.dispatchStackOps(op);
-            switch (stack_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const local_result = try self.dispatchLocalOps(op);
-            switch (local_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const arith_result = try self.dispatchArithmeticOps(op);
-            switch (arith_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const compare_result = try self.dispatchComparisonOps(op);
-            switch (compare_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const bitwise_result = try self.dispatchBitwiseOps(op);
-            switch (bitwise_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const control_result = try self.dispatchControlFlowOps(op);
-            switch (control_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const object_result = try self.dispatchObjectOps(op);
-            switch (object_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            const call_result = try self.dispatchCallOps(op);
-            switch (call_result) {
-                .unhandled => {},
-                .handled => continue :dispatch,
-                .ret => |val| return val,
-            }
-
-            switch (op) {
-                // ========================================
-                // Arithmetic - optimized direct stack access
-                // ========================================
-                // (handled by dispatchArithmeticOps)
-
-                // ========================================
-                // String Concatenation - batched allocation
-                // ========================================
-                .concat_n => {
-                    const count = self.pc[0];
-                    self.pc += 1;
-                    const result = try self.concatNValues(count);
-                    try self.ctx.push(result);
-                },
-
-                // ========================================
-                // Math Builtins - compile-time specialized
-                // ========================================
-                .math_floor => {
-                    const sp = self.ctx.sp;
-                    const arg = self.ctx.stack[sp - 1];
-                    // Integer fast path: floor(int) = int
-                    if (arg.isInt()) {
-                        // Already on stack, nothing to do
-                    } else if (arg.isFloat64()) {
-                        const n = arg.getFloat64();
-                        const floored = @floor(n);
-                        // Convert to integer if it's a safe integer (matches builtins.allocFloat behavior)
-                        if (floored >= -2147483648 and floored <= 2147483647) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(floored));
-                        } else {
-                            self.ctx.stack[sp - 1] = try self.allocFloat(floored);
-                        }
-                    } else {
-                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                    }
-                },
-
-                .math_ceil => {
-                    const sp = self.ctx.sp;
-                    const arg = self.ctx.stack[sp - 1];
-                    if (arg.isInt()) {
-                        // ceil(int) = int
-                    } else if (arg.isFloat64()) {
-                        const n = arg.getFloat64();
-                        const ceiled = @ceil(n);
-                        // Convert to integer if it's a safe integer
-                        if (ceiled >= -2147483648 and ceiled <= 2147483647) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(ceiled));
-                        } else {
-                            self.ctx.stack[sp - 1] = try self.allocFloat(ceiled);
-                        }
-                    } else {
-                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                    }
-                },
-
-                .math_round => {
-                    const sp = self.ctx.sp;
-                    const arg = self.ctx.stack[sp - 1];
-                    if (arg.isInt()) {
-                        // round(int) = int
-                    } else if (arg.isFloat64()) {
-                        const n = arg.getFloat64();
-                        const rounded = @round(n);
-                        // Convert to integer if it's a safe integer
-                        if (rounded >= -2147483648 and rounded <= 2147483647) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(rounded));
-                        } else {
-                            self.ctx.stack[sp - 1] = try self.allocFloat(rounded);
-                        }
-                    } else {
-                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                    }
-                },
-
-                .math_abs => {
-                    const sp = self.ctx.sp;
-                    const arg = self.ctx.stack[sp - 1];
-                    if (arg.isInt()) {
-                        const v = arg.getInt();
-                        if (v == std.math.minInt(i32)) {
-                            // Negating minInt overflows, need float
-                            const result = try self.allocFloat(@as(f64, 2147483648.0));
-                            self.ctx.stack[sp - 1] = result;
-                        } else if (v < 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(-v);
-                        }
-                        // v >= 0: already correct
-                    } else if (arg.isFloat64()) {
-                        const n = arg.getFloat64();
-                        const absed = @abs(n);
-                        // Convert to integer if it's a safe integer
-                        if (absed >= 0 and absed <= 2147483647) {
-                            const truncated = @floor(absed);
-                            if (truncated == absed) {
-                                self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intFromFloat(absed));
-                            } else {
-                                self.ctx.stack[sp - 1] = try self.allocFloat(absed);
-                            }
-                        } else {
-                            self.ctx.stack[sp - 1] = try self.allocFloat(absed);
-                        }
-                    } else {
-                        self.ctx.stack[sp - 1] = value.JSValue.undefined_val;
-                    }
-                },
-
-                .math_min2 => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    if (a.isInt() and b.isInt()) {
-                        const av = a.getInt();
-                        const bv = b.getInt();
-                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@min(av, bv));
-                    } else {
-                        const an = a.toNumber() orelse std.math.nan(f64);
-                        const bn = b.toNumber() orelse std.math.nan(f64);
-                        if (std.math.isNan(an) or std.math.isNan(bn)) {
-                            self.ctx.stack[sp - 2] = try self.allocFloat(std.math.nan(f64));
-                        } else {
-                            self.ctx.stack[sp - 2] = try self.allocFloat(@min(an, bn));
-                        }
-                    }
-                    self.ctx.sp = sp - 1;
-                },
-
-                .math_max2 => {
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-                    if (a.isInt() and b.isInt()) {
-                        const av = a.getInt();
-                        const bv = b.getInt();
-                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(@max(av, bv));
-                    } else {
-                        const an = a.toNumber() orelse std.math.nan(f64);
-                        const bn = b.toNumber() orelse std.math.nan(f64);
-                        if (std.math.isNan(an) or std.math.isNan(bn)) {
-                            self.ctx.stack[sp - 2] = try self.allocFloat(std.math.nan(f64));
-                        } else {
-                            self.ctx.stack[sp - 2] = try self.allocFloat(@max(an, bn));
-                        }
-                    }
-                    self.ctx.sp = sp - 1;
-                },
-
-                // ========================================
-                // Bitwise Operations
-                // ========================================
-                // (handled by dispatchBitwiseOps)
-
-                // ========================================
-                // Comparison / Logical
-                // ========================================
-                // (handled by dispatchComparisonOps)
-
-                // ========================================
-                // Control Flow
-                // ========================================
-                // (handled by dispatchControlFlowOps)
-
-                // ========================================
-                // Object Operations
-                // ========================================
-                // (handled by dispatchObjectOps)
-
-                // ========================================
-                // Call / Closure / Iterator Operations
-                // ========================================
-                // (handled by dispatchCallOps)
-
-                // Module operations
-                .import_module => {
-                    const module_idx = readU16(self.pc);
-                    self.pc += 2;
-                    // Get module name from constant pool
-                    const module_name_val = try self.getConstant(module_idx);
-                    _ = module_name_val;
-                    // Module loading requires a module registry/loader which would be
-                    // set up in the context. For now, push an empty namespace object.
-                    const namespace = try self.ctx.createObject(null);
-                    try self.ctx.push(namespace.toValue());
-                },
-
-                .import_name => {
-                    const name_idx = readU16(self.pc);
-                    self.pc += 2;
-                    // Get the name from constant pool
-                    const name_val = try self.getConstant(name_idx);
-                    _ = name_val;
-                    // Pop module namespace and get named export
-                    const namespace_val = self.ctx.pop();
-                    if (namespace_val.isObject()) {
-                        const namespace = object.JSObject.fromValue(namespace_val);
-                        // Try to get the property by name
-                        // For now, just push undefined as we don't have real module loading
-                        if (namespace.getSlot(0).isUndefined()) {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                        } else {
-                            try self.ctx.push(namespace.getSlot(0));
-                        }
-                    } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                    }
-                },
-
-                .import_default => {
-                    // Pop module namespace and get default export
-                    const namespace_val = self.ctx.pop();
-                    if (namespace_val.isObject()) {
-                        const namespace = object.JSObject.fromValue(namespace_val);
-                        // Default export is typically stored with "default" key
-                        // For now, just return undefined
-                        _ = namespace;
+            // ========================================
+            // Module Operations
+            // ========================================
+            .import_module => {
+                self.advanceOp();
+                const module_idx = readU16(self.pc);
+                self.pc += 2;
+                const module_name_val = try self.getConstant(module_idx);
+                _ = module_name_val;
+                const namespace = try self.ctx.createObject(null);
+                try self.ctx.push(namespace.toValue());
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .import_name => {
+                self.advanceOp();
+                const name_idx = readU16(self.pc);
+                self.pc += 2;
+                const name_val = try self.getConstant(name_idx);
+                _ = name_val;
+                const namespace_val = self.ctx.pop();
+                if (namespace_val.isObject()) {
+                    const namespace = object.JSObject.fromValue(namespace_val);
+                    if (namespace.getSlot(0).isUndefined()) {
                         try self.ctx.push(value.JSValue.undefined_val);
                     } else {
-                        try self.ctx.push(value.JSValue.undefined_val);
+                        try self.ctx.push(namespace.getSlot(0));
                     }
-                },
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .import_default => {
+                self.advanceOp();
+                const namespace_val = self.ctx.pop();
+                if (namespace_val.isObject()) {
+                    const namespace = object.JSObject.fromValue(namespace_val);
+                    _ = namespace;
+                    try self.ctx.push(value.JSValue.undefined_val);
+                } else {
+                    try self.ctx.push(value.JSValue.undefined_val);
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .export_name => {
+                self.advanceOp();
+                const name_idx = readU16(self.pc);
+                self.pc += 2;
+                _ = name_idx;
+                _ = self.ctx.pop();
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .export_default => {
+                self.advanceOp();
+                _ = self.ctx.pop();
+                continue :sw @enumFromInt(self.pc[0]);
+            },
 
-                .export_name => {
-                    const name_idx = readU16(self.pc);
-                    self.pc += 2;
-                    _ = name_idx;
-                    // Pop the value to export - in a real implementation this would
-                    // register the export in the module's export table
-                    _ = self.ctx.pop();
-                },
-
-                .export_default => {
-                    // Pop the default value to export - in a real implementation
-                    // this would register it as the default export
-                    _ = self.ctx.pop();
-                },
-
-                // ========================================
-                // Superinstructions (fused hot paths)
-                // ========================================
-                .get_loc_add => {
-                    const idx = self.pc[0];
-                    self.pc += 1;
-                    const b = self.ctx.getLocal(idx); // Right operand (get_loc was emitted second)
-                    const a = self.ctx.pop(); // Left operand (was already on stack)
-                    try self.ctx.push(try self.addValues(a, b));
-                },
-
-                .get_loc_get_loc_add => {
-                    const idx1 = self.pc[0];
-                    const idx2 = self.pc[1];
-                    self.pc += 2;
-                    const a = self.ctx.getLocal(idx1);
-                    const b = self.ctx.getLocal(idx2);
-                    try self.ctx.push(try self.addValues(a, b));
-                },
-
-                .if_false_goto => {
-                    const cond = self.ctx.pop();
-                    const cond_bool = cond.toConditionBool() orelse {
-                        self.ctx.exception = try self.createBoolError(cond);
-                        return error.TypeError;
-                    };
-                    const offset = readI16(self.pc);
-                    self.pc += 2;
-                    if (!cond_bool) {
-                        self.offsetPc(offset);
-                    }
-                },
-
-                // Fused arithmetic-modulo: (a op b) % divisor
-                // Uses i64 intermediate to avoid overflow, then modulo brings result back to i32 range
-                .add_mod => {
-                    const divisor_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const divisor_val = try self.getConstant(divisor_idx);
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-
-                    if (a.isInt() and b.isInt() and divisor_val.isInt()) {
-                        const ai: i64 = a.getInt();
-                        const bi: i64 = b.getInt();
-                        const div: i64 = divisor_val.getInt();
-                        if (div != 0) {
-                            const sum = ai + bi;
-                            // JavaScript % can return negative for negative numerators
-                            // Use @mod for always-positive result (matches common usage)
-                            const result: i32 = @intCast(@mod(sum, div));
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                    }
-                    // Fallback to normal path
-                    self.ctx.sp = sp - 2;
-                    const add_result = try self.addValues(a, b);
-                    self.ctx.pushUnchecked(try modValues(add_result, divisor_val));
-                },
-
-                .sub_mod => {
-                    const divisor_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const divisor_val = try self.getConstant(divisor_idx);
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-
-                    if (a.isInt() and b.isInt() and divisor_val.isInt()) {
-                        const ai: i64 = a.getInt();
-                        const bi: i64 = b.getInt();
-                        const div: i64 = divisor_val.getInt();
-                        if (div != 0) {
-                            const diff = ai - bi;
-                            const result: i32 = @intCast(@mod(diff, div));
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                    }
-                    self.ctx.sp = sp - 2;
-                    const sub_result = try self.subValues(a, b);
-                    self.ctx.pushUnchecked(try modValues(sub_result, divisor_val));
-                },
-
-                .mul_mod => {
-                    const divisor_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const divisor_val = try self.getConstant(divisor_idx);
-                    const sp = self.ctx.sp;
-                    const b = self.ctx.stack[sp - 1];
-                    const a = self.ctx.stack[sp - 2];
-
-                    if (a.isInt() and b.isInt() and divisor_val.isInt()) {
-                        const ai: i64 = a.getInt();
-                        const bi: i64 = b.getInt();
-                        const div: i64 = divisor_val.getInt();
-                        if (div != 0) {
-                            const product = ai * bi;
-                            const result: i32 = @intCast(@mod(product, div));
-                            self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
-                            self.ctx.sp = sp - 1;
-                            continue :dispatch;
-                        }
-                    }
-                    self.ctx.sp = sp - 2;
-                    const mul_result = try self.mulValues(a, b);
-                    self.ctx.pushUnchecked(try modValues(mul_result, divisor_val));
-                },
-
-                // ========================================
-                // Specialized Constant Opcodes
-                // ========================================
-                .shr_1 => {
-                    // Optimized shift right by 1 (common pattern x >> 1)
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-                    if (a.isInt()) {
-                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(a.getInt() >> 1);
-                        continue :dispatch;
-                    }
-                    // Fallback for non-integer
-                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(toInt32(a) >> 1);
-                },
-
-                .mul_2 => {
-                    // Optimized multiply by 2 (common pattern x * 2)
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-                    if (a.isInt()) {
-                        const ai = a.getInt();
-                        // Use shift left with overflow check (multiply by 2 = shift left 1)
-                        const result = @shlWithOverflow(ai, 1);
-                        if (result[1] == 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
-                            continue :dispatch;
-                        }
-                        // Overflow - convert to float
-                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * 2.0);
-                        continue :dispatch;
-                    }
-                    // Float path
-                    if (a.isFloat64()) {
-                        self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() * 2.0);
-                        continue :dispatch;
-                    }
+            // ========================================
+            // Superinstructions (fused hot paths)
+            // ========================================
+            .get_loc_add => {
+                self.advanceOp();
+                const idx = self.pc[0];
+                self.pc += 1;
+                const b = self.ctx.getLocal(idx);
+                const a = self.ctx.pop();
+                try self.ctx.push(try self.addValues(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .get_loc_get_loc_add => {
+                self.advanceOp();
+                const idx1 = self.pc[0];
+                const idx2 = self.pc[1];
+                self.pc += 2;
+                const a = self.ctx.getLocal(idx1);
+                const b = self.ctx.getLocal(idx2);
+                try self.ctx.push(try self.addValues(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .if_false_goto => {
+                self.advanceOp();
+                const cond = self.ctx.pop();
+                const cond_bool = cond.toConditionBool() orelse {
+                    self.ctx.exception = try self.createBoolError(cond);
                     return error.TypeError;
-                },
+                };
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                if (!cond_bool) {
+                    self.offsetPc(offset);
+                }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
 
-                .mod_const => {
-                    // Optimized modulo by constant (common pattern x % constant)
-                    const divisor_idx = readU16(self.pc);
-                    self.pc += 2;
-                    const divisor_val = try self.getConstant(divisor_idx);
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
+            // Fused arithmetic-modulo
+            .add_mod => {
+                self.advanceOp();
+                const divisor_idx = readU16(self.pc);
+                self.pc += 2;
+                const divisor_val = try self.getConstant(divisor_idx);
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
 
-                    if (a.isInt() and divisor_val.isInt()) {
-                        @branchHint(.likely);
-                        const div = divisor_val.getInt();
-                        if (div != 0) {
-                            @branchHint(.likely);
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), div));
-                            continue :dispatch;
-                        }
+                if (a.isInt() and b.isInt() and divisor_val.isInt()) {
+                    const ai: i64 = a.getInt();
+                    const bi: i64 = b.getInt();
+                    const div: i64 = divisor_val.getInt();
+                    if (div != 0) {
+                        const sum = ai + bi;
+                        const result: i32 = @intCast(@mod(sum, div));
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
+                        self.ctx.sp = sp - 1;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback to helper (handles division by zero error)
-                    self.ctx.stack[sp - 1] = try modValues(a, divisor_val);
-                    continue :dispatch;
-                },
+                }
+                // Fallback to normal path
+                self.ctx.sp = sp - 2;
+                const add_result = try self.addValues(a, b);
+                self.ctx.pushUnchecked(try modValues(add_result, divisor_val));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .sub_mod => {
+                self.advanceOp();
+                const divisor_idx = readU16(self.pc);
+                self.pc += 2;
+                const divisor_val = try self.getConstant(divisor_idx);
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
 
-                .mod_const_i8 => {
-                    // Modulo by inline i8 constant (no constant pool lookup)
-                    const divisor: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-
-                    if (a.isInt() and divisor != 0) {
-                        @branchHint(.likely);
-                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), divisor));
-                        continue :dispatch;
+                if (a.isInt() and b.isInt() and divisor_val.isInt()) {
+                    const ai: i64 = a.getInt();
+                    const bi: i64 = b.getInt();
+                    const div: i64 = divisor_val.getInt();
+                    if (div != 0) {
+                        const diff = ai - bi;
+                        const result: i32 = @intCast(@mod(diff, div));
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
+                        self.ctx.sp = sp - 1;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback
-                    self.ctx.stack[sp - 1] = try modValues(a, value.JSValue.fromInt(divisor));
-                },
+                }
+                self.ctx.sp = sp - 2;
+                const sub_result = try self.subValues(a, b);
+                self.ctx.pushUnchecked(try modValues(sub_result, divisor_val));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .mul_mod => {
+                self.advanceOp();
+                const divisor_idx = readU16(self.pc);
+                self.pc += 2;
+                const divisor_val = try self.getConstant(divisor_idx);
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
 
-                .add_const_i8 => {
-                    // Add inline i8 constant
-                    const constant: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-
-                    if (a.isInt()) {
-                        @branchHint(.likely);
-                        const sum, const overflow = @addWithOverflow(a.getInt(), constant);
-                        if (overflow == 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(sum);
-                            continue :dispatch;
-                        }
-                        // Overflow - convert to float
-                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(constant)));
-                        continue :dispatch;
+                if (a.isInt() and b.isInt() and divisor_val.isInt()) {
+                    const ai: i64 = a.getInt();
+                    const bi: i64 = b.getInt();
+                    const div: i64 = divisor_val.getInt();
+                    if (div != 0) {
+                        const product = ai * bi;
+                        const result: i32 = @intCast(@mod(product, div));
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(result);
+                        self.ctx.sp = sp - 1;
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback
-                    self.ctx.stack[sp - 1] = try self.addValues(a, value.JSValue.fromInt(constant));
-                },
+                }
+                self.ctx.sp = sp - 2;
+                const mul_result = try self.mulValues(a, b);
+                self.ctx.pushUnchecked(try modValues(mul_result, divisor_val));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
 
-                .sub_const_i8 => {
-                    // Subtract inline i8 constant
-                    const constant: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-
-                    if (a.isInt()) {
-                        @branchHint(.likely);
-                        const diff, const overflow = @subWithOverflow(a.getInt(), constant);
-                        if (overflow == 0) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(diff);
-                            continue :dispatch;
-                        }
-                        // Overflow - convert to float
-                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(constant)));
-                        continue :dispatch;
+            // ========================================
+            // Specialized Constant Opcodes
+            // ========================================
+            .shr_1 => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
+                if (a.isInt()) {
+                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(a.getInt() >> 1);
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 1] = value.JSValue.fromInt(toInt32(a) >> 1);
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .mul_2 => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
+                if (a.isInt()) {
+                    const ai = a.getInt();
+                    const result = @shlWithOverflow(ai, 1);
+                    if (result[1] == 0) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(result[0]);
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback
-                    self.ctx.stack[sp - 1] = try self.subValues(a, value.JSValue.fromInt(constant));
-                },
+                    self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * 2.0);
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                if (a.isFloat64()) {
+                    self.ctx.stack[sp - 1] = try self.allocFloat(a.getFloat64() * 2.0);
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                return error.TypeError;
+            },
+            .mod_const => {
+                self.advanceOp();
+                const divisor_idx = readU16(self.pc);
+                self.pc += 2;
+                const divisor_val = try self.getConstant(divisor_idx);
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
 
-                .mul_const_i8 => {
-                    // Multiply by inline i8 constant
-                    const constant: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-
-                    if (a.isInt()) {
+                if (a.isInt() and divisor_val.isInt()) {
+                    @branchHint(.likely);
+                    const div = divisor_val.getInt();
+                    if (div != 0) {
                         @branchHint(.likely);
-                        const ai: i64 = a.getInt();
-                        const result = ai * constant;
-                        if (result >= std.math.minInt(i32) and result <= std.math.maxInt(i32)) {
-                            self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intCast(result));
-                            continue :dispatch;
-                        }
-                        // Overflow - convert to float
-                        self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(result)));
-                        continue :dispatch;
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), div));
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback
-                    self.ctx.stack[sp - 1] = try self.mulValues(a, value.JSValue.fromInt(constant));
-                },
+                }
+                self.ctx.stack[sp - 1] = try modValues(a, divisor_val);
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .mod_const_i8 => {
+                self.advanceOp();
+                const divisor: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
 
-                .lt_const_i8 => {
-                    // Less than inline i8 constant (common in loop conditions)
-                    const constant: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
+                if (a.isInt() and divisor != 0) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 1] = value.JSValue.fromInt(@rem(a.getInt(), divisor));
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 1] = try modValues(a, value.JSValue.fromInt(divisor));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .add_const_i8 => {
+                self.advanceOp();
+                const constant: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
 
-                    if (a.isInt()) {
-                        @branchHint(.likely);
-                        self.ctx.stack[sp - 1] = if (a.getInt() < constant) value.JSValue.true_val else value.JSValue.false_val;
-                        continue :dispatch;
+                if (a.isInt()) {
+                    @branchHint(.likely);
+                    const sum, const overflow = @addWithOverflow(a.getInt(), constant);
+                    if (overflow == 0) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(sum);
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback for floats (null from toNumber = NaN, comparisons with NaN are false)
-                    const num = a.toNumber() orelse {
-                        self.ctx.stack[sp - 1] = value.JSValue.false_val;
-                        continue :dispatch;
-                    };
-                    self.ctx.stack[sp - 1] = if (num < @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
-                },
+                    self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) + @as(f64, @floatFromInt(constant)));
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 1] = try self.addValues(a, value.JSValue.fromInt(constant));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .sub_const_i8 => {
+                self.advanceOp();
+                const constant: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
 
-                .le_const_i8 => {
-                    // Less than or equal to inline i8 constant
-                    const constant: i8 = @bitCast(self.pc[0]);
-                    self.pc += 1;
-                    const sp = self.ctx.sp;
-                    const a = self.ctx.stack[sp - 1];
-
-                    if (a.isInt()) {
-                        @branchHint(.likely);
-                        self.ctx.stack[sp - 1] = if (a.getInt() <= constant) value.JSValue.true_val else value.JSValue.false_val;
-                        continue :dispatch;
+                if (a.isInt()) {
+                    @branchHint(.likely);
+                    const diff, const overflow = @subWithOverflow(a.getInt(), constant);
+                    if (overflow == 0) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(diff);
+                        continue :sw @enumFromInt(self.pc[0]);
                     }
-                    // Fallback for floats (null from toNumber = NaN, comparisons with NaN are false)
-                    const num = a.toNumber() orelse {
-                        self.ctx.stack[sp - 1] = value.JSValue.false_val;
-                        continue :dispatch;
-                    };
-                    self.ctx.stack[sp - 1] = if (num <= @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
-                },
+                    self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(a.getInt())) - @as(f64, @floatFromInt(constant)));
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 1] = try self.subValues(a, value.JSValue.fromInt(constant));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .mul_const_i8 => {
+                self.advanceOp();
+                const constant: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
 
-                else => {
-                    std.log.warn("Unimplemented opcode: {}", .{op});
-                    return error.UnimplementedOpcode;
-                },
-            }
-        }
+                if (a.isInt()) {
+                    @branchHint(.likely);
+                    const ai: i64 = a.getInt();
+                    const result = ai * constant;
+                    if (result >= std.math.minInt(i32) and result <= std.math.maxInt(i32)) {
+                        self.ctx.stack[sp - 1] = value.JSValue.fromInt(@intCast(result));
+                        continue :sw @enumFromInt(self.pc[0]);
+                    }
+                    self.ctx.stack[sp - 1] = try self.allocFloat(@as(f64, @floatFromInt(result)));
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 1] = try self.mulValues(a, value.JSValue.fromInt(constant));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .lt_const_i8 => {
+                self.advanceOp();
+                const constant: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
 
-        return value.JSValue.undefined_val;
+                if (a.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 1] = if (a.getInt() < constant) value.JSValue.true_val else value.JSValue.false_val;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                const num = a.toNumber() orelse {
+                    self.ctx.stack[sp - 1] = value.JSValue.false_val;
+                    continue :sw @enumFromInt(self.pc[0]);
+                };
+                self.ctx.stack[sp - 1] = if (num < @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .le_const_i8 => {
+                self.advanceOp();
+                const constant: i8 = @bitCast(self.pc[0]);
+                self.pc += 1;
+                const sp = self.ctx.sp;
+                const a = self.ctx.stack[sp - 1];
+
+                if (a.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 1] = if (a.getInt() <= constant) value.JSValue.true_val else value.JSValue.false_val;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                const num = a.toNumber() orelse {
+                    self.ctx.stack[sp - 1] = value.JSValue.false_val;
+                    continue :sw @enumFromInt(self.pc[0]);
+                };
+                self.ctx.stack[sp - 1] = if (num <= @as(f64, @floatFromInt(constant))) value.JSValue.true_val else value.JSValue.false_val;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+
+            // ========================================
+            // Inline Cache (call_ic)
+            // ========================================
+            .call_ic => {
+                self.advanceOp();
+                // call_ic: +u8 argc +u16 cache_idx
+                const argc: u8 = self.pc[0];
+                self.pc += 1;
+                const _cache_idx = readU16(self.pc);
+                _ = _cache_idx;
+                self.pc += 2;
+                // Fall back to normal call (IC not yet implemented for calls)
+                try self.doCall(argc, false);
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+
+            // ========================================
+            // Unimplemented / Reserved
+            // ========================================
+            _ => {
+                std.log.warn("Unimplemented opcode: {}", .{@as(bytecode.Opcode, @enumFromInt(self.pc[0]))});
+                return error.UnimplementedOpcode;
+            },
+        };
+    }
+
+    /// Advance program counter past opcode byte and track last opcode for diagnostics.
+    inline fn advanceOp(self: *Interpreter) void {
+        self.last_op = @enumFromInt(self.pc[0]);
+        self.pc += 1;
     }
 
     // ========================================================================
