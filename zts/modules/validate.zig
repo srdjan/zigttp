@@ -31,11 +31,11 @@ const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.valid
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "schemaCompile", .func = schemaCompileNative, .arg_count = 2 },
-    .{ .name = "validateJson", .func = validateJsonNative, .arg_count = 2 },
-    .{ .name = "validateObject", .func = validateObjectNative, .arg_count = 2 },
-    .{ .name = "coerceJson", .func = coerceJsonNative, .arg_count = 2 },
-    .{ .name = "schemaDrop", .func = schemaDropNative, .arg_count = 1 },
+    .{ .name = "schemaCompile", .func = schemaCompileNative, .arg_count = 2, .effect = .read },
+    .{ .name = "validateJson", .func = validateJsonNative, .arg_count = 2, .effect = .read },
+    .{ .name = "validateObject", .func = validateObjectNative, .arg_count = 2, .effect = .read },
+    .{ .name = "coerceJson", .func = coerceJsonNative, .arg_count = 2, .effect = .read },
+    .{ .name = "schemaDrop", .func = schemaDropNative, .arg_count = 1, .effect = .read },
 };
 
 // ============================================================================

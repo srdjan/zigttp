@@ -29,8 +29,8 @@ pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.i
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "parallel", .func = parallelNative, .arg_count = 1 },
-    .{ .name = "race", .func = raceNative, .arg_count = 1 },
+    .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .effect = .write },
+    .{ .name = "race", .func = raceNative, .arg_count = 1, .effect = .write },
 };
 
 // ============================================================================

@@ -27,11 +27,32 @@ const io_mod = @import("io.zig");
 const compose_mod = @import("compose.zig");
 const durable_mod = @import("durable.zig");
 
+/// Effect classification for virtual module functions.
+/// Used by the contract builder to derive handler-level properties
+/// (pure, read_only, retry_safe) at compile time.
+pub const EffectClass = enum {
+    /// Does not modify external state
+    read,
+    /// Modifies external state
+    write,
+    /// Compile-time only, no runtime effect (e.g. guard)
+    none,
+
+    pub fn toString(self: EffectClass) []const u8 {
+        return switch (self) {
+            .read => "read",
+            .write => "write",
+            .none => "none",
+        };
+    }
+};
+
 /// A single exported function from a virtual module
 pub const ModuleExport = struct {
     name: []const u8,
     func: object.NativeFn,
     arg_count: u8,
+    effect: EffectClass = .read,
 };
 
 /// Known virtual module identifiers

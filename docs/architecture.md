@@ -311,6 +311,25 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 - `zts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
 - `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
 
+### Handler Effect Classification
+
+Each virtual module export carries an `EffectClass` annotation (read, write, or none) in its `ModuleExport` definition (`zts/modules/resolver.zig`). During contract extraction, the `ContractBuilder.computeProperties()` method aggregates these effects across all imported functions to derive handler-level properties:
+
+- **pure** - no virtual module calls and no fetchSync; handler is a function of the request only
+- **read_only** - all imported functions are read-classified; no state mutations through virtual modules
+- **stateless** - read_only and no cacheGet; handler does not depend on mutable external state
+- **retry_safe** - read_only, or all write-classified imports come from `zigttp:durable` (exactly-once semantics via oplog)
+- **deterministic** - no `Date.now()` or `Math.random()` calls detected in the IR
+- **has_egress** - handler uses fetchSync (conservatively classified as write)
+
+Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension). They are informational in the contract diff - a property changing from true to false is not classified as breaking since it is derived from the underlying resource changes.
+
+**Key files**:
+- `zts/modules/resolver.zig` - `EffectClass` enum, `ModuleExport.effect` field
+- `zts/handler_contract.zig` - `HandlerProperties` struct, `computeProperties()`, `hasBareWrites()`
+- `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
+- `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
+
 ## Deployment Patterns
 
 ### Single Instance (Lambda-style)

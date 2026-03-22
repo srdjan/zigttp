@@ -24,6 +24,8 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces, SQL query names) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`.
 
+**Handler effect classification.** Every virtual module function carries a compile-time effect annotation (read, write, or none). The compiler aggregates these to prove handler-level properties: pure (no external calls), read-only (no state mutations), stateless (no mutable state dependency), retry-safe (safe for Lambda auto-retry), and deterministic (no Date.now/Math.random). These flow into deployment manifests and the build report - no annotations or configuration needed.
+
 **Full TypeScript type checking.** Beyond stripping type annotations, the compiler checks them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are all validated at build time. Interface declarations with all-function members are treated as nominal types to prevent structural forgery.
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
@@ -152,6 +154,8 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:compose` | `guard` | Compile-time handler composition via pipe operator |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, and signals |
+
+Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
 
 ### Auth Example
 
@@ -408,12 +412,13 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
+- **Handler properties** derived from effect classification of virtual module functions (pure, read_only, stateless, retry_safe, deterministic)
 - **Verification results** (when combined with `-Dverify`)
 - **Route patterns** (when combined with `-Daot`)
 
 ```json
 {
-  "version": 1,
+  "version": 6,
   "modules": ["zigttp:auth", "zigttp:cache"],
   "functions": {
     "zigttp:auth": ["jwtVerify", "parseBearer"],
@@ -428,6 +433,14 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
       { "name": "listTodos", "operation": "select", "tables": ["todos"] }
     ],
     "dynamic": false
+  },
+  "properties": {
+    "pure": false,
+    "readOnly": false,
+    "stateless": false,
+    "retrySafe": false,
+    "deterministic": true,
+    "hasEgress": true
   }
 }
 ```
@@ -442,6 +455,12 @@ Sandbox: complete (all access statically proven)
   egress: restricted to [api.example.com] (1 proven, no dynamic access)
   cache: restricted to [sessions] (1 proven, no dynamic access)
   sql: restricted to [listTodos] (1 proven, no dynamic access)
+Handler Properties:
+  ---    pure            handler is a deterministic function of the request
+  ---    read_only       no state mutations via virtual modules
+  ---    stateless       independent of mutable state
+  ---    retry_safe      safe for Lambda auto-retry on timeout
+  PROVEN deterministic   no Date.now() or Math.random()
 ```
 
 ### Explicit Policy Override (`-Dpolicy`)
@@ -468,7 +487,7 @@ zig build -Dhandler=handler.ts -Ddeploy=aws
 ```
 
 Currently supported targets:
-- **aws**: Generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata.
+- **aws**: Generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, handler effect properties (zigttp:retrySafe, zigttp:readOnly), and proof level metadata.
 
 Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). A deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
 

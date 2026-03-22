@@ -1994,6 +1994,7 @@ The contract extracts from the handler's IR:
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Registered SQL query names, operations, and touched tables from `sql("name", "...")`
 - Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
+- Handler effect properties derived from virtual module effect classification (pure, read_only, stateless, retry_safe, deterministic, has_egress)
 - Verification results (when combined with `-Dverify`)
 
 Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an
@@ -2025,6 +2026,51 @@ The current emitter only includes facts the compiler can prove:
 
 Dynamic schemas or routes are preserved as `x-zigttp-*` hints instead of guessed
 OpenAPI operations. The manifest is written to `src/generated/openapi.json`.
+
+## Handler Effect Properties
+
+Every virtual module function carries a compile-time effect annotation: read (does
+not modify external state), write (modifies external state), or none (compile-time
+only, like `guard`). During precompilation, the contract builder aggregates these
+effects to derive handler-level properties:
+
+| Property | Meaning |
+|----------|---------|
+| `pure` | No virtual module calls and no fetchSync. Handler is a function of the request only. |
+| `readOnly` | All imported functions are read-classified. No state mutations through virtual modules. |
+| `stateless` | Read-only and no `cacheGet`. Handler does not depend on mutable external state. |
+| `retrySafe` | Read-only, or all write-classified imports come from `zigttp:durable` (exactly-once semantics). Safe for Lambda auto-retry on timeout. |
+| `deterministic` | No `Date.now()` or `Math.random()` calls detected. |
+| `hasEgress` | Handler uses `fetchSync` (conservatively classified as write). |
+
+These properties appear in the build output:
+
+```
+Handler Properties:
+  PROVEN pure            handler is a deterministic function of the request
+  PROVEN read_only       no state mutations via virtual modules
+  PROVEN stateless       independent of mutable state
+  PROVEN retry_safe      safe for Lambda auto-retry on timeout
+  ---    deterministic   no Date.now() or Math.random()
+```
+
+They are also included in contract.json under the `"properties"` key, in AWS
+deployment manifests as `zigttp:retrySafe` and `zigttp:readOnly` tags, and in
+OpenAPI specs as the `x-zigttp-properties` extension.
+
+**Effect classifications by module:**
+
+Read-effect functions: `env`, `sha256`, `hmacSha256`, `base64Encode`,
+`base64Decode`, `routerMatch`, `parseBearer`, `jwtVerify`, `jwtSign`,
+`verifyWebhookSignature`, `timingSafeEqual`, `schemaCompile`, `validateJson`,
+`validateObject`, `coerceJson`, `schemaDrop`, `cacheGet`, `cacheStats`, `sql`,
+`sqlOne`, `sqlMany`.
+
+Write-effect functions: `cacheSet`, `cacheDelete`, `cacheIncr`, `sqlExec`,
+`parallel`, `race`, `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`,
+`signal`, `signalAt`.
+
+None-effect: `guard` (compile-time macro, no runtime execution).
 
 ## Runtime Sandboxing
 

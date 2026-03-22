@@ -17,10 +17,10 @@ const sqlite = @import("../sqlite.zig");
 pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.sql);
 
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "sql", .func = sqlRegisterNative, .arg_count = 2 },
-    .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2 },
-    .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2 },
-    .{ .name = "sqlExec", .func = sqlExecNative, .arg_count = 2 },
+    .{ .name = "sql", .func = sqlRegisterNative, .arg_count = 2, .effect = .read },
+    .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2, .effect = .read },
+    .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2, .effect = .read },
+    .{ .name = "sqlExec", .func = sqlExecNative, .arg_count = 2, .effect = .write },
 };
 
 pub const SqlStore = struct {

@@ -215,8 +215,26 @@ pub const AotInfo = struct {
     has_default: bool,
 };
 
+/// Handler-level properties derived from effect classification of virtual
+/// module function calls. Computed during contract extraction by checking
+/// each imported function's EffectClass (read/write/none).
+pub const HandlerProperties = struct {
+    /// No virtual module calls. Pure function of request.
+    pure: bool,
+    /// Only read-classified functions. No state mutations.
+    read_only: bool,
+    /// Read-only AND no cacheGet. Independent of mutable state.
+    stateless: bool,
+    /// Read-only OR all writes within durable steps. Safe for Lambda retry.
+    retry_safe: bool,
+    /// No Date.now() or Math.random() usage.
+    deterministic: bool,
+    /// Uses fetchSync (conservative write).
+    has_egress: bool,
+};
+
 pub const HandlerContract = struct {
-    version: u32 = 5,
+    version: u32 = 6,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -229,6 +247,7 @@ pub const HandlerContract = struct {
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,
+    properties: ?HandlerProperties = null,
 
     pub const FunctionEntry = struct {
         module: []const u8, // owned
@@ -328,6 +347,9 @@ pub const ContractBuilder = struct {
     api_jwt_auth: bool,
     api_schemas_dynamic: bool,
     api_routes_dynamic: bool,
+
+    // Effect tracking
+    has_nondeterministic_builtin: bool = false,
 
     const CacheBinding = struct {
         slot: u16,
@@ -448,6 +470,9 @@ pub const ContractBuilder = struct {
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
 
+        // Phase 3: Compute handler effect properties
+        const properties = self.computeProperties();
+
         // Build routes from dispatch table
         var routes: std.ArrayList(RouteInfo) = .empty;
         errdefer {
@@ -562,6 +587,7 @@ pub const ContractBuilder = struct {
             },
             .verification = verification,
             .aot = aot_info,
+            .properties = properties,
         };
 
         // Clear moved lists so deinit() won't double-free
@@ -827,6 +853,24 @@ pub const ContractBuilder = struct {
                 if (self.isRouterMatchBinding(binding.slot)) {
                     try self.extractApiRoutesFromCall(call);
                     continue;
+                }
+            }
+
+            // Detect nondeterministic builtins: Date.now(), Math.random()
+            if (!self.has_nondeterministic_builtin and callee_tag == .member_access) {
+                const member = self.ir_view.getMember(call.callee) orelse continue;
+                const obj_tag = self.ir_view.getTag(member.object) orelse continue;
+                if (obj_tag == .identifier) {
+                    const binding = self.ir_view.getBinding(member.object) orelse continue;
+                    if (binding.kind == .global or binding.kind == .undeclared_global) {
+                        const obj_name = self.resolveAtomName(binding.slot) orelse continue;
+                        const prop_name = self.resolveAtomName(member.property) orelse continue;
+                        if ((std.mem.eql(u8, obj_name, "Date") and std.mem.eql(u8, prop_name, "now")) or
+                            (std.mem.eql(u8, obj_name, "Math") and std.mem.eql(u8, prop_name, "random")))
+                        {
+                            self.has_nondeterministic_builtin = true;
+                        }
+                    }
                 }
             }
         }
@@ -1455,6 +1499,64 @@ pub const ContractBuilder = struct {
             else => {},
         }
     }
+
+    // -----------------------------------------------------------------
+    // Phase 3: Effect classification
+    // -----------------------------------------------------------------
+
+    /// Derive handler-level properties from the aggregate effect classification
+    /// of all imported virtual module functions. Single pass over functions_map
+    /// tracks both write effects and whether writes exist outside durable scope.
+    fn computeProperties(self: *const ContractBuilder) HandlerProperties {
+        var has_any_call = false;
+        var has_write = false;
+        var has_bare_write = false;
+        var has_cache_read = false;
+        const has_egress = self.egress_hosts.items.len > 0 or self.egress_dynamic;
+
+        for (self.functions_map.items) |entry| {
+            const vm = modules_resolver.VirtualModule.fromSpecifier(entry.module) orelse continue;
+            const mod_exports = vm.getExports();
+            const is_durable = vm == .durable;
+
+            for (entry.names.items) |func_name| {
+                has_any_call = true;
+
+                for (mod_exports) |exp| {
+                    if (std.mem.eql(u8, exp.name, func_name)) {
+                        if (exp.effect == .write) {
+                            has_write = true;
+                            if (!is_durable) has_bare_write = true;
+                        }
+                        break;
+                    }
+                }
+
+                if (vm == .cache and std.mem.eql(u8, func_name, "cacheGet")) {
+                    has_cache_read = true;
+                }
+            }
+        }
+
+        // fetchSync is a conservative bare write (method unknown at compile time)
+        if (has_egress) {
+            has_write = true;
+            has_bare_write = true;
+            has_any_call = true;
+        }
+
+        const read_only = !has_write;
+        const durable_only_writes = has_write and self.durable_used and !has_bare_write;
+
+        return .{
+            .pure = !has_any_call and !has_egress,
+            .read_only = read_only,
+            .stateless = read_only and !has_cache_read,
+            .retry_safe = read_only or durable_only_writes,
+            .deterministic = !self.has_nondeterministic_builtin,
+            .has_egress = has_egress,
+        };
+    }
 };
 
 fn containsString(items: []const []const u8, needle: []const u8) bool {
@@ -1587,6 +1689,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseDurableSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
             try parseVerification(&parser, &contract);
+        } else if (std.mem.eql(u8, key, "properties")) {
+            contract.properties = try parseProperties(&parser);
         } else {
             // Skip unknown fields
             parser.skipValue();
@@ -2067,6 +2171,53 @@ fn parseVerification(parser: *JsonParser, contract: *HandlerContract) !void {
     contract.verification = info;
 }
 
+fn parseProperties(parser: *JsonParser) !?HandlerProperties {
+    parser.skipWhitespace();
+    if (parser.readNull()) return null;
+
+    if (!parser.consume('{')) return error.InvalidJson;
+    var props = HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = false,
+    };
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "pure")) {
+            props.pure = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "readOnly")) {
+            props.read_only = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "stateless")) {
+            props.stateless = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "retrySafe")) {
+            props.retry_safe = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "deterministic")) {
+            props.deterministic = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "hasEgress")) {
+            props.has_egress = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    return props;
+}
+
 /// Map parsed route_type strings to static literals so they outlive the JSON source.
 fn toStaticRouteType(s: []const u8) []const u8 {
     if (std.mem.eql(u8, s, "exact")) return "exact";
@@ -2368,9 +2519,23 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  \"aot\": {\n");
         try writer.print("    \"patternCount\": {d},\n", .{a.pattern_count});
         try writer.print("    \"hasDefault\": {s}\n", .{if (a.has_default) "true" else "false"});
+        try writer.writeAll("  },\n");
+    } else {
+        try writer.writeAll("  \"aot\": null,\n");
+    }
+
+    // properties (optional)
+    if (contract.properties) |p| {
+        try writer.writeAll("  \"properties\": {\n");
+        try writer.print("    \"pure\": {s},\n", .{if (p.pure) "true" else "false"});
+        try writer.print("    \"readOnly\": {s},\n", .{if (p.read_only) "true" else "false"});
+        try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
+        try writer.print("    \"retrySafe\": {s},\n", .{if (p.retry_safe) "true" else "false"});
+        try writer.print("    \"deterministic\": {s},\n", .{if (p.deterministic) "true" else "false"});
+        try writer.print("    \"hasEgress\": {s}\n", .{if (p.has_egress) "true" else "false"});
         try writer.writeAll("  }\n");
     } else {
-        try writer.writeAll("  \"aot\": null\n");
+        try writer.writeAll("  \"properties\": null\n");
     }
 
     try writer.writeAll("}\n");
@@ -2584,13 +2749,13 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 6") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verification\": null") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"aot\": null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"properties\": null") != null);
 }
 
 test "writeContractJson with data" {

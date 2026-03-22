@@ -300,6 +300,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         }
     }
 
+    // Print handler effect properties
+    if (compiled.contract) |*contract| {
+        printPropertiesReport(contract);
+    }
+
     if (compiled.contract) |*contract| {
         // Write contract.json alongside the output if requested
         if (emit_contract) {
@@ -1680,6 +1685,25 @@ fn printSandboxReport(contract: *const HandlerContract) void {
     printSandboxSection("egress", contract.egress.hosts.items, egress_restricted, "no dynamic access");
     printSandboxSection("cache", contract.cache.namespaces.items, cache_restricted, "no dynamic access");
     printSqlSandboxSection(contract);
+}
+
+fn printPropertiesReport(contract: *const HandlerContract) void {
+    const props = contract.properties orelse return;
+
+    std.debug.print("Handler Properties:\n", .{});
+
+    const fields = [_]struct { name: []const u8, value: bool, desc: []const u8 }{
+        .{ .name = "pure", .value = props.pure, .desc = "handler is a deterministic function of the request" },
+        .{ .name = "read_only", .value = props.read_only, .desc = "no state mutations via virtual modules" },
+        .{ .name = "stateless", .value = props.stateless, .desc = "independent of mutable state" },
+        .{ .name = "retry_safe", .value = props.retry_safe, .desc = "safe for Lambda auto-retry on timeout" },
+        .{ .name = "deterministic", .value = props.deterministic, .desc = "no Date.now() or Math.random()" },
+    };
+
+    for (fields) |f| {
+        const label = if (f.value) "PROVEN" else "---   ";
+        std.debug.print("  {s} {s: <15} {s}\n", .{ label, f.name, f.desc });
+    }
 }
 
 fn printSqlSandboxSection(contract: *const HandlerContract) void {

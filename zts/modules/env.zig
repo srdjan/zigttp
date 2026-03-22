@@ -16,7 +16,7 @@ const util = @import("util.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "env", .func = envNative, .arg_count = 1 },
+    .{ .name = "env", .func = envNative, .arg_count = 1, .effect = .read },
 };
 
 /// env(name) - read environment variable

@@ -17,10 +17,10 @@ const util = @import("util.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "sha256", .func = sha256Native, .arg_count = 1 },
-    .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2 },
-    .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1 },
-    .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1 },
+    .{ .name = "sha256", .func = sha256Native, .arg_count = 1, .effect = .read },
+    .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2, .effect = .read },
+    .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1, .effect = .read },
+    .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1, .effect = .read },
 };
 
 

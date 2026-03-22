@@ -89,6 +89,12 @@ pub const DynamicChange = struct {
     new_dynamic: bool,
 };
 
+pub const PropertiesChange = struct {
+    field: []const u8,
+    old_value: bool,
+    new_value: bool,
+};
+
 pub const ReplaySummary = struct {
     total: u32 = 0,
     identical: u32 = 0,
@@ -109,6 +115,8 @@ pub const ContractDiff = struct {
     cache_changes: std.ArrayList(ItemChange),
     sql_changes: std.ArrayList(ItemChange),
     dynamic_changes: std.ArrayList(DynamicChange),
+    /// Informational only - not used for classification.
+    effect_changes: std.ArrayList(PropertiesChange) = .empty,
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
@@ -117,6 +125,7 @@ pub const ContractDiff = struct {
         self.cache_changes.deinit(allocator);
         self.sql_changes.deinit(allocator);
         self.dynamic_changes.deinit(allocator);
+        self.effect_changes.deinit(allocator);
     }
 
     pub fn capabilitiesWidened(self: *const ContractDiff) bool {
@@ -262,6 +271,30 @@ pub fn diffContracts(
         }
     }
 
+    // Handler properties comparison (informational only)
+    var effect_changes: std.ArrayList(PropertiesChange) = .empty;
+    errdefer effect_changes.deinit(allocator);
+
+    if (old.properties != null and new.properties != null) {
+        const op = old.properties.?;
+        const np = new.properties.?;
+        inline for (.{
+            .{ "pure", op.pure, np.pure },
+            .{ "read_only", op.read_only, np.read_only },
+            .{ "stateless", op.stateless, np.stateless },
+            .{ "retry_safe", op.retry_safe, np.retry_safe },
+            .{ "deterministic", op.deterministic, np.deterministic },
+        }) |entry| {
+            if (entry[1] != entry[2]) {
+                try effect_changes.append(allocator, .{
+                    .field = entry[0],
+                    .old_value = entry[1],
+                    .new_value = entry[2],
+                });
+            }
+        }
+    }
+
     return .{
         .routes = routes,
         .env_changes = env_changes,
@@ -269,6 +302,7 @@ pub fn diffContracts(
         .cache_changes = cache_changes,
         .sql_changes = sql_changes,
         .dynamic_changes = dynamic_changes,
+        .effect_changes = effect_changes,
     };
 }
 

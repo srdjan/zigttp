@@ -38,11 +38,11 @@ fn nowSeconds() i64 {
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2 },
-    .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4 },
-    .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2 },
-    .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4 },
-    .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1 },
+    .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2, .effect = .read },
+    .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4, .effect = .write },
+    .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2, .effect = .write },
+    .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4, .effect = .write },
+    .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1, .effect = .read },
 };
 
 // ============================================================================

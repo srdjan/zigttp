@@ -32,13 +32,13 @@ pub const DurableCallbacks = struct {
 };
 
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "run", .func = runNative, .arg_count = 2 },
-    .{ .name = "step", .func = stepNative, .arg_count = 2 },
-    .{ .name = "sleep", .func = sleepNative, .arg_count = 1 },
-    .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1 },
-    .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1 },
-    .{ .name = "signal", .func = signalNative, .arg_count = 2 },
-    .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3 },
+    .{ .name = "run", .func = runNative, .arg_count = 2, .effect = .write },
+    .{ .name = "step", .func = stepNative, .arg_count = 2, .effect = .write },
+    .{ .name = "sleep", .func = sleepNative, .arg_count = 1, .effect = .write },
+    .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1, .effect = .write },
+    .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1, .effect = .write },
+    .{ .name = "signal", .func = signalNative, .arg_count = 2, .effect = .write },
+    .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3, .effect = .write },
 };
 
 fn runNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {

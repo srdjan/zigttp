@@ -30,6 +30,16 @@ pub fn writeOpenApiJson(
     try writer.writeAll("\n");
     try writer.writeAll("  },\n");
 
+    if (contract.properties) |p| {
+        try writer.writeAll("  \"x-zigttp-properties\": {\n");
+        try writer.print("    \"pure\": {s},\n", .{if (p.pure) "true" else "false"});
+        try writer.print("    \"readOnly\": {s},\n", .{if (p.read_only) "true" else "false"});
+        try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
+        try writer.print("    \"retrySafe\": {s},\n", .{if (p.retry_safe) "true" else "false"});
+        try writer.print("    \"deterministic\": {s}\n", .{if (p.deterministic) "true" else "false"});
+        try writer.writeAll("  },\n");
+    }
+
     if (contract.api.auth.bearer or contract.api.auth.jwt) {
         try writer.writeAll("  \"security\": [\n");
         try writer.writeAll("    { \"bearerAuth\": [] }\n");

@@ -32,11 +32,11 @@ const base64url = std.base64.url_safe_no_pad;
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1 },
-    .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3 },
-    .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2 },
-    .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3 },
-    .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2 },
+    .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1, .effect = .read },
+    .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3, .effect = .read },
+    .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2, .effect = .read },
+    .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3, .effect = .read },
+    .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2, .effect = .read },
 };
 
 // ============================================================================

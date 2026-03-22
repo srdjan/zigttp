@@ -16,7 +16,7 @@ const resolver = @import("resolver.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "guard", .func = guardNative, .arg_count = 1 },
+    .{ .name = "guard", .func = guardNative, .arg_count = 1, .effect = .none },
 };
 
 /// guard(fn) - compile-time marker for handler composition.

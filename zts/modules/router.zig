@@ -33,7 +33,7 @@ const util = @import("util.zig");
 
 /// Module exports
 pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2 },
+    .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2, .effect = .read },
 };
 
 

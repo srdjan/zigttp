@@ -42,6 +42,9 @@ pub const ProvenFacts = struct {
 
     proof_level: ProofLevel,
     checks_passed: []const []const u8,
+
+    retry_safe: bool = false,
+    read_only: bool = false,
 };
 
 // -------------------------------------------------------------------------
@@ -123,6 +126,8 @@ pub fn extractProvenFacts(
             .routes = routes_buf,
             .proof_level = proof_level,
             .checks_passed = checks_buf,
+            .retry_safe = if (contract.properties) |p| p.retry_safe else false,
+            .read_only = if (contract.properties) |p| p.read_only else false,
         },
         .checks_buf = checks_buf,
         .routes_buf = routes_buf,
@@ -300,6 +305,13 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll("\",\n");
     try w.writeAll("          \"zigttp:proofLevel\": \"");
     try w.writeAll(facts.proof_level.toString());
+    try w.writeAll("\"");
+
+    try w.writeAll(",\n          \"zigttp:retrySafe\": \"");
+    try w.writeAll(if (facts.retry_safe) "true" else "false");
+    try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:readOnly\": \"");
+    try w.writeAll(if (facts.read_only) "true" else "false");
     try w.writeAll("\"");
 
     if (facts.egress_hosts.len > 0 or facts.egress_proven) {
