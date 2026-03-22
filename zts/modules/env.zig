@@ -13,11 +13,21 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "env", .func = envNative, .arg_count = 1, .effect = .read },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:env",
+    .name = "env",
+    .contract_section = "env",
+    .sandboxable = true,
+    .exports = &.{
+        .{ .name = "env", .func = envNative, .arg_count = 1,
+           .returns = .optional_string, .param_types = &.{.string},
+           .contract_extractions = &.{.{ .category = .env }} },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 /// env(name) - read environment variable
 fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {

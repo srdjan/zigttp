@@ -1235,54 +1235,47 @@ pub const BoolChecker = struct {
     // Virtual module return type table
     // -----------------------------------------------------------------------
 
-    /// Static table of known return types for virtual module functions.
-    /// Matches are by (module_specifier, function_name) -> ExprType.
-    /// Functions not listed here (or with nullable returns) default to .unknown.
+    const builtin_modules = @import("builtin_modules.zig");
+    const mb = @import("module_binding.zig");
+
+    /// Return type entry derived from the module binding registry.
     const ModuleReturnEntry = struct {
         module: []const u8,
         name: []const u8,
         ret: ExprType,
-        is_result: bool = false, // true for functions returning {ok, value, error} Result objects
-    };
-    const module_return_types = [_]ModuleReturnEntry{
-        // zigttp:auth
-        .{ .module = "zigttp:auth", .name = "verifyWebhookSignature", .ret = .boolean },
-        .{ .module = "zigttp:auth", .name = "timingSafeEqual", .ret = .boolean },
-        .{ .module = "zigttp:auth", .name = "jwtVerify", .ret = .object, .is_result = true },
-        .{ .module = "zigttp:auth", .name = "jwtSign", .ret = .string },
-        .{ .module = "zigttp:auth", .name = "parseBearer", .ret = .optional_string },
-        // zigttp:crypto
-        .{ .module = "zigttp:crypto", .name = "sha256", .ret = .string },
-        .{ .module = "zigttp:crypto", .name = "hmacSha256", .ret = .string },
-        .{ .module = "zigttp:crypto", .name = "base64Encode", .ret = .string },
-        .{ .module = "zigttp:crypto", .name = "base64Decode", .ret = .string },
-        // zigttp:validate
-        .{ .module = "zigttp:validate", .name = "schemaCompile", .ret = .boolean },
-        .{ .module = "zigttp:validate", .name = "validateJson", .ret = .object, .is_result = true },
-        .{ .module = "zigttp:validate", .name = "validateObject", .ret = .object, .is_result = true },
-        .{ .module = "zigttp:validate", .name = "coerceJson", .ret = .object, .is_result = true },
-        .{ .module = "zigttp:validate", .name = "schemaDrop", .ret = .boolean },
-        // zigttp:cache
-        .{ .module = "zigttp:cache", .name = "cacheSet", .ret = .boolean },
-        .{ .module = "zigttp:cache", .name = "cacheDelete", .ret = .boolean },
-        .{ .module = "zigttp:cache", .name = "cacheIncr", .ret = .number },
-        .{ .module = "zigttp:cache", .name = "cacheStats", .ret = .object },
-        .{ .module = "zigttp:cache", .name = "cacheGet", .ret = .optional_string },
-        // zigttp:env
-        .{ .module = "zigttp:env", .name = "env", .ret = .optional_string },
-        // zigttp:router
-        .{ .module = "zigttp:router", .name = "routerMatch", .ret = .optional_object },
-        // zigttp:io
-        .{ .module = "zigttp:io", .name = "parallel", .ret = .object },
-        .{ .module = "zigttp:io", .name = "race", .ret = .object },
+        is_result: bool = false,
     };
 
-    fn findModuleReturnEntry(module_str: []const u8, func_name: []const u8) ?*const ModuleReturnEntry {
-        for (&module_return_types) |*entry| {
-            if (std.mem.eql(u8, entry.module, module_str) and
-                std.mem.eql(u8, entry.name, func_name)) return entry;
+    /// Look up a function's return type from the module binding registry.
+    fn findModuleReturnEntry(module_str: []const u8, func_name: []const u8) ?ModuleReturnEntry {
+        for (builtin_modules.all) |binding| {
+            if (!std.mem.eql(u8, binding.specifier, module_str)) continue;
+            for (binding.exports) |func| {
+                if (std.mem.eql(u8, func.name, func_name)) {
+                    return .{
+                        .module = binding.specifier,
+                        .name = func.name,
+                        .ret = returnKindToExprType(func.returns),
+                        .is_result = func.returns == .result,
+                    };
+                }
+            }
         }
         return null;
+    }
+
+    fn returnKindToExprType(kind: mb.ReturnKind) ExprType {
+        return switch (kind) {
+            .boolean => .boolean,
+            .number => .number,
+            .string => .string,
+            .object => .object,
+            .undefined => .undefined,
+            .unknown => .unknown,
+            .optional_string => .optional_string,
+            .optional_object => .optional_object,
+            .result => .object, // Result objects are typed as object in ExprType
+        };
     }
 
     /// Scan all import declarations to map local binding slots to known return types.

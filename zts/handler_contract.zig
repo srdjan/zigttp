@@ -18,6 +18,8 @@ const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const modules_resolver = @import("modules/resolver.zig");
+const module_binding = @import("module_binding.zig");
+const builtin_modules = @import("builtin_modules.zig");
 const bytecode = @import("bytecode.zig");
 const handler_analyzer = @import("handler_analyzer.zig");
 const type_checker_mod = @import("type_checker.zig");
@@ -335,22 +337,9 @@ pub const ContractBuilder = struct {
     type_env: ?*const TypeEnv,
     type_checker: ?*const TypeChecker,
 
-    // Binding tracking: maps local slot -> category for call-site analysis
-    env_binding_slots: std.ArrayList(u16),
-    cache_binding_slots: std.ArrayList(CacheBinding),
-    sql_binding_slots: std.ArrayList(u16),
-    durable_run_binding_slots: std.ArrayList(u16),
-    durable_step_binding_slots: std.ArrayList(u16),
-    durable_sleep_binding_slots: std.ArrayList(u16) = .empty,
-    durable_sleep_until_binding_slots: std.ArrayList(u16) = .empty,
-    durable_wait_signal_binding_slots: std.ArrayList(u16) = .empty,
-    durable_signal_binding_slots: std.ArrayList(u16) = .empty,
-    durable_signal_at_binding_slots: std.ArrayList(u16) = .empty,
-    schema_compile_binding_slots: std.ArrayList(u16),
-    request_schema_binding_slots: std.ArrayList(u16),
-    parse_bearer_binding_slots: std.ArrayList(u16),
-    jwt_verify_binding_slots: std.ArrayList(u16),
-    router_match_binding_slots: std.ArrayList(u16),
+    // Binding tracking: maps local slot -> function binding metadata for call-site analysis.
+    // Populated during scanImports from the module binding registry.
+    generic_bindings: std.ArrayList(GenericBinding),
 
     // Collected data (all strings are duped/owned)
     modules_list: std.ArrayList([]const u8),
@@ -367,6 +356,7 @@ pub const ContractBuilder = struct {
     durable_key_literals: std.ArrayList([]const u8),
     durable_key_dynamic: bool,
     durable_step_names: std.ArrayList([]const u8),
+    durable_step_dynamic: bool = false,
     durable_timers: bool = false,
     durable_signal_names: std.ArrayList([]const u8) = .empty,
     durable_signal_dynamic: bool = false,
@@ -384,9 +374,12 @@ pub const ContractBuilder = struct {
     // Effect tracking
     has_nondeterministic_builtin: bool = false,
 
-    const CacheBinding = struct {
+    /// A tracked binding from scanImports: maps a local variable slot to its
+    /// FunctionBinding metadata from the module registry.
+    const GenericBinding = struct {
         slot: u16,
-        has_namespace_arg: bool, // true for cacheGet/Set/Delete/Incr, false for cacheStats
+        extractions: []const module_binding.ContractExtraction,
+        flags: module_binding.ContractFlags,
     };
 
     pub fn init(
@@ -402,16 +395,7 @@ pub const ContractBuilder = struct {
             .atoms = atoms,
             .type_env = type_env,
             .type_checker = type_checker,
-            .env_binding_slots = .empty,
-            .cache_binding_slots = .empty,
-            .sql_binding_slots = .empty,
-            .durable_run_binding_slots = .empty,
-            .durable_step_binding_slots = .empty,
-            .schema_compile_binding_slots = .empty,
-            .request_schema_binding_slots = .empty,
-            .parse_bearer_binding_slots = .empty,
-            .jwt_verify_binding_slots = .empty,
-            .router_match_binding_slots = .empty,
+            .generic_bindings = .empty,
             .modules_list = .empty,
             .functions_map = .empty,
             .env_literals = .empty,
@@ -441,21 +425,7 @@ pub const ContractBuilder = struct {
     /// was called: if build() moved the lists into a HandlerContract, the
     /// items slices are empty and these loops are no-ops.
     pub fn deinit(self: *ContractBuilder) void {
-        self.env_binding_slots.deinit(self.allocator);
-        self.cache_binding_slots.deinit(self.allocator);
-        self.sql_binding_slots.deinit(self.allocator);
-        self.durable_run_binding_slots.deinit(self.allocator);
-        self.durable_step_binding_slots.deinit(self.allocator);
-        self.durable_sleep_binding_slots.deinit(self.allocator);
-        self.durable_sleep_until_binding_slots.deinit(self.allocator);
-        self.durable_wait_signal_binding_slots.deinit(self.allocator);
-        self.durable_signal_binding_slots.deinit(self.allocator);
-        self.durable_signal_at_binding_slots.deinit(self.allocator);
-        self.schema_compile_binding_slots.deinit(self.allocator);
-        self.request_schema_binding_slots.deinit(self.allocator);
-        self.parse_bearer_binding_slots.deinit(self.allocator);
-        self.jwt_verify_binding_slots.deinit(self.allocator);
-        self.router_match_binding_slots.deinit(self.allocator);
+        self.generic_bindings.deinit(self.allocator);
         for (self.env_literals.items) |s| self.allocator.free(s);
         self.env_literals.deinit(self.allocator);
         for (self.egress_hosts.items) |s| self.allocator.free(s);
@@ -664,7 +634,7 @@ pub const ContractBuilder = struct {
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
 
             // Only track virtual modules
-            const vm = modules_resolver.VirtualModule.fromSpecifier(module_str) orelse continue;
+            if (builtin_modules.fromSpecifier(module_str) == null) continue;
 
             // Add module to list (deduplicated, duped)
             if (!containsString(self.modules_list.items, module_str)) {
@@ -688,76 +658,21 @@ pub const ContractBuilder = struct {
                 try func_names.append(self.allocator, name_duped);
                 func_module_str = module_str;
 
-                // Track env bindings
-                if (vm == .env and std.mem.eql(u8, imported_name, "env")) {
-                    try self.env_binding_slots.append(self.allocator, spec.local_binding.slot);
-                }
-
-                // Track validate bindings
-                if (vm == .validate) {
-                    if (std.mem.eql(u8, imported_name, "schemaCompile")) {
-                        try self.schema_compile_binding_slots.append(self.allocator, spec.local_binding.slot);
+                // Look up the function in the binding registry and track its
+                // contract extraction rules and flags for scanCallSites.
+                if (builtin_modules.findFunction(imported_name)) |entry| {
+                    const has_extractions = entry.func.contract_extractions.len > 0;
+                    const has_flags = entry.func.contract_flags.sets_durable_used or
+                        entry.func.contract_flags.sets_durable_timers or
+                        entry.func.contract_flags.sets_bearer_auth or
+                        entry.func.contract_flags.sets_jwt_auth;
+                    if (has_extractions or has_flags) {
+                        try self.generic_bindings.append(self.allocator, .{
+                            .slot = spec.local_binding.slot,
+                            .extractions = entry.func.contract_extractions,
+                            .flags = entry.func.contract_flags,
+                        });
                     }
-                    if (std.mem.eql(u8, imported_name, "validateJson") or
-                        std.mem.eql(u8, imported_name, "validateObject") or
-                        std.mem.eql(u8, imported_name, "coerceJson"))
-                    {
-                        try self.request_schema_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                }
-
-                // Track auth bindings
-                if (vm == .auth) {
-                    if (std.mem.eql(u8, imported_name, "parseBearer")) {
-                        try self.parse_bearer_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "jwtVerify")) {
-                        try self.jwt_verify_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                }
-
-                // Track cache bindings (functions with namespace as first arg)
-                if (vm == .cache) {
-                    const has_ns = std.mem.eql(u8, imported_name, "cacheGet") or
-                        std.mem.eql(u8, imported_name, "cacheSet") or
-                        std.mem.eql(u8, imported_name, "cacheDelete") or
-                        std.mem.eql(u8, imported_name, "cacheIncr");
-                    try self.cache_binding_slots.append(self.allocator, .{
-                        .slot = spec.local_binding.slot,
-                        .has_namespace_arg = has_ns,
-                    });
-                }
-
-                if (vm == .sql and std.mem.eql(u8, imported_name, "sql")) {
-                    try self.sql_binding_slots.append(self.allocator, spec.local_binding.slot);
-                }
-
-                if (vm == .durable) {
-                    if (std.mem.eql(u8, imported_name, "run")) {
-                        try self.durable_run_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "step")) {
-                        try self.durable_step_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "sleep")) {
-                        try self.durable_sleep_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "sleepUntil")) {
-                        try self.durable_sleep_until_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "waitSignal")) {
-                        try self.durable_wait_signal_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "signal")) {
-                        try self.durable_signal_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                    if (std.mem.eql(u8, imported_name, "signalAt")) {
-                        try self.durable_signal_at_binding_slots.append(self.allocator, spec.local_binding.slot);
-                    }
-                }
-
-                if (vm == .router and std.mem.eql(u8, imported_name, "routerMatch")) {
-                    try self.router_match_binding_slots.append(self.allocator, spec.local_binding.slot);
                 }
             }
 
@@ -820,80 +735,37 @@ pub const ContractBuilder = struct {
                     }
                 }
 
-                // Check for env() calls
-                if (self.isEnvBinding(binding.slot)) {
-                    try self.extractLiteralArg(call, &self.env_literals, &self.env_dynamic, null);
-                    continue;
-                }
+                // Check generic bindings from the module binding registry
+                for (self.generic_bindings.items) |gb| {
+                    if (gb.slot != binding.slot) continue;
 
-                // Check for cache calls
-                if (self.isCacheBindingWithNamespace(binding.slot)) {
-                    try self.extractLiteralArg(call, &self.cache_namespaces, &self.cache_dynamic, null);
-                    continue;
-                }
+                    // Apply contract flags
+                    if (gb.flags.sets_durable_used) self.durable_used = true;
+                    if (gb.flags.sets_durable_timers) self.durable_timers = true;
+                    if (gb.flags.sets_bearer_auth) self.api_bearer_auth = true;
+                    if (gb.flags.sets_jwt_auth) self.api_jwt_auth = true;
 
-                if (self.isSqlBinding(binding.slot)) {
-                    try self.extractSqlRegistration(call);
-                    continue;
-                }
-
-                if (self.isDurableRunBinding(binding.slot)) {
-                    self.durable_used = true;
-                    try self.extractLiteralArg(call, &self.durable_key_literals, &self.durable_key_dynamic, null);
-                    continue;
-                }
-
-                if (self.isDurableStepBinding(binding.slot)) {
-                    self.durable_used = true;
-                    try self.extractLiteralArgStatic(call, &self.durable_step_names);
-                    continue;
-                }
-
-                if (self.isDurableSleepBinding(binding.slot)) {
-                    self.durable_used = true;
-                    self.durable_timers = true;
-                    continue;
-                }
-
-                if (self.isDurableWaitSignalBinding(binding.slot)) {
-                    self.durable_used = true;
-                    try self.extractLiteralArg(call, &self.durable_signal_names, &self.durable_signal_dynamic, null);
-                    continue;
-                }
-
-                if (self.isDurableSignalBinding(binding.slot)) {
-                    self.durable_used = true;
-                    try self.extractLiteralArg(call, &self.durable_producer_key_literals, &self.durable_producer_key_dynamic, null);
-                    try self.extractLiteralArgAt(call, 1, &self.durable_signal_names, &self.durable_signal_dynamic, null);
-                    continue;
-                }
-
-                // Check for schemaCompile() calls
-                if (self.isSchemaCompileBinding(binding.slot)) {
-                    try self.extractSchemaCompile(call);
-                    continue;
-                }
-
-                // Track validateJson()/coerceJson()/validateObject() schema refs
-                if (self.isRequestSchemaBinding(binding.slot)) {
-                    try self.extractLiteralArg(call, &self.api_request_schema_refs, &self.api_request_schema_dynamic, null);
-                    continue;
-                }
-
-                // Track auth usage
-                if (self.isParseBearerBinding(binding.slot)) {
-                    self.api_bearer_auth = true;
-                    continue;
-                }
-                if (self.isJwtVerifyBinding(binding.slot)) {
-                    self.api_jwt_auth = true;
-                    continue;
-                }
-
-                // Extract routerMatch() API routes
-                if (self.isRouterMatchBinding(binding.slot)) {
-                    try self.extractApiRoutesFromCall(call);
-                    continue;
+                    // Process extraction rules
+                    for (gb.extractions) |ext| {
+                        switch (ext.category) {
+                            // Custom extractors for complex multi-arg patterns
+                            .sql_registration => try self.extractSqlRegistration(call),
+                            .schema_compile => try self.extractSchemaCompile(call),
+                            .route_pattern => try self.extractApiRoutesFromCall(call),
+                            // Generic: extract literal from arg N into category bucket
+                            else => {
+                                if (self.getCategoryTarget(ext.category)) |target| {
+                                    const transform: ?*const fn ([]const u8) []const u8 =
+                                        if (ext.transform) |t| switch (t) {
+                                        .extract_host => &extractHost,
+                                        .identity => null,
+                                    } else null;
+                                    try self.extractLiteralArgAt(call, ext.arg_position, target.list, target.dynamic, transform);
+                                }
+                            },
+                        }
+                    }
+                    break;
                 }
             }
 
@@ -962,94 +834,40 @@ pub const ContractBuilder = struct {
         }
     }
 
-    fn extractLiteralArgStatic(
-        self: *ContractBuilder,
-        call: Node.CallExpr,
-        target: *std.ArrayList([]const u8),
-    ) !void {
-        try self.extractLiteralArgStaticAt(call, 0, target);
-    }
-
-    fn extractLiteralArgStaticAt(
-        self: *ContractBuilder,
-        call: Node.CallExpr,
-        arg_pos: u8,
-        target: *std.ArrayList([]const u8),
-    ) !void {
-        if (call.args_count <= arg_pos) return;
-
-        const arg_idx = self.ir_view.getListIndex(call.args_start, arg_pos);
-        const arg_tag = self.ir_view.getTag(arg_idx) orelse return;
-        if (arg_tag != .lit_string) return;
-
-        const str_idx = self.ir_view.getStringIdx(arg_idx) orelse return;
-        const raw = self.ir_view.getString(str_idx) orelse return;
-        if (!containsString(target.items, raw)) {
-            const duped = try self.allocator.dupe(u8, raw);
-            errdefer self.allocator.free(duped);
-            try target.append(self.allocator, duped);
-        }
-    }
 
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
-    fn isEnvBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.env_binding_slots.items, slot);
-    }
+    /// Map a ContractCategory to the data field pair it writes to.
+    const CategoryTarget = struct {
+        list: *std.ArrayList([]const u8),
+        dynamic: *bool,
+    };
 
-    fn isCacheBindingWithNamespace(self: *const ContractBuilder, slot: u16) bool {
-        for (self.cache_binding_slots.items) |cb| {
-            if (cb.slot == slot and cb.has_namespace_arg) return true;
+    /// Check if a binding slot is tracked for a specific contract category.
+    fn isBindingCategory(self: *const ContractBuilder, slot: u16, category: module_binding.ContractCategory) bool {
+        for (self.generic_bindings.items) |gb| {
+            if (gb.slot != slot) continue;
+            for (gb.extractions) |ext| {
+                if (ext.category == category) return true;
+            }
         }
         return false;
     }
 
-    fn isSqlBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.sql_binding_slots.items, slot);
-    }
-
-    fn isSchemaCompileBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.schema_compile_binding_slots.items, slot);
-    }
-
-    fn isDurableRunBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.durable_run_binding_slots.items, slot);
-    }
-
-    fn isDurableStepBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.durable_step_binding_slots.items, slot);
-    }
-
-    fn isDurableSleepBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.durable_sleep_binding_slots.items, slot) or
-            containsSlot(self.durable_sleep_until_binding_slots.items, slot);
-    }
-
-    fn isDurableWaitSignalBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.durable_wait_signal_binding_slots.items, slot);
-    }
-
-    fn isDurableSignalBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.durable_signal_binding_slots.items, slot) or
-            containsSlot(self.durable_signal_at_binding_slots.items, slot);
-    }
-
-    fn isRequestSchemaBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.request_schema_binding_slots.items, slot);
-    }
-
-    fn isParseBearerBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.parse_bearer_binding_slots.items, slot);
-    }
-
-    fn isJwtVerifyBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.jwt_verify_binding_slots.items, slot);
-    }
-
-    fn isRouterMatchBinding(self: *const ContractBuilder, slot: u16) bool {
-        return containsSlot(self.router_match_binding_slots.items, slot);
+    fn getCategoryTarget(self: *ContractBuilder, category: module_binding.ContractCategory) ?CategoryTarget {
+        return switch (category) {
+            .env => .{ .list = &self.env_literals, .dynamic = &self.env_dynamic },
+            .cache_namespace => .{ .list = &self.cache_namespaces, .dynamic = &self.cache_dynamic },
+            .durable_key => .{ .list = &self.durable_key_literals, .dynamic = &self.durable_key_dynamic },
+            .durable_step => .{ .list = &self.durable_step_names, .dynamic = &self.durable_step_dynamic },
+            .durable_signal => .{ .list = &self.durable_signal_names, .dynamic = &self.durable_signal_dynamic },
+            .durable_producer_key => .{ .list = &self.durable_producer_key_literals, .dynamic = &self.durable_producer_key_dynamic },
+            .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
+            // Custom categories are dispatched directly, not via generic target
+            .sql_registration, .schema_compile, .route_pattern, .custom => null,
+        };
     }
 
     fn resolveAtomName(self: *const ContractBuilder, atom_idx: u16) ?[]const u8 {
@@ -1519,12 +1337,17 @@ pub const ContractBuilder = struct {
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return;
                 if (callee_tag == .identifier) {
                     const binding = self.ir_view.getBinding(call.callee) orelse return;
-                    if (self.isRequestSchemaBinding(binding.slot)) {
+                    if (self.isBindingCategory(binding.slot, .request_schema)) {
                         try self.extractLiteralArg(call, &route.request_schema_refs, &route.request_schema_dynamic, null);
-                    } else if (self.isParseBearerBinding(binding.slot)) {
-                        route.requires_bearer = true;
-                    } else if (self.isJwtVerifyBinding(binding.slot)) {
-                        route.requires_jwt = true;
+                    } else {
+                        // Check for auth flags via generic bindings
+                        for (self.generic_bindings.items) |gb| {
+                            if (gb.slot == binding.slot) {
+                                if (gb.flags.sets_bearer_auth) route.requires_bearer = true;
+                                if (gb.flags.sets_jwt_auth) route.requires_jwt = true;
+                                break;
+                            }
+                        }
                     }
                 }
                 try self.scanFunctionNodeForApiFacts(call.callee, route);
@@ -1753,7 +1576,7 @@ pub const ContractBuilder = struct {
         if (callee_tag != .identifier) return null;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return null;
-        if (!self.isRequestSchemaBinding(binding.slot)) return null;
+        if (!self.isBindingCategory(binding.slot, .request_schema)) return null;
         if (call.args_count == 0) return null;
 
         const schema_idx = self.ir_view.getListIndex(call.args_start, 0);
@@ -1879,12 +1702,7 @@ fn containsApiParam(items: []const ApiParamInfo, needle: []const u8) bool {
     return false;
 }
 
-fn containsSlot(items: []const u16, needle: u16) bool {
-    for (items) |item| {
-        if (item == needle) return true;
-    }
-    return false;
-}
+
 
 const ParsedRouteKey = struct {
     method: []const u8,

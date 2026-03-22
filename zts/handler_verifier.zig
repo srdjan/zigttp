@@ -117,23 +117,19 @@ const FunctionProduces = enum {
     }
 };
 
-/// Unified table of all virtual module functions that need caller-side checking.
-const tracked_functions = [_]struct { module: []const u8, name: []const u8, produces: FunctionProduces }{
-    // Result-producing (Check 2)
-    .{ .module = "zigttp:auth", .name = "jwtVerify", .produces = .result },
-    .{ .module = "zigttp:validate", .name = "validateJson", .produces = .result },
-    .{ .module = "zigttp:validate", .name = "validateObject", .produces = .result },
-    .{ .module = "zigttp:validate", .name = "coerceJson", .produces = .result },
-    // Optional-producing (Check 6)
-    .{ .module = "zigttp:env", .name = "env", .produces = .optional_string },
-    .{ .module = "zigttp:cache", .name = "cacheGet", .produces = .optional_string },
-    .{ .module = "zigttp:auth", .name = "parseBearer", .produces = .optional_string },
-    .{ .module = "zigttp:router", .name = "routerMatch", .produces = .optional_object },
-};
+const builtin_modules = @import("builtin_modules.zig");
+const mb = @import("module_binding.zig");
 
+/// Look up whether a function produces a value requiring caller-side checking.
+/// Reads from the module binding registry instead of a hardcoded table.
 fn lookupTrackedFunction(name: []const u8) ?FunctionProduces {
-    for (&tracked_functions) |entry| {
-        if (std.mem.eql(u8, entry.name, name)) return entry.produces;
+    if (builtin_modules.findFunction(name)) |entry| {
+        return switch (entry.func.returns) {
+            .result => .result,
+            .optional_string => .optional_string,
+            .optional_object => .optional_object,
+            else => null,
+        };
     }
     return null;
 }
@@ -466,11 +462,16 @@ pub const HandlerVerifier = struct {
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Check if this module has any tracked functions
+            // Check if this module has any tracked functions (result/optional returns)
             var module_has_tracked = false;
-            for (&tracked_functions) |entry| {
-                if (std.mem.eql(u8, entry.module, module_str)) {
-                    module_has_tracked = true;
+            for (builtin_modules.all) |b| {
+                if (std.mem.eql(u8, b.specifier, module_str)) {
+                    for (b.exports) |f| {
+                        if (f.returns == .result or f.returns == .optional_string or f.returns == .optional_object) {
+                            module_has_tracked = true;
+                            break;
+                        }
+                    }
                     break;
                 }
             }

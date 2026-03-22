@@ -311,9 +311,21 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 - `zts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
 - `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
 
+### Module Binding System
+
+Each virtual module declares a `pub const binding: ModuleBinding` struct that serves as the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. The `builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency).
+
+Consumers that previously maintained separate hardcoded tables now read from the registry:
+- **Type checker** (`types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`
+- **Handler verifier**: looks up result/optional producers via `builtin_modules.findFunction()`
+- **Bool checker**: maps `ReturnKind` to `ExprType` via `returnKindToExprType()`
+- **Contract builder**: uses `GenericBinding` entries populated from `FunctionBinding.contract_extractions` and `contract_flags`
+
+Third-party modules use `ModuleFn` (opaque `*ModuleHandle`) instead of `NativeFn` (raw `*anyopaque`). The opaque handle prevents dereferencing - all interaction goes through SDK free functions. Build-path isolation via a separate `zigttp-sdk` package prevents importing runtime internals.
+
 ### Handler Effect Classification
 
-Each virtual module export carries an `EffectClass` annotation (read, write, or none) in its `ModuleExport` definition (`zts/modules/resolver.zig`). During contract extraction, the `ContractBuilder.computeProperties()` method aggregates these effects across all imported functions to derive handler-level properties:
+Each `FunctionBinding` carries an `effect` annotation (read, write, or none). During contract extraction, `computeProperties()` aggregates these across all imported functions to derive handler-level properties:
 
 - **pure** - no virtual module calls and no fetchSync; handler is a function of the request only
 - **read_only** - all imported functions are read-classified; no state mutations through virtual modules
@@ -322,11 +334,12 @@ Each virtual module export carries an `EffectClass` annotation (read, write, or 
 - **deterministic** - no `Date.now()` or `Math.random()` calls detected in the IR
 - **has_egress** - handler uses fetchSync (conservatively classified as write)
 
-Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension). They are informational in the contract diff - a property changing from true to false is not classified as breaking since it is derived from the underlying resource changes.
+Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension).
 
 **Key files**:
-- `zts/modules/resolver.zig` - `EffectClass` enum, `ModuleExport.effect` field
-- `zts/handler_contract.zig` - `HandlerProperties` struct, `computeProperties()`, `hasBareWrites()`
+- `zts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `validateBindings()`
+- `zts/builtin_modules.zig` - registry of all 10 built-in bindings with comptime validation
+- `zts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
 

@@ -14,14 +14,31 @@ const resolver = @import("resolver.zig");
 const util = @import("util.zig");
 const sqlite = @import("../sqlite.zig");
 
+const mb = @import("../module_binding.zig");
+
 pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.sql);
 
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "sql", .func = sqlRegisterNative, .arg_count = 2, .effect = .read },
-    .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2, .effect = .read },
-    .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2, .effect = .read },
-    .{ .name = "sqlExec", .func = sqlExecNative, .arg_count = 2, .effect = .write },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:sql",
+    .name = "sql",
+    .stateful = true,
+    .contract_section = "sql",
+    .sandboxable = true,
+    .exports = &.{
+        .{ .name = "sql", .func = sqlRegisterNative, .arg_count = 2,
+           .returns = .boolean, .param_types = &.{ .string, .string },
+           .traceable = false,
+           .contract_extractions = &.{.{ .category = .sql_registration }} },
+        .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2,
+           .returns = .optional_object, .param_types = &.{ .string, .object } },
+        .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2,
+           .returns = .object, .param_types = &.{ .string, .object } },
+        .{ .name = "sqlExec", .func = sqlExecNative, .arg_count = 2,
+           .effect = .write, .returns = .object, .param_types = &.{ .string, .object } },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 pub const SqlStore = struct {
     allocator: std.mem.Allocator,

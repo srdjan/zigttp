@@ -14,14 +14,24 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "sha256", .func = sha256Native, .arg_count = 1, .effect = .read },
-    .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2, .effect = .read },
-    .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1, .effect = .read },
-    .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1, .effect = .read },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:crypto",
+    .name = "crypto",
+    .exports = &.{
+        .{ .name = "sha256", .func = sha256Native, .arg_count = 1,
+           .returns = .string, .param_types = &.{.string} },
+        .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2,
+           .returns = .string, .param_types = &.{ .string, .string } },
+        .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1,
+           .returns = .string, .param_types = &.{.string} },
+        .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1,
+           .returns = .string, .param_types = &.{.string} },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 
 /// sha256(data) -> hex string

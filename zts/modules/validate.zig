@@ -26,17 +26,35 @@ const object = @import("../object.zig");
 const builtins = @import("../builtins/root.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
 const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.validate);
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "schemaCompile", .func = schemaCompileNative, .arg_count = 2, .effect = .read },
-    .{ .name = "validateJson", .func = validateJsonNative, .arg_count = 2, .effect = .read },
-    .{ .name = "validateObject", .func = validateObjectNative, .arg_count = 2, .effect = .read },
-    .{ .name = "coerceJson", .func = coerceJsonNative, .arg_count = 2, .effect = .read },
-    .{ .name = "schemaDrop", .func = schemaDropNative, .arg_count = 1, .effect = .read },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:validate",
+    .name = "validate",
+    .stateful = true,
+    .exports = &.{
+        .{ .name = "schemaCompile", .func = schemaCompileNative, .arg_count = 2,
+           .returns = .boolean, .param_types = &.{.string},
+           .traceable = false,
+           .contract_extractions = &.{.{ .category = .schema_compile }} },
+        .{ .name = "validateJson", .func = validateJsonNative, .arg_count = 2,
+           .returns = .result, .param_types = &.{ .string, .string },
+           .contract_extractions = &.{.{ .category = .request_schema }} },
+        .{ .name = "validateObject", .func = validateObjectNative, .arg_count = 2,
+           .returns = .result, .param_types = &.{ .string, .string },
+           .contract_extractions = &.{.{ .category = .request_schema }} },
+        .{ .name = "coerceJson", .func = coerceJsonNative, .arg_count = 2,
+           .returns = .result, .param_types = &.{ .string, .string },
+           .contract_extractions = &.{.{ .category = .request_schema }} },
+        .{ .name = "schemaDrop", .func = schemaDropNative, .arg_count = 1,
+           .returns = .boolean, .param_types = &.{.string},
+           .traceable = false },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 // ============================================================================
 // Schema types

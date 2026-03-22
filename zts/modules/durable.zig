@@ -12,6 +12,7 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
 pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.durable_api);
 
@@ -31,15 +32,48 @@ pub const DurableCallbacks = struct {
     }
 };
 
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "run", .func = runNative, .arg_count = 2, .effect = .write },
-    .{ .name = "step", .func = stepNative, .arg_count = 2, .effect = .write },
-    .{ .name = "sleep", .func = sleepNative, .arg_count = 1, .effect = .write },
-    .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1, .effect = .write },
-    .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1, .effect = .write },
-    .{ .name = "signal", .func = signalNative, .arg_count = 2, .effect = .write },
-    .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3, .effect = .write },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:durable",
+    .name = "durable",
+    .stateful = true,
+    .contract_section = "durable",
+    .exports = &.{
+        .{ .name = "run", .func = runNative, .arg_count = 2,
+           .effect = .write, .returns = .unknown, .param_types = &.{ .string, .unknown },
+           .contract_extractions = &.{.{ .category = .durable_key }},
+           .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "step", .func = stepNative, .arg_count = 2,
+           .effect = .write, .returns = .unknown, .param_types = &.{ .string, .unknown },
+           .contract_extractions = &.{.{ .category = .durable_step }},
+           .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "sleep", .func = sleepNative, .arg_count = 1,
+           .effect = .write, .returns = .undefined, .param_types = &.{.number},
+           .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
+        .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1,
+           .effect = .write, .returns = .undefined, .param_types = &.{.number},
+           .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
+        .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1,
+           .effect = .write, .returns = .unknown, .param_types = &.{.string},
+           .contract_extractions = &.{.{ .category = .durable_signal }},
+           .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "signal", .func = signalNative, .arg_count = 2,
+           .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string },
+           .contract_extractions = &.{
+               .{ .category = .durable_producer_key },
+               .{ .arg_position = 1, .category = .durable_signal },
+           },
+           .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "signalAt", .func = signalAtNative, .arg_count = 3,
+           .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string, .number },
+           .contract_extractions = &.{
+               .{ .category = .durable_producer_key },
+               .{ .arg_position = 1, .category = .durable_signal },
+           },
+           .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 fn runNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);

@@ -26,18 +26,31 @@ const builtins = @import("../builtins/root.zig");
 const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
 const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const base64url = std.base64.url_safe_no_pad;
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1, .effect = .read },
-    .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3, .effect = .read },
-    .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2, .effect = .read },
-    .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3, .effect = .read },
-    .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2, .effect = .read },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:auth",
+    .name = "auth",
+    .exports = &.{
+        .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1,
+           .returns = .optional_string, .param_types = &.{.string},
+           .contract_flags = .{ .sets_bearer_auth = true } },
+        .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3,
+           .returns = .result, .param_types = &.{ .string, .string },
+           .contract_flags = .{ .sets_jwt_auth = true } },
+        .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2,
+           .returns = .string, .param_types = &.{ .string, .string } },
+        .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3,
+           .returns = .boolean, .param_types = &.{ .string, .string, .string } },
+        .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2,
+           .returns = .boolean, .param_types = &.{ .string, .string } },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 // ============================================================================
 // parseBearer

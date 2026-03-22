@@ -21,17 +21,26 @@ const value = @import("../value.zig");
 const object = @import("../object.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
 /// Maximum number of concurrent operations in a single parallel/race call.
 pub const MAX_PARALLEL: u32 = 8;
 
 pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.io);
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .effect = .write },
-    .{ .name = "race", .func = raceNative, .arg_count = 1, .effect = .write },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:io",
+    .name = "io",
+    .stateful = true,
+    .exports = &.{
+        .{ .name = "parallel", .func = parallelNative, .arg_count = 1,
+           .effect = .write, .returns = .string, .param_types = &.{} },
+        .{ .name = "race", .func = raceNative, .arg_count = 1,
+           .effect = .write, .returns = .string, .param_types = &.{} },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 // ============================================================================
 // Runtime callback interface

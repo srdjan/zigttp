@@ -13,11 +13,20 @@
 
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
+const mb = @import("../module_binding.zig");
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "guard", .func = guardNative, .arg_count = 1, .effect = .none },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:compose",
+    .name = "compose",
+    .comptime_only = true,
+    .exports = &.{
+        .{ .name = "guard", .func = guardNative, .arg_count = 1,
+           .effect = .none, .returns = .string, .param_types = &.{.string},
+           .traceable = false },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 /// guard(fn) - compile-time marker for handler composition.
 /// At runtime this is an identity function (returns its argument).

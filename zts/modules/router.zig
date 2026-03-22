@@ -30,11 +30,19 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2, .effect = .read },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:router",
+    .name = "router",
+    .exports = &.{
+        .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2,
+           .returns = .optional_object, .param_types = &.{ .string, .string, .string },
+           .contract_extractions = &.{.{ .category = .route_pattern }} },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 
 /// routerMatch(routes, req) -> { handler, params } | null

@@ -27,6 +27,7 @@ const object = @import("../object.zig");
 const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
+const mb = @import("../module_binding.zig");
 
 const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.cache);
 
@@ -36,14 +37,31 @@ fn nowSeconds() i64 {
     return @divTrunc(ms, 1000);
 }
 
-/// Module exports
-pub const exports = [_]resolver.ModuleExport{
-    .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2, .effect = .read },
-    .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4, .effect = .write },
-    .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2, .effect = .write },
-    .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4, .effect = .write },
-    .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1, .effect = .read },
+pub const binding = mb.ModuleBinding{
+    .specifier = "zigttp:cache",
+    .name = "cache",
+    .stateful = true,
+    .contract_section = "cache",
+    .sandboxable = true,
+    .exports = &.{
+        .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2,
+           .effect = .read, .returns = .optional_string, .param_types = &.{.string},
+           .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4,
+           .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string },
+           .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2,
+           .effect = .write, .returns = .boolean, .param_types = &.{.string},
+           .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4,
+           .effect = .write, .returns = .number, .param_types = &.{.string},
+           .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1,
+           .effect = .read, .returns = .object, .param_types = &.{} },
+    },
 };
+
+pub const exports = binding.toModuleExports();
 
 // ============================================================================
 // Internal data structures
