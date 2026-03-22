@@ -978,6 +978,7 @@ fn compileHandler(
                     root,
                     aot,
                     verify_info,
+                    if (strip_result) |*sr| &sr.type_map else null,
                     policy,
                     sql_schema_path,
                 )
@@ -1023,6 +1024,7 @@ fn compileHandler(
             root,
             effective_aot,
             verify_info,
+            if (strip_result) |*sr| &sr.type_map else null,
             policy,
             sql_schema_path,
         );
@@ -1233,6 +1235,7 @@ fn buildContract(
     root: ir.NodeIndex,
     aot: ?AotAnalysis,
     verify_info: ?VerificationInfo,
+    type_map: ?*const zts.TypeMap,
 ) !HandlerContract {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
@@ -1245,7 +1248,21 @@ fn buildContract(
         }
     }
 
-    var builder = ContractBuilder.init(allocator, ir_view, atoms);
+    var type_pool = zts.TypePool.init(allocator);
+    defer type_pool.deinit(allocator);
+
+    var type_env = zts.TypeEnv.init(allocator, &type_pool);
+    defer type_env.deinit();
+    zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+    if (type_map) |tm| {
+        type_env.populateFromTypeMap(tm);
+    }
+
+    var type_checker = zts.TypeChecker.init(allocator, ir_view, atoms, &type_env);
+    defer type_checker.deinit();
+    _ = type_checker.check(root) catch 0;
+
+    var builder = ContractBuilder.init(allocator, ir_view, atoms, &type_env, &type_checker);
     defer builder.deinit();
 
     const dispatch = if (aot) |a| a.dispatch else null;
@@ -1268,6 +1285,7 @@ fn buildContractWithPolicy(
     root: ir.NodeIndex,
     aot: ?AotAnalysis,
     verify_info: ?VerificationInfo,
+    type_map: ?*const zts.TypeMap,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
 ) !HandlerContract {
@@ -1279,6 +1297,7 @@ fn buildContractWithPolicy(
         root,
         aot,
         verify_info,
+        type_map,
     );
     errdefer contract.deinit(allocator);
 
@@ -1325,6 +1344,7 @@ fn buildMultiModuleContract(
             module.path,
             compiled_module.root,
             temp_aot,
+            null,
             null,
         );
         defer module_contract.deinit(allocator);
@@ -2262,6 +2282,7 @@ fn buildTestContractForSource(
         &atoms,
         filename,
         root,
+        null,
         null,
         null,
         null,

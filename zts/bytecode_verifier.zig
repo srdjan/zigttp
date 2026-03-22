@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const bytecode = @import("bytecode.zig");
+const value = @import("value.zig");
 
 const Opcode = bytecode.Opcode;
 const FunctionBytecode = bytecode.FunctionBytecode;
@@ -560,7 +561,7 @@ test "verify: push_const_call accounts for fused argument" {
             @intFromEnum(Opcode.drop),
             @intFromEnum(Opcode.ret_undefined),
         },
-        .constants = &.{bytecode.JSValue.fromInt(1)},
+        .constants = &.{value.JSValue.fromInt(1)},
         .source_map = null,
     };
     const result = verify(&func);

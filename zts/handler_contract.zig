@@ -13,12 +13,16 @@
 //! the parser and atom table that produced it.
 
 const std = @import("std");
+const api_schema = @import("api_schema.zig");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const modules_resolver = @import("modules/resolver.zig");
 const bytecode = @import("bytecode.zig");
 const handler_analyzer = @import("handler_analyzer.zig");
+const type_checker_mod = @import("type_checker.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -27,6 +31,8 @@ const IrView = ir.IrView;
 const null_node = ir.null_node;
 const HandlerPattern = bytecode.HandlerPattern;
 const PatternDispatchTable = bytecode.PatternDispatchTable;
+const TypeChecker = type_checker_mod.TypeChecker;
+const TypeEnv = type_env_mod.TypeEnv;
 
 // -------------------------------------------------------------------------
 // Contract data types
@@ -135,6 +141,17 @@ pub const ApiAuthInfo = struct {
     jwt: bool,
 };
 
+pub const ApiParamInfo = struct {
+    name: []const u8, // owned
+    location: []const u8 = "path", // static literal
+    schema_json: []const u8, // owned JSON source
+
+    pub fn deinit(self: *ApiParamInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.schema_json);
+    }
+};
+
 pub const ApiRouteInfo = struct {
     method: []const u8, // owned
     path: []const u8, // owned
@@ -142,8 +159,12 @@ pub const ApiRouteInfo = struct {
     request_schema_dynamic: bool,
     requires_bearer: bool,
     requires_jwt: bool,
+    path_params: std.ArrayList(ApiParamInfo) = .empty,
     response_status: ?u16 = null,
     response_content_type: ?[]const u8 = null, // owned when present
+    response_schema_ref: ?[]const u8 = null, // owned when present
+    response_schema_json: ?[]const u8 = null, // owned when present
+    response_schema_dynamic: bool = false,
 
     pub fn deinit(self: *ApiRouteInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.method);
@@ -152,8 +173,18 @@ pub const ApiRouteInfo = struct {
             allocator.free(schema_ref);
         }
         self.request_schema_refs.deinit(allocator);
+        for (self.path_params.items) |*param| {
+            param.deinit(allocator);
+        }
+        self.path_params.deinit(allocator);
         if (self.response_content_type) |content_type| {
             allocator.free(content_type);
+        }
+        if (self.response_schema_ref) |schema_ref| {
+            allocator.free(schema_ref);
+        }
+        if (self.response_schema_json) |schema_json| {
+            allocator.free(schema_json);
         }
     }
 };
@@ -234,7 +265,7 @@ pub const HandlerProperties = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 6,
+    version: u32 = 7,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -301,6 +332,8 @@ pub const ContractBuilder = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*context.AtomTable,
+    type_env: ?*const TypeEnv,
+    type_checker: ?*const TypeChecker,
 
     // Binding tracking: maps local slot -> category for call-site analysis
     env_binding_slots: std.ArrayList(u16),
@@ -356,11 +389,19 @@ pub const ContractBuilder = struct {
         has_namespace_arg: bool, // true for cacheGet/Set/Delete/Incr, false for cacheStats
     };
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) ContractBuilder {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*context.AtomTable,
+        type_env: ?*const TypeEnv,
+        type_checker: ?*const TypeChecker,
+    ) ContractBuilder {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
             .atoms = atoms,
+            .type_env = type_env,
+            .type_checker = type_checker,
             .env_binding_slots = .empty,
             .cache_binding_slots = .empty,
             .sql_binding_slots = .empty,
@@ -1257,6 +1298,12 @@ pub const ContractBuilder = struct {
     }
 
     fn findObjectLiteralBinding(self: *const ContractBuilder, slot: u16) ?NodeIndex {
+        const init_node = self.findBindingInitNode(slot) orelse return null;
+        if (self.ir_view.getTag(init_node) == .object_literal) return init_node;
+        return null;
+    }
+
+    fn findBindingInitNode(self: *const ContractBuilder, slot: u16) ?NodeIndex {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -1264,11 +1311,8 @@ pub const ContractBuilder = struct {
             if (tag != .var_decl) continue;
 
             const decl = self.ir_view.getVarDecl(idx) orelse continue;
-            if (decl.binding.slot != slot) continue;
-            if (decl.init == null_node) continue;
-            if (self.ir_view.getTag(decl.init)) |init_tag| {
-                if (init_tag == .object_literal) return decl.init;
-            }
+            if (decl.binding.slot != slot or decl.init == null_node) continue;
+            return decl.init;
         }
         return null;
     }
@@ -1337,6 +1381,7 @@ pub const ContractBuilder = struct {
                 .requires_jwt = false,
             };
             errdefer route.deinit(self.allocator);
+            try self.appendPathParams(&route);
 
             if (self.resolveFunctionNode(prop.value)) |fn_node| {
                 try self.populateApiRouteFacts(&route, fn_node);
@@ -1383,8 +1428,14 @@ pub const ContractBuilder = struct {
                     try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(block.stmts_start, i), route);
                 }
             },
-            .expr_stmt, .return_stmt, .throw_stmt => {
+            .expr_stmt, .throw_stmt => {
                 if (self.ir_view.getOptValue(node_idx)) |value_node| {
+                    try self.scanFunctionNodeForApiFacts(value_node, route);
+                }
+            },
+            .return_stmt => {
+                if (self.ir_view.getOptValue(node_idx)) |value_node| {
+                    try self.captureApiResponse(value_node, route);
                     try self.scanFunctionNodeForApiFacts(value_node, route);
                 }
             },
@@ -1500,6 +1551,261 @@ pub const ContractBuilder = struct {
         }
     }
 
+    const ResponseSchemaCandidate = struct {
+        status: ?u16 = null,
+        content_type: ?[]const u8 = null, // static literal
+        schema_ref: ?[]const u8 = null, // owned
+        schema_json: ?[]u8 = null, // owned
+        dynamic: bool = false,
+
+        fn deinit(self: *ResponseSchemaCandidate, allocator: std.mem.Allocator) void {
+            if (self.schema_ref) |schema_ref| allocator.free(schema_ref);
+            if (self.schema_json) |schema_json| allocator.free(schema_json);
+        }
+    };
+
+    fn appendPathParams(self: *ContractBuilder, route: *ApiRouteInfo) !void {
+        var i: usize = 0;
+        while (i < route.path.len) : (i += 1) {
+            if (route.path[i] != ':') continue;
+
+            const start = i + 1;
+            var end = start;
+            while (end < route.path.len and route.path[end] != '/') : (end += 1) {}
+            if (end <= start) continue;
+
+            const name = route.path[start..end];
+            if (containsApiParam(route.path_params.items, name)) continue;
+
+            try route.path_params.append(self.allocator, .{
+                .name = try self.allocator.dupe(u8, name),
+                .location = "path",
+                .schema_json = try self.allocator.dupe(u8, "{\"type\":\"string\"}"),
+            });
+            i = end;
+        }
+    }
+
+    fn captureApiResponse(self: *ContractBuilder, node_idx: NodeIndex, route: *ApiRouteInfo) !void {
+        var candidate = (try self.analyzeApiResponse(node_idx)) orelse return;
+        defer candidate.deinit(self.allocator);
+        try self.mergeResponseCandidate(route, &candidate);
+    }
+
+    fn analyzeApiResponse(self: *ContractBuilder, node_idx: NodeIndex) !?ResponseSchemaCandidate {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        if (tag != .call) return null;
+
+        const call = self.ir_view.getCall(node_idx) orelse return null;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+        if (callee_tag != .member_access) return null;
+
+        const member = self.ir_view.getMember(call.callee) orelse return null;
+        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
+        if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
+
+        var candidate = ResponseSchemaCandidate{};
+        errdefer candidate.deinit(self.allocator);
+
+        switch (@as(object.Atom, @enumFromInt(member.property))) {
+            .json => {
+                candidate.status = 200;
+                candidate.content_type = "application/json";
+                if (call.args_count >= 2) {
+                    const options_idx = self.ir_view.getListIndex(call.args_start, 1);
+                    candidate.status = self.extractStatusFromOptionsNode(options_idx);
+                }
+                if (call.args_count == 0) {
+                    candidate.schema_json = try self.allocator.dupe(u8, "{\"type\":\"object\"}");
+                    return candidate;
+                }
+
+                const payload_idx = self.ir_view.getListIndex(call.args_start, 0);
+                if (try self.extractResponseSchemaRef(payload_idx)) |schema_ref| {
+                    candidate.schema_ref = schema_ref;
+                    return candidate;
+                }
+                if (try self.extractResponseSchemaJson(payload_idx)) |schema_json| {
+                    candidate.schema_json = schema_json;
+                    return candidate;
+                }
+
+                candidate.dynamic = true;
+                return candidate;
+            },
+            .text => {
+                candidate.status = 200;
+                candidate.content_type = "text/plain; charset=utf-8";
+                if (call.args_count >= 2) {
+                    const options_idx = self.ir_view.getListIndex(call.args_start, 1);
+                    candidate.status = self.extractStatusFromOptionsNode(options_idx);
+                }
+                return candidate;
+            },
+            .html => {
+                candidate.status = 200;
+                candidate.content_type = "text/html; charset=utf-8";
+                if (call.args_count >= 2) {
+                    const options_idx = self.ir_view.getListIndex(call.args_start, 1);
+                    candidate.status = self.extractStatusFromOptionsNode(options_idx);
+                }
+                return candidate;
+            },
+            .rawJson => {
+                candidate.status = 200;
+                candidate.content_type = "application/json";
+                if (call.args_count >= 2) {
+                    const options_idx = self.ir_view.getListIndex(call.args_start, 1);
+                    candidate.status = self.extractStatusFromOptionsNode(options_idx);
+                }
+                return candidate;
+            },
+            else => return null,
+        }
+    }
+
+    fn mergeResponseCandidate(
+        self: *ContractBuilder,
+        route: *ApiRouteInfo,
+        candidate: *ResponseSchemaCandidate,
+    ) !void {
+        if (candidate.status) |status| {
+            if (route.response_status == null) {
+                route.response_status = status;
+            } else if (route.response_status.? != status) {
+                route.response_status = null;
+                route.response_schema_dynamic = true;
+            }
+        }
+
+        if (candidate.content_type) |content_type| {
+            if (route.response_content_type == null) {
+                route.response_content_type = try self.allocator.dupe(u8, content_type);
+            } else if (!std.mem.eql(u8, route.response_content_type.?, content_type)) {
+                self.allocator.free(route.response_content_type.?);
+                route.response_content_type = null;
+                route.response_schema_dynamic = true;
+            }
+        }
+
+        if (candidate.schema_ref) |schema_ref| {
+            if (route.response_schema_ref == null and route.response_schema_json == null) {
+                route.response_schema_ref = try self.allocator.dupe(u8, schema_ref);
+            } else if (route.response_schema_ref == null or !std.mem.eql(u8, route.response_schema_ref.?, schema_ref)) {
+                if (route.response_schema_ref) |existing| self.allocator.free(existing);
+                if (route.response_schema_json) |existing_json| self.allocator.free(existing_json);
+                route.response_schema_ref = null;
+                route.response_schema_json = null;
+                route.response_schema_dynamic = true;
+            }
+        }
+
+        if (candidate.schema_json) |schema_json| {
+            if (route.response_schema_ref == null and route.response_schema_json == null) {
+                route.response_schema_json = try self.allocator.dupe(u8, schema_json);
+            } else if (route.response_schema_json == null or !std.mem.eql(u8, route.response_schema_json.?, schema_json)) {
+                if (route.response_schema_ref) |existing| self.allocator.free(existing);
+                if (route.response_schema_json) |existing_json| self.allocator.free(existing_json);
+                route.response_schema_ref = null;
+                route.response_schema_json = null;
+                route.response_schema_dynamic = true;
+            }
+        }
+
+        if (candidate.dynamic) {
+            route.response_schema_dynamic = true;
+        }
+    }
+
+    fn extractResponseSchemaRef(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        switch (tag) {
+            .member_access => {
+                const member = self.ir_view.getMember(node_idx) orelse return null;
+                const prop_name = self.resolveAtomName(member.property) orelse return null;
+                if (!std.mem.eql(u8, prop_name, "value")) return null;
+
+                const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+                if (obj_tag != .identifier) return null;
+                const binding = self.ir_view.getBinding(member.object) orelse return null;
+                return try self.lookupSchemaRefForBinding(binding.slot);
+            },
+            .identifier => {
+                const binding = self.ir_view.getBinding(node_idx) orelse return null;
+                const init_node = self.findBindingInitNode(binding.slot) orelse return null;
+                return try self.extractResponseSchemaRef(init_node);
+            },
+            else => return null,
+        }
+    }
+
+    fn lookupSchemaRefForBinding(self: *ContractBuilder, slot: u16) !?[]u8 {
+        const init_node = self.findBindingInitNode(slot) orelse return null;
+        const tag = self.ir_view.getTag(init_node) orelse return null;
+        if (tag != .call) return null;
+
+        const call = self.ir_view.getCall(init_node) orelse return null;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+        if (callee_tag != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(call.callee) orelse return null;
+        if (!self.isRequestSchemaBinding(binding.slot)) return null;
+        if (call.args_count == 0) return null;
+
+        const schema_idx = self.ir_view.getListIndex(call.args_start, 0);
+        const schema_name = self.getLiteralString(schema_idx) orelse return null;
+        return try self.allocator.dupe(u8, schema_name);
+    }
+
+    fn extractResponseSchemaJson(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
+        if (self.type_checker == null or self.type_env == null) return null;
+
+        const inferred = self.type_checker.?.inferType(node_idx);
+        if (inferred != type_pool_mod.null_type_idx) {
+            if (try api_schema.schemaFromType(self.allocator, self.type_env.?, inferred)) |schema_json| {
+                return schema_json;
+            }
+        }
+
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        if (tag == .identifier) {
+            const binding = self.ir_view.getBinding(node_idx) orelse return null;
+            const init_node = self.findBindingInitNode(binding.slot) orelse return null;
+            return try self.extractResponseSchemaJson(init_node);
+        }
+
+        return null;
+    }
+
+    fn extractStatusFromOptionsNode(self: *const ContractBuilder, node_idx: NodeIndex) ?u16 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        if (tag != .object_literal) return null;
+
+        const obj = self.ir_view.getObject(node_idx) orelse return null;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const key = self.getObjectPropertyKey(prop.key) orelse continue;
+            if (!std.mem.eql(u8, key, "status")) continue;
+
+            const value_tag = self.ir_view.getTag(prop.value) orelse return null;
+            switch (value_tag) {
+                .lit_int => {
+                    const value = self.ir_view.getIntValue(prop.value) orelse return null;
+                    if (value < 0 or value > std.math.maxInt(u16)) return null;
+                    return @intCast(value);
+                },
+                else => return null,
+            }
+        }
+        return null;
+    }
+
     // -----------------------------------------------------------------
     // Phase 3: Effect classification
     // -----------------------------------------------------------------
@@ -1562,6 +1868,13 @@ pub const ContractBuilder = struct {
 fn containsString(items: []const []const u8, needle: []const u8) bool {
     for (items) |item| {
         if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
+fn containsApiParam(items: []const ApiParamInfo, needle: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item.name, needle)) return true;
     }
     return false;
 }
@@ -1687,6 +2000,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseSqlSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "durable")) {
             try parseDurableSection(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "api")) {
+            try parseApiSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
             try parseVerification(&parser, &contract);
         } else if (std.mem.eql(u8, key, "properties")) {
@@ -1821,6 +2136,15 @@ const JsonParser = struct {
                 }
             },
         }
+    }
+
+    fn readRawValue(self: *JsonParser) ?[]const u8 {
+        self.skipWhitespace();
+        const start = self.pos;
+        self.skipValue();
+        const end = self.pos;
+        if (end < start) return null;
+        return self.data[start..end];
     }
 
     fn skipObject(self: *JsonParser) void {
@@ -2124,6 +2448,283 @@ fn parseDurableSection(
         } else {
             parser.skipValue();
         }
+    }
+}
+
+fn parseApiSection(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "schemas")) {
+            try parseApiSchemas(parser, allocator, &contract.api.schemas);
+        } else if (std.mem.eql(u8, key, "requests")) {
+            try parseApiRequests(parser, allocator, &contract.api.requests);
+        } else if (std.mem.eql(u8, key, "auth")) {
+            try parseApiAuth(parser, &contract.api.auth);
+        } else if (std.mem.eql(u8, key, "routes")) {
+            try parseApiRoutes(parser, allocator, &contract.api.routes);
+        } else if (std.mem.eql(u8, key, "schemasDynamic")) {
+            contract.api.schemas_dynamic = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "routesDynamic")) {
+            contract.api.routes_dynamic = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseApiSchemas(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ApiSchemaInfo),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var schema = ApiSchemaInfo{
+            .name = try allocator.dupe(u8, ""),
+            .schema_json = try allocator.dupe(u8, "{}"),
+        };
+        errdefer {
+            allocator.free(schema.name);
+            allocator.free(schema.schema_json);
+        }
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "name")) {
+                allocator.free(schema.name);
+                schema.name = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "schema")) {
+                const raw = parser.readRawValue() orelse return error.InvalidJson;
+                allocator.free(schema.schema_json);
+                schema.schema_json = try allocator.dupe(u8, raw);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, schema);
+    }
+}
+
+fn parseApiRequests(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    requests: *ApiRequestInfo,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "schemaRefs")) {
+            try parseStringArray(parser, allocator, &requests.schema_refs);
+        } else if (std.mem.eql(u8, key, "dynamic")) {
+            requests.dynamic = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseApiAuth(parser: *JsonParser, auth: *ApiAuthInfo) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "bearer")) {
+            auth.bearer = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "jwt")) {
+            auth.jwt = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseApiRoutes(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ApiRouteInfo),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var route = ApiRouteInfo{
+            .method = try allocator.dupe(u8, ""),
+            .path = try allocator.dupe(u8, ""),
+            .request_schema_refs = .empty,
+            .request_schema_dynamic = false,
+            .requires_bearer = false,
+            .requires_jwt = false,
+        };
+        errdefer route.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "method")) {
+                allocator.free(route.method);
+                route.method = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "path")) {
+                allocator.free(route.path);
+                route.path = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "requestSchemaRefs")) {
+                try parseStringArray(parser, allocator, &route.request_schema_refs);
+            } else if (std.mem.eql(u8, key, "requestSchemaDynamic")) {
+                route.request_schema_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "requiresBearer")) {
+                route.requires_bearer = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "requiresJwt")) {
+                route.requires_jwt = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "pathParams")) {
+                try parseApiParams(parser, allocator, &route.path_params);
+            } else if (std.mem.eql(u8, key, "responseStatus")) {
+                route.response_status = if (parser.readNull()) null else (parser.readU16() orelse null);
+            } else if (std.mem.eql(u8, key, "responseContentType")) {
+                route.response_content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "responseSchemaRef")) {
+                route.response_schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "responseSchema")) {
+                if (!parser.readNull()) {
+                    const raw = parser.readRawValue() orelse return error.InvalidJson;
+                    route.response_schema_json = try allocator.dupe(u8, raw);
+                }
+            } else if (std.mem.eql(u8, key, "responseSchemaDynamic")) {
+                route.response_schema_dynamic = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, route);
+    }
+}
+
+fn parseApiParams(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ApiParamInfo),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var param = ApiParamInfo{
+            .name = try allocator.dupe(u8, ""),
+            .location = "path",
+            .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+        };
+        errdefer param.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "name")) {
+                allocator.free(param.name);
+                param.name = try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "location")) {
+                const raw = parser.readString() orelse "path";
+                param.location = if (std.mem.eql(u8, raw, "path")) "path" else "path";
+            } else if (std.mem.eql(u8, key, "schema")) {
+                const raw = parser.readRawValue() orelse return error.InvalidJson;
+                allocator.free(param.schema_json);
+                param.schema_json = try allocator.dupe(u8, raw);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, param);
     }
 }
 
@@ -2479,6 +3080,24 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.print("        \"requestSchemaDynamic\": {s},\n", .{if (route.request_schema_dynamic) "true" else "false"});
         try writer.print("        \"requiresBearer\": {s},\n", .{if (route.requires_bearer) "true" else "false"});
         try writer.print("        \"requiresJwt\": {s},\n", .{if (route.requires_jwt) "true" else "false"});
+        try writer.writeAll("        \"pathParams\": [");
+        for (route.path_params.items, 0..) |param, j| {
+            if (j > 0) try writer.writeAll(",");
+            try writer.writeAll("\n          {\n");
+            try writer.writeAll("            \"name\": ");
+            try writeJsonString(writer, param.name);
+            try writer.writeAll(",\n");
+            try writer.writeAll("            \"location\": ");
+            try writeJsonString(writer, param.location);
+            try writer.writeAll(",\n");
+            try writer.writeAll("            \"schema\": ");
+            try writer.writeAll(param.schema_json);
+            try writer.writeAll("\n          }");
+        }
+        if (route.path_params.items.len > 0) {
+            try writer.writeAll("\n        ");
+        }
+        try writer.writeAll("],\n");
         try writer.writeAll("        \"responseStatus\": ");
         if (route.response_status) |status| {
             try writer.print("{d}", .{status});
@@ -2492,7 +3111,23 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         } else {
             try writer.writeAll("null");
         }
-        try writer.writeAll("\n      }");
+        try writer.writeAll(",\n");
+        try writer.writeAll("        \"responseSchemaRef\": ");
+        if (route.response_schema_ref) |schema_ref| {
+            try writeJsonString(writer, schema_ref);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\n");
+        try writer.writeAll("        \"responseSchema\": ");
+        if (route.response_schema_json) |schema_json| {
+            try writer.writeAll(schema_json);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\n");
+        try writer.print("        \"responseSchemaDynamic\": {s}\n", .{if (route.response_schema_dynamic) "true" else "false"});
+        try writer.writeAll("      }");
     }
     if (contract.api.routes.items.len > 0) {
         try writer.writeAll("\n    ");
@@ -2698,6 +3333,76 @@ test "parseFromJson roundtrip" {
     try std.testing.expect(parsed.verification.?.bytecode_verified);
 }
 
+test "parseFromJson roundtrip preserves api route response schema" {
+    const allocator = std.testing.allocator;
+
+    var path_params: std.ArrayList(ApiParamInfo) = .empty;
+    try path_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "id"),
+        .location = "path",
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+
+    var routes: std.ArrayList(ApiRouteInfo) = .empty;
+    try routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .path_params = path_params,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_ref = try allocator.dupe(u8, "user"),
+        .response_schema_dynamic = false,
+    });
+
+    var contract = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "api.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = routes,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&contract, &aw.writer);
+    output = aw.toArrayList();
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.api.routes.items.len);
+    const route = parsed.api.routes.items[0];
+    try std.testing.expectEqualStrings("GET", route.method);
+    try std.testing.expectEqualStrings("/users/:id", route.path);
+    try std.testing.expectEqual(@as(usize, 1), route.path_params.items.len);
+    try std.testing.expectEqualStrings("id", route.path_params.items[0].name);
+    try std.testing.expectEqualStrings("user", route.response_schema_ref.?);
+}
+
 test "extractHost from URL" {
     try std.testing.expectEqualStrings("api.example.com", extractHost("https://api.example.com/path"));
     try std.testing.expectEqualStrings("api.example.com", extractHost("http://api.example.com:8080/path"));
@@ -2749,7 +3454,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 7") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);

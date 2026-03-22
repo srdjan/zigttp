@@ -11,6 +11,7 @@ const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
+const ApiRouteInfo = handler_contract.ApiRouteInfo;
 
 // -------------------------------------------------------------------------
 // Proof level (same semantics as deploy_manifest.ProofLevel)
@@ -83,6 +84,20 @@ pub const RouteChange = struct {
     status: ChangeStatus,
 };
 
+pub const ApiResponseChange = enum {
+    unchanged,
+    additive,
+    breaking,
+    dynamic,
+};
+
+pub const ApiRouteChange = struct {
+    method: []const u8,
+    path: []const u8,
+    status: ChangeStatus,
+    response: ApiResponseChange = .unchanged,
+};
+
 pub const DynamicChange = struct {
     section: []const u8,
     old_dynamic: bool,
@@ -110,6 +125,7 @@ pub const ReplaySummary = struct {
 
 pub const ContractDiff = struct {
     routes: std.ArrayList(RouteChange),
+    api_route_changes: std.ArrayList(ApiRouteChange),
     env_changes: std.ArrayList(ItemChange),
     egress_changes: std.ArrayList(ItemChange),
     cache_changes: std.ArrayList(ItemChange),
@@ -120,6 +136,7 @@ pub const ContractDiff = struct {
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
+        self.api_route_changes.deinit(allocator);
         self.env_changes.deinit(allocator);
         self.egress_changes.deinit(allocator);
         self.cache_changes.deinit(allocator);
@@ -150,6 +167,15 @@ pub const ContractDiff = struct {
         for (self.routes.items) |r| {
             if (r.status == .removed) return .breaking;
             if (r.status == .added) has_added = true;
+        }
+        for (self.api_route_changes.items) |route| {
+            if (route.status == .removed) return .breaking;
+            if (route.status == .added) has_added = true;
+            switch (route.response) {
+                .breaking => return .breaking,
+                .additive => has_added = true,
+                .unchanged, .dynamic => {},
+            }
         }
         inline for (.{ self.env_changes.items, self.egress_changes.items, self.cache_changes.items, self.sql_changes.items }) |items| {
             for (items) |c| {
@@ -202,6 +228,9 @@ pub fn diffContracts(
     var routes: std.ArrayList(RouteChange) = .empty;
     errdefer routes.deinit(allocator);
 
+    var api_route_changes: std.ArrayList(ApiRouteChange) = .empty;
+    errdefer api_route_changes.deinit(allocator);
+
     var env_changes: std.ArrayList(ItemChange) = .empty;
     errdefer env_changes.deinit(allocator);
 
@@ -238,6 +267,33 @@ pub fn diffContracts(
             try routes.append(allocator, .{
                 .pattern = new_route.pattern,
                 .route_type = new_route.route_type,
+                .status = .added,
+            });
+        }
+    }
+
+    // API route comparison (method + path)
+    for (old.api.routes.items) |old_route| {
+        if (findApiRoute(new.api.routes.items, old_route.method, old_route.path)) |new_route| {
+            try api_route_changes.append(allocator, .{
+                .method = old_route.method,
+                .path = old_route.path,
+                .status = .unchanged,
+                .response = try compareApiRouteResponse(allocator, &old_route, new_route),
+            });
+        } else {
+            try api_route_changes.append(allocator, .{
+                .method = old_route.method,
+                .path = old_route.path,
+                .status = .removed,
+            });
+        }
+    }
+    for (new.api.routes.items) |new_route| {
+        if (findApiRoute(old.api.routes.items, new_route.method, new_route.path) == null) {
+            try api_route_changes.append(allocator, .{
+                .method = new_route.method,
+                .path = new_route.path,
                 .status = .added,
             });
         }
@@ -297,6 +353,7 @@ pub fn diffContracts(
 
     return .{
         .routes = routes,
+        .api_route_changes = api_route_changes,
         .env_changes = env_changes,
         .egress_changes = egress_changes,
         .cache_changes = cache_changes,
@@ -332,6 +389,14 @@ pub fn writeProofJson(cert: *const ProofCertificate, writer: anytype) !void {
     try writeChangesJson(writer, "routes_removed", cert.diff.routes.items, .removed);
     try writer.writeAll(",\n");
     try writeChangesJson(writer, "routes_unchanged", cert.diff.routes.items, .unchanged);
+    try writer.writeAll(",\n");
+    try writeApiRouteChangesJson(writer, "api_routes_added", cert.diff.api_route_changes.items, .added, null);
+    try writer.writeAll(",\n");
+    try writeApiRouteChangesJson(writer, "api_routes_removed", cert.diff.api_route_changes.items, .removed, null);
+    try writer.writeAll(",\n");
+    try writeApiRouteChangesJson(writer, "api_response_additive", cert.diff.api_route_changes.items, .unchanged, .additive);
+    try writer.writeAll(",\n");
+    try writeApiRouteChangesJson(writer, "api_response_breaking", cert.diff.api_route_changes.items, .unchanged, .breaking);
     try writer.writeAll(",\n");
     try writeItemChangesJson(writer, "env_added", cert.diff.env_changes.items, .added);
     try writer.writeAll(",\n");
@@ -416,6 +481,49 @@ pub fn writeProofReport(writer: anytype, cert: *const ProofCertificate) !void {
                 try writer.writeAll(" (");
                 try writer.writeAll(route.route_type);
                 try writer.writeAll(")\n");
+            },
+        }
+    }
+
+    for (cert.diff.api_route_changes.items) |route| {
+        switch (route.status) {
+            .added => {
+                try writer.writeAll("  + ADDED    api: ");
+                try writer.writeAll(route.method);
+                try writer.writeByte(' ');
+                try writer.writeAll(route.path);
+                try writer.writeAll("\n");
+            },
+            .removed => {
+                try writer.writeAll("  - REMOVED  api: ");
+                try writer.writeAll(route.method);
+                try writer.writeByte(' ');
+                try writer.writeAll(route.path);
+                try writer.writeAll("\n");
+            },
+            .unchanged => switch (route.response) {
+                .additive => {
+                    try writer.writeAll("  + ADDED    api response: ");
+                    try writer.writeAll(route.method);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(route.path);
+                    try writer.writeAll("\n");
+                },
+                .breaking => {
+                    try writer.writeAll("  - CHANGED  api response: ");
+                    try writer.writeAll(route.method);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(route.path);
+                    try writer.writeAll("\n");
+                },
+                .dynamic => {
+                    try writer.writeAll("  ~ REVIEW   api response: ");
+                    try writer.writeAll(route.method);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(route.path);
+                    try writer.writeAll("\n");
+                },
+                .unchanged => {},
             },
         }
     }
@@ -575,6 +683,23 @@ pub fn generateRecommendation(
                 has_additions = true;
             }
 
+            var api_route_adds: u32 = 0;
+            var api_response_adds: u32 = 0;
+            for (diff.api_route_changes.items) |route| {
+                if (route.status == .added) api_route_adds += 1;
+                if (route.response == .additive) api_response_adds += 1;
+            }
+            if (api_route_adds > 0) {
+                if (has_additions) try w.writeAll(", ");
+                try w.print("{d} new API route(s)", .{api_route_adds});
+                has_additions = true;
+            }
+            if (api_response_adds > 0) {
+                if (has_additions) try w.writeAll(", ");
+                try w.print("{d} expanded API response(s)", .{api_response_adds});
+                has_additions = true;
+            }
+
             var env_adds: u32 = 0;
             for (diff.env_changes.items) |c| {
                 if (c.status == .added) env_adds += 1;
@@ -716,6 +841,200 @@ fn diffSqlList(
     }
 }
 
+fn findApiRoute(
+    haystack: []const ApiRouteInfo,
+    method: []const u8,
+    path: []const u8,
+) ?*const ApiRouteInfo {
+    for (haystack) |*item| {
+        if (std.mem.eql(u8, item.method, method) and std.mem.eql(u8, item.path, path)) return item;
+    }
+    return null;
+}
+
+fn compareApiRouteResponse(
+    allocator: std.mem.Allocator,
+    old: *const ApiRouteInfo,
+    new: *const ApiRouteInfo,
+) !ApiResponseChange {
+    if (old.response_status != new.response_status) return .breaking;
+    if (!eqlOptionalString(old.response_content_type, new.response_content_type)) return .breaking;
+
+    if (old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
+
+    if (old.response_schema_ref != null or new.response_schema_ref != null) {
+        if (old.response_schema_ref == null or new.response_schema_ref == null) return .dynamic;
+        if (std.mem.eql(u8, old.response_schema_ref.?, new.response_schema_ref.?)) return .unchanged;
+        return .breaking;
+    }
+
+    if (old.response_schema_json != null or new.response_schema_json != null) {
+        if (old.response_schema_json == null or new.response_schema_json == null) return .dynamic;
+        return try compareSchemaJson(allocator, old.response_schema_json.?, new.response_schema_json.?);
+    }
+
+    return .unchanged;
+}
+
+fn compareSchemaJson(
+    allocator: std.mem.Allocator,
+    old_json: []const u8,
+    new_json: []const u8,
+) !ApiResponseChange {
+    if (std.mem.eql(u8, old_json, new_json)) return .unchanged;
+
+    var old_parsed = std.json.parseFromSlice(std.json.Value, allocator, old_json, .{}) catch return .breaking;
+    defer old_parsed.deinit();
+    var new_parsed = std.json.parseFromSlice(std.json.Value, allocator, new_json, .{}) catch return .breaking;
+    defer new_parsed.deinit();
+
+    return compareSchemaValue(old_parsed.value, new_parsed.value);
+}
+
+fn compareSchemaValue(old_value: std.json.Value, new_value: std.json.Value) ApiResponseChange {
+    return switch (old_value) {
+        .object => |old_obj| switch (new_value) {
+            .object => |new_obj| blk: {
+                const old_type = getSchemaString(old_obj, "type");
+                const new_type = getSchemaString(new_obj, "type");
+                if (!eqlOptionalString(old_type, new_type)) break :blk .breaking;
+                if (old_type != null and std.mem.eql(u8, old_type.?, "object")) {
+                    break :blk compareObjectSchema(old_obj, new_obj);
+                }
+                break :blk if (jsonValueEqual(old_value, new_value)) .unchanged else .breaking;
+            },
+            else => .breaking,
+        },
+        else => if (jsonValueEqual(old_value, new_value)) .unchanged else .breaking,
+    };
+}
+
+fn compareObjectSchema(old_obj: std.json.ObjectMap, new_obj: std.json.ObjectMap) ApiResponseChange {
+    const old_props = getSchemaObject(old_obj, "properties");
+    const new_props = getSchemaObject(new_obj, "properties");
+    const old_required = getRequiredSet(old_obj);
+    const new_required = getRequiredSet(new_obj);
+
+    var has_addition = false;
+    if (old_props) |old_map| {
+        var it = old_map.iterator();
+        while (it.next()) |entry| {
+            const new_value = if (new_props) |new_map| new_map.get(entry.key_ptr.*) else null;
+            if (new_value == null) return .breaking;
+            if (requiredContains(old_required, entry.key_ptr.*) != requiredContains(new_required, entry.key_ptr.*)) {
+                return .breaking;
+            }
+            if (!jsonValueEqual(entry.value_ptr.*, new_value.?)) return .breaking;
+        }
+    }
+
+    if (new_props) |new_map| {
+        var it = new_map.iterator();
+        while (it.next()) |entry| {
+            if (old_props == null or old_props.?.get(entry.key_ptr.*) == null) {
+                has_addition = true;
+            }
+        }
+    }
+
+    return if (has_addition) .additive else .unchanged;
+}
+
+fn getSchemaObject(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    if (obj.get(key)) |value| {
+        return switch (value) {
+            .object => |map| map,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn getSchemaString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    if (obj.get(key)) |value| {
+        return switch (value) {
+            .string => |str| str,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn getRequiredSet(obj: std.json.ObjectMap) ?[]const std.json.Value {
+    if (obj.get("required")) |value| {
+        return switch (value) {
+            .array => |arr| arr.items,
+            else => null,
+        };
+    }
+    return null;
+}
+
+fn requiredContains(required: ?[]const std.json.Value, needle: []const u8) bool {
+    const items = required orelse return false;
+    for (items) |item| {
+        switch (item) {
+            .string => |value| if (std.mem.eql(u8, value, needle)) return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn jsonValueEqual(a: std.json.Value, b: std.json.Value) bool {
+    return switch (a) {
+        .null => switch (b) {
+            .null => true,
+            else => false,
+        },
+        .bool => |av| switch (b) {
+            .bool => |bv| av == bv,
+            else => false,
+        },
+        .integer => |av| switch (b) {
+            .integer => |bv| av == bv,
+            else => false,
+        },
+        .float => |av| switch (b) {
+            .float => |bv| av == bv,
+            else => false,
+        },
+        .string => |av| switch (b) {
+            .string => |bv| std.mem.eql(u8, av, bv),
+            else => false,
+        },
+        .array => |av| switch (b) {
+            .array => |bv| blk: {
+                if (av.items.len != bv.items.len) break :blk false;
+                for (av.items, bv.items) |lhs, rhs| {
+                    if (!jsonValueEqual(lhs, rhs)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+        .object => |av| switch (b) {
+            .object => |bv| blk: {
+                if (av.count() != bv.count()) break :blk false;
+                var it = av.iterator();
+                while (it.next()) |entry| {
+                    const other = bv.get(entry.key_ptr.*) orelse break :blk false;
+                    if (!jsonValueEqual(entry.value_ptr.*, other)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
 fn containsString(haystack: []const []const u8, needle: []const u8) bool {
     for (haystack) |item| {
         if (std.mem.eql(u8, item, needle)) return true;
@@ -759,6 +1078,33 @@ fn writeItemChangesJson(writer: anytype, field: []const u8, changes: []const Ite
         if (change.status != filter) continue;
         if (!first) try writer.writeAll(", ");
         try writeJsonString(writer, change.value);
+        first = false;
+    }
+    try writer.writeAll("]");
+}
+
+fn writeApiRouteChangesJson(
+    writer: anytype,
+    field: []const u8,
+    changes: []const ApiRouteChange,
+    status_filter: ChangeStatus,
+    response_filter: ?ApiResponseChange,
+) !void {
+    try writer.writeAll("    \"");
+    try writer.writeAll(field);
+    try writer.writeAll("\": [");
+    var first = true;
+    for (changes) |change| {
+        if (change.status != status_filter) continue;
+        if (response_filter) |filter| {
+            if (change.response != filter) continue;
+        }
+        if (!first) try writer.writeAll(", ");
+        try writer.writeByte('"');
+        try writer.writeAll(change.method);
+        try writer.writeByte(' ');
+        try writer.writeAll(change.path);
+        try writer.writeByte('"');
         first = false;
     }
     try writer.writeAll("]");
@@ -936,6 +1282,83 @@ test "diffContracts dynamic flag change tracked" {
     try std.testing.expect(diff.capabilitiesWidened());
     try std.testing.expect(!diff.capabilitiesNarrowed());
     try std.testing.expectEqual(Classification.additive, diff.classify());
+}
+
+test "diffContracts api response field addition is additive" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), diff.api_route_changes.items.len);
+    try std.testing.expectEqual(ApiResponseChange.additive, diff.api_route_changes.items[0].response);
+    try std.testing.expectEqual(Classification.additive, diff.classify());
+}
+
+test "diffContracts api response removal is breaking" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(ApiResponseChange.breaking, diff.api_route_changes.items[0].response);
+    try std.testing.expectEqual(Classification.breaking, diff.classify());
 }
 
 test "classifyWithReplay diverged traces are breaking" {

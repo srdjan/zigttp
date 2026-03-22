@@ -280,8 +280,14 @@ pub const TypeChecker = struct {
                 }
             },
 
-            .binary_op, .unary_op, .ternary, .call, .method_call,
-            .assignment, .match_expr, .template_literal,
+            .binary_op,
+            .unary_op,
+            .ternary,
+            .call,
+            .method_call,
+            .assignment,
+            .match_expr,
+            .template_literal,
             => {
                 self.walkExpr(node);
             },
@@ -410,7 +416,7 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     /// Infer the TypeIndex of an expression. Returns null_type_idx for unknown.
-    pub fn inferType(self: *TypeChecker, node: NodeIndex) TypeIndex {
+    pub fn inferType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         if (node == null_node) return null_type_idx;
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
         const pool = self.env.pool;
@@ -422,7 +428,7 @@ pub const TypeChecker = struct {
             .lit_null => pool.idx_undefined, // parser rejects null, but map defensively
             .lit_undefined => pool.idx_undefined,
             .object_literal => self.inferObjectLiteralType(node),
-            .array_literal => null_type_idx, // Could be refined with element type inference
+            .array_literal => self.inferArrayLiteralType(node),
             .function_expr, .arrow_function, .function_decl => null_type_idx, // Function types handled via signatures
 
             .binary_op => self.inferBinaryType(node),
@@ -464,7 +470,7 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn inferBinaryType(self: *TypeChecker, node: NodeIndex) TypeIndex {
+    fn inferBinaryType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const bin = self.ir_view.getBinary(node) orelse return null_type_idx;
         const pool = self.env.pool;
 
@@ -494,7 +500,7 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn inferUnaryType(self: *TypeChecker, node: NodeIndex) TypeIndex {
+    fn inferUnaryType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const un = self.ir_view.getUnary(node) orelse return null_type_idx;
         const pool = self.env.pool;
 
@@ -506,7 +512,7 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn inferObjectLiteralType(self: *TypeChecker, node: NodeIndex) TypeIndex {
+    fn inferObjectLiteralType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const obj = self.ir_view.getObject(node) orelse return null_type_idx;
         if (obj.properties_count == 0) return null_type_idx;
 
@@ -541,7 +547,38 @@ pub const TypeChecker = struct {
         return self.env.pool.addRecord(self.allocator, fields_buf[0..count]);
     }
 
-    fn inferMemberAccessType(self: *TypeChecker, node: NodeIndex) TypeIndex {
+    fn inferArrayLiteralType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const arr = self.ir_view.getArray(node) orelse return null_type_idx;
+        if (arr.elements_count == 0) return null_type_idx;
+
+        var element_types: [32]TypeIndex = undefined;
+        var count: usize = 0;
+
+        for (0..arr.elements_count) |i| {
+            if (count >= element_types.len) return null_type_idx;
+            const elem_idx = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
+            const elem_type = self.inferType(elem_idx);
+            if (elem_type == null_type_idx) return null_type_idx;
+            element_types[count] = elem_type;
+            count += 1;
+        }
+
+        const first = element_types[0];
+        var homogeneous = true;
+        for (element_types[1..count]) |elem_type| {
+            if (elem_type != first) {
+                homogeneous = false;
+                break;
+            }
+        }
+
+        if (homogeneous) {
+            return self.env.pool.addArray(self.allocator, first);
+        }
+        return self.env.pool.addTuple(self.allocator, element_types[0..count]);
+    }
+
+    fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const member = self.ir_view.getMember(node) orelse return null_type_idx;
         const obj_type = self.inferType(member.object);
         if (obj_type == null_type_idx) return null_type_idx;
@@ -558,7 +595,7 @@ pub const TypeChecker = struct {
                 }
             }
             // Field not found on known record type
-            self.addDiagnostic(.{
+            @constCast(self).addDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_field,
                 .node = node,
@@ -571,15 +608,18 @@ pub const TypeChecker = struct {
         return null_type_idx;
     }
 
-    fn inferCallType(self: *TypeChecker, node: NodeIndex) TypeIndex {
-        _ = self;
-        _ = node;
-        // Call return types require matching callee to a known function signature.
-        // For now, delegate to module type table via bool_checker.
-        return null_type_idx;
+    fn inferCallType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const call = self.ir_view.getCall(node) orelse return null_type_idx;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null_type_idx;
+        if (callee_tag != .identifier) return null_type_idx;
+
+        const binding = self.ir_view.getBinding(call.callee) orelse return null_type_idx;
+        const name = self.resolveAtomName(binding.slot) orelse return null_type_idx;
+        const sig = self.env.getFnSigByName(name) orelse return null_type_idx;
+        return sig.return_type;
     }
 
-    fn inferMatchType(self: *TypeChecker, node: NodeIndex) TypeIndex {
+    fn inferMatchType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const me = self.ir_view.getMatchExpr(node) orelse return null_type_idx;
         if (me.arms_count == 0) return null_type_idx;
 
