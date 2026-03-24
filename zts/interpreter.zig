@@ -660,6 +660,7 @@ pub const Interpreter = struct {
             .new_object, .array_spread, .call_spread => 0,
             .typeof, .to_number => 0,
             .shr_1, .mul_2, .await_val, .make_async, .import_default, .export_default => 0,
+            .add_num, .sub_num, .mul_num, .div_num, .lt_num, .gt_num, .lte_num, .gte_num, .concat_2 => 0,
 
             // 1-byte operand
             .push_i8, .get_loc, .put_loc => 1,
@@ -3003,6 +3004,159 @@ pub const Interpreter = struct {
             },
 
             // ========================================
+            // Type-specialized arithmetic
+            // ========================================
+            .add_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const bi = b.getInt();
+                    const sum, const overflow = @addWithOverflow(ai, bi);
+                    if (overflow == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(sum);
+                        self.ctx.sp = sp - 1;
+                        continue :sw @enumFromInt(self.pc[0]);
+                    }
+                    self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) + @as(f64, @floatFromInt(bi)));
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                // Numeric-only slow path (no string dispatch)
+                self.ctx.sp = sp - 2;
+                self.ctx.pushUnchecked(try self.addNumericOnly(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .sub_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const bi = b.getInt();
+                    const diff, const overflow = @subWithOverflow(ai, bi);
+                    if (overflow == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(diff);
+                        self.ctx.sp = sp - 1;
+                        continue :sw @enumFromInt(self.pc[0]);
+                    }
+                    self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) - @as(f64, @floatFromInt(bi)));
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.sp = sp - 2;
+                self.ctx.pushUnchecked(try self.subValuesSlow(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .mul_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    const ai = a.getInt();
+                    const bi = b.getInt();
+                    const product, const overflow = @mulWithOverflow(ai, bi);
+                    if (overflow == 0) {
+                        @branchHint(.likely);
+                        self.ctx.stack[sp - 2] = value.JSValue.fromInt(product);
+                        self.ctx.sp = sp - 1;
+                        continue :sw @enumFromInt(self.pc[0]);
+                    }
+                    self.ctx.stack[sp - 2] = try self.allocFloat(@as(f64, @floatFromInt(ai)) * @as(f64, @floatFromInt(bi)));
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.sp = sp - 2;
+                self.ctx.pushUnchecked(try self.mulValuesSlow(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .div_num => {
+                self.advanceOp();
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                self.ctx.pushUnchecked(try self.divValues(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .lt_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() < b.getInt());
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .lt);
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .gt_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() > b.getInt());
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(try compareValues(a, b) == .gt);
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .lte_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() <= b.getInt());
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                const cmp = try compareValues(a, b);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .lt or cmp == .eq);
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .gte_num => {
+                self.advanceOp();
+                const sp = self.ctx.sp;
+                const b = self.ctx.stack[sp - 1];
+                const a = self.ctx.stack[sp - 2];
+                if (a.isInt() and b.isInt()) {
+                    @branchHint(.likely);
+                    self.ctx.stack[sp - 2] = value.JSValue.fromBool(a.getInt() >= b.getInt());
+                    self.ctx.sp = sp - 1;
+                    continue :sw @enumFromInt(self.pc[0]);
+                }
+                const cmp = try compareValues(a, b);
+                self.ctx.stack[sp - 2] = value.JSValue.fromBool(cmp == .gt or cmp == .eq);
+                self.ctx.sp = sp - 1;
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .concat_2 => {
+                self.advanceOp();
+                const b = self.ctx.pop();
+                const a = self.ctx.pop();
+                self.ctx.pushUnchecked(try self.concatToString(a, b));
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+
+            // ========================================
             // Unimplemented / Reserved
             // ========================================
             _ => {
@@ -3052,6 +3206,20 @@ pub const Interpreter = struct {
         };
         const bn = b.toNumber() orelse {
             traceTypeError(self, "add(b)", a, b);
+            return error.TypeError;
+        };
+        return try self.allocFloat(an + bn);
+    }
+
+    /// Numeric-only add slow path for add_num opcode (no string dispatch).
+    fn addNumericOnly(self: *Interpreter, a: value.JSValue, b: value.JSValue) !value.JSValue {
+        @branchHint(.cold);
+        const an = a.toNumber() orelse {
+            traceTypeError(self, "add_num(a)", a, b);
+            return error.TypeError;
+        };
+        const bn = b.toNumber() orelse {
+            traceTypeError(self, "add_num(b)", a, b);
             return error.TypeError;
         };
         return try self.allocFloat(an + bn);

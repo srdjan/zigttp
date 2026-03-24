@@ -18,7 +18,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges and no exceptions - the IR tree IS the control flow graph. `break` and `continue` within `for-of` are forward jumps only and don't compromise this property. See [verification docs](docs/verification.md).
 
-**Boolean enforcement.** Truthy/falsy coercion is rejected in conditions and logical operators - always, not behind a flag. The BoolChecker performs progressive type inference for virtual-module return types, `match` expressions, optional returns like `env()`/`cacheGet()`, and Result-shaped values like `jwtVerify(...).ok`. Values the static checker cannot prove are caught by runtime VM assertions. See [boolean enforcement docs](docs/sound-mode.md).
+**Sound mode.** The compiler uses type inference to catch bugs across all operators at compile time, not just in boolean contexts. Arithmetic on non-numeric types is rejected (`"hello" - 1`, `true * 5`, `env("X") / 2`). Mixed-type `+` is an error - use template literals. Tautological comparisons (`typeof x === "number"` when x is provably number) emit warnings. In boolean contexts, types with unambiguous falsy states are accepted (`if (count)`, `if (name)`), while objects and functions are rejected (always truthy). Values the static checker cannot prove are caught by runtime VM assertions. When types are statically proven, the compiler emits specialized opcodes (`add_num`, `lt_num`, etc.) that skip runtime type dispatch. See [sound mode docs](docs/sound-mode.md).
 
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
 
@@ -290,7 +290,7 @@ Options:
 
 **HTTP/FaaS Optimizations**: Shape preallocation for Request/Response objects, pre-interned HTTP atoms, HTTP string caching, LockFreePool handler isolation, zero-copy response mode.
 
-**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract extraction and auto-sandboxing restrict runtime capabilities to proven values. `zigttp:sql` queries are prepared against a build-time schema snapshot via `-Dsql-schema=...`. Boolean enforcement rejects truthy/falsy coercion. Full TypeScript type checking validates annotations against virtual module signatures.
+**Compile-Time Analysis**: Handler verification (`-Dverify`) proves correctness at build time. Contract extraction and auto-sandboxing restrict runtime capabilities to proven values. `zigttp:sql` queries are prepared against a build-time schema snapshot via `-Dsql-schema=...`. Sound mode rejects non-numeric arithmetic, mixed-type `+`, and tautological comparisons at compile time, and emits type-specialized opcodes when types are proven. Full TypeScript type checking validates annotations against virtual module signatures.
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
@@ -638,7 +638,7 @@ See [Performance](docs/performance.md) for detailed profiling analysis and deplo
 
 - [User Guide](docs/user-guide.md) - Complete handler API reference, routing patterns, examples
 - [Verification](docs/verification.md) - Compile-time handler verification: checks, diagnostics, examples
-- [Boolean Enforcement](docs/sound-mode.md) - Strict boolean enforcement: type inference, narrowing, diagnostics
+- [Sound Mode](docs/sound-mode.md) - Type-directed analysis: arithmetic safety, `+` safety, tautology detection, truthiness, type-specialized codegen
 - [Architecture](docs/architecture.md) - System design, runtime model, concurrency, project structure
 - [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
 - [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation

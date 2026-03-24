@@ -1860,6 +1860,17 @@ pub const BaselineCompiler = struct {
             // Logical NOT
             .not => try self.emitLogicalNot(pc - 1),
 
+            // Type-specialized arithmetic: types are statically proven, use specialized int paths
+            .add_num => try self.emitSpecializedIntBinaryOp(.add),
+            .sub_num => try self.emitSpecializedIntBinaryOp(.sub),
+            .mul_num => try self.emitSpecializedIntBinaryOp(.mul),
+            .div_num => try self.emitDiv(),
+            .lt_num => try self.emitComparison(.lt),
+            .gt_num => try self.emitComparison(.gt),
+            .lte_num => try self.emitComparison(.lte),
+            .gte_num => try self.emitComparison(.gte),
+            .concat_2 => try self.emitBinaryOp(.add), // fallback to generic add (string path)
+
             else => {
                 return CompileError.UnsupportedOpcode;
             },

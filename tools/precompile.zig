@@ -787,6 +787,10 @@ fn compileHandler(
         root,
     ) catch {};
 
+    // Node type map for type-directed codegen (populated by BoolChecker, consumed by CodeGen)
+    var node_type_map: zts.bool_checker.NodeTypeMap = .empty;
+    defer node_type_map.deinit(allocator);
+
     // Run bool checker and type checker
     {
         const ir_view_check = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
@@ -818,6 +822,10 @@ fn compileHandler(
         }
 
         std.debug.print("Boolean check passed\n", .{});
+
+        // Extract node type map for codegen specialization (move ownership out of checker)
+        node_type_map = checker.node_types;
+        checker.node_types = .empty; // Prevent double-free in checker.deinit()
 
         // TypeChecker: full type annotation checking (when TypeMap available from .ts/.tsx)
         if (strip_result) |sr| {
@@ -921,6 +929,11 @@ fn compileHandler(
         &atoms,
     );
     defer code_gen.deinit();
+
+    // Wire type annotations from BoolChecker for type-directed opcode specialization
+    if (node_type_map.count() > 0) {
+        code_gen.setNodeTypes(&node_type_map);
+    }
 
     const func = try code_gen.generate(root);
     defer code_gen.freeOwnedConstantPayloads();

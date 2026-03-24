@@ -1,4 +1,8 @@
-# Type-Directed Truthiness
+# Sound Mode: Type-Directed Analysis
+
+zigttp's sound mode uses compile-time type inference to catch bugs across all operators, not just boolean contexts. The compiler infers types for every expression and enforces type-safety rules at three levels: truthiness in boolean contexts, arithmetic type safety, and tautological comparison detection.
+
+## Type-Directed Truthiness
 
 zigttp uses type-directed truthiness (TDT) in boolean contexts. Instead of rejecting all non-boolean values, the compiler uses its type knowledge to apply unambiguous truthiness rules per type. The original concise syntax (`if (x)`, `if (count)`, `if (name)`) works when the type has exactly one falsy state.
 
@@ -160,15 +164,109 @@ When the BoolChecker cannot determine the type statically, it infers `unknown`. 
 | `typeof x === "T"` guard (then-branch) | T (narrowed) |
 | `typeof x !== "T"` guard (else-branch) | T (narrowed) |
 
+## Type-Directed Arithmetic Safety
+
+Arithmetic operators (`-`, `*`, `/`, `%`, `**`) require numeric operands. When the compiler can prove an operand is non-numeric, it emits a compile-time error.
+
+### What is rejected
+
+```javascript
+"hello" - 1                        // ERROR: 'string' operand in '-'; arithmetic requires numbers
+true * 5                           // ERROR: 'boolean' operand in '*'; use (b ? 1 : 0)
+undefined / 2                     // ERROR: 'undefined' operand in '/'; result is always NaN
+env("TTL") * 1000                 // ERROR: 'optional string' operand in '*'; unwrap with ?? first
+{} - 1                            // ERROR: 'object' operand in '-'; objects cannot be used in arithmetic
+```
+
+### What works
+
+```javascript
+5 - 3                              // OK: number - number
+count * 2                          // OK: tracked const number
+cacheIncr("ns", "key") * 2        // OK: cacheIncr returns number
+parseInt(env("TTL") ?? "60") * 1000  // OK: parseInt returns number, ?? unwraps optional
+unknownParam - 1                   // OK: unknown defers to runtime
+```
+
+## Type-Directed `+` Safety
+
+The `+` operator accepts `number + number` (addition) and `string + string` (concatenation). Mixing types is an error - use template literals for string interpolation.
+
+### What is rejected
+
+```javascript
+42 + "px"                          // ERROR: implicit type coercion; number and string operands
+"count: " + 5                     // ERROR: use template literal: `count: ${n}`
+true + 1                          // ERROR: 'boolean' operand in '+'
+env("X") + "suffix"               // ERROR: 'optional string' operand in '+'
+```
+
+### What works
+
+```javascript
+1 + 2                              // OK: number + number
+"a" + "b"                         // OK: string + string
+`count: ${n}`                     // OK: template literal handles conversion
+(env("X") ?? "") + "suffix"       // OK: ?? unwraps optional to string
+x + 1                             // OK: unknown defers to runtime
+```
+
+## Tautological Comparison Detection
+
+The compiler warns when a comparison is always true or always false based on known types.
+
+### typeof tautologies
+
+```javascript
+const x = 42;
+typeof x === "number"              // WARNING: always true; typeof check unnecessary
+typeof x === "string"              // WARNING: always false; this branch is dead code
+typeof x !== "number"              // WARNING: always false
+```
+
+### undefined tautologies
+
+```javascript
+const x = 42;
+x === undefined                    // WARNING: always false; value is never undefined
+sha256("data") !== undefined       // WARNING: always true; remove the check
+env("KEY") === undefined           // No warning: env() returns optional
+```
+
 ## Diagnostic Reference
 
 **Errors (block compilation):**
 - `always-truthy value (object) in 'if' operator` - objects are always truthy; this condition is pointless
 - `always-truthy value (function) in 'if' operator` - functions are always truthy; this condition is pointless
+- `'<type>' operand in '<op>' operator; arithmetic requires numbers` - non-numeric value in arithmetic
+- `implicit type coercion in '+'; number and string operands` - mixed types in addition
+- `'<type>' operand in '+' operator` - non-addable type in addition
 
 **Warnings (do not block compilation):**
 - `condition is always false (undefined)` - this branch is dead code
 - `left side of '??' is never undefined` - remove the '??' fallback; it is unreachable
+- `tautological typeof comparison: result is always true/false` - typeof check on known type
+- `comparison with undefined is always true/false` - undefined check on non-optional value
+
+## Type-Directed Codegen
+
+When the compiler can prove both operands of a binary operation are numbers (or both are strings for `+`), it emits specialized opcodes that skip runtime type dispatch.
+
+| Generic opcode | Specialized opcode | Difference |
+|---|---|---|
+| `add` | `add_num` | skips string concatenation check |
+| `sub` | `sub_num` | skips type coercion slow path |
+| `mul` | `mul_num` | skips type coercion slow path |
+| `div` | `div_num` | skips type coercion slow path |
+| `lt` | `lt_num` | skips general comparison path |
+| `gt` | `gt_num` | skips general comparison path |
+| `lte` | `lte_num` | skips general comparison path |
+| `gte` | `gte_num` | skips general comparison path |
+| `add` (string) | `concat_2` | direct string concatenation |
+
+Specialized opcodes also skip type feedback recording (the JIT does not need profiling data for statically-proven types). The JIT baseline compiler maps specialized opcodes directly to their optimized machine code paths.
+
+Type-directed codegen is active only in precompiled handlers (`-Dhandler=...`). Dev mode (`zig build run`) uses generic opcodes because the BoolChecker's type annotations are not wired to the dev-mode CodeGen path.
 
 ## Runtime Enforcement
 

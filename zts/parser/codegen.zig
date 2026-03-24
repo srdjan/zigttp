@@ -15,6 +15,7 @@ const string = @import("../string.zig");
 const js_object = @import("../object.zig");
 const context = @import("../context.zig");
 const handler_analyzer = @import("../handler_analyzer.zig");
+const bool_checker = @import("../bool_checker.zig");
 
 // Re-export types used by this module
 const JSValue = value.JSValue;
@@ -88,6 +89,9 @@ pub const CodeGen = struct {
     /// Optimization statistics (accumulated across all functions)
     opt_stats: bytecode_opt.OptStats,
 
+    /// Per-node type annotations from BoolChecker for type-specialized opcode emission.
+    node_types: ?*const bool_checker.NodeTypeMap,
+
     /// Object literal shapes collected during compilation.
     /// Each entry is an array of atoms representing property names in declaration order.
     shapes: std.ArrayList([]const js_object.Atom),
@@ -134,6 +138,7 @@ pub const CodeGen = struct {
             .current_stack_depth = 0,
             .ic_cache_idx = 0,
             .opt_stats = .{},
+            .node_types = null,
             .shapes = .empty,
             .shape_dedup = .{},
         };
@@ -164,9 +169,15 @@ pub const CodeGen = struct {
             .current_stack_depth = 0,
             .ic_cache_idx = 0,
             .opt_stats = .{},
+            .node_types = null,
             .shapes = .empty,
             .shape_dedup = .{},
         };
+    }
+
+    /// Set the per-node type annotations from BoolChecker for type-directed codegen.
+    pub fn setNodeTypes(self: *CodeGen, nt: *const bool_checker.NodeTypeMap) void {
+        self.node_types = nt;
     }
 
     /// Get accumulated optimization statistics
@@ -369,7 +380,7 @@ pub const CodeGen = struct {
             .identifier => try self.emitIdentifier(self.ir.getBinding(index).?),
 
             // Expressions
-            .binary_op => try self.emitBinaryOp(self.ir.getBinary(index).?),
+            .binary_op => try self.emitBinaryOp(self.ir.getBinary(index).?, index),
             .unary_op => try self.emitUnaryOp(self.ir.getUnary(index).?),
             .ternary => try self.emitTernary(self.ir.getTernary(index).?),
             .call, .optional_call => try self.emitCall(self.ir.getCall(index).?),
@@ -720,7 +731,7 @@ pub const CodeGen = struct {
         return true;
     }
 
-    fn emitBinaryOp(self: *CodeGen, binary: Node.BinaryExpr) !void {
+    fn emitBinaryOp(self: *CodeGen, binary: Node.BinaryExpr, node_idx: NodeIndex) !void {
         // Short-circuit operators need special handling
         switch (binary.op) {
             .and_op => return self.emitShortCircuitAnd(binary),
@@ -876,6 +887,32 @@ pub const CodeGen = struct {
 
         try self.emitNode(binary.left);
         try self.emitNode(binary.right);
+
+        // Type-directed specialization: emit optimized opcodes when types are statically known
+        if (self.node_types) |nt| {
+            if (nt.get(node_idx)) |expr_type| {
+                const specialized: ?Opcode = switch (binary.op) {
+                    .add => switch (expr_type) {
+                        .number => .add_num,
+                        .string => .concat_2,
+                        else => null,
+                    },
+                    .sub => if (expr_type == .number) .sub_num else null,
+                    .mul => if (expr_type == .number) .mul_num else null,
+                    .div => if (expr_type == .number) .div_num else null,
+                    .lt => if (expr_type == .number) .lt_num else null,
+                    .gt => if (expr_type == .number) .gt_num else null,
+                    .lte => if (expr_type == .number) .lte_num else null,
+                    .gte => if (expr_type == .number) .gte_num else null,
+                    else => null,
+                };
+                if (specialized) |op| {
+                    try self.emit(op);
+                    self.popStack(1);
+                    return;
+                }
+            }
+        }
 
         const opcode: Opcode = switch (binary.op) {
             .add => .add,

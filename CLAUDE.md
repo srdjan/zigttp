@@ -149,9 +149,15 @@ Currently supported targets:
 
 Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). The deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
 
-**Type-Directed Truthiness** (`zts/bool_checker.zig`): The BoolChecker walks the IR tree inferring expression types and applies type-directed truthiness (TDT) in boolean contexts. Types with unambiguous falsy states are accepted: boolean (value itself), number (!=0), string (!=""), optional_string/optional_object (!=undefined). Objects and functions are rejected (always truthy - pointless condition). undefined emits a warning (always false - dead branch). Runtime VM conditional opcodes use `toConditionBool()` with the same rules. See [docs/sound-mode.md](docs/sound-mode.md).
+**Sound Mode** (`zts/bool_checker.zig`): The BoolChecker walks the IR tree inferring expression types and applies type-directed analysis across all operators. See [docs/sound-mode.md](docs/sound-mode.md).
 
-TDT includes progressive type inference and automatic narrowing:
+Type-directed truthiness (TDT) in boolean contexts: types with unambiguous falsy states are accepted (boolean, number, string, optional variants). Objects and functions are rejected (always truthy). undefined emits a warning (always false).
+
+Type-directed arithmetic safety: arithmetic operators (`-`, `*`, `/`, `%`, `**`) require numeric operands. Non-numeric types (string, boolean, object, function, undefined, optional) are compile-time errors. Type-directed `+` safety: mixed-type `+` (number + string) is a compile-time error - use template literals. Non-addable types (boolean, object, function, undefined, optional) in `+` are also errors. Tautological comparison detection: `typeof x === "T"` on a provably-typed value, or `x === undefined` on a provably non-optional value, emits warnings.
+
+Type-directed codegen: when the BoolChecker proves both operands of an arithmetic or comparison are numbers, it populates a `NodeTypeMap`. The CodeGen emits specialized opcodes (`add_num`, `sub_num`, `mul_num`, `div_num`, `lt_num`, `gt_num`, `lte_num`, `gte_num`, `concat_2`) that skip runtime type dispatch. These opcodes omit the string-concatenation check (for `add_num`) and type feedback recording, providing faster cold-start execution before JIT warmup.
+
+Progressive type inference and automatic narrowing:
 - **Virtual module return types**: Imported functions from `zigttp:*` modules have known return types (boolean, number, string, object, optional variants). `if (cacheIncr("ns", "key"))` works directly (number truthiness: != 0).
 - **Match expression types**: When all arms return the same type, the match expression inherits that type.
 - **Optional types**: Functions like `env()` and `cacheGet()` return `optional_string` (`T | undefined`). These work directly in boolean contexts: `if (val)` narrows to string in then-branch. The `??` operator resolves optionals: `env("KEY") ?? "default"` infers as `string`.

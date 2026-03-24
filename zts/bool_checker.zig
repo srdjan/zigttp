@@ -122,6 +122,10 @@ pub const DiagnosticKind = enum {
     logical_operand_not_boolean, // && or || operand is non-boolean
     not_operand_not_boolean, // ! operand is non-boolean
     nullish_on_non_nullable, // ?? LHS is provably non-nullable
+    arithmetic_on_non_numeric, // arithmetic operator on provably non-numeric type
+    mixed_type_add, // number + string or string + number
+    add_on_non_addable, // + operator on non-numeric/non-string type
+    tautological_comparison, // comparison is always true or always false
 };
 
 pub const Diagnostic = struct {
@@ -130,11 +134,17 @@ pub const Diagnostic = struct {
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
+    /// Whether the message was dynamically allocated (needs freeing).
+    allocated: bool = false,
 };
 
 // ---------------------------------------------------------------------------
 // BoolChecker
 // ---------------------------------------------------------------------------
+
+/// Per-node type annotation map for type-directed codegen.
+/// Populated by BoolChecker during its walk, consumed by CodeGen to emit specialized opcodes.
+pub const NodeTypeMap = std.AutoHashMapUnmanaged(NodeIndex, ExprType);
 
 pub const BoolChecker = struct {
     allocator: std.mem.Allocator,
@@ -158,6 +168,9 @@ pub const BoolChecker = struct {
     /// Binding slots that hold Result objects (from jwtVerify, validateJson, etc.).
     /// Used to infer result.ok as boolean. Key: packed(scope_id, slot).
     result_bindings: std.AutoHashMapUnmanaged(u32, void),
+    /// Per-node type annotations for codegen specialization.
+    /// Populated for binary ops where both operands have known types.
+    node_types: NodeTypeMap,
 
     const TypeofGuard = struct {
         binding_key: u32,
@@ -179,13 +192,14 @@ pub const BoolChecker = struct {
             .module_fn_types = .empty,
             .module_result_fn_slots = .empty,
             .result_bindings = .empty,
+            .node_types = .empty,
         };
     }
 
     pub fn deinit(self: *BoolChecker) void {
         // Free dynamically allocated diagnostic messages
         for (self.diagnostics.items) |diag| {
-            if (isAllocatedMessage(diag.message)) {
+            if (diag.allocated) {
                 self.allocator.free(diag.message);
             }
         }
@@ -196,14 +210,7 @@ pub const BoolChecker = struct {
         self.module_fn_types.deinit(self.allocator);
         self.module_result_fn_slots.deinit(self.allocator);
         self.result_bindings.deinit(self.allocator);
-    }
-
-    /// Check if a diagnostic message was dynamically allocated vs static string.
-    /// Allocated messages start with "always-truthy value (" and contain "' operator".
-    fn isAllocatedMessage(msg: []const u8) bool {
-        return msg.len > 30 and
-            std.mem.startsWith(u8, msg, "always-truthy value (") and
-            std.mem.endsWith(u8, msg, "' operator");
+        self.node_types.deinit(self.allocator);
     }
 
     /// Run the checker on the given root node. Returns the number of errors.
@@ -441,8 +448,50 @@ pub const BoolChecker = struct {
                             });
                         }
                     },
+                    // S5: Arithmetic operators require numeric operands
+                    .sub, .mul, .div, .mod, .pow => {
+                        const op_name: []const u8 = switch (bin.op) {
+                            .sub => "-",
+                            .mul => "*",
+                            .div => "/",
+                            .mod => "%",
+                            .pow => "**",
+                            else => unreachable,
+                        };
+                        self.requireNumeric(bin.left, op_name);
+                        self.requireNumeric(bin.right, op_name);
+                    },
+                    // S6: + operator requires matching types
+                    .add => {
+                        const left_type = self.inferType(bin.left);
+                        const right_type = self.inferType(bin.right);
+                        // Mixed type: number + string or string + number
+                        if ((left_type == .number and right_type == .string) or
+                            (left_type == .string and right_type == .number))
+                        {
+                            self.addDiagnostic(.{
+                                .severity = .err,
+                                .kind = .mixed_type_add,
+                                .node = node,
+                                .message = "implicit type coercion in '+'; number and string operands",
+                                .help = "use template literal for string interpolation, or parseInt()/parseFloat() for numeric conversion",
+                            });
+                        } else {
+                            // Check each operand is addable (number, string, or unknown)
+                            self.requireAddable(bin.left, left_type);
+                            self.requireAddable(bin.right, right_type);
+                        }
+                    },
+                    // S7: Tautological comparisons
+                    .strict_eq, .strict_neq => {
+                        self.checkTautologicalComparison(node, bin);
+                    },
                     else => {},
                 }
+                // Annotate binary op nodes for type-directed codegen.
+                // Uses inferType results (cheap for leaf nodes; avoids redundancy
+                // with the checks above for non-leaf cases).
+                self.annotateNodeType(node, bin.op, self.inferType(bin.left), self.inferType(bin.right));
                 // Recurse into sub-expressions
                 self.walkExpr(bin.left);
                 self.walkExpr(bin.right);
@@ -925,15 +974,24 @@ pub const BoolChecker = struct {
             pos += context_name.len;
             @memcpy(msg_buf[pos..][0..suffix.len], suffix);
             pos += suffix.len;
-            const message = self.allocator.dupe(u8, msg_buf[0..pos]) catch
-                "always-truthy value used in boolean context";
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = kind,
-                .node = node,
-                .message = message,
-                .help = help,
-            });
+            if (self.allocator.dupe(u8, msg_buf[0..pos])) |message| {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = kind,
+                    .node = node,
+                    .message = message,
+                    .help = help,
+                    .allocated = true,
+                });
+            } else |_| {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = kind,
+                    .node = node,
+                    .message = "always-truthy value used in boolean context",
+                    .help = help,
+                });
+            }
         } else {
             self.addDiagnostic(.{
                 .severity = .err,
@@ -943,6 +1001,284 @@ pub const BoolChecker = struct {
                 .help = help,
             });
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Node type annotation for codegen specialization
+    // -----------------------------------------------------------------------
+
+    fn annotateNodeType(self: *BoolChecker, node: NodeIndex, op: ir.BinaryOp, left_type: ExprType, right_type: ExprType) void {
+        if (left_type == .number and right_type == .number) {
+            switch (op) {
+                .add, .sub, .mul, .div, .mod, .pow, .lt, .lte, .gt, .gte => {
+                    self.node_types.put(self.allocator, node, .number) catch {};
+                },
+                else => {},
+            }
+        } else if (op == .add and left_type == .string and right_type == .string) {
+            self.node_types.put(self.allocator, node, .string) catch {};
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Numeric requirement check (type-directed arithmetic safety)
+    // -----------------------------------------------------------------------
+
+    fn requireNumeric(self: *BoolChecker, node: NodeIndex, op_name: []const u8) void {
+        const inferred = self.inferType(node);
+        switch (inferred) {
+            .number, .unknown => return, // number is valid, unknown defers to runtime
+            .boolean => {
+                self.emitArithDiagnostic(node, "boolean", op_name, "use explicit conversion: (b ? 1 : 0)");
+            },
+            .string => {
+                self.emitArithDiagnostic(node, "string", op_name, "use parseInt() or parseFloat() to convert");
+            },
+            .undefined => {
+                self.emitArithDiagnostic(node, "undefined", op_name, "result is always NaN");
+            },
+            .object => {
+                self.emitArithDiagnostic(node, "object", op_name, "objects cannot be used in arithmetic");
+            },
+            .function => {
+                self.emitArithDiagnostic(node, "function", op_name, "functions cannot be used in arithmetic");
+            },
+            .optional_string => {
+                self.emitArithDiagnostic(node, "optional string", op_name, "unwrap with ?? first, then use parseInt()");
+            },
+            .optional_object => {
+                self.emitArithDiagnostic(node, "optional object", op_name, "objects cannot be used in arithmetic");
+            },
+        }
+    }
+
+    fn emitArithDiagnostic(self: *BoolChecker, node: NodeIndex, type_name: []const u8, op_name: []const u8, help: []const u8) void {
+        // Build message: "'string' operand in '-' operator; arithmetic requires numbers"
+        var msg_buf: [96]u8 = undefined;
+        const prefix = "'";
+        const mid = "' operand in '";
+        const suffix = "' operator; arithmetic requires numbers";
+        const msg_len = prefix.len + type_name.len + mid.len + op_name.len + suffix.len;
+        if (msg_len <= msg_buf.len) {
+            var pos: usize = 0;
+            @memcpy(msg_buf[pos..][0..prefix.len], prefix);
+            pos += prefix.len;
+            @memcpy(msg_buf[pos..][0..type_name.len], type_name);
+            pos += type_name.len;
+            @memcpy(msg_buf[pos..][0..mid.len], mid);
+            pos += mid.len;
+            @memcpy(msg_buf[pos..][0..op_name.len], op_name);
+            pos += op_name.len;
+            @memcpy(msg_buf[pos..][0..suffix.len], suffix);
+            pos += suffix.len;
+            if (self.allocator.dupe(u8, msg_buf[0..pos])) |message| {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .arithmetic_on_non_numeric,
+                    .node = node,
+                    .message = message,
+                    .help = help,
+                    .allocated = true,
+                });
+            } else |_| {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .arithmetic_on_non_numeric,
+                    .node = node,
+                    .message = "non-numeric operand in arithmetic operator",
+                    .help = help,
+                });
+            }
+        } else {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arithmetic_on_non_numeric,
+                .node = node,
+                .message = "non-numeric operand in arithmetic operator",
+                .help = help,
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Addable requirement check (type-directed + safety)
+    // -----------------------------------------------------------------------
+
+    fn requireAddable(self: *BoolChecker, node: NodeIndex, inferred: ExprType) void {
+        switch (inferred) {
+            .number, .string, .unknown => return, // valid operands for +
+            .boolean => {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .add_on_non_addable,
+                    .node = node,
+                    .message = "'boolean' operand in '+' operator",
+                    .help = "use explicit conversion: (b ? 1 : 0) for numeric addition, or `${b}` for string",
+                });
+            },
+            .undefined => {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .add_on_non_addable,
+                    .node = node,
+                    .message = "'undefined' operand in '+' operator; result is always NaN",
+                    .help = "check for undefined before using in addition",
+                });
+            },
+            .object => {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .add_on_non_addable,
+                    .node = node,
+                    .message = "'object' operand in '+' operator",
+                    .help = "objects cannot be used in addition",
+                });
+            },
+            .function => {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .add_on_non_addable,
+                    .node = node,
+                    .message = "'function' operand in '+' operator",
+                    .help = "functions cannot be used in addition",
+                });
+            },
+            .optional_string => {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .add_on_non_addable,
+                    .node = node,
+                    .message = "'optional string' operand in '+' operator",
+                    .help = "unwrap with ?? first: (val ?? \"default\")",
+                });
+            },
+            .optional_object => {
+                self.addDiagnostic(.{
+                    .severity = .err,
+                    .kind = .add_on_non_addable,
+                    .node = node,
+                    .message = "'optional object' operand in '+' operator",
+                    .help = "objects cannot be used in addition",
+                });
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tautological comparison detection
+    // -----------------------------------------------------------------------
+
+    fn checkTautologicalComparison(self: *BoolChecker, node: NodeIndex, bin: Node.BinaryExpr) void {
+        // Pattern 1: typeof x === "T" where x is provably T
+        if (self.isTypeofTautology(bin)) |is_always_true| {
+            const result_is_true = (bin.op == .strict_eq) == is_always_true;
+            self.addDiagnostic(.{
+                .severity = .warning,
+                .kind = .tautological_comparison,
+                .node = node,
+                .message = if (result_is_true)
+                    "tautological typeof comparison: result is always true"
+                else
+                    "tautological typeof comparison: result is always false",
+                .help = if (result_is_true)
+                    "typeof check is unnecessary; type is already known"
+                else
+                    "this branch is dead code",
+            });
+            return;
+        }
+
+        // Pattern 2: x === undefined where x is provably non-optional
+        if (self.isUndefinedTautology(bin)) |_| {
+            const result_is_true = bin.op == .strict_neq;
+            self.addDiagnostic(.{
+                .severity = .warning,
+                .kind = .tautological_comparison,
+                .node = node,
+                .message = if (result_is_true)
+                    "comparison with undefined is always true; value is never undefined"
+                else
+                    "comparison with undefined is always false; value is never undefined",
+                .help = if (result_is_true)
+                    "remove the undefined check; it is unreachable"
+                else
+                    "this branch is dead code",
+            });
+        }
+    }
+
+    /// Check if a typeof comparison is tautological.
+    /// Returns true if the typeof matches the known type, false if it contradicts, null if unknown.
+    fn isTypeofTautology(self: *BoolChecker, bin: Node.BinaryExpr) ?bool {
+        // Look for: typeof x === "T" or "T" === typeof x
+        const typeof_node, const lit_node = self.extractTypeofAndLiteral(bin) orelse return null;
+
+        // Get the typeof operand
+        const unary = self.ir_view.getUnary(typeof_node) orelse return null;
+        if (unary.op != .typeof_op) return null;
+
+        // Infer the type of the operand
+        const operand_type = self.inferType(unary.operand);
+        if (operand_type == .unknown) return null;
+
+        // Get the string literal value
+        const str_idx = self.ir_view.getStringIdx(lit_node) orelse return null;
+        const lit_str = self.ir_view.getString(str_idx) orelse return null;
+
+        // Map ExprType to typeof result string
+        const expected_typeof: ?[]const u8 = switch (operand_type) {
+            .boolean => "boolean",
+            .number => "number",
+            .string, .optional_string => "string",
+            .undefined => "undefined",
+            .object, .optional_object => "object",
+            .function => "function",
+            .unknown => null,
+        };
+
+        if (expected_typeof) |expected| {
+            return std.mem.eql(u8, lit_str, expected);
+        }
+        return null;
+    }
+
+    /// Check if a comparison with undefined is tautological on a non-optional value.
+    /// Returns true if one side is `undefined`, null if no tautology detected.
+    fn isUndefinedTautology(self: *BoolChecker, bin: Node.BinaryExpr) ?bool {
+        // Look for: x === undefined or undefined === x
+        const left_tag = self.ir_view.getTag(bin.left) orelse return null;
+        const right_tag = self.ir_view.getTag(bin.right) orelse return null;
+
+        var value_node: NodeIndex = undefined;
+        if (left_tag == .lit_undefined) {
+            value_node = bin.right;
+        } else if (right_tag == .lit_undefined) {
+            value_node = bin.left;
+        } else {
+            return null;
+        }
+
+        // Get the type of the non-undefined side
+        const value_type = self.inferType(value_node);
+        if (value_type.isNonNullable()) {
+            return true;
+        }
+        return null;
+    }
+
+    /// Extract typeof node and string literal from a comparison.
+    /// Handles both `typeof x === "T"` and `"T" === typeof x`.
+    fn extractTypeofAndLiteral(self: *BoolChecker, bin: Node.BinaryExpr) ?struct { NodeIndex, NodeIndex } {
+        const left_tag = self.ir_view.getTag(bin.left) orelse return null;
+        const right_tag = self.ir_view.getTag(bin.right) orelse return null;
+
+        if (left_tag == .unary_op and right_tag == .lit_string) {
+            return .{ bin.left, bin.right };
+        }
+        if (left_tag == .lit_string and right_tag == .unary_op) {
+            return .{ bin.right, bin.left };
+        }
+        return null;
     }
 
     // -----------------------------------------------------------------------
@@ -1960,4 +2296,252 @@ test "sound: optional from function in boolean context passes (TDT)" {
         \\const r = find([1]);
         \\if (r) { let x = r; }
     , 0);
+}
+
+// =========================================================================
+// Type-directed arithmetic safety (S5)
+// =========================================================================
+
+test "sound: number - number passes" {
+    try checkSource("const r = 5 - 3;", 0);
+}
+
+test "sound: number * number passes" {
+    try checkSource("const r = 5 * 3;", 0);
+}
+
+test "sound: number / number passes" {
+    try checkSource("const r = 10 / 2;", 0);
+}
+
+test "sound: number % number passes" {
+    try checkSource("const r = 10 % 3;", 0);
+}
+
+test "sound: number ** number passes" {
+    try checkSource("const r = 2 ** 3;", 0);
+}
+
+test "sound: string in subtraction fails" {
+    try checkSource("const r = \"hello\" - 1;", 1);
+}
+
+test "sound: string in multiplication fails" {
+    try checkSource("const r = \"hello\" * 2;", 1);
+}
+
+test "sound: boolean in arithmetic fails" {
+    try checkSource("const r = true * 5;", 1);
+}
+
+test "sound: boolean both sides arithmetic fails" {
+    try checkSource("const r = true - false;", 2);
+}
+
+test "sound: undefined in arithmetic fails" {
+    try checkSource("const r = undefined / 2;", 1);
+}
+
+test "sound: object in arithmetic fails" {
+    try checkSource("const r = {} - 1;", 1);
+}
+
+test "sound: function in arithmetic fails" {
+    try checkSource("const r = (() => 1) * 2;", 1);
+}
+
+test "sound: optional string in arithmetic fails" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const r = env("X") * 1000;
+    , 1);
+}
+
+test "sound: unknown in arithmetic passes" {
+    try checkSource(
+        \\const f = (x) => x - 1;
+    , 0);
+}
+
+test "sound: tracked number in arithmetic passes" {
+    try checkSource(
+        \\const count = 42;
+        \\const r = count * 2;
+    , 0);
+}
+
+test "sound: cacheIncr (number return) in arithmetic passes" {
+    try checkSource(
+        \\import { cacheIncr } from "zigttp:cache";
+        \\const count = cacheIncr("ns", "key");
+        \\const r = count * 2;
+    , 0);
+}
+
+// =========================================================================
+// Type-directed + safety (S6)
+// =========================================================================
+
+test "sound: number + number passes" {
+    try checkSource("const r = 1 + 2;", 0);
+}
+
+test "sound: string + string passes" {
+    try checkSource("const r = \"a\" + \"b\";", 0);
+}
+
+test "sound: number + string fails (mixed type)" {
+    try checkSource("const r = 42 + \"px\";", 1);
+}
+
+test "sound: string + number fails (mixed type)" {
+    try checkSource("const r = \"count: \" + 5;", 1);
+}
+
+test "sound: boolean in + fails" {
+    try checkSource("const r = true + 1;", 1);
+}
+
+test "sound: undefined in + fails" {
+    try checkSource("const r = undefined + 1;", 1);
+}
+
+test "sound: object in + fails" {
+    try checkSource("const r = {} + 1;", 1);
+}
+
+test "sound: optional string in + fails" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const r = env("X") + "suffix";
+    , 1);
+}
+
+test "sound: unknown + number passes (runtime decides)" {
+    try checkSource(
+        \\const f = (x) => x + 1;
+    , 0);
+}
+
+test "sound: unknown + unknown passes" {
+    try checkSource(
+        \\const f = (x, y) => x + y;
+    , 0);
+}
+
+// =========================================================================
+// Tautological comparison detection (S7)
+// =========================================================================
+
+test "sound: typeof on known number is tautological" {
+    try checkSourceFull(
+        \\const x = 42;
+        \\const r = typeof x === "number";
+    , 0, 1);
+}
+
+test "sound: typeof on known string is tautological" {
+    try checkSourceFull(
+        \\const x = "hello";
+        \\const r = typeof x === "string";
+    , 0, 1);
+}
+
+test "sound: typeof mismatch on known number is tautological" {
+    try checkSourceFull(
+        \\const x = 42;
+        \\const r = typeof x === "string";
+    , 0, 1);
+}
+
+test "sound: typeof !== on known type is tautological" {
+    try checkSourceFull(
+        \\const x = 42;
+        \\const r = typeof x !== "number";
+    , 0, 1);
+}
+
+test "sound: typeof on unknown is not tautological" {
+    try checkSourceFull(
+        \\const f = (x) => typeof x === "number";
+    , 0, 0);
+}
+
+test "sound: x === undefined on non-optional is tautological" {
+    try checkSourceFull(
+        \\const x = 42;
+        \\const r = x === undefined;
+    , 0, 1);
+}
+
+test "sound: x !== undefined on non-optional is tautological" {
+    try checkSourceFull(
+        \\import { sha256 } from "zigttp:crypto";
+        \\const h = sha256("data");
+        \\const r = h !== undefined;
+    , 0, 1);
+}
+
+test "sound: x === undefined on optional is not tautological" {
+    try checkSourceFull(
+        \\import { env } from "zigttp:env";
+        \\const v = env("K");
+        \\const r = v === undefined;
+    , 0, 0);
+}
+
+test "sound: typeof reversed operand order tautological" {
+    try checkSourceFull(
+        \\const x = true;
+        \\const r = "boolean" === typeof x;
+    , 0, 1);
+}
+
+// =========================================================================
+// Phase 2: Type propagation through ?? and narrowing
+// =========================================================================
+
+test "sound: env() ?? default resolves to string, catches arithmetic" {
+    // env() ?? "default" -> string. string - 1 -> error.
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const key = env("KEY") ?? "default";
+        \\const r = key - 1;
+    , 1);
+}
+
+test "sound: env() ?? default resolves to string, string + string passes" {
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const key = env("KEY") ?? "default";
+        \\const r = key + "_suffix";
+    , 0);
+}
+
+test "sound: narrowing in if-branch propagates to derived binding" {
+    // After if (val), val is narrowed to string. const s = val should track as string.
+    try checkSource(
+        \\import { env } from "zigttp:env";
+        \\const val = env("K");
+        \\if (val) {
+        \\  const s = val;
+        \\  const r = s + "_ok";
+        \\}
+    , 0);
+}
+
+test "sound: result.ok is boolean, catches arithmetic on it" {
+    try checkSource(
+        \\import { jwtVerify } from "zigttp:auth";
+        \\const result = jwtVerify("token", "secret", "opts");
+        \\const r = result.ok * 2;
+    , 1);
+}
+
+test "sound: result.error is string, catches arithmetic on it" {
+    try checkSource(
+        \\import { validateJson } from "zigttp:validate";
+        \\const result = validateJson("schema", "data");
+        \\const r = result.error - 1;
+    , 1);
 }

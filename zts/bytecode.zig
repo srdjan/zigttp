@@ -204,6 +204,17 @@ pub const Opcode = enum(u8) {
     // Object literal optimization
     set_slot = 0xC4, // +u8 slot_idx (direct slot write for pre-compiled object literals)
 
+    // Type-specialized arithmetic (emitted when types are statically proven)
+    add_num = 0xC5, // pop 2 numbers, push sum (no string dispatch)
+    sub_num = 0xC6, // pop 2 numbers, push difference
+    mul_num = 0xC7, // pop 2 numbers, push product
+    div_num = 0xC8, // pop 2 numbers, push quotient
+    lt_num = 0xC9, // pop 2 numbers, push boolean (less-than)
+    gt_num = 0xCA, // pop 2 numbers, push boolean (greater-than)
+    lte_num = 0xCB, // pop 2 numbers, push boolean (less-or-equal)
+    gte_num = 0xCC, // pop 2 numbers, push boolean (greater-or-equal)
+    concat_2 = 0xCD, // pop 2 strings, push concatenation
+
     // Reserved for future
     _,
 };
@@ -386,6 +397,17 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
 
         // Object literal optimization
         .set_slot => .{ .size = 2, .n_pop = 2, .n_push = 0, .name = "set_slot" },
+
+        // Type-specialized arithmetic
+        .add_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "add_num" },
+        .sub_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "sub_num" },
+        .mul_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "mul_num" },
+        .div_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "div_num" },
+        .lt_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "lt_num" },
+        .gt_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "gt_num" },
+        .lte_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "lte_num" },
+        .gte_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "gte_num" },
+        .concat_2 => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "concat_2" },
 
         // Unknown/reserved opcodes
         _ => .{ .size = 1, .n_pop = 0, .n_push = 0, .name = "unknown" },
