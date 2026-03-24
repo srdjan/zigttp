@@ -52,7 +52,7 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 
 #### VM and Runtime
 - `interpreter.zig` - Stack-based bytecode interpreter with JIT baseline compiler
-- `value.zig` - NaN-boxing value representation
+- `value.zig` - Type-prefix NaN-boxing value representation
 - `object.zig` - Hidden classes, object system, property access
 - `builtins.zig` - Built-in JavaScript functions and APIs
 - `http.zig` - HTTP runtime (Request, Response) and JSX runtime (h, renderToString)
@@ -104,12 +104,16 @@ const Result = union(enum) {
 
 ### NaN-Boxing
 
-64-bit tagged values storing integers, floats, and pointers in a single word. Enables efficient value representation without heap allocation for primitives.
+Type-prefix NaN-boxing: each type owns a unique upper 16-bit prefix, enabling single-instruction type checks.
 
-**Layout**:
-- Integers: 48-bit signed int in low bits, tag in high bits
-- Floats: IEEE 754 double precision (NaN values used for tagging)
-- Pointers: 48-bit pointer with tag in high bits
+**Layout** (upper 16 bits of raw u64):
+- Raw doubles: prefix < 0xFFFC - IEEE 754 f64 stored inline, no heap allocation
+- Pointers: prefix 0xFFFC - 8-byte aligned address in lower 48 bits
+- Integers: prefix 0xFFFD - signed i32 in lower 32 bits
+- Specials: prefix 0xFFFE - null (0), undefined (1), true (2), false (3), exception (4)
+- Extern pointers: prefix 0xFFFF - non-GC pointer in lower 48 bits
+
+Quiet NaN patterns with prefix >= 0xFFFC are canonicalized to 0x7FF8 on storage.
 
 ### Hidden Classes
 
@@ -190,7 +194,7 @@ for crash recovery.
 
 zts uses a **generational garbage collector** with:
 
-1. **NaN-boxing** for efficient value representation (64-bit tagged values)
+1. **Type-prefix NaN-boxing** for efficient value representation (single-instruction type checks)
 2. **Hidden classes** for inline caching (index-based `HiddenClassPool` with SoA layout)
 3. **LockFreePool-backed handler pool** for request isolation in FaaS environments
 4. **Hybrid arena allocation** for request-scoped memory with O(1) reset
@@ -209,7 +213,7 @@ zigttp-server/
 │   │   ├── codegen.zig    # Bytecode generation
 │   │   └── ir.zig         # Intermediate representation
 │   ├── interpreter.zig    # Stack-based bytecode VM
-│   ├── value.zig          # NaN-boxing value representation
+│   ├── value.zig          # Type-prefix NaN-boxing value representation
 │   ├── object.zig         # Hidden classes, object system
 │   ├── gc.zig             # Generational GC (nursery + tenured)
 │   ├── heap.zig           # Size-class segregated allocator

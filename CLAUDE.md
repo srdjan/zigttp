@@ -52,7 +52,7 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 **Engine layer (zts/)**: Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode). Key components:
 - Parser (`zts/parser/`): Pratt parser, tokenizer, IR, bytecode codegen, scope tracking
 - VM (`interpreter.zig`): Stack-based bytecode interpreter with JIT baseline compiler
-- Values (`value.zig`, `object.zig`): NaN-boxing, hidden classes, inline caching
+- Values (`value.zig`, `object.zig`): Type-prefix NaN-boxing, hidden classes, inline caching
 - Memory (`gc.zig`, `heap.zig`, `arena.zig`, `pool.zig`): Generational GC, arena allocator, lock-free pooling
 - TypeScript (`stripper.zig`, `comptime.zig`): Type stripping and compile-time evaluation
 
@@ -71,7 +71,7 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 
 **Result Type**: Functional error handling throughout - `Result(T)` union with `ok`/`err` variants. Maps JS exceptions to Zig errors.
 
-**NaN-Boxing**: 64-bit tagged values storing integers, floats, and pointers in a single word.
+**NaN-Boxing**: Type-prefix NaN-boxing - each type owns a unique upper 16-bit prefix (pointers 0xFFFC, integers 0xFFFD, specials 0xFFFE, extern 0xFFFF). Raw f64 doubles stored inline when prefix < 0xFFFC. Every type check is a single shift-and-compare.
 
 **Hidden Classes**: V8-style hidden class transitions for inline caching. Index-based `HiddenClassPool` with SoA layout stores shapes as compact u32 indices (50% vs pointers). O(1) transition lookups via hash map keyed on `(from_class << 32 | atom)`.
 

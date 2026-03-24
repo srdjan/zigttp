@@ -43,8 +43,7 @@ const OBJ_INLINE_SLOTS_OFF: i32 = @intCast(@offsetOf(JSObject, "inline_slots"));
 const OBJ_RANGE_START_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_START)) * 8;
 const OBJ_RANGE_STEP_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_STEP)) * 8;
 const OBJ_RANGE_LENGTH_OFF: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, @intCast(object.JSObject.Slots.RANGE_LENGTH)) * 8;
-const PTR_EXTRACT_MASK: u64 = 0x0000_FFFF_FFFF_FFF8;
-const INT_TYPE_MASK: u64 = 0xFFFF_F000_0000_0000;
+const PTR_EXTRACT_MASK: u64 = value_mod.JSValue.PAYLOAD_MASK;
 
 // Re-use baseline definitions
 pub const Arch = baseline.Arch;
@@ -812,9 +811,10 @@ pub const OptimizedCompiler = struct {
             if (is_x86_64) {
                 const fp_reg = getFramePointerReg();
                 self.emitter.movRegMem(.rax, fp_reg, local_offset) catch return CompileError.OutOfMemory;
+                // Pointer check: (raw >> 48) == 0xFFFC
                 self.emitter.movRegReg(.r10, .rax) catch return CompileError.OutOfMemory;
-                self.emitter.andRegImm32(.r10, 0x7) catch return CompileError.OutOfMemory;
-                self.emitter.cmpRegImm32(.r10, 1) catch return CompileError.OutOfMemory;
+                self.emitter.shrRegImm(.r10, 48) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegImm32(.r10, 0xFFFC) catch return CompileError.OutOfMemory;
                 try self.emitJccToLabel(.ne, deopt_label);
 
                 try self.emitExtractPtr(.r10, .rax);
@@ -825,8 +825,10 @@ pub const OptimizedCompiler = struct {
                 const fp_reg = getFramePointerReg();
                 const local_off_i12: i12 = @intCast(local_offset);
                 self.emitter.ldrImm(.x9, fp_reg, local_off_i12) catch return CompileError.OutOfMemory;
-                self.emitter.andRegImm(.x10, .x9, 0x7) catch return CompileError.OutOfMemory;
-                self.emitter.cmpRegImm12(.x10, 1) catch return CompileError.OutOfMemory;
+                // Pointer check: (raw >> 48) == 0xFFFC
+                self.emitter.lsrRegImm(.x10, .x9, 48) catch return CompileError.OutOfMemory;
+                self.emitter.movRegImm64(.x11, 0xFFFC) catch return CompileError.OutOfMemory;
+                self.emitter.cmpRegReg(.x10, .x11) catch return CompileError.OutOfMemory;
                 try self.emitBcondToLabel(.ne, deopt_label);
 
                 try self.emitExtractPtr(.x10, .x9);
@@ -1188,7 +1190,7 @@ pub const OptimizedCompiler = struct {
     }
 
     /// Emit unguarded integer binary operation (no type checks, only overflow)
-    /// NaN-boxing: integers stored as TAG_PREFIX | TYPE_INT | value (lower 32 bits)
+    /// NaN-boxing: integers stored as INT_PREFIX | value (lower 32 bits)
     fn emitUnguardedIntBinaryOp(self: *OptimizedCompiler, op: BinaryOp, loop_idx: u8) CompileError!void {
         const loop = &self.loops[loop_idx];
         const overflow_deopt = loop.deopt_stub_offset;
@@ -1689,7 +1691,7 @@ pub const OptimizedCompiler = struct {
     }
 
     fn emitInc(self: *OptimizedCompiler) CompileError!void {
-        // NaN-boxing: integers stored as TAG_PREFIX | TYPE_INT | value
+        // NaN-boxing: integers stored as INT_PREFIX | value
         // Adding 1 to raw bits adds 1 to the integer (lower 32 bits)
         if (is_x86_64) {
             try self.emitPopReg(.rax);
@@ -1715,12 +1717,7 @@ pub const OptimizedCompiler = struct {
         }
     }
 
-    // Specialized shift and multiply opcodes
-    // NaN-boxing integer encoding:
-    // TAG_PREFIX = 0xFFFC_0000_0000_0000, TYPE_INT = 1 << 44 = 0x0000_1000_0000_0000
-    // - Tag: 0xFFFC_1000_0000_0000 (TAG_PREFIX | TYPE_INT)
-    // - Value: lower 32 bits (signed i32)
-    const INT_TAG: u64 = 0xFFFC_1000_0000_0000;
+    const INT_TAG: u64 = value_mod.JSValue.INT_PREFIX;
 
     fn emitShr1(self: *OptimizedCompiler) CompileError!void {
         // Shift right by 1 in JS: v >> 1
@@ -2243,9 +2240,10 @@ pub const OptimizedCompiler = struct {
             self.emitter.ldrImm(.x10, .x9, 0) catch return CompileError.OutOfMemory; // x10 = iter_val
             self.emitter.ldrImm(.x11, .x9, 8) catch return CompileError.OutOfMemory; // x11 = idx_val
 
-            // Check iter_val is a pointer: (raw & 7) == 1
-            self.emitter.andRegImm(.x12, .x10, 0b111) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            // Check iter_val is a pointer: (raw >> 48) == 0xFFFC
+            self.emitter.lsrRegImm(.x12, .x10, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, 0xFFFC) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x12, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
             // Extract object pointer
@@ -2264,11 +2262,10 @@ pub const OptimizedCompiler = struct {
             self.emitter.cmpRegImm12(.x12, 23) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Check idx_val is int
-            self.emitter.movRegImm64(.x12, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
-            self.emitter.andRegReg(.x13, .x11, .x12) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x12, INT_TAG) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x13, .x12) catch return CompileError.OutOfMemory;
+            // Check idx_val is int: (raw >> 48) == 0xFFFD
+            self.emitter.lsrRegImm(.x12, .x11, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, 0xFFFD) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x12, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
             // Extract idx and length as u32
@@ -2346,9 +2343,10 @@ pub const OptimizedCompiler = struct {
             self.emitter.ldrImm(.x10, .x9, 0) catch return CompileError.OutOfMemory; // x10 = iter_val
             self.emitter.ldrImm(.x11, .x9, 8) catch return CompileError.OutOfMemory; // x11 = idx_val
 
-            // Check iter_val is a pointer: (raw & 7) == 1
-            self.emitter.andRegImm(.x12, .x10, 0b111) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegImm12(.x12, 1) catch return CompileError.OutOfMemory;
+            // Check iter_val is a pointer: (raw >> 48) == 0xFFFC
+            self.emitter.lsrRegImm(.x12, .x10, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, 0xFFFC) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x12, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
             // Extract object pointer
@@ -2367,11 +2365,10 @@ pub const OptimizedCompiler = struct {
             self.emitter.cmpRegImm12(.x12, 23) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
-            // Check idx_val is int
-            self.emitter.movRegImm64(.x12, INT_TYPE_MASK) catch return CompileError.OutOfMemory;
-            self.emitter.andRegReg(.x13, .x11, .x12) catch return CompileError.OutOfMemory;
-            self.emitter.movRegImm64(.x12, INT_TAG) catch return CompileError.OutOfMemory;
-            self.emitter.cmpRegReg(.x13, .x12) catch return CompileError.OutOfMemory;
+            // Check idx_val is int: (raw >> 48) == 0xFFFD
+            self.emitter.lsrRegImm(.x12, .x11, 48) catch return CompileError.OutOfMemory;
+            self.emitter.movRegImm64(.x13, 0xFFFD) catch return CompileError.OutOfMemory;
+            self.emitter.cmpRegReg(.x12, .x13) catch return CompileError.OutOfMemory;
             try self.emitBcondToLabel(.ne, slow);
 
             // Extract idx and length as u32
