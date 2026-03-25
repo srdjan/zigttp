@@ -34,9 +34,11 @@ pub const binding = mb.ModuleBinding{
     .stateful = true,
     .exports = &.{
         .{ .name = "parallel", .func = parallelNative, .arg_count = 1,
-           .effect = .write, .returns = .string, .param_types = &.{} },
+           .effect = .write, .returns = .string, .param_types = &.{},
+           .return_labels = .{ .external = true } },
         .{ .name = "race", .func = raceNative, .arg_count = 1,
-           .effect = .write, .returns = .string, .param_types = &.{} },
+           .effect = .write, .returns = .string, .param_types = &.{},
+           .return_labels = .{ .external = true } },
     },
 };
 

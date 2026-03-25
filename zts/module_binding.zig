@@ -152,6 +152,73 @@ pub const ReturnKind = enum {
 };
 
 // -------------------------------------------------------------------------
+// Data provenance labels
+// -------------------------------------------------------------------------
+
+/// Classification of data sensitivity for compile-time information flow analysis.
+/// The flow checker tracks these labels through the handler's data flow graph,
+/// proving that sensitive data never reaches unauthorized sinks.
+pub const DataLabel = enum(u3) {
+    secret, // env vars with sensitive names (PASSWORD, KEY, TOKEN, SECRET, PRIVATE)
+    credential, // auth tokens, JWT payloads, bearer tokens
+    user_input, // request body, headers, query params, path params
+    config, // non-secret env configuration
+    internal, // cache values, internal state
+    external, // data from fetchSync responses
+    validated, // data that passed through validation
+};
+
+/// Bitset of data provenance labels. Propagates through operations via merge (OR).
+/// Compact enough (1 byte) to store per-node in the flow checker's label map.
+pub const LabelSet = packed struct(u8) {
+    secret: bool = false,
+    credential: bool = false,
+    user_input: bool = false,
+    config: bool = false,
+    internal: bool = false,
+    external: bool = false,
+    validated: bool = false,
+    _pad: u1 = 0,
+
+    pub const empty: LabelSet = .{};
+
+    /// Bitwise OR: union of two label sets.
+    pub fn merge(a: LabelSet, b: LabelSet) LabelSet {
+        const ai: u8 = @bitCast(a);
+        const bi: u8 = @bitCast(b);
+        return @bitCast(ai | bi);
+    }
+
+    /// Check if a specific label is present.
+    pub fn has(self: LabelSet, label: DataLabel) bool {
+        const bit: u3 = @intFromEnum(label);
+        const mask: u8 = @as(u8, 1) << bit;
+        const raw: u8 = @bitCast(self);
+        return (raw & mask) != 0;
+    }
+
+    /// Check if any label in the mask is present.
+    pub fn hasAny(self: LabelSet, mask: LabelSet) bool {
+        const si: u8 = @bitCast(self);
+        const mi: u8 = @bitCast(mask);
+        return (si & mi) != 0;
+    }
+
+    /// True if no labels are set.
+    pub fn isEmpty(self: LabelSet) bool {
+        const raw: u8 = @bitCast(self);
+        return (raw & 0x7F) == 0; // ignore pad bit
+    }
+
+    /// Create a LabelSet from a single label.
+    pub fn fromLabel(label: DataLabel) LabelSet {
+        const bit: u3 = @intFromEnum(label);
+        const mask: u8 = @as(u8, 1) << bit;
+        return @bitCast(mask);
+    }
+};
+
+// -------------------------------------------------------------------------
 // Contract extraction rules
 // -------------------------------------------------------------------------
 
@@ -237,6 +304,10 @@ pub const FunctionBinding = struct {
 
     /// Flags set on the contract when this function is called.
     contract_flags: ContractFlags = .{},
+
+    /// Data provenance labels for this function's return value.
+    /// Used by the flow checker to track sensitive data through the handler.
+    return_labels: LabelSet = .{},
 
     /// Get the NativeFn for this binding, wrapping ModuleFn if needed.
     pub fn getNativeFn(comptime self: FunctionBinding) object.NativeFn {
@@ -442,4 +513,53 @@ test "FunctionBinding with module_func wraps correctly" {
     const me = comptime fb.toModuleExport();
     try std.testing.expectEqualStrings("sandboxedFn", me.name);
     try std.testing.expect(me.func != null);
+}
+
+test "LabelSet merge combines labels" {
+    const a = LabelSet{ .secret = true };
+    const b = LabelSet{ .credential = true };
+    const merged = LabelSet.merge(a, b);
+    try std.testing.expect(merged.secret);
+    try std.testing.expect(merged.credential);
+    try std.testing.expect(!merged.user_input);
+}
+
+test "LabelSet has checks specific label" {
+    const labels = LabelSet{ .secret = true, .user_input = true };
+    try std.testing.expect(labels.has(.secret));
+    try std.testing.expect(labels.has(.user_input));
+    try std.testing.expect(!labels.has(.credential));
+    try std.testing.expect(!labels.has(.config));
+}
+
+test "LabelSet hasAny checks mask intersection" {
+    const labels = LabelSet{ .config = true, .internal = true };
+    const sensitive = LabelSet{ .secret = true, .credential = true };
+    const config_mask = LabelSet{ .config = true };
+    try std.testing.expect(!labels.hasAny(sensitive));
+    try std.testing.expect(labels.hasAny(config_mask));
+}
+
+test "LabelSet isEmpty" {
+    try std.testing.expect(LabelSet.empty.isEmpty());
+    try std.testing.expect(!(LabelSet{ .secret = true }).isEmpty());
+}
+
+test "LabelSet fromLabel" {
+    const label = LabelSet.fromLabel(.credential);
+    try std.testing.expect(label.credential);
+    try std.testing.expect(!label.secret);
+}
+
+test "FunctionBinding return_labels defaults to empty" {
+    const fb = FunctionBinding{
+        .name = "test",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 0,
+    };
+    try std.testing.expect(fb.return_labels.isEmpty());
 }

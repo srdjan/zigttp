@@ -1517,6 +1517,50 @@ fn buildContractWithPolicy(
     );
     errdefer contract.deinit(allocator);
 
+    // Run data flow provenance analysis
+    {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const handler_fn = findHandlerFunction(ir_view, root);
+        if (handler_fn) |hf| {
+            var flow = zts.FlowChecker.init(allocator, ir_view, atoms);
+            defer flow.deinit();
+
+            const flow_errors = try flow.check(hf);
+            const flow_diags = flow.getDiagnostics();
+
+            if (flow_diags.len > 0) {
+                if (!builtin.is_test) {
+                    std.debug.print("\n", .{});
+                    var flow_output: std.ArrayList(u8) = .empty;
+                    defer flow_output.deinit(allocator);
+                    var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
+                    flow.formatDiagnostics("", &flow_aw.writer) catch {};
+                    flow_output = flow_aw.toArrayList();
+                    if (flow_output.items.len > 0) {
+                        std.debug.print("{s}", .{flow_output.items});
+                    }
+                    std.debug.print("{d} flow error(s), {d} warning(s)\n", .{
+                        flow_errors,
+                        flow_diags.len - flow_errors,
+                    });
+                }
+            }
+
+            // Inject flow properties into contract
+            const flow_props = flow.getProperties();
+            if (contract.properties) |*props| {
+                props.no_secret_leakage = flow_props.no_secret_leakage;
+                props.no_credential_leakage = flow_props.no_credential_leakage;
+                props.input_validated = flow_props.input_validated;
+                props.pii_contained = flow_props.pii_contained;
+            }
+
+            if (!builtin.is_test and flow_errors == 0) {
+                std.debug.print("Flow analysis passed\n", .{});
+            }
+        }
+    }
+
     try validateSqlContract(allocator, &contract, sql_schema_path);
     try enforcePolicyForContract(allocator, filename, &contract, policy);
     if (policy != null) {

@@ -55,7 +55,8 @@ pub const binding = mb.ModuleBinding{
         .{ .name = "waitSignal", .func = waitSignalNative, .arg_count = 1,
            .effect = .write, .returns = .unknown, .param_types = &.{.string},
            .contract_extractions = &.{.{ .category = .durable_signal }},
-           .contract_flags = .{ .sets_durable_used = true } },
+           .contract_flags = .{ .sets_durable_used = true },
+           .return_labels = .{ .external = true } },
         .{ .name = "signal", .func = signalNative, .arg_count = 2,
            .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string },
            .contract_extractions = &.{

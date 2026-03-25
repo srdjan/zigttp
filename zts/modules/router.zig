@@ -38,7 +38,8 @@ pub const binding = mb.ModuleBinding{
     .exports = &.{
         .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2,
            .returns = .optional_object, .param_types = &.{ .string, .string, .string },
-           .contract_extractions = &.{.{ .category = .route_pattern }} },
+           .contract_extractions = &.{.{ .category = .route_pattern }},
+           .return_labels = .{ .user_input = true } },
     },
 };
 

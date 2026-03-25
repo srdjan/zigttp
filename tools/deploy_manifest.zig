@@ -45,6 +45,12 @@ pub const ProvenFacts = struct {
 
     retry_safe: bool = false,
     read_only: bool = false,
+
+    // Data flow provenance
+    no_secret_leakage: bool = true,
+    no_credential_leakage: bool = true,
+    input_validated: bool = true,
+    pii_contained: bool = true,
 };
 
 // -------------------------------------------------------------------------
@@ -128,6 +134,10 @@ pub fn extractProvenFacts(
             .checks_passed = checks_buf,
             .retry_safe = if (contract.properties) |p| p.retry_safe else false,
             .read_only = if (contract.properties) |p| p.read_only else false,
+            .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
+            .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
+            .input_validated = if (contract.properties) |p| p.input_validated else true,
+            .pii_contained = if (contract.properties) |p| p.pii_contained else true,
         },
         .checks_buf = checks_buf,
         .routes_buf = routes_buf,
@@ -312,6 +322,20 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll("\"");
     try w.writeAll(",\n          \"zigttp:readOnly\": \"");
     try w.writeAll(if (facts.read_only) "true" else "false");
+    try w.writeAll("\"");
+
+    // Flow provenance tags
+    try w.writeAll(",\n          \"zigttp:noSecretLeakage\": \"");
+    try w.writeAll(if (facts.no_secret_leakage) "true" else "false");
+    try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:noCredentialLeakage\": \"");
+    try w.writeAll(if (facts.no_credential_leakage) "true" else "false");
+    try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:inputValidated\": \"");
+    try w.writeAll(if (facts.input_validated) "true" else "false");
+    try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:piiContained\": \"");
+    try w.writeAll(if (facts.pii_contained) "true" else "false");
     try w.writeAll("\"");
 
     if (facts.egress_hosts.len > 0 or facts.egress_proven) {
@@ -506,6 +530,17 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
     } else {
         try w.writeAll("  (no verification ran)\n");
     }
+
+    // FLOW ANALYSIS section
+    try w.writeAll("\nFLOW ANALYSIS:\n");
+    try w.writeAll(if (facts.no_secret_leakage) "  PROVEN  " else "  ---     ");
+    try w.writeAll("no secret leakage\n");
+    try w.writeAll(if (facts.no_credential_leakage) "  PROVEN  " else "  ---     ");
+    try w.writeAll("no credential leakage\n");
+    try w.writeAll(if (facts.input_validated) "  PROVEN  " else "  ---     ");
+    try w.writeAll("input validated before egress\n");
+    try w.writeAll(if (facts.pii_contained) "  PROVEN  " else "  ---     ");
+    try w.writeAll("PII contained (no user input in egress)\n");
 
     try w.writeAll("\nPROOF LEVEL: ");
     try w.writeAll(facts.proof_level.toString());

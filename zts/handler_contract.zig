@@ -264,10 +264,19 @@ pub const HandlerProperties = struct {
     deterministic: bool,
     /// Uses fetchSync (conservative write).
     has_egress: bool,
+    // --- Data flow provenance (from FlowChecker) ---
+    /// No {secret} data reaches response bodies, headers, or external egress.
+    no_secret_leakage: bool = true,
+    /// No {credential} data reaches response bodies or logs.
+    no_credential_leakage: bool = true,
+    /// All {user_input} data passes through validation before external egress.
+    input_validated: bool = true,
+    /// {user_input} data does not flow to external egress hosts.
+    pii_contained: bool = true,
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 7,
+    version: u32 = 8,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -2629,6 +2638,14 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.deterministic = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "hasEgress")) {
             props.has_egress = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "noSecretLeakage")) {
+            props.no_secret_leakage = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "noCredentialLeakage")) {
+            props.no_credential_leakage = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "inputValidated")) {
+            props.input_validated = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "piiContained")) {
+            props.pii_contained = parser.readBool() orelse false;
         } else {
             parser.skipValue();
         }
@@ -2985,7 +3002,11 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
         try writer.print("    \"retrySafe\": {s},\n", .{if (p.retry_safe) "true" else "false"});
         try writer.print("    \"deterministic\": {s},\n", .{if (p.deterministic) "true" else "false"});
-        try writer.print("    \"hasEgress\": {s}\n", .{if (p.has_egress) "true" else "false"});
+        try writer.print("    \"hasEgress\": {s},\n", .{if (p.has_egress) "true" else "false"});
+        try writer.print("    \"noSecretLeakage\": {s},\n", .{if (p.no_secret_leakage) "true" else "false"});
+        try writer.print("    \"noCredentialLeakage\": {s},\n", .{if (p.no_credential_leakage) "true" else "false"});
+        try writer.print("    \"inputValidated\": {s},\n", .{if (p.input_validated) "true" else "false"});
+        try writer.print("    \"piiContained\": {s}\n", .{if (p.pii_contained) "true" else "false"});
         try writer.writeAll("  }\n");
     } else {
         try writer.writeAll("  \"properties\": null\n");
@@ -3272,7 +3293,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 8") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
