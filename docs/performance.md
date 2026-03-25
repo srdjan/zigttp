@@ -141,11 +141,34 @@ Shapes:
 
 **Zero-Copy Response** (`src/zruntime.zig`): Borrowed mode avoids memcpy when arena lifetime is guaranteed.
 
+### Type-Directed Code Generation
+
+When the BoolChecker can prove both operands of an arithmetic or comparison are numbers, it populates a `NodeTypeMap`. The CodeGen reads this map and emits specialized opcodes that skip runtime type dispatch:
+
+| Specialized Opcode | Replaces | Benefit |
+|-------------------|----------|---------|
+| `add_num` | `add` | Skips string-concatenation check |
+| `sub_num` | `sub` | Skips type coercion |
+| `mul_num` | `mul` | Skips type coercion |
+| `div_num` | `div` | Skips type coercion |
+| `lt_num`, `gt_num`, `lte_num`, `gte_num` | `lt`, `gt`, `lte`, `gte` | Skip polymorphic comparison |
+| `concat_2` | `add` (string case) | Dedicated string concatenation |
+
+These opcodes also omit type feedback recording, providing faster cold-start execution before JIT warmup. Type-directed codegen is active in precompiled handlers (`-Dhandler`). Dev mode (`zig build run`) uses generic opcodes because BoolChecker type annotations are not wired to the dev-mode CodeGen path.
+
 ### Build-Time Precompilation
 
 **Handler Precompilation** (`tools/precompile.zig`, `build.zig`): `-Dhandler=<path>` compiles handlers at build time. Bytecode embedded in binary, eliminating runtime parsing.
 
 Build flow: `precompile.zig` compiles handler, serializes bytecode with atoms and shapes, generates `src/generated/embedded_handler.zig`. Server loads via `loadFromCachedBytecode()`.
+
+The precompile pipeline also supports:
+- `-Dverify` - compile-time handler verification (see [verification.md](verification.md))
+- `-Dcontract` - emit contract.json with handler properties and proven capabilities
+- `-Ddeploy=aws` - generate platform-specific deployment manifests from proven contracts
+- `-Dtest-file=tests.jsonl` - run declarative handler tests at build time
+- `-Dreplay=traces.jsonl` - replay-verify recorded traces before embedding
+- `-Dgenerate-tests=true` - exhaustive path enumeration and fault coverage analysis
 
 ### Concurrent I/O
 

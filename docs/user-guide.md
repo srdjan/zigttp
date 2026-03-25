@@ -24,7 +24,8 @@ Functions, Cloudflare Workers), powered by Zig and zts.
 15. [Compile-Time Verification](#compile-time-verification)
 16. [Contract Manifest](#contract-manifest)
 17. [Runtime Sandboxing](#runtime-sandboxing)
-18. [Troubleshooting](#troubleshooting)
+18. [Declarative Handler Testing](#declarative-handler-testing)
+19. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -142,8 +143,15 @@ OPTIONS:
   --sqlite <FILE>       SQLite database path for zigttp:sql
                         Required for zigttp:sql query execution
 
+  --test <FILE>         Run declarative handler tests from JSONL file
+                        Exit code 1 on any test failure
+
   --durable <DIR>       Enable durable run/step oplogs in a directory
                         Required for zigttp:durable
+
+  --cors                Enable CORS headers on all responses
+
+  --static <DIR>        Serve static files from directory
 
   --help                Show help message
 ```
@@ -168,6 +176,9 @@ OPTIONS:
 
 # Durable execution with persisted oplogs
 ./zig-out/bin/zigttp-server --durable .zigttp-durable handler.js
+
+# Run declarative handler tests
+./zig-out/bin/zigttp-server --test tests.jsonl handler.js
 
 # Inline with all options
 ./zig-out/bin/zigttp-server -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
@@ -722,65 +733,64 @@ function handler(request) {
 
 ## Error Handling
 
-### Try-Catch Pattern
+zts has no try/catch. All errors flow through two patterns: Result types and optional narrowing.
 
-```javascript
-function handler(request) {
-    try {
-        return processRequest(request);
-    } catch (e) {
-        console.error("Error:", e.message);
-        return Response.json({
-            error: "Internal Server Error",
-            message: e.message,
-        }, { status: 500 });
-    }
+### Result Types
+
+Functions like `jwtVerify`, `validateJson`, `validateObject`, and `coerceJson` return
+`{ ok: true, value: T } | { ok: false, error: string }`. The handler verifier enforces
+that `.ok` is checked before `.value` is accessed.
+
+```typescript
+import { jwtVerify } from "zigttp:auth";
+import { validateJson } from "zigttp:validate";
+
+function handler(req: Request): Response {
+    const token = req.headers["authorization"];
+    const auth = jwtVerify(token, "secret");
+    if (!auth.ok) return Response.json({ error: auth.error }, { status: 401 });
+
+    const body = validateJson("user", req.body);
+    if (!body.ok) return Response.json({ errors: body.errors }, { status: 400 });
+
+    return Response.json({ user: body.value, claims: auth.value });
 }
+```
 
-function processRequest(request) {
-    if (request.url === "/api/risky") {
-        // This might throw
-        let data = JSON.parse(request.body);
-        return Response.json(data);
-    }
-    return Response.text("OK");
+### Optional Narrowing
+
+Functions like `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` return
+`T | undefined`. The verifier enforces narrowing before use.
+
+```typescript
+import { env } from "zigttp:env";
+
+function handler(req: Request): Response {
+    const apiKey = env("API_KEY");
+    if (!apiKey) return Response.json({ error: "unconfigured" }, { status: 500 });
+
+    const dbUrl = env("DATABASE_URL") ?? "postgres://localhost";
+
+    return Response.json({ configured: true });
 }
 ```
 
 ### Error Response Helper
 
-```javascript
-function errorResponse(status, message, details) {
-    return Response.json({
-        error: true,
-        status: status,
-        message: message,
-        details: details || null,
-        timestamp: Date.now(),
-    }, { status: status });
-}
+```typescript
+const errorResponse = (status: number, message: string): Response =>
+    Response.json({ error: true, status, message, timestamp: Date.now() }, { status });
 
-function handler(request) {
-    if (!request.headers["Authorization"]) {
+function handler(req: Request): Response {
+    if (!req.headers["authorization"]) {
         return errorResponse(401, "Authentication required");
     }
 
-    if (request.method === "POST" && !request.body) {
+    if (req.method === "POST" && !req.body) {
         return errorResponse(400, "Request body is required");
     }
 
-    try {
-        let data = JSON.parse(request.body);
-        if (!data.name) {
-            return errorResponse(400, "Validation failed", {
-                field: "name",
-                reason: "required",
-            });
-        }
-        return Response.json({ ok: true });
-    } catch (e) {
-        return errorResponse(400, "Invalid JSON");
-    }
+    return Response.json({ ok: true });
 }
 ```
 
@@ -1208,86 +1218,129 @@ All existing guarantees are preserved:
 - **Determinism**: same inputs produce same output ordering. Results always
   match declaration order.
 
+### zigttp:sql
+
+SQL query execution over SQLite with build-time schema validation. Requires `--sqlite <FILE>` at runtime.
+
+```typescript
+import { sql, sqlOne, sqlMany, sqlExec } from "zigttp:sql";
+```
+
+**sql(name, query)** - Register a named query at module scope (compile-time allowlisting):
+
+```typescript
+sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
+sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
+sql("getTodo", "SELECT id, title, done FROM todos WHERE id = :id");
+```
+
+**sqlMany(name, params?)** - Execute a registered query, return all rows as an array of objects.
+
+**sqlOne(name, params?)** - Execute a registered query, return the first row or `undefined`.
+
+**sqlExec(name, params?)** - Execute a registered query for side effects (INSERT, UPDATE, DELETE). Returns `{ changes: number, lastInsertRowId: number }`.
+
+```typescript
+function handler(req: Request): Response {
+    if (req.method === "GET") {
+        return Response.json({ items: sqlMany("listTodos") });
+    }
+
+    const parsed = validateJson("todo.create", req.body);
+    if (!parsed.ok) return Response.json({ errors: parsed.errors }, { status: 400 });
+
+    return Response.json(sqlExec("createTodo", { title: parsed.value.title }), { status: 201 });
+}
+```
+
+All query names must be registered via `sql()` at module scope. The contract extractor captures registered query names, operations, and touched tables. At build time with `-Dverify`, queries are validated against the SQLite schema if `--sqlite` is configured.
+
 ---
 
 ## JavaScript Subset Reference
 
-zts implements ES5 with some ES6+ extensions. Here's what's available:
+zts implements a restricted JavaScript subset optimized for FaaS workloads. The restrictions enable compile-time verification, deterministic replay, and contract extraction.
 
 ### Supported Features
 
-```javascript
+```typescript
 // Variables
-let x = 1; // ✓ let keyword
-const y = 2; // ✓ const keyword
-var z = 3; // ✓ var keyword (function scoped)
+let x = 1;
+const y = 2;
 
 // Functions
-function foo() {} // ✓ Function declarations
-let bar = function () {}; // ✓ Function expressions
-let arrow = () => {}; // ✗ NOT supported
+function foo() {}
+const bar = (a, b) => a + b;     // arrow functions
+const add = (a: number): number => a + 1;  // with TypeScript annotations
 
 // Objects and Arrays
-let obj = { a: 1, b: 2 }; // ✓ Object literals
-let arr = [1, 2, 3]; // ✓ Array literals
+const obj = { a: 1, b: 2 };
+const arr = [1, 2, 3];
+const { a, ...rest } = obj;      // destructuring with rest
+const [first, ...tail] = arr;
+
+// Template literals
+const msg = `Hello ${name}, you have ${count} items`;
 
 // Loops
-for (let i = 0; i < 10; i++) {} // ✓ for loop
-while (condition) {} // ✓ while loop
-for (let item of array) {} // ✓ for...of (arrays only)
-for (let key in obj) {} // ✓ for...in (own properties only)
+for (const item of array) {}     // for-of with break/continue
+for (const i of range(10)) {}    // range-based iteration
 
-// Built-in Objects
-JSON.parse(), JSON.stringify(); // ✓ JSON
-Math.floor(), Math.random(); // ✓ Math
-Array.isArray(), [].push(); // ✓ Array methods
-"".split(), "".indexOf(); // ✓ String methods
-Date.now(); // ✓ Date (limited)
+// Operators
+const piped = value |> transform |> format;  // pipe operator
+score += 10;                     // compound assignment (+=, -=, *=, /=, etc.)
 
-// ES6+ Extensions
-Math.imul(), Math.clz32(); // ✓ Additional Math
-Math.trunc(), Math.log2(); // ✓
-"".trimStart(), "".trimEnd(); // ✓ String methods
-"".codePointAt(); // ✓
-2 ** 10; // ✓ Exponentiation
+// Array HOFs
+const evens = items.filter((n) => n % 2 === 0);
+const doubled = items.map((n) => n * 2);
+const sum = items.reduce((acc, n) => acc + n, 0);
 
-// Match Expression
-let result = match (x) {   // ✓ Pattern matching
-    when "a": 1,
-    when { key: "val" }: 2,
-    when _: 0               // wildcard
+// Object methods
+const keys = Object.keys(obj);
+const vals = Object.values(obj);
+const entries = Object.entries(obj);
+
+// Optional chaining and nullish coalescing
+const name = user?.profile?.name ?? "Anonymous";
+
+// Pattern matching
+const result = match (req) {
+    when { method: "GET", path: "/health" }: Response.json({ ok: true })
+    default: Response.text("Not Found", { status: 404 })
 };
+
+// Built-in objects
+JSON.parse(str); JSON.stringify(obj);
+Math.floor(x); Math.random();
+Date.now();                      // only Date.now(), no other Date methods
+console.log(value);
 ```
 
-### NOT Supported
+### NOT Supported (compile-time errors)
 
-```javascript
-// ES6+ Syntax
-let, const                   // Use 'let' instead
-() => {}                     // Use 'function() {}' instead
-`template ${literals}`       // Use string concatenation
-{ ...spread }                // Use Object.assign or manual copy
-class Foo {}                 // Use constructor functions
-import/export                // Not in handler context
-async/await                  // Synchronous only
-Promise                      // Not available
+All unsupported features produce helpful error messages with alternatives:
 
-// Other Limitations
-eval('local code')           // Only global eval: (1, eval)('code')
-new Number(1)                // No value boxing
-[1, , 3]                     // No array holes
-```
+- `class` - use plain objects and functions
+- `var` - use `let` or `const`
+- `while`, `do...while` - use `for (const x of range(n))`
+- C-style `for (;;)` - use `for (const i of range(n))`
+- `for...in` - use `for (const k of Object.keys(obj))`
+- `try`/`catch`/`throw` - use Result types (check `.ok`)
+- `async`/`await`/`Promise` - use `fetchSync()`, `parallel()`, `race()`
+- `null` - use `undefined`
+- `==`, `!=` - use `===`, `!==`
+- `++`, `--` - use `x = x + 1`
+- `this`, `new` - use explicit params and factory functions
+- `delete` - use `const { key, ...rest } = obj`
+- Regular expressions - use string methods
+- `any` type (TS) - use specific types
+- `as` type assertions (TS) - use control flow narrowing
+
+See [feature-detection.md](feature-detection.md) for the full 54-feature detection matrix.
 
 ### Strict Mode
 
-zts always runs in strict mode:
-
-```javascript
-// These are errors:
-x = 1; // Error: must use 'let x = 1'
-with (obj) {} // Error: 'with' not allowed
-delete x; // Error: cannot delete letiables
-```
+zts always runs in strict mode. Implicit globals and `with` are errors.
 
 ---
 
@@ -2145,6 +2198,64 @@ part of the compile pipeline.
 
 ---
 
+## Declarative Handler Testing
+
+Handler tests use a JSONL format with four entry types. Because handlers are pure functions of (Request, VirtualModuleResponses), testing requires no mocking frameworks or infrastructure - just declare inputs and expected outputs.
+
+### Running Tests
+
+```bash
+# Runtime mode
+./zig-out/bin/zigttp-server --test tests.jsonl handler.ts
+
+# Build-time mode (fails the build on test failure)
+zig build -Dhandler=handler.ts -Dtest-file=tests.jsonl
+```
+
+### Test Format
+
+Each test is a group of JSONL lines:
+
+```jsonl
+{"type":"test","name":"GET /health returns 200"}
+{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"ok"}
+
+{"type":"test","name":"POST /users validates body"}
+{"type":"request","method":"POST","url":"/users","headers":{"content-type":"application/json"},"body":"{\"invalid\":true}"}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"JWT auth with stubbed verify"}
+{"type":"request","method":"GET","url":"/secure","headers":{"authorization":"Bearer test-token"},"body":null}
+{"type":"io","seq":0,"module":"auth","fn":"jwtVerify","args":["test-token","secret"],"result":{"ok":true,"value":{"sub":"user-123"}}}
+{"type":"expect","status":200,"bodyContains":"user-123"}
+```
+
+Entry types:
+- `test` - Test case header with a name
+- `request` - HTTP request (method, url, headers, body). Use `null` for absent body (JSON has no `undefined`)
+- `io` - Virtual module stub. The `seq` field orders multiple stubs within a test. The handler receives this recorded return value instead of calling the real module
+- `expect` - Assertions: `status` (exact match) and/or `bodyContains` (substring match)
+
+### Deterministic Replay
+
+Record handler I/O traces during live traffic, then replay them for regression testing:
+
+```bash
+# Record traces
+./zig-out/bin/zigttp-server --trace traces.jsonl handler.ts
+
+# Replay against a handler (offline verification)
+./zig-out/bin/zigttp-server --replay traces.jsonl handler.ts
+
+# Build-time replay (fails on regressions)
+zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
+```
+
+Tracing captures every virtual module call (with args and return values), `fetchSync` responses, `Date.now()` timestamps, and `Math.random()` values. Because virtual modules are the only I/O boundary, handlers become deterministic pure functions of (Request, VirtualModuleResponses). Replay substitutes recorded values for all I/O and compares actual vs expected Response.
+
+---
+
 ## Troubleshooting
 
 ### Common Errors
@@ -2175,31 +2286,27 @@ function handler(request) {
 
 **"SyntaxError" in handler**
 
-```javascript
-// Wrong: ES6 syntax not supported
-const x = 1;
-let y = 2;
-const fn = () => x + y;
+Common causes: using banned syntax. Check the error message for the suggestion:
 
-// Right: ES5 syntax
-let x = 1;
-let y = 2;
-let fn = function () {
-    return x + y;
-};
+```
+'while' is not supported; use 'for-of' with a finite collection instead
+'try' is not supported; use Result types instead
+'var' is not supported; use 'let' or 'const' instead
+'==' is not supported; use '===' instead
 ```
 
-**JSON parse errors**
+**JSON validation**
 
-```javascript
-// Always wrap JSON.parse in try-catch
-function handler(request) {
-    try {
-        let data = JSON.parse(request.body);
-        return Response.json(data);
-    } catch (e) {
-        return Response.json({ error: "Invalid JSON" }, { status: 400 });
-    }
+```typescript
+// Use zigttp:validate instead of try-catch (which is banned)
+import { schemaCompile, validateJson } from "zigttp:validate";
+
+schemaCompile("input", JSON.stringify({ type: "object" }));
+
+function handler(req: Request): Response {
+    const result = validateJson("input", req.body);
+    if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
+    return Response.json(result.value);
 }
 ```
 
@@ -2240,30 +2347,36 @@ If you see out-of-memory errors:
 │                    zigttp-server Quick Reference                  │
 ├─────────────────────────────────────────────────────────────────┤
 │ START SERVER                                                    │
-│   zigttp-server handler.js                                        │
+│   zigttp-server handler.ts                                       │
 │   zigttp-server -p 3000 -e "function handler(r) {...}"           │
 ├─────────────────────────────────────────────────────────────────┤
 │ REQUEST OBJECT                                                  │
-│   request.method   → "GET", "POST", "PUT", "DELETE"            │
-│   request.url     → "/api/users"                              │
-│   request.headers  → { "Content-Type": "..." }                 │
-│   request.body     → "..." or null                             │
+│   req.method   → "GET", "POST", "PUT", "DELETE"                │
+│   req.url      → "/api/users?page=1"                           │
+│   req.path     → "/api/users"                                  │
+│   req.headers  → { "content-type": "..." }                     │
+│   req.body     → "..." or undefined                            │
 ├─────────────────────────────────────────────────────────────────┤
 │ RESPONSE HELPERS                                                │
-│   Response.json({ data })        → application/json            │
-│   Response.text("string")        → text/plain                  │
-│   Response.html("<html>")        → text/html                   │
-│   Response.text(body, { status: 404, headers: {} })             │
+│   Response.json({ data })          → application/json          │
+│   Response.text("string")          → text/plain                │
+│   Response.html("<html>")          → text/html                 │
+│   Response.redirect("/path", 301)  → redirect                  │
 ├─────────────────────────────────────────────────────────────────┤
-│ COMMON PATTERNS                                                 │
-│   let data = JSON.parse(request.body);                         │
-│   return Response.json({ error: "msg" }, { status: 400 });     │
-│   if (request.url.indexOf('/api/') === 0) { ... }             │
+│ VIRTUAL MODULES                                                 │
+│   import { env } from "zigttp:env"                             │
+│   import { jwtVerify } from "zigttp:auth"                      │
+│   import { validateJson } from "zigttp:validate"               │
+│   import { routerMatch } from "zigttp:router"                  │
+│   import { parallel } from "zigttp:io"                         │
+│   import { guard } from "zigttp:compose"                       │
 ├─────────────────────────────────────────────────────────────────┤
 │ REMEMBER                                                        │
-│   • Use 'let' not 'let/const'                                  │
-│   • Use 'function(){}' not arrow functions                     │
-│   • Always try-catch JSON.parse                                │
-│   • Handler must return a Response                             │
+│   - Use let/const, never var                                   │
+│   - Arrow functions are supported: (x) => x + 1               │
+│   - No try/catch: use Result types (.ok check)                 │
+│   - No null: use undefined                                     │
+│   - No while: use for (const i of range(n))                    │
+│   - Handler must return a Response on every path               │
 └─────────────────────────────────────────────────────────────────┘
 ```

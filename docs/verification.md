@@ -101,6 +101,34 @@ verify warning: unreachable code after return statement
    = help: remove the unreachable code, or restructure the control flow
 ```
 
+### 4. Unused Variables
+
+Declared variables that are never referenced. Severity: warning. Suppress by prefixing the name with `_`.
+
+The check is scope-aware: a variable used only in a nested scope that shadows an outer declaration does not count as a use of the outer binding.
+
+```
+verify warning: unused variable 'temp'
+  --> handler.ts:3:11
+   |
+  3 |     const temp = computeValue();
+   |           ^
+   = help: remove the variable, or prefix with _ to suppress: _temp
+```
+
+### 5. Non-Exhaustive Match
+
+Match expressions without a `default` arm. Severity: warning.
+
+```
+verify warning: match expression has no default arm
+  --> handler.ts:5:12
+   |
+  5 |     return match (req) {
+   |            ^
+   = help: add a default arm: default: Response.text("Not Found", { status: 404 })
+```
+
 ### 6. Exhaustive Optional Handling
 
 Four virtual module functions return optional values (`T | undefined`):
@@ -148,6 +176,34 @@ verify error: property access on optional value without checking for undefined
 - `const x = env("KEY") ?? "default"` - nullish coalesce resolves at declaration
 - `val = "override"` - reassignment to non-optional clears tracking
 - `val?.prop` - optional chaining is safe (not flagged)
+
+## Exhaustive Path Analysis (-Dgenerate-tests)
+
+The `-Dgenerate-tests=true` build option enables compile-time exhaustive path enumeration and fault coverage analysis.
+
+### Path Generator
+
+The `PathGenerator` (`zts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
+
+For Result-producing calls (`jwtVerify`, `validateJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths.
+
+### Fault Coverage Analysis
+
+The `FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes the generated paths against `FailureSeverity` annotations on each virtual module function:
+
+| Severity | Functions | Meaning |
+|----------|-----------|---------|
+| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson` | Auth/validation failures must not produce 2xx |
+| `expected` | `cacheGet`, `env` | Cache misses and missing env vars are normal degradation |
+| `upstream` | `fetchSync` | Upstream failures should be surfaced, not swallowed |
+
+The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
+
+Results appear in:
+- `contract.json` under the `faultCoverage` section
+- `HandlerProperties.fault_covered` flag
+- Deployment manifest tags (`zigttp:faultCovered`)
+- Build report alongside other PROVEN/--- labels
 
 ## Running Tests
 

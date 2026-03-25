@@ -66,6 +66,16 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 #### Language Extensions
 - `stripper.zig` - TypeScript/TSX type annotation stripper
 - `comptime.zig` - Compile-time expression evaluator
+- `bool_checker.zig` - Sound mode type-directed analysis (TDT, arithmetic safety)
+- `type_map.zig`, `type_pool.zig`, `type_env.zig`, `type_checker.zig` - TypeScript type checking
+
+#### Compile-Time Analysis
+- `handler_verifier.zig` - Six-check compile-time verification
+- `handler_contract.zig` - Contract extraction from IR
+- `handler_policy.zig` - Runtime policy derivation from contracts
+- `bytecode_verifier.zig` - Bytecode structural integrity validation
+- `path_generator.zig` - Exhaustive execution path enumeration
+- `fault_coverage.zig` - Fault coverage analysis against FailureSeverity annotations
 
 #### JIT Compilation
 - `jit/baseline.zig` - Baseline JIT compiler for x86-64 and ARM64
@@ -232,16 +242,39 @@ zigttp-server/
 │   │   ├── validate.zig   # JSON Schema validation
 │   │   ├── env.zig        # Environment variable access
 │   │   ├── crypto.zig     # SHA-256, HMAC, base64
-│   │   └── router.zig     # Pattern-matching HTTP router
+│   │   ├── router.zig     # Pattern-matching HTTP router
+│   │   ├── sql.zig        # SQLite query execution with allowlisting
+│   │   ├── compose.zig    # Guard-based handler composition
+│   │   ├── durable.zig    # Durable execution (run, step, sleep, signal)
+│   │   ├── resolver.zig   # Module resolver and wiring
+│   │   └── root.zig       # Module registry
 │   ├── jit/
 │   │   └── baseline.zig   # Baseline JIT compiler (x86-64, ARM64)
-│   └── type_feedback.zig  # Call site profiling
+│   ├── type_feedback.zig  # Call site profiling
+│   ├── handler_verifier.zig   # Compile-time handler verification
+│   ├── handler_contract.zig   # Contract extraction from IR
+│   ├── handler_policy.zig     # Runtime policy from contracts
+│   ├── path_generator.zig     # Exhaustive path enumeration
+│   ├── fault_coverage.zig     # Fault coverage analysis
+│   ├── bool_checker.zig       # Sound mode type-directed analysis
+│   ├── type_map.zig           # TypeScript type annotation map
+│   ├── type_checker.zig       # TypeScript type checking
+│   ├── trace.zig              # Deterministic trace recording/replay
+│   ├── module_binding.zig     # ModuleBinding, FunctionBinding, ModuleHandle
+│   └── builtin_modules.zig    # Registry of all built-in module bindings
 ├── src/
 │   ├── main.zig           # CLI entry point
 │   ├── zruntime.zig       # HandlerPool, JS context management
 │   ├── server.zig         # HTTP server implementation
+│   ├── test_runner.zig    # Declarative handler test runner
+│   ├── replay_runner.zig  # Deterministic replay runner
+│   ├── durable_recovery.zig  # Durable execution crash recovery
+│   ├── durable_store.zig     # Signal persistence backend
+│   └── durable_scheduler.zig # Background scheduler for durable waits
 ├── tools/
-│   └── precompile.zig     # Build-time bytecode compiler
+│   ├── precompile.zig     # Build-time bytecode compiler
+│   ├── deploy_manifest.zig    # Proven deployment manifest generator
+│   └── openapi_manifest.zig   # OpenAPI spec generator
 └── examples/
     ├── handler.jsx        # Example JSX handler
     ├── htmx-todo/         # HTMX Todo app example
@@ -346,6 +379,20 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 - `zts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
+
+### Compile-Time Path Analysis
+
+The `PathGenerator` (`zts/path_generator.zig`) performs exhaustive path enumeration at build time, enabled via `-Dgenerate-tests=true`. It walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary to produce a test case for each execution path.
+
+The `FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response - a structural pattern correlated with bugs. Results flow into `contract.json` (`faultCoverage` section), `HandlerProperties.fault_covered`, and deployment manifest tags.
+
+### Guard Composition
+
+The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `zts/parser/parse.zig` (pipe chain collection), `zts/modules/compose.zig` (guard marker).
+
+### Proven Deployment Manifests
+
+The `-Ddeploy=<target>` build option generates platform-specific deployment configurations from compiler-proven contracts. The system extracts `ProvenFacts` (platform-agnostic) from the contract, then dispatches to a `DeployTarget` renderer. Currently supported: `aws` (generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata). Architecture is pluggable via `DeployTarget` enum in `tools/deploy_manifest.zig`.
 
 ## Deployment Patterns
 
