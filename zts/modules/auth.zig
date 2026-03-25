@@ -37,10 +37,12 @@ pub const binding = mb.ModuleBinding{
     .exports = &.{
         .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1,
            .returns = .optional_string, .param_types = &.{.string},
+           .failure_severity = .expected,
            .contract_flags = .{ .sets_bearer_auth = true },
            .return_labels = .{ .credential = true } },
         .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3,
            .returns = .result, .param_types = &.{ .string, .string },
+           .failure_severity = .critical,
            .contract_flags = .{ .sets_jwt_auth = true },
            .return_labels = .{ .credential = true, .validated = true } },
         .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2,

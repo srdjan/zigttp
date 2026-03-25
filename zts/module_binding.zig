@@ -152,6 +152,27 @@ pub const ReturnKind = enum {
 };
 
 // -------------------------------------------------------------------------
+// Failure severity classification
+// -------------------------------------------------------------------------
+
+/// How the fault coverage checker treats a 2xx response on this function's
+/// failure path. Derived from the function's domain semantics:
+///   - critical: security/validation boundary - 2xx on failure is suspicious
+///   - expected: cache miss or missing config - 2xx is normal (graceful degradation)
+///   - upstream: external service failure - 2xx may be intentional (fallback)
+///   - none: function cannot fail (returns plain value)
+pub const FailureSeverity = enum {
+    /// Auth or validation failure - 2xx on failure path is a warning.
+    critical,
+    /// Cache miss, missing env, route not matched - 2xx is fine.
+    expected,
+    /// External service failure (fetchSync) - 2xx is informational.
+    upstream,
+    /// Function always succeeds (returns plain value, not Result/optional).
+    none,
+};
+
+// -------------------------------------------------------------------------
 // Data provenance labels
 // -------------------------------------------------------------------------
 
@@ -308,6 +329,11 @@ pub const FunctionBinding = struct {
     /// Data provenance labels for this function's return value.
     /// Used by the flow checker to track sensitive data through the handler.
     return_labels: LabelSet = .{},
+
+    /// Failure severity classification for fault coverage analysis.
+    /// Determines how the fault coverage checker treats a 2xx response
+    /// on this function's failure path.
+    failure_severity: FailureSeverity = .none,
 
     /// Get the NativeFn for this binding, wrapping ModuleFn if needed.
     pub fn getNativeFn(comptime self: FunctionBinding) object.NativeFn {
@@ -562,4 +588,17 @@ test "FunctionBinding return_labels defaults to empty" {
         .arg_count = 0,
     };
     try std.testing.expect(fb.return_labels.isEmpty());
+}
+
+test "FunctionBinding failure_severity defaults to none" {
+    const fb = FunctionBinding{
+        .name = "test",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 0,
+    };
+    try std.testing.expectEqual(FailureSeverity.none, fb.failure_severity);
 }

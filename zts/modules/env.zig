@@ -23,6 +23,7 @@ pub const binding = mb.ModuleBinding{
     .exports = &.{
         .{ .name = "env", .func = envNative, .arg_count = 1,
            .returns = .optional_string, .param_types = &.{.string},
+           .failure_severity = .expected,
            .contract_extractions = &.{.{ .category = .env }},
            .return_labels = .{ .secret = true } },
     },

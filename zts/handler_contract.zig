@@ -248,6 +248,16 @@ pub const AotInfo = struct {
     has_default: bool,
 };
 
+pub const FaultCoverageInfo = struct {
+    total_failable: u32,
+    covered: u32,
+    warnings: u32,
+
+    pub fn isCovered(self: FaultCoverageInfo) bool {
+        return self.covered == self.total_failable and self.total_failable > 0;
+    }
+};
+
 /// Handler-level properties derived from effect classification of virtual
 /// module function calls. Computed during contract extraction by checking
 /// each imported function's EffectClass (read/write/none).
@@ -273,6 +283,9 @@ pub const HandlerProperties = struct {
     input_validated: bool = true,
     /// {user_input} data does not flow to external egress hosts.
     pii_contained: bool = true,
+    // --- Fault coverage (from FaultCoverageChecker) ---
+    /// Every failable I/O call site has an explicit failure path.
+    fault_covered: bool = false,
 };
 
 pub const HandlerContract = struct {
@@ -289,6 +302,7 @@ pub const HandlerContract = struct {
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,
+    fault_coverage: ?FaultCoverageInfo = null,
     properties: ?HandlerProperties = null,
 
     pub const FunctionEntry = struct {
@@ -1831,6 +1845,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseApiSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
             try parseVerification(&parser, &contract);
+        } else if (std.mem.eql(u8, key, "faultCoverage")) {
+            contract.fault_coverage = try parseFaultCoverage(&parser);
         } else if (std.mem.eql(u8, key, "properties")) {
             contract.properties = try parseProperties(&parser);
         } else {
@@ -2646,12 +2662,52 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.input_validated = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "piiContained")) {
             props.pii_contained = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "faultCovered")) {
+            props.fault_covered = parser.readBool() orelse false;
         } else {
             parser.skipValue();
         }
     }
 
     return props;
+}
+
+fn parseFaultCoverage(parser: *JsonParser) !?FaultCoverageInfo {
+    parser.skipWhitespace();
+    if (parser.readNull()) return null;
+
+    if (!parser.consume('{')) return error.InvalidJson;
+    var info = FaultCoverageInfo{
+        .total_failable = 0,
+        .covered = 0,
+        .warnings = 0,
+    };
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "totalFailable")) {
+            info.total_failable = parser.readU32() orelse 0;
+        } else if (std.mem.eql(u8, key, "covered")) {
+            info.covered = parser.readU32() orelse 0;
+        } else if (std.mem.eql(u8, key, "warnings")) {
+            info.warnings = parser.readU32() orelse 0;
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    return info;
 }
 
 /// Map parsed route_type strings to static literals so they outlive the JSON source.
@@ -2994,6 +3050,18 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  \"aot\": null,\n");
     }
 
+    // faultCoverage (optional)
+    if (contract.fault_coverage) |fc| {
+        try writer.writeAll("  \"faultCoverage\": {\n");
+        try writer.print("    \"totalFailable\": {d},\n", .{fc.total_failable});
+        try writer.print("    \"covered\": {d},\n", .{fc.covered});
+        try writer.print("    \"warnings\": {d},\n", .{fc.warnings});
+        try writer.print("    \"isCovered\": {s}\n", .{if (fc.isCovered()) "true" else "false"});
+        try writer.writeAll("  },\n");
+    } else {
+        try writer.writeAll("  \"faultCoverage\": null,\n");
+    }
+
     // properties (optional)
     if (contract.properties) |p| {
         try writer.writeAll("  \"properties\": {\n");
@@ -3006,7 +3074,8 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.print("    \"noSecretLeakage\": {s},\n", .{if (p.no_secret_leakage) "true" else "false"});
         try writer.print("    \"noCredentialLeakage\": {s},\n", .{if (p.no_credential_leakage) "true" else "false"});
         try writer.print("    \"inputValidated\": {s},\n", .{if (p.input_validated) "true" else "false"});
-        try writer.print("    \"piiContained\": {s}\n", .{if (p.pii_contained) "true" else "false"});
+        try writer.print("    \"piiContained\": {s},\n", .{if (p.pii_contained) "true" else "false"});
+        try writer.print("    \"faultCovered\": {s}\n", .{if (p.fault_covered) "true" else "false"});
         try writer.writeAll("  }\n");
     } else {
         try writer.writeAll("  \"properties\": null\n");

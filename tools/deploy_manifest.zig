@@ -51,6 +51,9 @@ pub const ProvenFacts = struct {
     no_credential_leakage: bool = true,
     input_validated: bool = true,
     pii_contained: bool = true,
+
+    // Fault coverage
+    fault_covered: bool = false,
 };
 
 // -------------------------------------------------------------------------
@@ -138,6 +141,7 @@ pub fn extractProvenFacts(
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
             .input_validated = if (contract.properties) |p| p.input_validated else true,
             .pii_contained = if (contract.properties) |p| p.pii_contained else true,
+            .fault_covered = if (contract.properties) |p| p.fault_covered else false,
         },
         .checks_buf = checks_buf,
         .routes_buf = routes_buf,
@@ -336,6 +340,9 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll("\"");
     try w.writeAll(",\n          \"zigttp:piiContained\": \"");
     try w.writeAll(if (facts.pii_contained) "true" else "false");
+    try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:faultCovered\": \"");
+    try w.writeAll(if (facts.fault_covered) "true" else "false");
     try w.writeAll("\"");
 
     if (facts.egress_hosts.len > 0 or facts.egress_proven) {
@@ -541,6 +548,11 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
     try w.writeAll("input validated before egress\n");
     try w.writeAll(if (facts.pii_contained) "  PROVEN  " else "  ---     ");
     try w.writeAll("PII contained (no user input in egress)\n");
+
+    // FAULT COVERAGE section
+    try w.writeAll("\nFAULT COVERAGE:\n");
+    try w.writeAll(if (facts.fault_covered) "  PROVEN  " else "  ---     ");
+    try w.writeAll("all I/O failure modes handled correctly\n");
 
     try w.writeAll("\nPROOF LEVEL: ");
     try w.writeAll(facts.proof_level.toString());

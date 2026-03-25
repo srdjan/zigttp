@@ -1293,6 +1293,47 @@ fn compileHandler(
                 generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
             }
 
+            // Fault coverage analysis on generated paths
+            var fc = zts.fault_coverage.FaultCoverageChecker.init(allocator, gen.getTests());
+            defer fc.deinit();
+            try fc.analyze();
+            const fc_report = fc.getReport();
+
+            if (fc_report.total_failable > 0) {
+                if (contract != null) {
+                    contract.?.fault_coverage = .{
+                        .total_failable = fc_report.total_failable,
+                        .covered = fc_report.covered,
+                        .warnings = fc_report.warning_count,
+                    };
+                    if (contract.?.properties) |*props| {
+                        props.fault_covered = fc_report.isClean();
+                    }
+                }
+
+                if (!builtin.is_test) {
+                    var fc_buf: std.ArrayList(u8) = .empty;
+                    var fc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &fc_buf);
+                    fc.formatMatrix(fc_report, &fc_aw.writer) catch {};
+                    fc_buf = fc_aw.toArrayList();
+                    if (fc_buf.items.len > 0) {
+                        std.debug.print("{s}", .{fc_buf.items});
+                    }
+                    fc_buf.deinit(allocator);
+
+                    if (fc_report.warning_count > 0) {
+                        var diag_buf: std.ArrayList(u8) = .empty;
+                        var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_buf);
+                        fc.formatDiagnostics(&diag_aw.writer) catch {};
+                        diag_buf = diag_aw.toArrayList();
+                        if (diag_buf.items.len > 0) {
+                            std.debug.print("{s}", .{diag_buf.items});
+                        }
+                        diag_buf.deinit(allocator);
+                    }
+                }
+            }
+
             if (!builtin.is_test) {
                 std.debug.print("Generated {d} test case(s) from path analysis\n", .{test_count});
             }

@@ -31,6 +31,7 @@ pub const binding = mb.ModuleBinding{
            .contract_extractions = &.{.{ .category = .sql_registration }} },
         .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2,
            .returns = .optional_object, .param_types = &.{ .string, .object },
+           .failure_severity = .expected,
            .return_labels = .{ .internal = true } },
         .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2,
            .returns = .object, .param_types = &.{ .string, .object },

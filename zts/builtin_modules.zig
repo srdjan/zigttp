@@ -113,3 +113,22 @@ test "findFunction finds optional-producing functions" {
     try std.testing.expect(router_fn != null);
     try std.testing.expectEqual(mb.ReturnKind.optional_object, router_fn.?.func.returns);
 }
+
+test "failure_severity annotations on failable functions" {
+    // Critical: auth and validation failures
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("jwtVerify").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("validateJson").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("validateObject").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("coerceJson").?.func.failure_severity);
+
+    // Expected: cache miss, missing config, route not matched
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("env").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("cacheGet").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("routerMatch").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("parseBearer").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("sqlOne").?.func.failure_severity);
+
+    // None: functions that always succeed
+    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("sha256").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("cacheSet").?.func.failure_severity);
+}

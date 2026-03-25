@@ -31,16 +31,24 @@ const packBindingKey = bool_checker_mod.packBindingKey;
 // Path constraints
 // ---------------------------------------------------------------------------
 
-const Constraint = union(enum) {
+pub const Constraint = union(enum) {
     req_method: []const u8,
     req_url: []const u8,
     stub_truthy: StubInfo,
     stub_falsy: StubInfo,
     result_ok: StubInfo,
     result_not_ok: StubInfo,
+
+    /// Whether this constraint represents an I/O failure condition.
+    pub fn isFailure(self: Constraint) bool {
+        return switch (self) {
+            .stub_falsy, .result_not_ok => true,
+            else => false,
+        };
+    }
 };
 
-const StubInfo = struct {
+pub const StubInfo = struct {
     module: []const u8,
     func: []const u8,
     returns: mb.ReturnKind,
@@ -50,20 +58,21 @@ const StubInfo = struct {
 // Generated test
 // ---------------------------------------------------------------------------
 
-const IoStub = struct {
+pub const IoStub = struct {
     seq: u32,
     module: []const u8,
     func: []const u8,
     result_json: []const u8,
 };
 
-const GeneratedTest = struct {
+pub const GeneratedTest = struct {
     name: []const u8,
     method: []const u8,
     url: []const u8,
     has_auth_header: bool,
     expected_status: u16,
     io_stubs: std.ArrayList(IoStub),
+    constraints: []const Constraint = &.{},
 };
 
 // ---------------------------------------------------------------------------
@@ -131,7 +140,11 @@ pub const PathGenerator = struct {
         self.var_inits.deinit(self.allocator);
         self.constraints.deinit(self.allocator);
         self.io_seq.deinit(self.allocator);
-        for (self.tests.items) |*t| t.io_stubs.deinit(self.allocator);
+        for (self.tests.items) |*t| {
+            self.allocator.free(t.name);
+            t.io_stubs.deinit(self.allocator);
+            if (t.constraints.len > 0) self.allocator.free(t.constraints);
+        }
         self.tests.deinit(self.allocator);
     }
 
@@ -741,6 +754,9 @@ pub const PathGenerator = struct {
             seq += 1;
         }
 
+        // Snapshot current constraints for fault coverage analysis
+        const constraints_snapshot = try self.allocator.dupe(Constraint, self.constraints.items);
+
         try self.tests.append(self.allocator, .{
             .name = name,
             .method = method,
@@ -748,6 +764,7 @@ pub const PathGenerator = struct {
             .has_auth_header = has_auth,
             .expected_status = status,
             .io_stubs = io_stubs,
+            .constraints = constraints_snapshot,
         });
     }
 

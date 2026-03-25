@@ -46,6 +46,7 @@ pub const binding = mb.ModuleBinding{
     .exports = &.{
         .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2,
            .effect = .read, .returns = .optional_string, .param_types = &.{.string},
+           .failure_severity = .expected,
            .contract_extractions = &.{.{ .category = .cache_namespace }},
            .return_labels = .{ .internal = true } },
         .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4,
