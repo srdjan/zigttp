@@ -1173,10 +1173,8 @@ pub const Server = struct {
                 if (body_start > data.len or len > data.len - body_start) {
                     return error.IncompleteBody;
                 }
-                if (len <= self.config.max_body_size) {
-                    body = try allocator.alloc(u8, len);
-                    @memcpy(body.?, data[body_start..][0..len]);
-                }
+                body = try allocator.alloc(u8, len);
+                @memcpy(body.?, data[body_start..][0..len]);
             }
         }
 

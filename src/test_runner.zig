@@ -326,3 +326,135 @@ fn parseTestFile(allocator: std.mem.Allocator, source: []const u8) ![]TestCase {
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return zq.file_io.readFile(allocator, path, 100 * 1024 * 1024);
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "parseTestFile: empty input" {
+    const tests = try parseTestFile(std.testing.allocator, "");
+    defer std.testing.allocator.free(tests);
+    try std.testing.expectEqual(@as(usize, 0), tests.len);
+}
+
+test "parseTestFile: single test with status assertion" {
+    const source =
+        \\{"type":"test","name":"health check"}
+        \\{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+        \\{"type":"expect","status":200}
+    ;
+    const tests = try parseTestFile(std.testing.allocator, source);
+    defer {
+        for (tests) |t| std.testing.allocator.free(t.io_calls);
+        std.testing.allocator.free(tests);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), tests.len);
+    try std.testing.expectEqualStrings("health check", tests[0].name);
+    try std.testing.expectEqualStrings("GET", tests[0].request.?.method);
+    try std.testing.expectEqualStrings("/health", tests[0].request.?.url);
+    try std.testing.expectEqual(@as(u16, 200), tests[0].assertions.status.?);
+}
+
+test "parseTestFile: multiple tests" {
+    const source =
+        \\{"type":"test","name":"first"}
+        \\{"type":"request","method":"GET","url":"/a","headers":{},"body":null}
+        \\{"type":"expect","status":200}
+        \\{"type":"test","name":"second"}
+        \\{"type":"request","method":"POST","url":"/b","headers":{},"body":null}
+        \\{"type":"expect","status":404}
+    ;
+    const tests = try parseTestFile(std.testing.allocator, source);
+    defer {
+        for (tests) |t| std.testing.allocator.free(t.io_calls);
+        std.testing.allocator.free(tests);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqualStrings("first", tests[0].name);
+    try std.testing.expectEqualStrings("second", tests[1].name);
+    try std.testing.expectEqual(@as(u16, 404), tests[1].assertions.status.?);
+}
+
+test "parseTestFile: test with io stubs" {
+    const source =
+        \\{"type":"test","name":"with io"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"io","seq":0,"module":"env","fn":"env","args":["KEY"],"result":"val"}
+        \\{"type":"io","seq":1,"module":"crypto","fn":"sha256","args":["x"],"result":"abc"}
+        \\{"type":"expect","status":200}
+    ;
+    const tests = try parseTestFile(std.testing.allocator, source);
+    defer {
+        for (tests) |t| std.testing.allocator.free(t.io_calls);
+        std.testing.allocator.free(tests);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), tests.len);
+    try std.testing.expectEqual(@as(usize, 2), tests[0].io_calls.len);
+    try std.testing.expectEqualStrings("env", tests[0].io_calls[0].module);
+    try std.testing.expectEqualStrings("crypto", tests[0].io_calls[1].module);
+}
+
+test "parseTestFile: bodyContains assertion" {
+    const source =
+        \\{"type":"test","name":"contains"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200,"bodyContains":"hello"}
+    ;
+    const tests = try parseTestFile(std.testing.allocator, source);
+    defer {
+        for (tests) |t| std.testing.allocator.free(t.io_calls);
+        std.testing.allocator.free(tests);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), tests.len);
+    try std.testing.expectEqualStrings("hello", tests[0].assertions.body_contains.?);
+}
+
+test "checkAssertions: status match passes" {
+    const assertions = TestAssertions{ .status = 200 };
+    var response = HttpResponse.init(std.testing.allocator);
+    response.status = 200;
+    var failures: std.ArrayList([]const u8) = .empty;
+    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    try std.testing.expectEqual(@as(usize, 0), failures.items.len);
+}
+
+test "checkAssertions: status mismatch fails" {
+    const assertions = TestAssertions{ .status = 404 };
+    var response = HttpResponse.init(std.testing.allocator);
+    response.status = 200;
+    var failures: std.ArrayList([]const u8) = .empty;
+    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    defer {
+        for (failures.items) |msg| std.testing.allocator.free(msg);
+        failures.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), failures.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, failures.items[0], "expected status: 404") != null);
+}
+
+test "checkAssertions: bodyContains match passes" {
+    const assertions = TestAssertions{ .body_contains = "world" };
+    var response = HttpResponse.init(std.testing.allocator);
+    response.body = "{\"greeting\":\"hello world\"}";
+    var failures: std.ArrayList([]const u8) = .empty;
+    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    try std.testing.expectEqual(@as(usize, 0), failures.items.len);
+}
+
+test "checkAssertions: bodyContains mismatch fails" {
+    const assertions = TestAssertions{ .body_contains = "missing" };
+    var response = HttpResponse.init(std.testing.allocator);
+    response.body = "{\"greeting\":\"hello\"}";
+    var failures: std.ArrayList([]const u8) = .empty;
+    checkAssertions(std.testing.allocator, &response, &assertions, &failures);
+    defer {
+        for (failures.items) |msg| std.testing.allocator.free(msg);
+        failures.deinit(std.testing.allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 1), failures.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, failures.items[0], "body does not contain") != null);
+}

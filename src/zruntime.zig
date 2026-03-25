@@ -2945,61 +2945,86 @@ fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue)
     return result;
 }
 
-fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
-    if (!rt.config.outbound_http_enabled) {
-        return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
-    }
+/// Parsed fetch arguments: URL, URI, and optional init object.
+/// Shared by fetchSyncResult and collectFetchForParallel.
+const FetchArgs = struct {
+    url: []const u8,
+    uri: std.Uri,
+    init_obj: ?*zq.JSObject,
+};
+
+/// Parse and validate the (url, init?) arguments common to all fetch call sites.
+/// Returns a JS error response (status 599) on validation failure.
+fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !union(enum) {
+    ok: FetchArgs,
+    err: zq.JSValue,
+} {
     if (args.len == 0) {
-        return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object") };
     }
-
-    // If parallel() is collecting fetch descriptors, record this call
-    // instead of executing the HTTP request.
-    if (zq.modules.io.parallel_collector) |collector| {
-        return collectFetchForParallel(rt, collector, args);
-    }
-
-    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     var init_obj: ?*zq.JSObject = null;
     const url = blk: {
         if (args[0].isObject()) {
             init_obj = args[0].toPtr(zq.JSObject);
             const url_val = getObjectProperty(rt.ctx, init_obj.?, pool, zq.Atom.url, "url") orelse {
-                return createFetchErrorResponse(rt, "InvalidUrl", "missing url field");
+                return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "missing url field") };
             };
-            const url = getStringData(url_val) orelse {
-                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+            const url_str = getStringData(url_val) orelse {
+                return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string") };
             };
-            if (url.len == 0) {
-                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+            if (url_str.len == 0) {
+                return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string") };
             }
-            break :blk url;
+            break :blk url_str;
         }
-
-        const url = getStringData(args[0]) orelse {
-            return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
+        const url_str = getStringData(args[0]) orelse {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object") };
         };
-        if (url.len == 0) {
-            return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
+        if (url_str.len == 0) {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string") };
         }
         if (args.len > 1 and args[1].isObject()) {
             init_obj = args[1].toPtr(zq.JSObject);
         }
-        break :blk url;
+        break :blk url_str;
     };
 
     const uri = std.Uri.parse(url) catch {
-        return createFetchErrorResponse(rt, "InvalidUrl", "url parse failed");
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url parse failed") };
     };
-
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = uri.getHost(&host_buf) catch {
-        return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidUrl", "url host is required") };
     };
     if (outboundHostViolation(rt, host.bytes)) |details| {
-        return createFetchErrorResponse(rt, "HostNotAllowed", details);
+        return .{ .err = try createFetchErrorResponse(rt, "HostNotAllowed", details) };
     }
+
+    return .{ .ok = .{ .url = url, .uri = uri, .init_obj = init_obj } };
+}
+
+fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
+    if (!rt.config.outbound_http_enabled) {
+        return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
+    }
+
+    if (zq.modules.io.parallel_collector) |collector| {
+        return collectFetchForParallel(rt, collector, args);
+    }
+
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    const parsed = try parseFetchArgs(rt, pool, args);
+    const fetch_args = switch (parsed) {
+        .ok => |fa| fa,
+        .err => |err_val| return err_val,
+    };
+    const uri = fetch_args.uri;
+    const init_obj = fetch_args.init_obj;
+
+    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host = uri.getHost(&host_buf) catch unreachable; // already validated by parseFetchArgs
 
     var method = std.http.Method.GET;
     var body: ?[]const u8 = null;
@@ -3169,47 +3194,14 @@ fn collectFetchForParallel(rt: *Runtime, collector: *zq.modules.io.ParallelColle
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const a = collector.allocator;
 
-    // Extract URL (same parsing as fetchSyncResult)
-    var init_obj: ?*zq.JSObject = null;
-    const url = blk: {
-        if (args[0].isObject()) {
-            init_obj = args[0].toPtr(zq.JSObject);
-            const url_val = getObjectProperty(rt.ctx, init_obj.?, pool, zq.Atom.url, "url") orelse {
-                return createFetchErrorResponse(rt, "InvalidUrl", "missing url field");
-            };
-            const url_str = getStringData(url_val) orelse {
-                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
-            };
-            if (url_str.len == 0) {
-                return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
-            }
-            break :blk url_str;
-        }
-        const url_str = getStringData(args[0]) orelse {
-            return createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object");
-        };
-        if (url_str.len == 0) {
-            return createFetchErrorResponse(rt, "InvalidUrl", "url must be a non-empty string");
-        }
-        if (args.len > 1 and args[1].isObject()) {
-            init_obj = args[1].toPtr(zq.JSObject);
-        }
-        break :blk url_str;
+    const parsed = try parseFetchArgs(rt, pool, args);
+    const fetch_args = switch (parsed) {
+        .ok => |fa| fa,
+        .err => |err_val| return err_val,
     };
+    const url = fetch_args.url;
+    const init_obj = fetch_args.init_obj;
 
-    // Validate URL and host
-    const uri = std.Uri.parse(url) catch {
-        return createFetchErrorResponse(rt, "InvalidUrl", "url parse failed");
-    };
-    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch {
-        return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
-    };
-    if (outboundHostViolation(rt, host.bytes)) |details| {
-        return createFetchErrorResponse(rt, "HostNotAllowed", details);
-    }
-
-    // Extract method, body, headers from init object
     var method = std.http.Method.GET;
     var body: ?[]const u8 = null;
     var max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);

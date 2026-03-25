@@ -41,3 +41,35 @@ pub fn parseHeadersFromJson(
         try headers.append(allocator, .{ .key = key, .value = val });
     }
 }
+
+test "parseHeadersFromJson: basic object" {
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(std.testing.allocator);
+
+    try parseHeadersFromJson(std.testing.allocator, "{\"content-type\":\"application/json\",\"authorization\":\"Bearer tok\"}", &headers);
+
+    try std.testing.expectEqual(@as(usize, 2), headers.items.len);
+    try std.testing.expectEqualStrings("content-type", headers.items[0].key);
+    try std.testing.expectEqualStrings("application/json", headers.items[0].value);
+    try std.testing.expectEqualStrings("authorization", headers.items[1].key);
+    try std.testing.expectEqualStrings("Bearer tok", headers.items[1].value);
+}
+
+test "parseHeadersFromJson: empty object" {
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(std.testing.allocator);
+
+    try parseHeadersFromJson(std.testing.allocator, "{}", &headers);
+    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
+}
+
+test "parseHeadersFromJson: malformed input" {
+    var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
+    defer headers.deinit(std.testing.allocator);
+
+    try parseHeadersFromJson(std.testing.allocator, "", &headers);
+    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
+
+    try parseHeadersFromJson(std.testing.allocator, "not json", &headers);
+    try std.testing.expectEqual(@as(usize, 0), headers.items.len);
+}

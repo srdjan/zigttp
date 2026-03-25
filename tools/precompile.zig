@@ -96,6 +96,98 @@ pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.All
     }
 }
 
+const PrecompileOptions = struct {
+    handler_path: []const u8,
+    output_path: []const u8,
+    emit_aot: bool = false,
+    emit_verify: bool = false,
+    emit_contract: bool = false,
+    emit_openapi: bool = false,
+    sql_schema_path: ?[]const u8 = null,
+    policy_path: ?[]const u8 = null,
+    deploy_target_str: ?[]const u8 = null,
+    replay_trace_path: ?[]const u8 = null,
+    test_file_path: ?[]const u8 = null,
+    prove_spec: ?[]const u8 = null,
+};
+
+fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
+    var args = std.process.Args.Iterator.init(args_vector);
+    defer args.deinit();
+    _ = args.skip();
+
+    var opts = PrecompileOptions{ .handler_path = "", .output_path = "" };
+    var handler_path: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--aot")) { opts.emit_aot = true; continue; }
+        if (std.mem.eql(u8, arg, "--verify")) { opts.emit_verify = true; continue; }
+        if (std.mem.eql(u8, arg, "--contract")) { opts.emit_contract = true; continue; }
+        if (std.mem.eql(u8, arg, "--openapi")) { opts.emit_openapi = true; continue; }
+        if (std.mem.eql(u8, arg, "--sql-schema")) {
+            opts.sql_schema_path = args.next() orelse {
+                std.debug.print("Missing path after --sql-schema\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--policy")) {
+            opts.policy_path = args.next() orelse {
+                std.debug.print("Missing path after --policy\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--deploy")) {
+            opts.deploy_target_str = args.next() orelse {
+                std.debug.print("Missing target after --deploy\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--replay")) {
+            opts.replay_trace_path = args.next() orelse {
+                std.debug.print("Missing path after --replay\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--test-file")) {
+            opts.test_file_path = args.next() orelse {
+                std.debug.print("Missing path after --test-file\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--prove")) {
+            opts.prove_spec = args.next() orelse {
+                std.debug.print("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (handler_path == null) { handler_path = arg; continue; }
+        if (output_path == null) { output_path = arg; continue; }
+        std.debug.print("Unexpected argument: {s}\n", .{arg});
+        return error.InvalidArgument;
+    }
+
+    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n";
+    opts.handler_path = handler_path orelse {
+        std.debug.print(usage, .{});
+        std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
+        return error.MissingArgument;
+    };
+    opts.output_path = output_path orelse {
+        std.debug.print(usage, .{});
+        std.debug.print("\nMissing output path.\n", .{});
+        return error.MissingArgument;
+    };
+
+    return opts;
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
         if (builtin.mode == .Debug) .init else {};
@@ -104,110 +196,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
-    // Parse command line arguments
-    var args = std.process.Args.Iterator.init(init.args);
-    defer args.deinit();
-
-    // Skip program name
-    _ = args.skip();
-
-    var emit_aot = false;
-    var emit_verify = false;
-    var emit_contract = false;
-    var emit_openapi = false;
-    var sql_schema_path: ?[]const u8 = null;
-    var policy_path: ?[]const u8 = null;
-    var deploy_target_str: ?[]const u8 = null;
-    var replay_trace_path: ?[]const u8 = null;
-    var test_file_path: ?[]const u8 = null;
-    var prove_spec: ?[]const u8 = null;
-    var handler_path: ?[]const u8 = null;
-    var output_path: ?[]const u8 = null;
-
-    while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--aot")) {
-            emit_aot = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--verify")) {
-            emit_verify = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--contract")) {
-            emit_contract = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--openapi")) {
-            emit_openapi = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--sql-schema")) {
-            sql_schema_path = args.next() orelse {
-                std.debug.print("Missing path after --sql-schema\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--policy")) {
-            policy_path = args.next() orelse {
-                std.debug.print("Missing path after --policy\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--deploy")) {
-            deploy_target_str = args.next() orelse {
-                std.debug.print("Missing target after --deploy\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--replay")) {
-            replay_trace_path = args.next() orelse {
-                std.debug.print("Missing path after --replay\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--test-file")) {
-            test_file_path = args.next() orelse {
-                std.debug.print("Missing path after --test-file\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--prove")) {
-            prove_spec = args.next() orelse {
-                std.debug.print("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-
-        if (handler_path == null) {
-            handler_path = arg;
-            continue;
-        }
-        if (output_path == null) {
-            output_path = arg;
-            continue;
-        }
-
-        std.debug.print("Unexpected argument: {s}\n", .{arg});
-        return error.InvalidArgument;
-    }
-
-    const handler_path_final = handler_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
-        std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
-        return error.MissingArgument;
+    const opts = parsePrecompileArgs(init.args) catch |err| {
+        if (err == error.MissingArgument) return;
+        return err;
     };
 
-    const output_path_final = output_path orelse {
-        std.debug.print("Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n", .{});
-        std.debug.print("\nMissing output path.\n", .{});
-        return error.MissingArgument;
-    };
+    const handler_path_final = opts.handler_path;
+    const output_path_final = opts.output_path;
+    const emit_aot = opts.emit_aot;
+    const emit_verify = opts.emit_verify;
+    const emit_contract = opts.emit_contract;
+    const emit_openapi = opts.emit_openapi;
+    const sql_schema_path = opts.sql_schema_path;
+    const policy_path = opts.policy_path;
+    const deploy_target_str = opts.deploy_target_str;
+    const replay_trace_path = opts.replay_trace_path;
+    const test_file_path = opts.test_file_path;
+    const prove_spec = opts.prove_spec;
 
     // Read the handler source file (using posix for synchronous I/O)
     const source = readFilePosix(allocator, handler_path_final, 10 * 1024 * 1024) catch |err| {
