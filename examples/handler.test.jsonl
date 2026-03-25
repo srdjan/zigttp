@@ -1,0 +1,18 @@
+{"type":"test","name":"GET /api/health returns 200"}
+{"type":"request","method":"GET","url":"/api/health","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"ok"}
+{"type":"test","name":"GET /api/echo returns request details"}
+{"type":"request","method":"GET","url":"/api/echo","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"method"}
+{"type":"test","name":"GET /api/compute returns fibonacci"}
+{"type":"request","method":"GET","url":"/api/compute","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"fibonacci"}
+{"type":"test","name":"GET /api/greet/Alice returns greeting"}
+{"type":"request","method":"GET","url":"/api/greet/Alice","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Alice"}
+{"type":"test","name":"GET /unknown returns 404"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"Not Found"}
+{"type":"test","name":"POST /api/json without body returns 400"}
+{"type":"request","method":"POST","url":"/api/json","headers":{},"body":null}
+{"type":"expect","status":400,"bodyContains":"No body provided"}

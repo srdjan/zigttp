@@ -23,12 +23,14 @@ zig build -Dhandler=handler.jsx -Dverify  # Verify handler at compile time
 zig build -Dhandler=handler.jsx -Dcontract  # Emit contract.json manifest
 zig build -Dhandler=handler.jsx -Ddeploy=aws  # Generate proven deployment manifest
 zig build -Dhandler=handler.jsx -Dreplay=traces.jsonl  # Replay-verify before embedding
+zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Run handler tests at build time
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
 zig build run -- examples/handler.jsx -p 3000
 zig build run -- examples/handler.ts       # TypeScript handler
 zig build run -- examples/handler.tsx      # TSX handler
+zig build run -- examples/handler.jsx --test examples/handler.test.jsonl  # Run handler tests
 
 # Test
 zig build test                      # All src/ tests
@@ -179,6 +181,10 @@ Build integration: `-Dreplay=traces.jsonl` in the precompile pipeline. The preco
 
 Non-determinism sources handled: `env()`, `fetchSync`, `Date.now()` (intercepted in builtins.zig), `Math.random()` (intercepted in builtins.zig), `jwtVerify` (captured by result recording), `cacheGet/Set/Delete/Incr` (per-call recording sidesteps state), `parallel`/`race` (individual fetch results recorded).
 
+**Declarative Handler Testing** (`src/test_runner.zig`, `tools/precompile.zig`): User-authored test cases in JSONL format, leveraging the same replay stub infrastructure. Because handlers are pure functions of (Request, VirtualModuleResponses), testing requires no mocking frameworks or infrastructure - just declare inputs and expected outputs.
+
+Test file format: each test is a group of JSONL lines starting with `{"type":"test","name":"..."}`, followed by `{"type":"request",...}` (same format as trace recording), optional `{"type":"io",...}` lines (virtual module stubs), and `{"type":"expect","status":N,"bodyContains":"..."}` (assertions). Runtime mode: `--test tests.jsonl`. Build-time mode: `-Dtest-file=tests.jsonl`. Exit code 1 on any failure.
+
 **Durable Execution** (`zts/trace.zig:DurableState`, `src/durable_recovery.zig`, `src/durable_store.zig`, `src/durable_scheduler.zig`): Write-ahead oplog mode built on top of the deterministic replay system. `--durable <dir>` enables crash recovery and long-running workflows for FaaS handlers.
 
 Per-request lifecycle: (1) create oplog file in dir, (2) persist request line with fsync, (3) execute handler - each I/O call's result is persisted to oplog before returning to handler, (4) persist response and "complete" marker, (5) delete oplog.
@@ -282,6 +288,7 @@ Stateful modules (validate, cache, io) use `Context.module_state` - a fixed-size
 --static <DIR>         Serve static files
 --trace <FILE>         Record handler I/O traces to JSONL file
 --replay <FILE>        Replay recorded traces and verify handler output
+--test <FILE>          Run declarative handler tests from JSONL file
 --durable <DIR>        Enable durable execution with write-ahead oplog
 ```
 

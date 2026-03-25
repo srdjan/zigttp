@@ -1,0 +1,12 @@
+{"type":"test","name":"returns app name from env"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"hello world"}
+{"type":"io","seq":0,"module":"env","fn":"env","args":["APP_NAME"],"result":"MyApp"}
+{"type":"io","seq":1,"module":"crypto","fn":"sha256","args":["hello world"],"result":"b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"}
+{"type":"io","seq":2,"module":"crypto","fn":"base64Encode","args":["Hello from MyApp"],"result":"SGVsbG8gZnJvbSBNeUFwcA=="}
+{"type":"expect","status":200,"bodyContains":"MyApp"}
+{"type":"test","name":"uses default app name when env is unset"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"test"}
+{"type":"io","seq":0,"module":"env","fn":"env","args":["APP_NAME"],"result":null}
+{"type":"io","seq":1,"module":"crypto","fn":"sha256","args":["test"],"result":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}
+{"type":"io","seq":2,"module":"crypto","fn":"base64Encode","args":["Hello from zigttp"],"result":"SGVsbG8gZnJvbSB6aWd0dHA="}
+{"type":"expect","status":200,"bodyContains":"zigttp"}

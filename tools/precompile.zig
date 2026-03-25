@@ -119,6 +119,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var policy_path: ?[]const u8 = null;
     var deploy_target_str: ?[]const u8 = null;
     var replay_trace_path: ?[]const u8 = null;
+    var test_file_path: ?[]const u8 = null;
     var prove_spec: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -164,6 +165,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         if (std.mem.eql(u8, arg, "--replay")) {
             replay_trace_path = args.next() orelse {
                 std.debug.print("Missing path after --replay\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--test-file")) {
+            test_file_path = args.next() orelse {
+                std.debug.print("Missing path after --test-file\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -282,6 +290,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.debug.print("Build aborted: replay verification failed.\n", .{});
                 return error.ReplayVerificationFailed;
             }
+        }
+    }
+
+    // Run handler tests if --test-file was passed.
+    if (test_file_path) |t_path| {
+        const test_source = readFilePosix(allocator, t_path, 100 * 1024 * 1024) catch |err| {
+            std.debug.print("Error reading test file '{s}': {}\n", .{ t_path, err });
+            return err;
+        };
+        defer allocator.free(test_source);
+
+        const test_result = runBuildTimeTests(allocator, source, handler_path_final, test_source) catch |err| {
+            std.debug.print("Build-time test execution failed: {}\n", .{err});
+            return err;
+        };
+        std.debug.print("Tests: {d}/{d} passed", .{ test_result.pass, test_result.total });
+        if (test_result.fail > 0) {
+            std.debug.print(", {d} FAILED", .{test_result.fail});
+        }
+        std.debug.print("\n", .{});
+        if (test_result.fail > 0) {
+            std.debug.print("Build aborted: handler tests failed.\n", .{});
+            return error.TestsFailed;
         }
     }
 
@@ -554,27 +585,33 @@ fn runBuildTimeReplay(
     return .{ .total = pass + fail, .pass = pass, .fail = fail };
 }
 
-/// Replay a single trace at build time using a standalone zts context.
-fn replayOneBuildTime(
+/// Result of executing a handler at build time.
+const HandlerExecResult = struct {
+    status: u16,
+    body: []const u8,
+    divergences: u32,
+};
+
+/// Execute a handler against a request with stubbed I/O at build time.
+/// Shared by both replay verification and handler tests.
+fn executeBuildTimeHandler(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    group: *const zts.trace.RequestTraceGroup,
-) !bool {
-    // Create a standalone zts context
+    request: zts.trace.RequestTrace,
+    io_calls: []const zts.trace.IoEntry,
+) !HandlerExecResult {
     const ctx = try zts.createContext(allocator, .{ .nursery_size = 64 * 1024 });
     defer zts.destroyContext(ctx);
     try zts.builtins.initBuiltins(ctx);
 
-    // Register replay stubs for all virtual modules
     inline for (std.meta.fields(zts.modules.VirtualModule)) |field| {
         const module: zts.modules.VirtualModule = @enumFromInt(field.value);
         try zts.modules.registerVirtualModuleReplay(module, ctx, allocator);
     }
 
-    // Set up replay state
     var replay_state = zts.trace.ReplayState{
-        .io_calls = group.io_calls,
+        .io_calls = io_calls,
         .cursor = 0,
         .divergences = 0,
     };
@@ -585,7 +622,6 @@ fn replayOneBuildTime(
     );
     defer ctx.module_state[zts.trace.REPLAY_STATE_SLOT] = null;
 
-    // Parse and compile handler
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
 
@@ -608,7 +644,6 @@ fn replayOneBuildTime(
 
     const bytecode_data = p.parse() catch return error.ParseFailed;
 
-    // Materialize object literal shapes before execution
     const shapes = p.getShapes();
     if (shapes.len > 0) {
         try ctx.materializeShapes(shapes);
@@ -629,28 +664,25 @@ fn replayOneBuildTime(
     var interp = zts.Interpreter.init(ctx);
     _ = try interp.run(&func);
 
-    // Find handler function
     const handler_val = ctx.getGlobal(zts.Atom.handler) orelse return error.NoHandler;
     if (!handler_val.isObject()) return error.NoHandler;
     const handler_obj = zts.JSObject.fromValue(handler_val);
     if (handler_obj.class_id != .function or !handler_obj.flags.is_callable) return error.NoHandler;
 
-    // Build request object using Context methods (same as runtime dynamic path)
     const hc_pool_req = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const req_obj = try ctx.createObject(null);
 
-    const method_val = try ctx.createString(group.request.method);
+    const method_val = try ctx.createString(request.method);
     try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.method, method_val);
 
-    const url_val = try ctx.createString(group.request.url);
+    const url_val = try ctx.createString(request.url);
     try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.url, url_val);
 
-    if (group.request.body) |body| {
+    if (request.body) |body| {
         const body_val = try ctx.createString(body);
         try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.body, body_val);
     }
 
-    // Execute handler
     const args = [_]zts.JSValue{req_obj.toValue()};
     const bc_data = handler_obj.getBytecodeFunctionData() orelse return error.NotCallable;
     const result = interp.callBytecodeFunction(
@@ -660,7 +692,6 @@ fn replayOneBuildTime(
         &args,
     ) catch return error.HandlerError;
 
-    // Extract response status and body
     if (!result.isObject()) return error.InvalidResponse;
     const result_obj = zts.JSObject.fromValue(result);
     const hc_pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
@@ -672,19 +703,186 @@ fn replayOneBuildTime(
         200;
 
     const body_val = result_obj.getProperty(hc_pool, zts.Atom.body) orelse zts.JSValue.undefined_val;
-    const actual_body = zts.trace.extractStringData(body_val) orelse "";
 
-    // Compare against expected
-    const expected = group.response orelse return true; // no expected response = pass
-    const status_ok = actual_status == expected.status;
+    return .{
+        .status = actual_status,
+        .body = zts.trace.extractStringData(body_val) orelse "",
+        .divergences = replay_state.divergences,
+    };
+}
 
-    // The trace stores body as a JSON string value with escape sequences.
-    // Unescape before comparing against the raw response body.
+/// Replay a single trace at build time.
+fn replayOneBuildTime(
+    allocator: std.mem.Allocator,
+    handler_source: []const u8,
+    handler_filename: []const u8,
+    group: *const zts.trace.RequestTraceGroup,
+) !bool {
+    const r = try executeBuildTimeHandler(allocator, handler_source, handler_filename, group.request, group.io_calls);
+
+    const expected = group.response orelse return true;
+    const status_ok = r.status == expected.status;
+
+    // Unescape before comparing (trace stores JSON-escaped body strings).
     const expected_body = zts.trace.unescapeJson(allocator, expected.body) catch expected.body;
     defer if (expected_body.ptr != expected.body.ptr) allocator.free(expected_body);
-    const body_ok = std.mem.eql(u8, actual_body, expected_body);
 
-    return status_ok and body_ok and replay_state.divergences == 0;
+    return status_ok and std.mem.eql(u8, r.body, expected_body) and r.divergences == 0;
+}
+
+// ============================================================================
+// Build-Time Handler Tests
+// ============================================================================
+
+const BuildTestCase = struct {
+    name: []const u8,
+    request: ?zts.trace.RequestTrace = null,
+    io_calls: []const zts.trace.IoEntry = &.{},
+    expected_status: ?u16 = null,
+    expected_body: ?[]const u8 = null,
+    expected_body_contains: ?[]const u8 = null,
+};
+
+fn runBuildTimeTests(
+    allocator: std.mem.Allocator,
+    handler_source: []const u8,
+    handler_filename: []const u8,
+    test_source: []const u8,
+) !BuildReplayResult {
+    const tests = try parseBuildTestFile(allocator, test_source);
+    defer {
+        for (tests) |t| allocator.free(t.io_calls);
+        allocator.free(tests);
+    }
+
+    var pass: u32 = 0;
+    var fail: u32 = 0;
+
+    for (tests) |*tc| {
+        const request = tc.request orelse {
+            std.debug.print("  FAIL  {s} (no request defined)\n", .{tc.name});
+            fail += 1;
+            continue;
+        };
+
+        const r = executeBuildTimeHandler(allocator, handler_source, handler_filename, request, tc.io_calls) catch |err| {
+            std.debug.print("  FAIL  {s} (error: {})\n", .{ tc.name, err });
+            fail += 1;
+            continue;
+        };
+
+        var ok = true;
+        if (tc.expected_status) |expected_status| {
+            if (r.status != expected_status) {
+                std.debug.print("  FAIL  {s}\n        expected status: {d}, actual status: {d}\n", .{
+                    tc.name, expected_status, r.status,
+                });
+                ok = false;
+            }
+        }
+        if (tc.expected_body) |expected| {
+            const unescaped = zts.trace.unescapeJson(allocator, expected) catch expected;
+            defer if (unescaped.ptr != expected.ptr) allocator.free(unescaped);
+            if (!std.mem.eql(u8, r.body, unescaped)) {
+                std.debug.print("  FAIL  {s}\n        body mismatch\n        expected: {s}\n        actual:   {s}\n", .{
+                    tc.name, truncate(unescaped, 200), truncate(r.body, 200),
+                });
+                ok = false;
+            }
+        }
+        if (tc.expected_body_contains) |needle| {
+            const unescaped = zts.trace.unescapeJson(allocator, needle) catch needle;
+            defer if (unescaped.ptr != needle.ptr) allocator.free(unescaped);
+            if (std.mem.indexOf(u8, r.body, unescaped) == null) {
+                std.debug.print("  FAIL  {s}\n        body does not contain: {s}\n", .{ tc.name, unescaped });
+                ok = false;
+            }
+        }
+
+        if (ok) {
+            std.debug.print("  PASS  {s}\n", .{tc.name});
+            pass += 1;
+        } else {
+            fail += 1;
+        }
+    }
+
+    return .{ .total = pass + fail, .pass = pass, .fail = fail };
+}
+
+fn truncate(s: []const u8, max: usize) []const u8 {
+    return if (s.len > max) s[0..max] else s;
+}
+
+fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]BuildTestCase {
+    var tests: std.ArrayList(BuildTestCase) = .empty;
+    errdefer tests.deinit(allocator);
+
+    var current_name: ?[]const u8 = null;
+    var current_request: ?zts.trace.RequestTrace = null;
+    var current_io: std.ArrayList(zts.trace.IoEntry) = .empty;
+    defer current_io.deinit(allocator);
+    var current_status: ?u16 = null;
+    var current_body: ?[]const u8 = null;
+    var current_body_contains: ?[]const u8 = null;
+
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+
+        const type_str = zts.trace.findJsonStringValue(line, "\"type\"") orelse continue;
+
+        if (std.mem.eql(u8, type_str, "test")) {
+            if (current_name != null) {
+                try tests.append(allocator, .{
+                    .name = current_name.?,
+                    .request = current_request,
+                    .io_calls = try current_io.toOwnedSlice(allocator),
+                    .expected_status = current_status,
+                    .expected_body = current_body,
+                    .expected_body_contains = current_body_contains,
+                });
+                current_request = null;
+                current_status = null;
+                current_body = null;
+                current_body_contains = null;
+            }
+            current_name = zts.trace.findJsonStringValue(line, "\"name\"") orelse "unnamed";
+        } else if (std.mem.eql(u8, type_str, "request")) {
+            current_request = .{
+                .method = zts.trace.findJsonStringValue(line, "\"method\"") orelse "GET",
+                .url = zts.trace.findJsonStringValue(line, "\"url\"") orelse "/",
+                .headers_json = zts.trace.findJsonObjectValue(line, "\"headers\"") orelse "{}",
+                .body = zts.trace.findJsonStringValue(line, "\"body\""),
+            };
+        } else if (std.mem.eql(u8, type_str, "io")) {
+            try current_io.append(allocator, .{
+                .seq = @intCast(zts.trace.findJsonIntValue(line, "\"seq\"") orelse 0),
+                .module = zts.trace.findJsonStringValue(line, "\"module\"") orelse "",
+                .func = zts.trace.findJsonStringValue(line, "\"fn\"") orelse "",
+                .args_json = zts.trace.findJsonArrayValue(line, "\"args\"") orelse "[]",
+                .result_json = zts.trace.findJsonAnyValue(line, "\"result\"") orelse "null",
+            });
+        } else if (std.mem.eql(u8, type_str, "expect")) {
+            const status_val = zts.trace.findJsonIntValue(line, "\"status\"");
+            current_status = if (status_val) |s| @intCast(@max(0, @min(999, s))) else null;
+            current_body = zts.trace.findJsonStringValue(line, "\"body\"");
+            current_body_contains = zts.trace.findJsonStringValue(line, "\"bodyContains\"");
+        }
+    }
+
+    if (current_name != null) {
+        try tests.append(allocator, .{
+            .name = current_name.?,
+            .request = current_request,
+            .io_calls = try current_io.toOwnedSlice(allocator),
+            .expected_status = current_status,
+            .expected_body = current_body,
+            .expected_body_contains = current_body_contains,
+        });
+    }
+
+    return try tests.toOwnedSlice(allocator);
 }
 
 fn compileHandler(

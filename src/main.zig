@@ -43,6 +43,7 @@ const ServerConfig = @import("server.zig").ServerConfig;
 const HandlerSource = @import("server.zig").HandlerSource;
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const replay_runner = @import("replay_runner.zig");
+const test_runner = @import("test_runner.zig");
 const durable_recovery = @import("durable_recovery.zig");
 const durable_scheduler = @import("durable_scheduler.zig");
 
@@ -71,6 +72,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         replay_runner.run(allocator, config) catch |err| {
             std.log.err("Replay error: {}", .{err});
             return;
+        };
+        return;
+    }
+
+    // Test mode: run declarative handler tests instead of serving
+    if (config.runtime_config.test_file_path != null) {
+        test_runner.run(allocator, config) catch |err| {
+            if (err != error.TestsFailed) {
+                std.log.err("Test error: {}", .{err});
+            }
+            std.process.exit(if (err == error.TestsFailed) 1 else 2);
         };
         return;
     }
@@ -170,6 +182,8 @@ fn parseArgs(args_vector: std.process.Args) !ServerConfig {
             config.runtime_config.trace_file_path = args.next() orelse return error.MissingTraceFile;
         } else if (std.mem.eql(u8, arg, "--replay")) {
             config.runtime_config.replay_file_path = args.next() orelse return error.MissingReplayFile;
+        } else if (std.mem.eql(u8, arg, "--test")) {
+            config.runtime_config.test_file_path = args.next() orelse return error.MissingTestFile;
         } else if (std.mem.eql(u8, arg, "--durable")) {
             config.runtime_config.durable_oplog_dir = args.next() orelse return error.MissingDurableDir;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
@@ -246,6 +260,7 @@ fn printHelp() void {
         \\  --sqlite <FILE>       SQLite database path for zigttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
         \\  --replay <FILE>       Replay recorded traces and verify handler output
+        \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --help                Show this help message
         \\

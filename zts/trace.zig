@@ -546,7 +546,7 @@ pub fn parseTraceFile(allocator: std.mem.Allocator, source: []const u8) ![]Reque
     return try groups.toOwnedSlice(allocator);
 }
 
-fn parseTraceLine(line: []const u8) !TraceEntry {
+pub fn parseTraceLine(line: []const u8) !TraceEntry {
     const type_str = findJsonStringValue(line, "\"type\"") orelse return .unknown;
 
     if (std.mem.eql(u8, type_str, "durable_run")) {
@@ -617,7 +617,7 @@ fn parseTraceLine(line: []const u8) !TraceEntry {
 // Minimal JSON Field Extraction (zero-copy)
 // ============================================================================
 
-fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
+pub fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
     const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
     var pos = key_pos + key.len;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
@@ -636,7 +636,7 @@ fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
+pub fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
     const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
     var pos = key_pos + key.len;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
@@ -648,7 +648,7 @@ fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
     return std.fmt.parseInt(i64, json[start..pos], 10) catch null;
 }
 
-fn findJsonObjectValue(json: []const u8, key: []const u8) ?[]const u8 {
+pub fn findJsonObjectValue(json: []const u8, key: []const u8) ?[]const u8 {
     const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
     var pos = key_pos + key.len;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
@@ -656,7 +656,7 @@ fn findJsonObjectValue(json: []const u8, key: []const u8) ?[]const u8 {
     return findMatchingBrace(json, pos, '{', '}');
 }
 
-fn findJsonArrayValue(json: []const u8, key: []const u8) ?[]const u8 {
+pub fn findJsonArrayValue(json: []const u8, key: []const u8) ?[]const u8 {
     const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
     var pos = key_pos + key.len;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
@@ -664,7 +664,7 @@ fn findJsonArrayValue(json: []const u8, key: []const u8) ?[]const u8 {
     return findMatchingBrace(json, pos, '[', ']');
 }
 
-fn findJsonAnyValue(json: []const u8, key: []const u8) ?[]const u8 {
+pub fn findJsonAnyValue(json: []const u8, key: []const u8) ?[]const u8 {
     const key_pos = std.mem.indexOf(u8, json, key) orelse return null;
     var pos = key_pos + key.len;
     while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}

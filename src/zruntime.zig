@@ -79,6 +79,9 @@ pub const RuntimeConfig = struct {
     /// Replay input file path. When set, replays recorded traces instead of serving.
     replay_file_path: ?[]const u8 = null,
 
+    /// Test file path. When set, runs declarative handler tests instead of serving.
+    test_file_path: ?[]const u8 = null,
+
     /// Durable execution oplog directory. When set, each request gets a
     /// Directory backing explicit zigttp:durable runs.
     /// Incomplete oplogs are replayed on startup; completed ones are kept so
