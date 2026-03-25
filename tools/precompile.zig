@@ -51,6 +51,8 @@ const CompiledHandler = struct {
     dep_bytecodes: ?[]const []const u8 = null,
     /// Contract manifest (when --contract is passed)
     contract: ?HandlerContract = null,
+    /// Generated test JSONL (when --generate-tests is passed)
+    generated_tests: ?[]const u8 = null,
 
     fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.aot) |*analysis| {
@@ -64,6 +66,9 @@ const CompiledHandler = struct {
         }
         if (self.contract) |*c| {
             c.deinit(allocator);
+        }
+        if (self.generated_tests) |gt| {
+            allocator.free(gt);
         }
         if (self.bytecode.len > 0) {
             allocator.free(self.bytecode);
@@ -109,6 +114,7 @@ const PrecompileOptions = struct {
     replay_trace_path: ?[]const u8 = null,
     test_file_path: ?[]const u8 = null,
     prove_spec: ?[]const u8 = null,
+    generate_tests: bool = false,
 };
 
 fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
@@ -123,6 +129,7 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--aot")) { opts.emit_aot = true; continue; }
         if (std.mem.eql(u8, arg, "--verify")) { opts.emit_verify = true; continue; }
+        if (std.mem.eql(u8, arg, "--generate-tests")) { opts.generate_tests = true; continue; }
         if (std.mem.eql(u8, arg, "--contract")) { opts.emit_contract = true; continue; }
         if (std.mem.eql(u8, arg, "--openapi")) { opts.emit_openapi = true; continue; }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
@@ -239,6 +246,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional AOT analysis + optional verification + optional contract)
+    const generate_tests = opts.generate_tests;
+
     var compiled = compileHandler(
         allocator,
         source,
@@ -248,6 +257,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         emit_contract,
         policy,
         sql_schema_path,
+        generate_tests,
     ) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
@@ -391,6 +401,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
 
             std.debug.print("Wrote OpenAPI manifest to: {s}\n", .{openapi_path});
+        }
+
+        // Write generated tests if --generate-tests was passed
+        if (compiled.generated_tests) |tests_jsonl| {
+            const tests_path = deriveSiblingPath(allocator, output_path_final, "handler.auto-tests.jsonl") catch |err| {
+                std.debug.print("Error deriving test output path: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(tests_path);
+
+            writeFilePosix(tests_path, tests_jsonl, allocator) catch |err| {
+                std.debug.print("Error writing generated tests '{s}': {}\n", .{ tests_path, err });
+                return err;
+            };
+
+            std.debug.print("Wrote generated tests to: {s}\n", .{tests_path});
         }
 
         // Generate deployment manifest if --deploy was passed
@@ -899,6 +925,7 @@ fn compileHandler(
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
+    generate_tests: bool,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
     var strip_result: ?zts.StripResult = null;
@@ -1246,11 +1273,38 @@ fn compileHandler(
         );
     }
 
+    // Generate exhaustive test cases from path analysis
+    var generated_tests_jsonl: ?[]const u8 = null;
+    if (generate_tests) {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const handler_fn = findHandlerFunction(ir_view, root);
+        if (handler_fn) |hf| {
+            var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
+            defer gen.deinit();
+
+            try gen.generate(hf);
+
+            const test_count = gen.getTests().len;
+            if (test_count > 0) {
+                var jsonl_buf: std.ArrayList(u8) = .empty;
+                var jsonl_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl_buf);
+                gen.writeJsonl(&jsonl_aw.writer) catch {};
+                jsonl_buf = jsonl_aw.toArrayList();
+                generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
+            }
+
+            if (!builtin.is_test) {
+                std.debug.print("Generated {d} test case(s) from path analysis\n", .{test_count});
+            }
+        }
+    }
+
     return .{
         .bytecode = bytecode_data,
         .aot = aot,
         .transpiled_source = transpiled_source,
         .contract = contract,
+        .generated_tests = generated_tests_jsonl,
     };
 }
 
@@ -2468,6 +2522,7 @@ test "compileHandler aggregates contract across file imports" {
         true,
         policy,
         null,
+        false,
     );
     defer compiled.deinit(allocator);
 
@@ -2515,6 +2570,7 @@ test "compileHandler rejects disallowed policy from imported module" {
             false,
             policy,
             null,
+            false,
         ),
     );
 }

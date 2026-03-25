@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     const replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time");
     const test_file_path = b.option([]const u8, "test-file", "Run handler tests from JSONL file at build time");
     const prove_spec = b.option([]const u8, "prove", "Prove upgrade safety (format: contract.json or contract.json:traces.jsonl)");
+    const generate_tests = b.option(bool, "generate-tests", "Generate exhaustive test cases from path analysis") orelse false;
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
@@ -122,6 +123,9 @@ pub fn build(b: *std.Build) void {
         if (prove_spec) |ps| {
             run_precompile.addArg("--prove");
             run_precompile.addArg(ps);
+        }
+        if (generate_tests) {
+            run_precompile.addArg("--generate-tests");
         }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");
