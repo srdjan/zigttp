@@ -19,6 +19,7 @@ const context = @import("context.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
+const handler_contract = @import("handler_contract.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -33,14 +34,9 @@ const packBindingKey = bool_checker_mod.packBindingKey;
 const Constraint = union(enum) {
     req_method: []const u8,
     req_url: []const u8,
-    req_url_prefix: []const u8,
-    /// Virtual module call should return a truthy value.
     stub_truthy: StubInfo,
-    /// Virtual module call should return a falsy value (null/undefined).
     stub_falsy: StubInfo,
-    /// Result.ok should be true.
     result_ok: StubInfo,
-    /// Result.ok should be false.
     result_not_ok: StubInfo,
 };
 
@@ -96,8 +92,9 @@ pub const PathGenerator = struct {
     io_seq: std.ArrayList(IoCall),
     /// Completed test cases.
     tests: std.ArrayList(GeneratedTest),
-    /// Path counter for naming.
     path_count: u32,
+
+    const MAX_PATHS = 1024;
 
     const FnMeta = struct {
         module: []const u8,
@@ -155,19 +152,18 @@ pub const PathGenerator = struct {
     pub fn writeJsonl(self: *const PathGenerator, writer: anytype) !void {
         for (self.tests.items) |test_case| {
             // Test header
-            try writer.writeAll("{\"type\":\"test\",\"name\":\"");
-            try writeJsonEscaped(writer, test_case.name);
-            try writer.writeAll("\"}\n");
+            try writer.writeAll("{\"type\":\"test\",\"name\":");
+            try handler_contract.writeJsonString(writer, test_case.name);
+            try writer.writeAll("}\n");
 
-            // Request
             try writer.writeAll("{\"type\":\"request\",\"method\":\"");
             try writer.writeAll(test_case.method);
-            try writer.writeAll("\",\"url\":\"");
-            try writeJsonEscaped(writer, test_case.url);
+            try writer.writeAll("\",\"url\":");
+            try handler_contract.writeJsonString(writer, test_case.url);
             if (test_case.has_auth_header) {
-                try writer.writeAll("\",\"headers\":{\"authorization\":\"Bearer test-token\"},\"body\":null}\n");
+                try writer.writeAll(",\"headers\":{\"authorization\":\"Bearer test-token\"},\"body\":null}\n");
             } else {
-                try writer.writeAll("\",\"headers\":{},\"body\":null}\n");
+                try writer.writeAll(",\"headers\":{},\"body\":null}\n");
             }
 
             // I/O stubs
@@ -200,7 +196,6 @@ pub const PathGenerator = struct {
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
             if (!std.mem.startsWith(u8, module_str, "zigttp:")) continue;
 
-            // Extract short module name after "zigttp:"
             const mod_name = module_str[7..];
 
             var j: u8 = 0;
@@ -282,14 +277,14 @@ pub const PathGenerator = struct {
                 const saved_io = self.io_seq.items.len;
 
                 // Push all extractable constraints for then-branch
-                self.extractAllConstraints(if_s.condition, false);
+                try self.extractAllConstraints(if_s.condition, false);
                 try self.walkPaths(if_s.then_branch);
                 self.constraints.shrinkRetainingCapacity(saved_constraints);
                 self.io_seq.shrinkRetainingCapacity(saved_io);
 
                 // Else-branch: push negated constraints
                 if (if_s.else_branch != null_node) {
-                    self.extractAllConstraints(if_s.condition, true);
+                    try self.extractAllConstraints(if_s.condition, true);
                     try self.walkPaths(if_s.else_branch);
                     self.constraints.shrinkRetainingCapacity(saved_constraints);
                     self.io_seq.shrinkRetainingCapacity(saved_io);
@@ -317,13 +312,11 @@ pub const PathGenerator = struct {
                 if (vd.init != null_node) {
                     const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                     self.var_inits.put(self.allocator, key, vd.init) catch {};
-                    // Track module function calls for I/O stub generation
                     self.trackModuleCall(vd.init, key);
                 }
             },
 
             .expr_stmt => {
-                // Track standalone module calls (side effects)
                 if (self.ir_view.getOptValue(node)) |expr| {
                     self.trackModuleCall(expr, null);
                 }
@@ -381,13 +374,13 @@ pub const PathGenerator = struct {
                     // Then-branch returns, no else: fork then-path, continue for fall-through
                     const saved = self.constraints.items.len;
                     const saved_io = self.io_seq.items.len;
-                    self.extractAllConstraints(if_s.condition, false);
+                    try self.extractAllConstraints(if_s.condition, false);
                     try self.walkPaths(if_s.then_branch);
                     self.constraints.shrinkRetainingCapacity(saved);
                     self.io_seq.shrinkRetainingCapacity(saved_io);
 
                     // Fall-through with negated constraints
-                    self.extractAllConstraints(if_s.condition, true);
+                    try self.extractAllConstraints(if_s.condition, true);
                     continue;
                 } else {
                     // Neither always returns: just recurse normally
@@ -409,15 +402,15 @@ pub const PathGenerator = struct {
 
     /// Push all extractable constraints from a condition into the constraint list.
     /// When `negate` is true, each constraint is negated (for else/fall-through paths).
-    fn extractAllConstraints(self: *PathGenerator, cond: NodeIndex, negate: bool) void {
+    fn extractAllConstraints(self: *PathGenerator, cond: NodeIndex, negate: bool) error{OutOfMemory}!void {
         const tag = self.ir_view.getTag(cond) orelse return;
 
         // AND chains: extract from both sides
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(cond) orelse return;
             if (bin.op == .and_op) {
-                self.extractAllConstraints(bin.left, negate);
-                self.extractAllConstraints(bin.right, negate);
+                try self.extractAllConstraints(bin.left, negate);
+                try self.extractAllConstraints(bin.right, negate);
                 return;
             }
         }
@@ -425,7 +418,7 @@ pub const PathGenerator = struct {
         // Extract single constraint from this node
         if (self.extractConditionConstraint(cond)) |c| {
             const final = if (negate) self.negateConstraint(c) else c;
-            if (final) |f| self.constraints.append(self.allocator, f) catch {};
+            if (final) |f| try self.constraints.append(self.allocator, f);
         }
     }
 
@@ -585,9 +578,7 @@ pub const PathGenerator = struct {
 
     fn negateConstraint(_: *const PathGenerator, c: Constraint) ?Constraint {
         return switch (c) {
-            .req_method => null, // can't negate "not GET" into a useful constraint
-            .req_url => null,
-            .req_url_prefix => null,
+            .req_method, .req_url => null,
             .stub_truthy => |info| .{ .stub_falsy = info },
             .stub_falsy => |info| .{ .stub_truthy = info },
             .result_ok => |info| .{ .result_not_ok = info },
@@ -636,7 +627,6 @@ pub const PathGenerator = struct {
         if (ret_tag == .call or ret_tag == .method_call) {
             const call = self.ir_view.getCall(ret_val) orelse return 200;
 
-            // Check for Response.json/text/html/redirect
             if (!self.isResponseHelper(call.callee)) return 200;
 
             if (call.args_count >= 2) {
@@ -661,7 +651,6 @@ pub const PathGenerator = struct {
 
             const prop = self.ir_view.getProperty(prop_idx) orelse continue;
 
-            // Check if key is "status"
             const key_name = self.getPropertyKeyName(prop.key) orelse continue;
             if (!std.mem.eql(u8, key_name, "status")) continue;
 
@@ -679,9 +668,8 @@ pub const PathGenerator = struct {
     // -------------------------------------------------------------------
 
     fn emitTestCase(self: *PathGenerator, status: u16) !void {
+        if (self.path_count >= MAX_PATHS) return;
         self.path_count += 1;
-
-        // Build test name from constraints
         var name_buf: [256]u8 = undefined;
         var name_len: usize = 0;
         const prefix = std.fmt.bufPrint(name_buf[0..], "path {d}", .{self.path_count}) catch "path";
@@ -695,7 +683,6 @@ pub const PathGenerator = struct {
                 .stub_falsy => "!falsy",
                 .result_ok => "result.ok",
                 .result_not_ok => "!result.ok",
-                else => "",
             };
             if (desc.len > 0 and name_len + 2 + desc.len < name_buf.len) {
                 name_buf[name_len] = ' ';
@@ -724,19 +711,18 @@ pub const PathGenerator = struct {
             switch (c) {
                 .req_method => |m| method = m,
                 .req_url => |u| url = u,
-                .req_url_prefix => |p| url = p,
                 .stub_truthy => |info| {
-                    stub_overrides.put(self.allocator, info.func, stubValueForType(info.returns, true)) catch {};
+                    try stub_overrides.put(self.allocator, info.func, stubValueForType(info.returns, true));
                     if (std.mem.eql(u8, info.func, "parseBearer")) has_auth = true;
                 },
                 .stub_falsy => |info| {
-                    stub_overrides.put(self.allocator, info.func, stubValueForType(info.returns, false)) catch {};
+                    try stub_overrides.put(self.allocator, info.func, stubValueForType(info.returns, false));
                 },
                 .result_ok => |info| {
-                    stub_overrides.put(self.allocator, info.func, "{\"ok\":true,\"value\":{}}") catch {};
+                    try stub_overrides.put(self.allocator, info.func, "{\"ok\":true,\"value\":{}}");
                 },
                 .result_not_ok => |info| {
-                    stub_overrides.put(self.allocator, info.func, "{\"ok\":false,\"error\":\"test-error\"}") catch {};
+                    try stub_overrides.put(self.allocator, info.func, "{\"ok\":false,\"error\":\"test-error\"}");
                 },
             }
         }
@@ -881,19 +867,6 @@ fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
     };
 }
 
-fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => try writer.writeByte(c),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -910,11 +883,3 @@ test "stubValueForType falsy" {
     try std.testing.expectEqualStrings("false", stubValueForType(.boolean, false));
 }
 
-test "writeJsonEscaped" {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(std.testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
-    try writeJsonEscaped(&aw.writer, "hello \"world\"\nnewline");
-    buf = aw.toArrayList();
-    try std.testing.expectEqualStrings("hello \\\"world\\\"\\nnewline", buf.items);
-}
