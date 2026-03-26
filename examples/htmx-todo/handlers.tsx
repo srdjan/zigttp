@@ -1,7 +1,3 @@
-// HTMX Todo App Example for zigttp-server (TSX version)
-// Demonstrates JSX templating with HTMX partial updates
-// Uses guard composition for request/response logging
-//
 // Run: zig build run -- examples/htmx-todo/handlers.tsx -p 3000
 // Open: http://localhost:3000
 
@@ -113,15 +109,14 @@ const styles =
     ".htmx-request { opacity: 0.5; }";
 
 function encodeFormValue(value: string): string {
-    let encoded = value;
-    encoded = encoded.split("%").join("%25");
-    encoded = encoded.split("&").join("%26");
-    encoded = encoded.split("=").join("%3D");
-    encoded = encoded.split("?").join("%3F");
-    encoded = encoded.split("#").join("%23");
-    encoded = encoded.split("+").join("%2B");
-    encoded = encoded.split(" ").join("+");
-    return encoded;
+    return value
+        .replaceAll("%", "%25")
+        .replaceAll("&", "%26")
+        .replaceAll("=", "%3D")
+        .replaceAll("?", "%3F")
+        .replaceAll("#", "%23")
+        .replaceAll("+", "%2B")
+        .replaceAll(" ", "+");
 }
 
 function fallbackId(): string {

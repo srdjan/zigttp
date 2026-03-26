@@ -1,5 +1,3 @@
-// JSX with component test
-
 function Card(props: { title: string, children: JSX.Element }): JSX.Element {
     return (
         <div class="card">

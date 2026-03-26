@@ -1,6 +1,3 @@
-// Example handler for zigttp-server (TSX version)
-// Demonstrates routing, JSON responses, and JSX templating
-
 function HomePage(): JSX.Element {
     return (
         <html>

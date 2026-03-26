@@ -1,8 +1,4 @@
-// JSX SSR Example for zigttp-server
-// Demonstrates server-side rendering with JSX components
-
 type Todo = {
-    id: number;
     text: string;
     done: boolean;
 };
@@ -17,8 +13,9 @@ function Card(props: { title: string, children: JSX.Element }): JSX.Element {
 }
 
 function TodoItem(props: { todo: Todo }): JSX.Element {
+    const cls = props.todo.done ? "todo-item done" : "todo-item";
     return (
-        <li class="todo-item">
+        <li class={cls}>
             <span class="todo-text">{props.todo.text}</span>
         </li>
     );
@@ -49,10 +46,10 @@ function Layout(props: { title: string, children: JSX.Element }): JSX.Element {
 
 function getTodos(): Todo[] {
     return [
-        { id: 1, text: "Learn Zig", done: true },
-        { id: 2, text: "Build JSX transformer", done: true },
-        { id: 3, text: "Create SSR example", done: true },
-        { id: 4, text: "Deploy to production", done: false },
+        { text: "Learn Zig", done: true },
+        { text: "Build JSX transformer", done: true },
+        { text: "Create SSR example", done: true },
+        { text: "Deploy to production", done: false },
     ];
 }
 
