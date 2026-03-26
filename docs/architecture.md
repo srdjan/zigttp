@@ -276,9 +276,14 @@ zigttp-server/
 │   ├── deploy_manifest.zig    # Proven deployment manifest generator
 │   └── openapi_manifest.zig   # OpenAPI spec generator
 └── examples/
-    ├── handler.jsx        # Example JSX handler
-    ├── htmx-todo/         # HTMX Todo app example
-    └── jsx-ssr.jsx        # Full SSR example
+    ├── handler/           # Basic handler variants (TS, TSX)
+    ├── jsx/               # JSX rendering demos
+    ├── modules/           # Virtual module usage
+    ├── routing/           # Router, match, guard composition
+    ├── parallel/          # Concurrent I/O demos
+    ├── shopping-cart/     # Full shopping cart app
+    ├── htmx-todo/         # HTMX Todo app
+    └── sql/               # SQL schema + CRUD handler
 ```
 
 ## Memory Safety

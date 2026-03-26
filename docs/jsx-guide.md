@@ -4,11 +4,11 @@ zigttp-server includes native JSX/TSX support for server-side rendering. JSX is 
 
 ## Quick Start
 
-Create a `.jsx` file with your handler:
+Create a `.tsx` file with your handler:
 
-```jsx
-// handler.jsx
-function handler(request) {
+```tsx
+// handler.tsx
+function handler(req: Request): Response {
     const page = <div class="hello">Hello JSX!</div>;
     return Response.html(renderToString(page));
 }
@@ -17,7 +17,7 @@ function handler(request) {
 Run it:
 
 ```bash
-./zig-out/bin/zigttp-server handler.jsx
+./zig-out/bin/zigttp-server handler.tsx
 ```
 
 ## JSX Runtime API
@@ -397,8 +397,8 @@ Use `class` (not `className`) for HTML class attributes in JSX.
 
 See the examples directory for complete working examples:
 
-- `examples/handler/handler.jsx` - Basic JSX handler
-- `examples/jsx/jsx-ssr.jsx` - Full SSR example with layouts
+- `examples/handler/handler-full.tsx` - Full routing + JSX handler
+- `examples/jsx/jsx-ssr.tsx` - SSR example with layouts
 - `examples/htmx-todo/` - HTMX Todo app with JSX
 
 ## Best Practices
