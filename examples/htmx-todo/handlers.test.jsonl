@@ -1,0 +1,19 @@
+{"type":"test","name":"GET / returns HTML page with todo form"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Todo App"}
+
+{"type":"test","name":"GET / includes HTMX script tag"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"htmx.org"}
+
+{"type":"test","name":"GET /todos without query returns error"}
+{"type":"request","method":"GET","url":"/todos","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Text is required"}
+
+{"type":"test","name":"DELETE /todos/delete returns empty response"}
+{"type":"request","method":"DELETE","url":"/todos/delete","headers":{},"body":null}
+{"type":"expect","status":200}
+
+{"type":"test","name":"GET /unknown returns 404"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"Not Found"}

@@ -83,6 +83,9 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     var test_config = config.runtime_config;
     test_config.trace_file_path = null;
     test_config.replay_file_path = "test";
+    // Disable arena escape enforcement: each test creates an isolated runtime
+    // that is destroyed after the test, so arena objects can't outlive their scope.
+    test_config.enforce_arena_escape = false;
 
     std.debug.print("\nTesting {s} ({d} tests)\n\n", .{ handler_filename, tests.len });
 

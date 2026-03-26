@@ -1,0 +1,17 @@
+{"type":"test","name":"GET / returns home with env stub"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"io","seq":0,"module":"env","fn":"env","args":["APP_NAME"],"result":"TestApp"}
+{"type":"expect","status":200,"bodyContains":"TestApp"}
+
+{"type":"test","name":"GET /health returns healthy"}
+{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"healthy"}
+
+{"type":"test","name":"GET /users/:id returns user with params"}
+{"type":"request","method":"GET","url":"/users/abc123","headers":{},"body":null}
+{"type":"io","seq":0,"module":"crypto","fn":"sha256","args":["abc123"],"result":"deadbeef"}
+{"type":"expect","status":200,"bodyContains":"abc123"}
+
+{"type":"test","name":"GET /unknown returns 404"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"Not Found"}

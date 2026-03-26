@@ -240,7 +240,8 @@ const Stripper = struct {
             if (std.mem.eql(u8, ident, "return") or std.mem.eql(u8, ident, "throw") or
                 std.mem.eql(u8, ident, "new") or std.mem.eql(u8, ident, "typeof") or
                 std.mem.eql(u8, ident, "delete") or std.mem.eql(u8, ident, "void") or
-                std.mem.eql(u8, ident, "await") or std.mem.eql(u8, ident, "yield"))
+                std.mem.eql(u8, ident, "await") or std.mem.eql(u8, ident, "yield") or
+                std.mem.eql(u8, ident, "when"))
             {
                 self.in_expression = true;
             }
@@ -836,6 +837,49 @@ const Stripper = struct {
 
     /// Check if we're at a label colon (identifier at statement start followed by colon).
     /// Labels: `public: foo();` or `loop: for (...) {...}`
+    /// Detect match arm separator: when { ... }:
+    /// Scans backward in the output buffer from the current colon position.
+    fn isMatchArmColon(self: *Self) bool {
+        const items = self.output.items;
+        if (items.len == 0) return false;
+
+        // Scan backward past whitespace
+        var p = items.len;
+        while (p > 0 and (items[p - 1] == ' ' or items[p - 1] == '\t' or items[p - 1] == '\n' or items[p - 1] == '\r')) {
+            p -= 1;
+        }
+
+        // Previous non-whitespace must be '}'
+        if (p == 0 or items[p - 1] != '}') return false;
+        p -= 1;
+
+        // Find the matching '{' by counting braces
+        var depth: u32 = 1;
+        while (p > 0 and depth > 0) {
+            p -= 1;
+            if (items[p] == '}') {
+                depth += 1;
+            } else if (items[p] == '{') {
+                depth -= 1;
+            }
+        }
+        if (depth != 0) return false;
+
+        // Now p points at the '{'. Scan backward past whitespace.
+        while (p > 0 and (items[p - 1] == ' ' or items[p - 1] == '\t' or items[p - 1] == '\n' or items[p - 1] == '\r')) {
+            p -= 1;
+        }
+
+        // Check if the preceding 4 characters are "when"
+        if (p < 4) return false;
+        if (!std.mem.eql(u8, items[p - 4 .. p], "when")) return false;
+
+        // "when" must not be part of a longer identifier
+        if (p > 4 and isIdentifierContinue(items[p - 5])) return false;
+
+        return true;
+    }
+
     fn isLabelColon(self: *Self) bool {
         const items = self.output.items;
         if (items.len == 0) return false;
@@ -869,6 +913,13 @@ const Stripper = struct {
         // We're at ':'
         // Skip if we're in expression context (object literals, arrays, etc.)
         if (self.in_expression) {
+            return false;
+        }
+
+        // Match arm separators: when { ... }: body
+        // The } before the colon sets in_expression=false, so we must detect this pattern
+        // by scanning backward for a matching when { ... } sequence.
+        if (self.isMatchArmColon()) {
             return false;
         }
 

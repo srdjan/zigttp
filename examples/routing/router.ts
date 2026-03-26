@@ -29,10 +29,10 @@ const routes = {
 };
 
 function handler(req) {
-    const match = routerMatch(routes, req);
-    if (match) {
-        req.params = match.params;
-        return match.handler(req);
+    const found = routerMatch(routes, req);
+    if (found) {
+        req.params = found.params;
+        return found.handler(req);
     }
     return Response.json({ error: "Not Found" }, { status: 404 });
 }

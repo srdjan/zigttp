@@ -1,0 +1,11 @@
+{"type":"test","name":"GET /health returns ok"}
+{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"ok"}
+
+{"type":"test","name":"GET /version returns version"}
+{"type":"request","method":"GET","url":"/version","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"1.0.0"}
+
+{"type":"test","name":"GET /unknown returns Not Found"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"Not Found"}

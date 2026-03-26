@@ -259,6 +259,8 @@ fn shouldWrapExport(comptime module: VirtualModule, comptime export_name: []cons
     return switch (module) {
         .validate => !std.mem.eql(u8, export_name, "schemaCompile") and !std.mem.eql(u8, export_name, "schemaDrop"),
         .sql => !std.mem.eql(u8, export_name, "sql"),
+        // routerMatch is a pure pattern matcher with no I/O - run it directly
+        .router => false,
         else => true,
     };
 }

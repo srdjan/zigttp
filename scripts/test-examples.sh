@@ -55,6 +55,12 @@ run_tests "examples/jsx/jsx-ssr.tsx"       "examples/jsx/jsx-ssr.test.jsonl"
 run_tests "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
 run_tests "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
 
+# routing/
+run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
+
+# htmx-todo/
+run_tests "examples/htmx-todo/handlers.tsx"    "examples/htmx-todo/handlers.test.jsonl"
+
 # shopping-cart/
 run_tests "examples/shopping-cart/shopping-cart.tsx" "examples/shopping-cart/shopping-cart.test.jsonl"
 
