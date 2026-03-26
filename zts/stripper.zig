@@ -835,25 +835,15 @@ const Stripper = struct {
     // Annotation Stripping (Phase 4)
     // ========================================================================
 
-    /// Check if we're at a label colon (identifier at statement start followed by colon).
-    /// Labels: `public: foo();` or `loop: for (...) {...}`
-    /// Detect match arm separator: when { ... }:
-    /// Scans backward in the output buffer from the current colon position.
+    /// Detect match arm separator: `when { ... }:`
     fn isMatchArmColon(self: *Self) bool {
         const items = self.output.items;
         if (items.len == 0) return false;
 
-        // Scan backward past whitespace
-        var p = items.len;
-        while (p > 0 and (items[p - 1] == ' ' or items[p - 1] == '\t' or items[p - 1] == '\n' or items[p - 1] == '\r')) {
-            p -= 1;
-        }
-
-        // Previous non-whitespace must be '}'
+        var p = skipBackwardWs(items, items.len);
         if (p == 0 or items[p - 1] != '}') return false;
         p -= 1;
 
-        // Find the matching '{' by counting braces
         var depth: u32 = 1;
         while (p > 0 and depth > 0) {
             p -= 1;
@@ -865,21 +855,24 @@ const Stripper = struct {
         }
         if (depth != 0) return false;
 
-        // Now p points at the '{'. Scan backward past whitespace.
-        while (p > 0 and (items[p - 1] == ' ' or items[p - 1] == '\t' or items[p - 1] == '\n' or items[p - 1] == '\r')) {
-            p -= 1;
-        }
-
-        // Check if the preceding 4 characters are "when"
+        p = skipBackwardWs(items, p);
         if (p < 4) return false;
         if (!std.mem.eql(u8, items[p - 4 .. p], "when")) return false;
-
         // "when" must not be part of a longer identifier
         if (p > 4 and isIdentifierContinue(items[p - 5])) return false;
 
         return true;
     }
 
+    fn skipBackwardWs(items: []const u8, start: usize) usize {
+        var p = start;
+        while (p > 0 and (items[p - 1] == ' ' or items[p - 1] == '\t' or items[p - 1] == '\n' or items[p - 1] == '\r')) {
+            p -= 1;
+        }
+        return p;
+    }
+
+    /// Check if we're at a label colon (identifier at statement start followed by colon).
     fn isLabelColon(self: *Self) bool {
         const items = self.output.items;
         if (items.len == 0) return false;
