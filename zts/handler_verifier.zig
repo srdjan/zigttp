@@ -19,6 +19,7 @@ const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const modules_resolver = @import("modules/resolver.zig");
+const bool_checker_mod = @import("bool_checker.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -134,10 +135,7 @@ fn lookupTrackedFunction(name: []const u8) ?FunctionProduces {
     return null;
 }
 
-/// Shared key computation for scope_id + slot binding lookups.
-fn bindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
-    return (@as(u32, scope_id) << 16) | @as(u32, slot);
-}
+const bindingKey = bool_checker_mod.packBindingKey;
 
 const OptionalFnSlot = struct {
     slot: u16,

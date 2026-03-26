@@ -1293,6 +1293,19 @@ fn compileHandler(
                 generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
             }
 
+            // Compute max I/O depth across all generated paths
+            if (contract != null) {
+                const tests = gen.getTests();
+                if (contract.?.properties) |*props| {
+                    var max_depth: u32 = 0;
+                    for (tests) |t| {
+                        const depth: u32 = @intCast(t.io_stubs.items.len);
+                        if (depth > max_depth) max_depth = depth;
+                    }
+                    props.max_io_depth = if (tests.len > 0) max_depth else null;
+                }
+            }
+
             // Fault coverage analysis on generated paths
             var fc = zts.fault_coverage.FaultCoverageChecker.init(allocator, gen.getTests());
             defer fc.deinit();
@@ -2073,11 +2086,16 @@ fn printPropertiesReport(contract: *const HandlerContract) void {
         .{ .name = "stateless", .value = props.stateless, .desc = "independent of mutable state" },
         .{ .name = "retry_safe", .value = props.retry_safe, .desc = "safe for Lambda auto-retry on timeout" },
         .{ .name = "deterministic", .value = props.deterministic, .desc = "no Date.now() or Math.random()" },
+        .{ .name = "idempotent", .value = props.idempotent, .desc = "safe for at-least-once delivery" },
     };
 
     for (fields) |f| {
         const label = if (f.value) "PROVEN" else "---   ";
         std.debug.print("  {s} {s: <15} {s}\n", .{ label, f.name, f.desc });
+    }
+
+    if (props.max_io_depth) |depth| {
+        std.debug.print("  PROVEN {s: <15} max {d} I/O calls per request\n", .{ "max_io_depth", depth });
     }
 }
 

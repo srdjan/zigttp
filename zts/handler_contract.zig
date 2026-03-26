@@ -283,6 +283,13 @@ pub const HandlerProperties = struct {
     input_validated: bool = true,
     /// {user_input} data does not flow to external egress hosts.
     pii_contained: bool = true,
+    // --- Derived properties ---
+    /// Deterministic AND (read_only OR all writes in durable steps).
+    /// Safe for at-least-once delivery and automatic retry.
+    idempotent: bool = false,
+    /// Maximum number of I/O calls on any single execution path.
+    /// Enables compile-time Lambda timeout derivation.
+    max_io_depth: ?u32 = null,
     // --- Fault coverage (from FaultCoverageChecker) ---
     /// Every failable I/O call site has an explicit failure path.
     fault_covered: bool = false,
@@ -889,7 +896,7 @@ pub const ContractBuilder = struct {
             .durable_producer_key => .{ .list = &self.durable_producer_key_literals, .dynamic = &self.durable_producer_key_dynamic },
             .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
             // Custom categories are dispatched directly, not via generic target
-            .sql_registration, .schema_compile, .route_pattern, .custom => null,
+            .sql_registration, .schema_compile, .route_pattern => null,
         };
     }
 
@@ -1700,13 +1707,18 @@ pub const ContractBuilder = struct {
         const read_only = !has_write;
         const durable_only_writes = has_write and self.durable_used and !has_bare_write;
 
+        const deterministic = !self.has_nondeterministic_builtin;
+
+        const retry_safe = read_only or durable_only_writes;
+
         return .{
             .pure = !has_any_call and !has_egress,
             .read_only = read_only,
             .stateless = read_only and !has_cache_read,
-            .retry_safe = read_only or durable_only_writes,
-            .deterministic = !self.has_nondeterministic_builtin,
+            .retry_safe = retry_safe,
+            .deterministic = deterministic,
             .has_egress = has_egress,
+            .idempotent = deterministic and retry_safe,
         };
     }
 };
@@ -2662,6 +2674,14 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.input_validated = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "piiContained")) {
             props.pii_contained = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "idempotent")) {
+            props.idempotent = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "maxIoDepth")) {
+            if (parser.readNull()) {
+                props.max_io_depth = null;
+            } else {
+                props.max_io_depth = parser.readU32();
+            }
         } else if (std.mem.eql(u8, key, "faultCovered")) {
             props.fault_covered = parser.readBool() orelse false;
         } else {
@@ -3075,6 +3095,12 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.print("    \"noCredentialLeakage\": {s},\n", .{if (p.no_credential_leakage) "true" else "false"});
         try writer.print("    \"inputValidated\": {s},\n", .{if (p.input_validated) "true" else "false"});
         try writer.print("    \"piiContained\": {s},\n", .{if (p.pii_contained) "true" else "false"});
+        try writer.print("    \"idempotent\": {s},\n", .{if (p.idempotent) "true" else "false"});
+        if (p.max_io_depth) |depth| {
+            try writer.print("    \"maxIoDepth\": {d},\n", .{depth});
+        } else {
+            try writer.writeAll("    \"maxIoDepth\": null,\n");
+        }
         try writer.print("    \"faultCovered\": {s}\n", .{if (p.fault_covered) "true" else "false"});
         try writer.writeAll("  }\n");
     } else {
@@ -3084,8 +3110,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("}\n");
 }
 
-pub fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
+pub fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
             '"' => try writer.writeAll("\\\""),
@@ -3099,6 +3124,11 @@ pub fn writeJsonString(writer: anytype, s: []const u8) !void {
             else => try writer.writeByte(c),
         }
     }
+}
+
+pub fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.writeByte('"');
+    try writeJsonStringContent(writer, s);
     try writer.writeByte('"');
 }
 

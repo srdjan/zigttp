@@ -45,12 +45,17 @@ pub const ProvenFacts = struct {
 
     retry_safe: bool = false,
     read_only: bool = false,
+    idempotent: bool = false,
+    max_io_depth: ?u32 = null,
 
     // Data flow provenance
     no_secret_leakage: bool = true,
     no_credential_leakage: bool = true,
     input_validated: bool = true,
     pii_contained: bool = true,
+
+    // Verification
+    results_safe: bool = false,
 
     // Fault coverage
     fault_covered: bool = false,
@@ -137,10 +142,13 @@ pub fn extractProvenFacts(
             .checks_passed = checks_buf,
             .retry_safe = if (contract.properties) |p| p.retry_safe else false,
             .read_only = if (contract.properties) |p| p.read_only else false,
+            .idempotent = if (contract.properties) |p| p.idempotent else false,
+            .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
             .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
             .input_validated = if (contract.properties) |p| p.input_validated else true,
             .pii_contained = if (contract.properties) |p| p.pii_contained else true,
+            .results_safe = if (contract.verification) |v| v.results_safe else false,
             .fault_covered = if (contract.properties) |p| p.fault_covered else false,
         },
         .checks_buf = checks_buf,
@@ -327,6 +335,12 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll(",\n          \"zigttp:readOnly\": \"");
     try w.writeAll(if (facts.read_only) "true" else "false");
     try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:idempotent\": \"");
+    try w.writeAll(if (facts.idempotent) "true" else "false");
+    try w.writeAll("\"");
+    if (facts.max_io_depth) |depth| {
+        try w.print(",\n          \"zigttp:maxIoDepth\": \"{d}\"", .{depth});
+    }
 
     // Flow provenance tags
     try w.writeAll(",\n          \"zigttp:noSecretLeakage\": \"");
@@ -432,23 +446,7 @@ fn toLower(c: u8) u8 {
     return c;
 }
 
-/// Write a string's content (without surrounding quotes) with JSON escaping.
-/// Handles control characters (matching handler_contract.zig's writeJsonString).
-fn writeJsonStringContent(w: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
-                try w.print("\\u{x:0>4}", .{@as(u16, c)});
-            },
-            else => try w.writeByte(c),
-        }
-    }
-}
+const writeJsonStringContent = handler_contract.writeJsonStringContent;
 
 // -------------------------------------------------------------------------
 // Deploy report (platform-agnostic)
@@ -538,25 +536,41 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
         try w.writeAll("  (no verification ran)\n");
     }
 
-    // FLOW ANALYSIS section
     try w.writeAll("\nFLOW ANALYSIS:\n");
-    try w.writeAll(if (facts.no_secret_leakage) "  PROVEN  " else "  ---     ");
-    try w.writeAll("no secret leakage\n");
-    try w.writeAll(if (facts.no_credential_leakage) "  PROVEN  " else "  ---     ");
-    try w.writeAll("no credential leakage\n");
-    try w.writeAll(if (facts.input_validated) "  PROVEN  " else "  ---     ");
-    try w.writeAll("input validated before egress\n");
-    try w.writeAll(if (facts.pii_contained) "  PROVEN  " else "  ---     ");
-    try w.writeAll("PII contained (no user input in egress)\n");
+    try writeProvenLine(w, facts.no_secret_leakage, "no secret leakage");
+    try writeProvenLine(w, facts.no_credential_leakage, "no credential leakage");
+    try writeProvenLine(w, facts.input_validated, "input validated before egress");
+    try writeProvenLine(w, facts.pii_contained, "PII contained (no user input in egress)");
 
-    // FAULT COVERAGE section
     try w.writeAll("\nFAULT COVERAGE:\n");
-    try w.writeAll(if (facts.fault_covered) "  PROVEN  " else "  ---     ");
-    try w.writeAll("all I/O failure modes handled correctly\n");
+    try writeProvenLine(w, facts.fault_covered, "all I/O failure modes handled correctly");
+
+    try w.writeAll("\nHANDLER PROPERTIES:\n");
+    try writeProvenLine(w, facts.retry_safe, "retry safe (auto-retry on failure)");
+    try writeProvenLine(w, facts.read_only, "read only (no state mutations)");
+    try writeProvenLine(w, facts.idempotent, "idempotent (safe for at-least-once delivery)");
+    if (facts.max_io_depth) |depth| {
+        try w.print("  PROVEN  max I/O depth: {d} calls per request\n", .{depth});
+    }
+
+    try w.writeAll("\nOWASP TOP 10 COVERAGE:\n");
+    try writeProvenLine(w, facts.no_secret_leakage, "A01 Broken Access Control (no secret leakage, sandbox enforced)");
+    try writeProvenLine(w, facts.no_credential_leakage, "A02 Cryptographic Failures (no credential leakage)");
+    try writeProvenLine(w, facts.input_validated, "A03 Injection (input validated before egress)");
+    try writeProvenLine(w, facts.fault_covered, "A04 Insecure Design (fault coverage, exhaustive returns)");
+    const sandbox_proven = facts.env_proven and facts.egress_proven and facts.cache_proven;
+    try writeProvenLine(w, sandbox_proven, "A05 Security Misconfiguration (sandbox derived from contract)");
+    try writeProvenLine(w, facts.results_safe, "A07 Auth Failures (result values checked before use)");
 
     try w.writeAll("\nPROOF LEVEL: ");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\n");
+}
+
+fn writeProvenLine(w: anytype, proven: bool, desc: []const u8) !void {
+    try w.writeAll(if (proven) "  PROVEN  " else "  ---     ");
+    try w.writeAll(desc);
+    try w.writeByte('\n');
 }
 
 fn writeCommaList(w: anytype, items: []const []const u8) !void {

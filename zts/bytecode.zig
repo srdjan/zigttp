@@ -414,16 +414,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
     };
 }
 
-/// Constant pool entry types
-pub const ConstType = enum(u8) {
-    int32 = 0,
-    float64 = 1,
-    string = 2,
-    atom = 3,
-    function = 4,
-    regexp = 5,
-};
-
 /// Upvalue info for closures
 pub const UpvalueInfo = struct {
     is_local: bool, // true: from parent's locals, false: from parent's upvalues

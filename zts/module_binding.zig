@@ -255,8 +255,6 @@ pub const ContractCategory = enum {
     schema_compile,
     request_schema,
     route_pattern,
-    /// Escape hatch for multi-arg or complex extraction.
-    custom,
 };
 
 /// Transform applied to extracted literal before storing.
@@ -340,11 +338,6 @@ pub const FunctionBinding = struct {
         if (self.func) |f| return f;
         if (self.module_func) |mf| return wrapModuleFn(mf);
         @compileError("FunctionBinding must set either func or module_func");
-    }
-
-    /// Whether the return value is a Result object ({ok, value, error}).
-    pub fn isResult(self: FunctionBinding) bool {
-        return self.returns == .result;
     }
 
     /// Convert to a legacy ModuleExport for backward compatibility.

@@ -695,7 +695,7 @@ pub const FlowChecker = struct {
     }
 
     fn isResponseHelper(self: *const FlowChecker, callee: NodeIndex) bool {
-        return self.isGlobalMethodCall(callee, "Response", &.{ "json", "text", "html" });
+        return self.isGlobalMethodCall(callee, "Response", &.{ "json", "text", "html", "redirect" });
     }
 
     fn isConsoleCall(self: *const FlowChecker, callee: NodeIndex) bool {

@@ -54,7 +54,6 @@ pub const DiagnosticKind = enum {
     arg_count_mismatch, // wrong number of arguments
     arg_type_mismatch, // argument type doesn't match parameter
     return_type_mismatch, // return value doesn't match declared return type
-    union_not_narrowed, // using union value without narrowing
 };
 
 pub const Diagnostic = struct {

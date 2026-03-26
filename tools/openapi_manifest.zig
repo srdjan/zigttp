@@ -36,7 +36,13 @@ pub fn writeOpenApiJson(
         try writer.print("    \"readOnly\": {s},\n", .{if (p.read_only) "true" else "false"});
         try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
         try writer.print("    \"retrySafe\": {s},\n", .{if (p.retry_safe) "true" else "false"});
-        try writer.print("    \"deterministic\": {s}\n", .{if (p.deterministic) "true" else "false"});
+        try writer.print("    \"deterministic\": {s},\n", .{if (p.deterministic) "true" else "false"});
+        try writer.print("    \"idempotent\": {s},\n", .{if (p.idempotent) "true" else "false"});
+        if (p.max_io_depth) |depth| {
+            try writer.print("    \"maxIoDepth\": {d}\n", .{depth});
+        } else {
+            try writer.writeAll("    \"maxIoDepth\": null\n");
+        }
         try writer.writeAll("  },\n");
     }
 
@@ -318,25 +324,8 @@ fn writeLowerAscii(writer: anytype, s: []const u8) !void {
     }
 }
 
-fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
-    try writeJsonStringContent(writer, s);
-    try writer.writeByte('"');
-}
-
-fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{@as(u16, c)}),
-            else => try writer.writeByte(c),
-        }
-    }
-}
+const writeJsonString = handler_contract.writeJsonString;
+const writeJsonStringContent = handler_contract.writeJsonStringContent;
 
 test "writeOpenApiJson renders schema and route" {
     const allocator = std.testing.allocator;

@@ -340,6 +340,7 @@ pub fn diffContracts(
             .{ "stateless", op.stateless, np.stateless },
             .{ "retry_safe", op.retry_safe, np.retry_safe },
             .{ "deterministic", op.deterministic, np.deterministic },
+            .{ "idempotent", op.idempotent, np.idempotent },
             .{ "fault_covered", op.fault_covered, np.fault_covered },
         }) |entry| {
             if (entry[1] != entry[2]) {

@@ -7,6 +7,7 @@
 const std = @import("std");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
+const handler_contract = @import("handler_contract.zig");
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
@@ -250,21 +251,7 @@ fn getTupleMembers(pool: *const TypePool, type_idx: TypeIndex) []const TypeIndex
     return pool.members.items[start .. start + count];
 }
 
-fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{@as(u16, c)}),
-            else => try writer.writeByte(c),
-        }
-    }
-    try writer.writeByte('"');
-}
+const writeJsonString = handler_contract.writeJsonString;
 
 test "schemaFromType renders record with required field" {
     const allocator = std.testing.allocator;

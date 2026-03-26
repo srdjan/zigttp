@@ -51,14 +51,6 @@ pub fn fromSpecifier(specifier: []const u8) ?*const ModuleBinding {
     return null;
 }
 
-/// Look up a built-in module by short name.
-pub fn fromName(name: []const u8) ?*const ModuleBinding {
-    for (&all) |*b| {
-        if (std.mem.eql(u8, b.name, name)) return b;
-    }
-    return null;
-}
-
 /// Get the binding for a function name (searches all modules).
 pub fn findFunction(func_name: []const u8) ?struct { binding: *const ModuleBinding, func: *const mb.FunctionBinding } {
     for (&all) |*b| {
