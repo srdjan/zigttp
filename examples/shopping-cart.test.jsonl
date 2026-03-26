@@ -1,0 +1,47 @@
+{"type":"test","name":"GET /products returns HTML product listing"}
+{"type":"request","method":"GET","url":"/products","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Zig Shop"}
+
+{"type":"test","name":"GET / shows products page"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Zig Logo T-Shirt"}
+
+{"type":"test","name":"GET /api/products returns JSON catalog"}
+{"type":"request","method":"GET","url":"/api/products","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"zig-shirt"}
+
+{"type":"test","name":"GET /api/cart returns empty cart"}
+{"type":"request","method":"GET","url":"/api/cart","headers":{"x-session-id":"test-user-1"},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"itemCount\":0"}
+
+{"type":"test","name":"GET /api/cart/add adds product (JSON mode)"}
+{"type":"request","method":"GET","url":"/api/cart/add?product=zig-mug&json=1","headers":{"x-session-id":"test-user-2"},"body":null}
+{"type":"expect","status":201,"bodyContains":"Comptime Coffee Mug"}
+
+{"type":"test","name":"GET /api/cart/add redirects browser"}
+{"type":"request","method":"GET","url":"/api/cart/add?product=zig-mug","headers":{"x-session-id":"test-user-3"},"body":null}
+{"type":"expect","status":302}
+
+{"type":"test","name":"GET /api/cart/add rejects unknown product"}
+{"type":"request","method":"GET","url":"/api/cart/add?product=nonexistent&json=1","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"not found"}
+
+{"type":"test","name":"GET /api/cart/add without product returns 400"}
+{"type":"request","method":"GET","url":"/api/cart/add?json=1","headers":{},"body":null}
+{"type":"expect","status":400,"bodyContains":"Missing"}
+
+{"type":"test","name":"OPTIONS returns CORS preflight"}
+{"type":"request","method":"OPTIONS","url":"/api/cart","headers":{},"body":null}
+{"type":"expect","status":204}
+
+{"type":"test","name":"GET /cart shows empty cart message"}
+{"type":"request","method":"GET","url":"/cart","headers":{"x-session-id":"empty-cart-user"},"body":null}
+{"type":"expect","status":200,"bodyContains":"Your cart is empty"}
+
+{"type":"test","name":"POST /api/cart/checkout on empty cart returns 400"}
+{"type":"request","method":"POST","url":"/api/cart/checkout?json=1","headers":{"x-session-id":"empty-checkout"},"body":null}
+{"type":"expect","status":400,"bodyContains":"Cart is empty"}
+
+{"type":"test","name":"GET /unknown returns 404"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"expect","status":404,"bodyContains":"Not Found"}
