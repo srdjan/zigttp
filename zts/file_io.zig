@@ -24,6 +24,28 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize)
     return buffer.toOwnedSlice(allocator);
 }
 
+/// Write a file synchronously using POSIX operations.
+pub fn writeFile(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const fd = try std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+        0o644,
+    );
+    defer std.Io.Threaded.closeFd(fd);
+
+    var total_written: usize = 0;
+    while (total_written < data.len) {
+        const result = std.c.write(fd, data[total_written..].ptr, data.len - total_written);
+        if (result < 0) return error.WriteFailure;
+        if (result == 0) return error.WriteFailure;
+        total_written += @intCast(result);
+    }
+}
+
 /// Read a file for ModuleGraph.build() - wraps readFile with ReadFileError mapping.
 pub fn readFileForModuleGraph(allocator: std.mem.Allocator, path: []const u8) module_graph.ReadFileError![]const u8 {
     return readFile(allocator, path, 10 * 1024 * 1024) catch |err| switch (err) {

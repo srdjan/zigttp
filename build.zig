@@ -261,4 +261,40 @@ pub fn build(b: *std.Build) void {
     }
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
+
+    // Mock server (serves responses from generated test JSONL)
+    const mock_exe = b.addExecutable(.{
+        .name = "mock",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mock_server.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    mock_exe.root_module.addImport("zts", zts_mod);
+    const mock_cmd = b.addRunArtifact(mock_exe);
+    if (b.args) |run_args| {
+        mock_cmd.addArgs(run_args);
+    }
+    const mock_step = b.step("mock", "Serve mock responses from generated tests (mock <tests.jsonl> [--port PORT])");
+    mock_step.dependOn(&mock_cmd.step);
+
+    // Standalone prove tool (contract diff + classification)
+    const prove_exe = b.addExecutable(.{
+        .name = "prove",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/prove.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    prove_exe.root_module.addImport("zts", zts_mod);
+    const prove_cmd = b.addRunArtifact(prove_exe);
+    if (b.args) |run_args| {
+        prove_cmd.addArgs(run_args);
+    }
+    const prove_step = b.step("prove", "Compare two handler contracts (prove <old.json> <new.json> [output-dir/])");
+    prove_step.dependOn(&prove_cmd.step);
 }

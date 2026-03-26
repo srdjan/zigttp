@@ -660,6 +660,24 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
         }
     }
 
+    // COST ESTIMATE section (AWS Lambda us-east-1, 128MB)
+    try w.writeAll("\nCOST ESTIMATE (AWS Lambda us-east-1, 128MB):\n");
+    if (facts.max_io_depth) |depth| {
+        // Duration: max_io_depth * 100ms per I/O call + 10ms processing
+        const duration_ms: u32 = if (depth == 0) 10 else depth * 100 + 10;
+        const gb_sec_per_req: f64 = (@as(f64, @floatFromInt(duration_ms)) / 1000.0) * (128.0 / 1024.0);
+        const cost_per_million: f64 = 0.20 + (1_000_000.0 * gb_sec_per_req * 0.0000166667);
+        try w.print("  Duration per request: ~{d}ms (max {d} I/O calls x 100ms + 10ms processing)\n", .{ duration_ms, depth });
+        try w.print("  Cost per 1M requests: ${d:.2}\n", .{cost_per_million});
+        try w.print("  Cost per 10M requests: ${d:.2}\n", .{cost_per_million * 10.0});
+        // Free tier: 1M requests + 400,000 GB-seconds
+        const free_tier_reqs: u64 = if (gb_sec_per_req > 0) @intFromFloat(@min(400_000.0 / gb_sec_per_req, 1_000_000.0)) else 1_000_000;
+        try w.print("  Monthly free tier covers: ~{d}K requests\n", .{free_tier_reqs / 1000});
+    } else {
+        try w.writeAll("  Duration: unknown (run with -Dgenerate-tests=true for I/O depth analysis)\n");
+        try w.writeAll("  Cost per 1M requests: $0.20 + duration-based charges\n");
+    }
+
     try w.writeAll("\nPROOF LEVEL: ");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\n");
