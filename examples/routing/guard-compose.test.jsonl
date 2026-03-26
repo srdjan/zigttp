@@ -1,0 +1,13 @@
+{"type":"test","name":"OPTIONS returns CORS preflight"}
+{"type":"request","method":"OPTIONS","url":"/health","headers":{},"body":null}
+{"type":"expect","status":204}
+
+{"type":"test","name":"GET without auth returns 401"}
+{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":[""],"result":null}
+{"type":"expect","status":401,"bodyContains":"unauthorized"}
+
+{"type":"test","name":"GET /unknown without auth returns 401"}
+{"type":"request","method":"GET","url":"/unknown","headers":{},"body":null}
+{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":[""],"result":null}
+{"type":"expect","status":401,"bodyContains":"unauthorized"}

@@ -89,8 +89,8 @@ fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
             // Get the handler function value
             const handler_val = routes_obj.getProperty(pool, atom) orelse continue;
 
-            // Create params object
-            const params_obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch return value.JSValue.undefined_val;
+            // Create params object using ctx.createObject for proper hybrid-mode allocation
+            const params_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
 
             for (0..match_result.count) |pi| {
                 const param = match_result.params[pi];
@@ -100,7 +100,7 @@ fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
             }
 
             // Create result object { handler, params }
-            const result_obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch return value.JSValue.undefined_val;
+            const result_obj = ctx.createObject(null) catch return value.JSValue.undefined_val;
             const handler_atom = ctx.atoms.intern("handler") catch return value.JSValue.undefined_val;
             const params_atom = ctx.atoms.intern("params") catch return value.JSValue.undefined_val;
 

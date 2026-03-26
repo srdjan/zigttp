@@ -6,8 +6,7 @@ import { routerMatch } from "zigttp:router";
 import { env } from "zigttp:env";
 import { parseBearer, jwtVerify } from "zigttp:auth";
 
-// Pre-guard: handle CORS preflight
-const preflight = (req: Request): Response | undefined => {
+function preflight(req: Request): Response | undefined {
     if (req.method === "OPTIONS") {
         return Response.text("", {
             status: 204,
@@ -18,15 +17,16 @@ const preflight = (req: Request): Response | undefined => {
             }
         });
     }
-};
+}
 
-// Pre-guard: require auth
-const requireAuth = (req: Request): Response | undefined => {
-    const token = parseBearer(req.headers.get("authorization"));
+function requireAuth(req: Request): Response | undefined {
+    const header = req.headers["authorization"] ?? "";
+    const token = parseBearer(header);
     if (!token) return Response.json({error: "unauthorized"}, {status: 401});
-    const result = jwtVerify(token, env("JWT_SECRET") ?? "secret");
+    const secret = env("JWT_SECRET") ?? "secret";
+    const result = jwtVerify(token, secret);
     if (!result.ok) return Response.json({error: result.error}, {status: 403});
-};
+}
 
 // Route handlers
 function getHealth(req: Request): Response {
@@ -44,7 +44,7 @@ const routes = {
 
 function routeHandler(req: Request): Response {
     const found = routerMatch(routes, req);
-    if (found) {
+    if (found !== undefined) {
         req.params = found.params;
         return found.handler(req);
     }

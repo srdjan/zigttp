@@ -56,6 +56,8 @@ run_tests "examples/modules/modules.ts"      "examples/modules/modules.test.json
 run_tests "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
 
 # routing/
+run_tests "examples/routing/router.ts"         "examples/routing/router.test.jsonl"
+run_tests "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
 run_tests "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
 
 # htmx-todo/
