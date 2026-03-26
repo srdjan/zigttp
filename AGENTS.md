@@ -8,7 +8,7 @@
 - `zts/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
 - `zts/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
 - `tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding).
-- `examples/` holds runnable handlers and demos (`.js`, `.jsx`, `.ts`, `.tsx`).
+- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `shopping-cart/`, `htmx-todo/`, `sql/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (7 files - see Documentation section below).
 - `zig-out/` and `.zig-cache/` are generated outputs; don't edit or commit them.
@@ -30,7 +30,7 @@
 - `zig build -Doptimize=ReleaseFast` - optimized release build.
 - `zig build -Doptimize=ReleaseFast -Dhandler=handler.jsx` - production build with embedded bytecode.
 - `zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"` - run with inline handler.
-- `zig build run -- examples/handler.jsx -p 3000` - run a file-based handler.
+- `zig build run -- examples/handler/handler.jsx -p 3000` - run a file-based handler.
 - `zig build test` - all src/ and zts/ tests.
 - `zig build test-zts` - JS engine tests only.
 - `zig build test-zruntime` - runtime tests only (`src/zruntime.zig`).

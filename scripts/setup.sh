@@ -26,7 +26,7 @@ echo
 echo "=== Setup Complete ==="
 echo
 echo "Run the server with:"
-echo "  ./zig-out/bin/zigttp-server examples/handler.js"
+echo "  ./zig-out/bin/zigttp-server examples/handler/handler.js"
 echo
 echo "Or with inline code:"
 echo "  ./zig-out/bin/zigttp-server -e \"function handler(r) { return Response.json({ok:true}) }\""

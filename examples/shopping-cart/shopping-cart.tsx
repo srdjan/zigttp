@@ -1,8 +1,8 @@
 // Shopping Cart Application
 // Cache-backed cart with validation, server-rendered JSX views, and CORS
 //
-// Run:   zig build run -- examples/shopping-cart.tsx -p 3000
-// Test:  zig build run -- examples/shopping-cart.tsx --test examples/shopping-cart.test.jsonl
+// Run:   zig build run -- examples/shopping-cart/shopping-cart.tsx -p 3000
+// Test:  zig build run -- examples/shopping-cart/shopping-cart.tsx --test examples/shopping-cart/shopping-cart.test.jsonl
 
 import { cacheGet, cacheSet, cacheDelete } from "zigttp:cache";
 import { schemaCompile, validateJson } from "zigttp:validate";

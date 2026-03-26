@@ -57,7 +57,7 @@ zig build -Doptimize=ReleaseFast
 ./zig-out/bin/zigttp-server -e "function handler(r) { return Response.json({hello:'world'}) }"
 
 # Or with a handler file
-./zig-out/bin/zigttp-server examples/handler.ts
+./zig-out/bin/zigttp-server examples/handler/handler.ts
 ```
 
 Test it:
@@ -235,7 +235,7 @@ function handler(req: Request): Response {
 }
 ```
 
-See [examples/modules_all.ts](examples/modules_all.ts) for an integration example using all modules together.
+See [examples/modules/modules_all.ts](examples/modules/modules_all.ts) for an integration example using all modules together.
 
 ### SQL Example
 
@@ -258,7 +258,7 @@ function handler(req: Request): Response {
 Build-time validation requires a schema snapshot:
 
 ```bash
-zig build -Dhandler=examples/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
+zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
 ```
 
 ## CLI Options
@@ -350,7 +350,7 @@ zigttp's compile-time toolchain goes beyond precompilation. It verifies correctn
 zig build -Doptimize=ReleaseFast
 
 # Production build (embedded bytecode, auto-sandboxed, 16% faster cold starts)
-zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
+zig build -Doptimize=ReleaseFast -Dhandler=examples/handler/handler.ts
 
 # Verify handler correctness at compile time
 zig build -Dhandler=handler.ts -Dverify
@@ -359,7 +359,7 @@ zig build -Dhandler=handler.ts -Dverify
 zig build -Dhandler=handler.ts -Dcontract
 
 # Validate zigttp:sql queries against a schema snapshot
-zig build -Dhandler=examples/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
+zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
 
 # Override auto-derived sandbox with an explicit capability policy
 zig build -Dhandler=handler.ts -Dpolicy=policy.json

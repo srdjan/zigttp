@@ -614,7 +614,7 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
 
 test "extractHandlerName basic" {
     try std.testing.expectEqualStrings("handler", extractHandlerName("handler.ts"));
-    try std.testing.expectEqualStrings("handler", extractHandlerName("examples/handler.jsx"));
+    try std.testing.expectEqualStrings("handler", extractHandlerName("examples/handler/handler.jsx"));
     try std.testing.expectEqualStrings("handler", extractHandlerName("/some/path/handler.tsx"));
     try std.testing.expectEqualStrings("my-handler", extractHandlerName("my-handler.ts"));
 }

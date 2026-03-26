@@ -27,10 +27,10 @@ zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Run handler tests at 
 
 # Run
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
-zig build run -- examples/handler.jsx -p 3000
-zig build run -- examples/handler.ts       # TypeScript handler
-zig build run -- examples/handler.tsx      # TSX handler
-zig build run -- examples/handler.jsx --test examples/handler.test.jsonl  # Run handler tests
+zig build run -- examples/handler/handler.jsx -p 3000
+zig build run -- examples/handler/handler.ts       # TypeScript handler
+zig build run -- examples/handler/handler.tsx      # TSX handler
+zig build run -- examples/handler/handler.jsx --test examples/handler/handler.test.jsonl  # Run handler tests
 
 # Test
 zig build test                      # All src/ tests

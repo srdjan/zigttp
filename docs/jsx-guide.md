@@ -397,8 +397,8 @@ Use `class` (not `className`) for HTML class attributes in JSX.
 
 See the examples directory for complete working examples:
 
-- `examples/handler.jsx` - Basic JSX handler
-- `examples/jsx-ssr.jsx` - Full SSR example with layouts
+- `examples/handler/handler.jsx` - Basic JSX handler
+- `examples/jsx/jsx-ssr.jsx` - Full SSR example with layouts
 - `examples/htmx-todo/` - HTMX Todo app with JSX
 
 ## Best Practices

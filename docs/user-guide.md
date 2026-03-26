@@ -1078,8 +1078,8 @@ Example commands:
 
 ```bash
 sqlite3 examples/sql/app.sqlite < examples/sql/schema.sql
-zig build -Dhandler=examples/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
-zig build run -- --sqlite examples/sql/app.sqlite examples/sql-crud.ts
+zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sql
+zig build run -- --sqlite examples/sql/app.sqlite examples/sql/sql-crud.ts
 ```
 
 ### zigttp:durable

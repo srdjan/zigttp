@@ -375,7 +375,7 @@ test "writeOpenApiJson renders schema and route" {
     });
 
     var contract = HandlerContract{
-        .handler = .{ .path = try allocator.dupe(u8, "examples/router.ts"), .line = 1, .column = 1 },
+        .handler = .{ .path = try allocator.dupe(u8, "examples/routing/router.ts"), .line = 1, .column = 1 },
         .routes = .empty,
         .modules = .empty,
         .functions = .empty,

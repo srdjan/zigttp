@@ -159,7 +159,7 @@ fn mayFailFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSVal
 Compile handlers at build time for fastest cold starts:
 
 ```bash
-zig build -Doptimize=ReleaseFast -Dhandler=examples/handler.ts
+zig build -Doptimize=ReleaseFast -Dhandler=examples/handler/handler.ts
 ```
 
 This embeds bytecode directly in the binary, eliminating all runtime parsing.
