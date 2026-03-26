@@ -45,7 +45,9 @@ pub const ProvenFacts = struct {
 
     retry_safe: bool = false,
     read_only: bool = false,
+    injection_safe: bool = true,
     idempotent: bool = false,
+    state_isolated: bool = true,
     max_io_depth: ?u32 = null,
 
     // Data flow provenance
@@ -142,7 +144,9 @@ pub fn extractProvenFacts(
             .checks_passed = checks_buf,
             .retry_safe = if (contract.properties) |p| p.retry_safe else false,
             .read_only = if (contract.properties) |p| p.read_only else false,
+            .injection_safe = if (contract.properties) |p| p.injection_safe else true,
             .idempotent = if (contract.properties) |p| p.idempotent else false,
+            .state_isolated = if (contract.properties) |p| p.state_isolated else true,
             .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
             .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
@@ -256,10 +260,27 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
         try w.writeAll("\"\n");
         try w.writeAll("    }");
     }
-    if (facts.env_vars.len > 0) {
+    // VPC parameters (when egress hosts are known)
+    const has_egress = facts.egress_hosts.len > 0;
+    if (has_egress) {
+        if (facts.env_vars.len > 0) try w.writeAll(",");
+        try w.writeAll("\n    \"VpcSubnetIds\": {\n");
+        try w.writeAll("      \"Type\": \"CommaDelimitedList\",\n");
+        try w.writeAll("      \"Default\": \"\",\n");
+        try w.writeAll("      \"Description\": \"Private subnet IDs for VPC egress restriction (leave empty to skip VPC)\"\n");
+        try w.writeAll("    }");
+    }
+    if (facts.env_vars.len > 0 or has_egress) {
         try w.writeAll("\n  ");
     }
     try w.writeAll("},\n");
+
+    // Conditions
+    if (has_egress) {
+        try w.writeAll("  \"Conditions\": {\n");
+        try w.writeAll("    \"HasVpc\": { \"Fn::Not\": [{ \"Fn::Equals\": [{ \"Fn::Join\": [\"\", { \"Ref\": \"VpcSubnetIds\" }] }, \"\"] }] }\n");
+        try w.writeAll("  },\n");
+    }
 
     // Resources
     try w.writeAll("  \"Resources\": {\n");
@@ -288,6 +309,20 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     }
     try w.writeAll("}\n");
     try w.writeAll("        },\n");
+
+    // VpcConfig (conditional on HasVpc)
+    if (has_egress) {
+        try w.writeAll("        \"VpcConfig\": {\n");
+        try w.writeAll("          \"Fn::If\": [\n");
+        try w.writeAll("            \"HasVpc\",\n");
+        try w.writeAll("            {\n");
+        try w.writeAll("              \"SecurityGroupIds\": [{ \"Ref\": \"EgressSecurityGroup\" }],\n");
+        try w.writeAll("              \"SubnetIds\": { \"Ref\": \"VpcSubnetIds\" }\n");
+        try w.writeAll("            },\n");
+        try w.writeAll("            { \"Ref\": \"AWS::NoValue\" }\n");
+        try w.writeAll("          ]\n");
+        try w.writeAll("        },\n");
+    }
 
     // Events (routes)
     try w.writeAll("        \"Events\": {");
@@ -335,8 +370,14 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll(",\n          \"zigttp:readOnly\": \"");
     try w.writeAll(if (facts.read_only) "true" else "false");
     try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:injectionSafe\": \"");
+    try w.writeAll(if (facts.injection_safe) "true" else "false");
+    try w.writeAll("\"");
     try w.writeAll(",\n          \"zigttp:idempotent\": \"");
     try w.writeAll(if (facts.idempotent) "true" else "false");
+    try w.writeAll("\"");
+    try w.writeAll(",\n          \"zigttp:stateIsolated\": \"");
+    try w.writeAll(if (facts.state_isolated) "true" else "false");
     try w.writeAll("\"");
     if (facts.max_io_depth) |depth| {
         try w.print(",\n          \"zigttp:maxIoDepth\": \"{d}\"", .{depth});
@@ -377,8 +418,48 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll("\n        }\n");
 
     try w.writeAll("      }\n");
-    try w.writeAll("    }\n");
-    try w.writeAll("  },\n");
+    try w.writeAll("    }");
+
+    if (has_egress) {
+        try w.writeAll(",\n    \"EgressSecurityGroup\": {\n");
+        try w.writeAll("      \"Type\": \"AWS::EC2::SecurityGroup\",\n");
+        try w.writeAll("      \"Condition\": \"HasVpc\",\n");
+        try w.writeAll("      \"Properties\": {\n");
+        try w.writeAll("        \"GroupDescription\": \"zigttp proven egress - ");
+        if (facts.egress_proven) {
+            try w.writeAll("restricted to: ");
+            for (facts.egress_hosts, 0..) |host, i| {
+                if (i > 0) try w.writeAll(", ");
+                try writeJsonStringContent(w, host);
+            }
+        } else {
+            try w.writeAll("REVIEW: handler uses dynamic URLs");
+        }
+        try w.writeAll("\",\n");
+        try w.writeAll("        \"VpcId\": { \"Fn::Select\": [0, { \"Fn::Split\": [\",\", { \"Fn::Select\": [0, { \"Ref\": \"VpcSubnetIds\" }] }] }] },\n");
+        try w.writeAll("        \"SecurityGroupEgress\": [\n");
+        try w.writeAll("          {\n");
+        try w.writeAll("            \"IpProtocol\": \"tcp\",\n");
+        try w.writeAll("            \"FromPort\": 443,\n");
+        try w.writeAll("            \"ToPort\": 443,\n");
+        try w.writeAll("            \"CidrIp\": \"0.0.0.0/0\",\n");
+        try w.writeAll("            \"Description\": \"HTTPS egress");
+        if (facts.egress_proven) {
+            try w.writeAll(" (proven hosts: ");
+            for (facts.egress_hosts, 0..) |host, i| {
+                if (i > 0) try w.writeAll(", ");
+                try writeJsonStringContent(w, host);
+            }
+            try w.writeAll(")");
+        }
+        try w.writeAll("\"\n");
+        try w.writeAll("          }\n");
+        try w.writeAll("        ]\n");
+        try w.writeAll("      }\n");
+        try w.writeAll("    }");
+    }
+
+    try w.writeAll("\n  },\n");
 
     // Outputs
     try w.writeAll("  \"Outputs\": {\n");
@@ -548,7 +629,9 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
     try w.writeAll("\nHANDLER PROPERTIES:\n");
     try writeProvenLine(w, facts.retry_safe, "retry safe (auto-retry on failure)");
     try writeProvenLine(w, facts.read_only, "read only (no state mutations)");
+    try writeProvenLine(w, facts.injection_safe, "injection safe (no unvalidated input in sinks)");
     try writeProvenLine(w, facts.idempotent, "idempotent (safe for at-least-once delivery)");
+    try writeProvenLine(w, facts.state_isolated, "state isolated (no cross-request data leakage)");
     if (facts.max_io_depth) |depth| {
         try w.print("  PROVEN  max I/O depth: {d} calls per request\n", .{depth});
     }
@@ -556,11 +639,26 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
     try w.writeAll("\nOWASP TOP 10 COVERAGE:\n");
     try writeProvenLine(w, facts.no_secret_leakage, "A01 Broken Access Control (no secret leakage, sandbox enforced)");
     try writeProvenLine(w, facts.no_credential_leakage, "A02 Cryptographic Failures (no credential leakage)");
-    try writeProvenLine(w, facts.input_validated, "A03 Injection (input validated before egress)");
+    try writeProvenLine(w, facts.injection_safe, "A03 Injection (no unvalidated input in sinks)");
     try writeProvenLine(w, facts.fault_covered, "A04 Insecure Design (fault coverage, exhaustive returns)");
     const sandbox_proven = facts.env_proven and facts.egress_proven and facts.cache_proven;
     try writeProvenLine(w, sandbox_proven, "A05 Security Misconfiguration (sandbox derived from contract)");
     try writeProvenLine(w, facts.results_safe, "A07 Auth Failures (result values checked before use)");
+
+    // VPC EGRESS section (when egress hosts exist)
+    if (facts.egress_hosts.len > 0) {
+        try w.writeAll("\nVPC EGRESS:\n");
+        if (facts.egress_proven) {
+            try w.writeAll("  PROVEN  outbound traffic restricted to: ");
+            try writeCommaList(w, facts.egress_hosts);
+            try w.writeAll("\n  SecurityGroup resource generated (activate with VpcSubnetIds parameter)\n");
+        } else {
+            try w.writeAll("  ---     handler uses dynamic URLs, egress restriction requires manual SecurityGroup\n");
+            try w.writeAll("          known hosts: ");
+            try writeCommaList(w, facts.egress_hosts);
+            try w.writeByte('\n');
+        }
+    }
 
     try w.writeAll("\nPROOF LEVEL: ");
     try w.writeAll(facts.proof_level.toString());

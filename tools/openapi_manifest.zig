@@ -37,7 +37,9 @@ pub fn writeOpenApiJson(
         try writer.print("    \"stateless\": {s},\n", .{if (p.stateless) "true" else "false"});
         try writer.print("    \"retrySafe\": {s},\n", .{if (p.retry_safe) "true" else "false"});
         try writer.print("    \"deterministic\": {s},\n", .{if (p.deterministic) "true" else "false"});
+        try writer.print("    \"injectionSafe\": {s},\n", .{if (p.injection_safe) "true" else "false"});
         try writer.print("    \"idempotent\": {s},\n", .{if (p.idempotent) "true" else "false"});
+        try writer.print("    \"stateIsolated\": {s},\n", .{if (p.state_isolated) "true" else "false"});
         if (p.max_io_depth) |depth| {
             try writer.print("    \"maxIoDepth\": {d}\n", .{depth});
         } else {

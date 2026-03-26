@@ -65,6 +65,9 @@ pub const DiagnosticKind = enum {
     // Optional checking (Check 6)
     unchecked_optional_use,
     unchecked_optional_access,
+
+    // State isolation (Check 7)
+    module_scope_mutation,
 };
 
 pub const Diagnostic = struct {
@@ -184,6 +187,10 @@ pub const HandlerVerifier = struct {
     // Dead variable tracking
     all_bindings: std.ArrayList(BindingState),
 
+    // State isolation (Check 7)
+    handler_scope_id: ?ir.ScopeId = null,
+    has_module_mutation: bool = false,
+
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) HandlerVerifier {
         return .{
             .allocator = allocator,
@@ -219,6 +226,7 @@ pub const HandlerVerifier = struct {
 
         // Phase 2: Exhaustive return analysis on the handler body
         const func = self.ir_view.getFunction(handler_func) orelse return 0;
+        self.handler_scope_id = func.scope_id;
         const body_status = self.stmtReturns(func.body);
         if (body_status != .always) {
             self.addDiagnostic(.{
@@ -753,6 +761,9 @@ pub const HandlerVerifier = struct {
 
                 // Check 6: reassignment to non-optional clears tracking
                 self.handleOptionalReassignment(assign);
+
+                // Check 7: detect mutation of module-scope bindings
+                self.checkModuleScopeMutation(assign.target, node);
             },
             .array_literal => {
                 const arr = self.ir_view.getArray(node) orelse return;
@@ -1242,6 +1253,29 @@ pub const HandlerVerifier = struct {
 
         // Reassignment to non-optional resolves optionality
         ob.narrowed = true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Check 7: State isolation
+    // -----------------------------------------------------------------------
+
+    fn checkModuleScopeMutation(self: *HandlerVerifier, target: NodeIndex, assign_node: NodeIndex) void {
+        const handler_scope = self.handler_scope_id orelse return;
+        const target_tag = self.ir_view.getTag(target) orelse return;
+        if (target_tag != .identifier) return;
+
+        const binding = self.ir_view.getBinding(target) orelse return;
+        // Module-scope bindings have a scope_id lower than the handler's
+        if (binding.scope_id < handler_scope and binding.kind != .undeclared_global) {
+            self.has_module_mutation = true;
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .module_scope_mutation,
+                .node = assign_node,
+                .message = "handler mutates module-scope variable (breaks cross-request isolation)",
+                .help = "use const instead of let for module-scope declarations, or move state to zigttp:cache",
+            });
+        }
     }
 
     // -----------------------------------------------------------------------

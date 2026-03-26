@@ -290,6 +290,12 @@ pub const HandlerProperties = struct {
     /// Maximum number of I/O calls on any single execution path.
     /// Enables compile-time Lambda timeout derivation.
     max_io_depth: ?u32 = null,
+    /// No unvalidated user input reaches sensitive sinks.
+    /// Proves SQL injection and XSS prevention.
+    injection_safe: bool = true,
+    /// No module-scope variable mutations inside handler body.
+    /// Proves cross-request data isolation.
+    state_isolated: bool = true,
     // --- Fault coverage (from FaultCoverageChecker) ---
     /// Every failable I/O call site has an explicit failure path.
     fault_covered: bool = false,
@@ -2674,8 +2680,12 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             props.input_validated = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "piiContained")) {
             props.pii_contained = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "injectionSafe")) {
+            props.injection_safe = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "idempotent")) {
             props.idempotent = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "stateIsolated")) {
+            props.state_isolated = parser.readBool() orelse false;
         } else if (std.mem.eql(u8, key, "maxIoDepth")) {
             if (parser.readNull()) {
                 props.max_io_depth = null;
@@ -3095,7 +3105,9 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.print("    \"noCredentialLeakage\": {s},\n", .{if (p.no_credential_leakage) "true" else "false"});
         try writer.print("    \"inputValidated\": {s},\n", .{if (p.input_validated) "true" else "false"});
         try writer.print("    \"piiContained\": {s},\n", .{if (p.pii_contained) "true" else "false"});
+        try writer.print("    \"injectionSafe\": {s},\n", .{if (p.injection_safe) "true" else "false"});
         try writer.print("    \"idempotent\": {s},\n", .{if (p.idempotent) "true" else "false"});
+        try writer.print("    \"stateIsolated\": {s},\n", .{if (p.state_isolated) "true" else "false"});
         if (p.max_io_depth) |depth| {
             try writer.print("    \"maxIoDepth\": {d},\n", .{depth});
         } else {

@@ -77,6 +77,8 @@ pub const FlowProperties = struct {
     input_validated: bool = true,
     /// {user_input} data does not flow to external egress hosts.
     pii_contained: bool = true,
+    /// No unvalidated user input reaches sensitive sinks (egress, HTML responses).
+    injection_safe: bool = true,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +95,9 @@ pub const FlowChecker = struct {
     binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
     /// Virtual module import tracking: local slot -> FunctionBinding return_labels.
     module_fn_labels: std.AutoHashMapUnmanaged(u16, LabelSet),
+    /// Result binding tracking: packed(scope_id, slot) -> return_labels from the producing call.
+    /// When accessing .value on these bindings, the return_labels are merged in.
+    result_binding_labels: std.AutoHashMapUnmanaged(u32, LabelSet),
     /// Handler request parameter binding key (packed scope_id + slot).
     req_binding_key: ?u32,
     /// Slot of the `env` function import (for smart label refinement).
@@ -108,6 +113,7 @@ pub const FlowChecker = struct {
             .diagnostics = .empty,
             .binding_labels = .empty,
             .module_fn_labels = .empty,
+            .result_binding_labels = .empty,
             .req_binding_key = null,
             .env_fn_slot = null,
             .properties = .{},
@@ -118,6 +124,7 @@ pub const FlowChecker = struct {
         self.diagnostics.deinit(self.allocator);
         self.binding_labels.deinit(self.allocator);
         self.module_fn_labels.deinit(self.allocator);
+        self.result_binding_labels.deinit(self.allocator);
     }
 
     /// Run the flow analysis on the given handler function node.
@@ -248,6 +255,8 @@ pub const FlowChecker = struct {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                         self.binding_labels.put(self.allocator, key, labels) catch {};
                     }
+                    // Track result bindings from validation calls for .value label narrowing
+                    self.trackResultBinding(vd);
                 }
             },
 
@@ -380,6 +389,19 @@ pub const FlowChecker = struct {
                     }
                 }
 
+                // result.value inherits labels from the producing validation call
+                const prop_name = self.resolveAtomName(member.property) orelse return obj_labels;
+                if (std.mem.eql(u8, prop_name, "value")) {
+                    const obj_tag = self.ir_view.getTag(member.object) orelse return obj_labels;
+                    if (obj_tag == .identifier) {
+                        const binding = self.ir_view.getBinding(member.object) orelse return obj_labels;
+                        const key = packBindingKey(binding.scope_id, binding.slot);
+                        if (self.result_binding_labels.get(key)) |result_labels| {
+                            return LabelSet.merge(obj_labels, result_labels);
+                        }
+                    }
+                }
+
                 return obj_labels;
             },
 
@@ -487,7 +509,7 @@ pub const FlowChecker = struct {
     fn checkResponseSink(self: *FlowChecker, ret_val: NodeIndex) void {
         const tag = self.ir_view.getTag(ret_val) orelse return;
 
-        // Response.json(data), Response.text(data), Response.html(data)
+        // Response.json(data), Response.text(data), Response.html(data), Response.redirect(url)
         if (tag == .method_call or tag == .call) {
             const call_data = self.ir_view.getCall(ret_val) orelse return;
 
@@ -496,6 +518,20 @@ pub const FlowChecker = struct {
                     const data_arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     const labels = self.inferLabels(data_arg);
                     self.checkSinkLabels(labels, ret_val, .response);
+
+                    // XSS check: Response.html with unvalidated user input
+                    if (labels.has(.user_input) and !labels.has(.validated)) {
+                        if (self.isGlobalMethodCall(call_data.callee, "Response", &.{"html"})) {
+                            self.addDiagnostic(.{
+                                .severity = .warning,
+                                .kind = .unvalidated_input_in_egress,
+                                .node = ret_val,
+                                .message = "unvalidated user input in Response.html (potential XSS)",
+                                .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
+                            });
+                            self.properties.injection_safe = false;
+                        }
+                    }
                 }
             }
         }
@@ -621,6 +657,7 @@ pub const FlowChecker = struct {
                         .help = "pass user input through validateJson() or validateObject() before sending to external services",
                     });
                     self.properties.input_validated = false;
+                    self.properties.injection_safe = false;
                 }
                 // PII containment: user input going to external hosts
                 if (labels.has(.user_input)) {
@@ -763,6 +800,27 @@ pub const FlowChecker = struct {
             return self.ir_view.getString(str_idx);
         }
         return null;
+    }
+
+    /// Track result bindings from validation function calls.
+    /// When `const result = validateJson(...)` is seen, records the function's
+    /// return_labels so that `result.value` inherits them during label inference.
+    fn trackResultBinding(self: *FlowChecker, vd: ir.Node.VarDecl) void {
+        const init_tag = self.ir_view.getTag(vd.init) orelse return;
+        if (init_tag != .call) return;
+
+        const call_data = self.ir_view.getCall(vd.init) orelse return;
+        const callee_tag = self.ir_view.getTag(call_data.callee) orelse return;
+        if (callee_tag != .identifier) return;
+
+        const callee_binding = self.ir_view.getBinding(call_data.callee) orelse return;
+        const return_labels = self.module_fn_labels.get(callee_binding.slot) orelse return;
+
+        // Only track if the function returns labels worth propagating (e.g., validated)
+        if (return_labels.has(.validated)) {
+            const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+            self.result_binding_labels.put(self.allocator, key, return_labels) catch {};
+        }
     }
 
     fn addDiagnostic(self: *FlowChecker, diag: Diagnostic) void {

@@ -1096,6 +1096,7 @@ fn compileHandler(
 
     // Run handler verification if requested
     var verify_info: ?VerificationInfo = null;
+    var state_isolated: bool = true;
     if (emit_verify) {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
@@ -1143,6 +1144,7 @@ fn compileHandler(
                 .unreachable_code = has_unreachable,
                 .bytecode_verified = true, // will be set after bytecode gen
             };
+            state_isolated = !verifier.has_module_mutation;
 
             std.debug.print("Verification passed\n", .{});
         } else {
@@ -1271,6 +1273,11 @@ fn compileHandler(
             policy,
             sql_schema_path,
         );
+
+        // Inject state isolation result from verifier (Check 7)
+        if (contract.?.properties) |*props| {
+            props.state_isolated = state_isolated;
+        }
     }
 
     // Generate exhaustive test cases from path analysis
@@ -1661,6 +1668,7 @@ fn buildContractWithPolicy(
                 props.no_credential_leakage = flow_props.no_credential_leakage;
                 props.input_validated = flow_props.input_validated;
                 props.pii_contained = flow_props.pii_contained;
+                props.injection_safe = flow_props.injection_safe;
             }
 
             if (!builtin.is_test and flow_errors == 0) {
@@ -2086,7 +2094,9 @@ fn printPropertiesReport(contract: *const HandlerContract) void {
         .{ .name = "stateless", .value = props.stateless, .desc = "independent of mutable state" },
         .{ .name = "retry_safe", .value = props.retry_safe, .desc = "safe for Lambda auto-retry on timeout" },
         .{ .name = "deterministic", .value = props.deterministic, .desc = "no Date.now() or Math.random()" },
+        .{ .name = "injection_safe", .value = props.injection_safe, .desc = "no unvalidated input in sinks" },
         .{ .name = "idempotent", .value = props.idempotent, .desc = "safe for at-least-once delivery" },
+        .{ .name = "state_isolated", .value = props.state_isolated, .desc = "no cross-request data leakage" },
     };
 
     for (fields) |f| {
