@@ -36,6 +36,7 @@ zig build run -- examples/handler/handler-full.tsx --test examples/handler/handl
 zig build test                      # All src/ tests
 zig build test-zts                  # zts engine tests only
 zig build test-zruntime             # Native Zig runtime tests only
+bash scripts/test-examples.sh       # All example handler tests (10 suites, 32 tests)
 
 # Run a single test by name
 zig build test 2>&1 | head -50      # See available tests

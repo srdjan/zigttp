@@ -1,0 +1,14 @@
+{"type":"test","name":"GET returns schema status and cache stats"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"schema_compiled"}
+
+{"type":"test","name":"POST with valid body returns 201 with user and token"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"name\":\"Alice\",\"age\":30}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["user","{\"name\":\"Alice\",\"age\":30}"],"result":{"ok":true,"value":{"name":"Alice","age":30}}}
+{"type":"io","seq":1,"module":"auth","fn":"jwtSign","args":["{\"sub\":\"user-123\",\"iat\":1700000000}","my-secret-key"],"result":"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.test"}
+{"type":"expect","status":201,"bodyContains":"Alice"}
+
+{"type":"test","name":"POST with invalid body returns 400"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"name\":\"\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["user","{\"name\":\"\"}"],"result":{"ok":false,"errors":["minLength"]}}
+{"type":"expect","status":400}

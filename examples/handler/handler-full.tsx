@@ -28,7 +28,7 @@ function HomePage(): JSX.Element {
 }
 
 function fibonacci(n: number): number {
-    if (n <= 1) return n;
+    if (1 >= n) return n; // reversed: TSX parser treats `<` and `<=` as JSX tag open
     let a = 0;
     let b = 1;
     for (const _ of range(2, n + 1)) {

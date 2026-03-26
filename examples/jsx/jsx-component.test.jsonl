@@ -1,0 +1,3 @@
+{"type":"test","name":"renders Card component with title"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"Welcome to JSX"}

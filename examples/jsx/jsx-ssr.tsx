@@ -38,7 +38,7 @@ function Layout(props: { title: string, children: JSX.Element }): JSX.Element {
             </head>
             <body>
                 <h1>{props.title}</h1>
-                {props.children}
+                <div>{props.children}</div>
             </body>
         </html>
     );
