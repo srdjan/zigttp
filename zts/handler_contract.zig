@@ -3491,7 +3491,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 9") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);

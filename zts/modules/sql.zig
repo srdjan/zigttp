@@ -10,6 +10,7 @@ const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
+const string = @import("../string.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
 const sqlite = @import("../sqlite.zig");
@@ -381,10 +382,8 @@ test "sql module register and execute queries" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const db_path = try tmp.dir.realPathAlloc(std.testing.allocator, ".", 1024);
-    defer std.testing.allocator.free(db_path);
-
-    const sqlite_path = try std.fs.path.join(std.testing.allocator, &.{ db_path, "test.sqlite" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "test.sqlite", .data = "" });
+    const sqlite_path = try tmp.dir.realPathFileAlloc(std.testing.io, "test.sqlite", std.testing.allocator);
     defer std.testing.allocator.free(sqlite_path);
 
     var db = try sqlite.Db.openReadWriteCreate(std.testing.allocator, sqlite_path);
@@ -402,41 +401,58 @@ test "sql module register and execute queries" {
     try @import("../builtins/root.zig").initBuiltins(ctx);
     try installStore(ctx, sqlite_path);
 
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    const insert_todo_name = try ctx.createString("insertTodo");
+    defer string.freeString(std.testing.allocator, insert_todo_name.toPtr(string.JSString));
+    const insert_todo_sql = try ctx.createString("INSERT INTO todos(id, text, done) VALUES (:id, :text, :done)");
+    defer string.freeString(std.testing.allocator, insert_todo_sql.toPtr(string.JSString));
     const register_args = [_]value.JSValue{
-        try ctx.createString("insertTodo"),
-        try ctx.createString("INSERT INTO todos(id, text, done) VALUES (:id, :text, :done)"),
+        insert_todo_name,
+        insert_todo_sql,
     };
     _ = try sqlRegisterNative(@ptrCast(ctx), value.JSValue.undefined_val, &register_args);
 
+    const get_todo_name = try ctx.createString("getTodo");
+    defer string.freeString(std.testing.allocator, get_todo_name.toPtr(string.JSString));
+    const get_todo_sql = try ctx.createString("SELECT id, text, done FROM todos WHERE id = :id");
+    defer string.freeString(std.testing.allocator, get_todo_sql.toPtr(string.JSString));
     const read_args = [_]value.JSValue{
-        try ctx.createString("getTodo"),
-        try ctx.createString("SELECT id, text, done FROM todos WHERE id = :id"),
+        get_todo_name,
+        get_todo_sql,
     };
     _ = try sqlRegisterNative(@ptrCast(ctx), value.JSValue.undefined_val, &read_args);
 
     const params = try ctx.createObject(null);
+    defer params.destroyBuiltin(std.testing.allocator, pool);
     try ctx.setPropertyChecked(params, try ctx.atoms.intern("id"), try ctx.createString("todo-1"));
     try ctx.setPropertyChecked(params, try ctx.atoms.intern("text"), try ctx.createString("write tests"));
     try ctx.setPropertyChecked(params, try ctx.atoms.intern("done"), value.JSValue.fromInt(0));
 
+    const exec_name = try ctx.createString("insertTodo");
+    defer string.freeString(std.testing.allocator, exec_name.toPtr(string.JSString));
     const exec_args = [_]value.JSValue{
-        try ctx.createString("insertTodo"),
+        exec_name,
         params.toValue(),
     };
     const exec_result = try sqlExecNative(@ptrCast(ctx), value.JSValue.undefined_val, &exec_args);
+    defer exec_result.toPtr(object.JSObject).destroyBuiltin(std.testing.allocator, pool);
     try std.testing.expect(exec_result.isObject());
 
     const read_params = try ctx.createObject(null);
+    defer read_params.destroyBuiltin(std.testing.allocator, pool);
     try ctx.setPropertyChecked(read_params, try ctx.atoms.intern("id"), try ctx.createString("todo-1"));
+    const one_name = try ctx.createString("getTodo");
+    defer string.freeString(std.testing.allocator, one_name.toPtr(string.JSString));
     const one_args = [_]value.JSValue{
-        try ctx.createString("getTodo"),
+        one_name,
         read_params.toValue(),
     };
     const row_val = try sqlOneNative(@ptrCast(ctx), value.JSValue.undefined_val, &one_args);
+    defer row_val.toPtr(object.JSObject).destroyBuiltin(std.testing.allocator, pool);
     try std.testing.expect(row_val.isObject());
 
     const row = row_val.toPtr(object.JSObject);
-    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const text_val = row.getProperty(pool, try ctx.atoms.intern("text")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("write tests", util.extractString(text_val).?);
 }

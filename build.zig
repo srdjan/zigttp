@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    zts_tests.root_module.linkSystemLibrary("sqlite3", .{});
     const run_zts_tests = b.addRunArtifact(zts_tests);
     const zts_test_step = b.step("test-zts", "Run zts unit tests");
     zts_test_step.dependOn(&run_zts_tests.step);

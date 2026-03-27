@@ -24,6 +24,7 @@ const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
+const string = @import("../string.zig");
 const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
@@ -645,8 +646,15 @@ test "cache policy rejects disallowed namespace" {
     };
 
     const blocked_ns = try ctx.createString("metrics");
+    defer string.freeString(allocator, blocked_ns.toPtr(string.JSString));
     const key = try ctx.createString("key");
+    defer string.freeString(allocator, key.toPtr(string.JSString));
     _ = try cacheGetNative(ctx, value.JSValue.undefined_val, &[_]value.JSValue{ blocked_ns, key });
 
     try std.testing.expect(ctx.hasException());
+    if (ctx.exception.isObject()) {
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        ctx.exception.toPtr(object.JSObject).destroyBuiltin(allocator, pool);
+        ctx.clearException();
+    }
 }

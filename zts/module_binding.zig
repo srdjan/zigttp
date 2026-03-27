@@ -531,7 +531,7 @@ test "FunctionBinding with module_func wraps correctly" {
 
     const me = comptime fb.toModuleExport();
     try std.testing.expectEqualStrings("sandboxedFn", me.name);
-    try std.testing.expect(me.func != null);
+    try std.testing.expectEqual(@typeInfo(object.NativeFn), @typeInfo(@TypeOf(me.func)));
 }
 
 test "LabelSet merge combines labels" {

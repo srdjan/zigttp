@@ -2563,14 +2563,15 @@ pub const Parser = struct {
         if (self.check(.lparen)) {
             // (...) => ...
             const state = self.tokenizer.saveState();
-            var depth: u32 = 0;
+            // The current '(' is already consumed by the tokenizer state, so start
+            // one level deep and only accept '=>' after the matching top-level ')'.
+            var depth: u32 = 1;
             var tok = self.tokenizer.next();
 
             // Skip past parentheses
             while (tok.type != .eof) {
                 if (tok.type == .lparen) depth += 1;
                 if (tok.type == .rparen) {
-                    if (depth == 0) break; // Already at top level
                     depth -= 1;
                     if (depth == 0) break;
                 }

@@ -137,11 +137,6 @@ pub const ParallelCollector = struct {
 fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
 
-    // Get runtime callbacks from module state
-    const callbacks = getCallbacks(ctx) orelse {
-        return util.throwError(ctx, "Error", "parallel() requires outbound HTTP to be enabled");
-    };
-
     if (args.len == 0) {
         return (try ctx.createArray()).toValue();
     }
@@ -162,6 +157,11 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
     if (count > MAX_PARALLEL) {
         return util.throwError(ctx, "RangeError", "parallel() supports at most 8 concurrent operations");
     }
+
+    // Get runtime callbacks from module state after handling no-op cases.
+    const callbacks = getCallbacks(ctx) orelse {
+        return util.throwError(ctx, "Error", "parallel() requires outbound HTTP to be enabled");
+    };
 
     // Phase 1: Execute each thunk to collect fetch descriptors.
     // fetchSync calls during thunk execution are intercepted and recorded
@@ -239,10 +239,6 @@ fn parallelNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSV
 fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
 
-    const callbacks = getCallbacks(ctx) orelse {
-        return util.throwError(ctx, "Error", "race() requires outbound HTTP to be enabled");
-    };
-
     if (args.len == 0) {
         return value.JSValue.undefined_val;
     }
@@ -262,6 +258,10 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
     if (count > MAX_PARALLEL) {
         return util.throwError(ctx, "RangeError", "race() supports at most 8 concurrent operations");
     }
+
+    const callbacks = getCallbacks(ctx) orelse {
+        return util.throwError(ctx, "Error", "race() requires outbound HTTP to be enabled");
+    };
 
     // Phase 1: Collect fetch descriptors (same as parallel)
     var descriptor_buf: [MAX_PARALLEL]FetchDescriptor = undefined;
@@ -348,17 +348,30 @@ fn getCallbacks(ctx: *context.Context) ?*IoCallbacks {
 // ============================================================================
 
 test "parallel: empty array returns empty array" {
-    // This tests the validation logic without needing a full runtime.
-    // The actual concurrent execution is tested in src/zruntime.zig.
-    // Module state is not set, so the function returns an error - which is
-    // the expected behavior when outbound HTTP is not enabled.
-    const result = parallelNative(
-        @ptrFromInt(0x1), // dummy ctx
-        value.JSValue.undefined_val,
-        &.{},
-    );
-    // Without a real Context, this will fail before reaching the array check
-    try std.testing.expect(result == error.OutOfMemory or true);
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+
+    const result = try parallelNative(ctx, value.JSValue.undefined_val, &.{});
+    defer result.toPtr(object.JSObject).destroy(allocator);
+
+    try std.testing.expect(result.isObject());
+    try std.testing.expectEqual(object.ClassId.array, result.toPtr(object.JSObject).class_id);
+    try std.testing.expectEqual(@as(u32, 0), result.toPtr(object.JSObject).getArrayLength());
 }
 
 test "MAX_PARALLEL is within MODULE_STATE_SLOTS" {

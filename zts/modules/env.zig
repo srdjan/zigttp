@@ -10,6 +10,8 @@
 
 const std = @import("std");
 const context = @import("../context.zig");
+const object = @import("../object.zig");
+const string = @import("../string.zig");
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
@@ -83,7 +85,13 @@ test "env policy rejects disallowed env access" {
     };
 
     const key = try ctx.createString("BLOCKED");
+    defer string.freeString(allocator, key.toPtr(string.JSString));
     _ = try envNative(ctx, value.JSValue.undefined_val, &[_]value.JSValue{key});
 
     try std.testing.expect(ctx.hasException());
+    if (ctx.exception.isObject()) {
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        ctx.exception.toPtr(object.JSObject).destroyBuiltin(allocator, pool);
+        ctx.clearException();
+    }
 }
