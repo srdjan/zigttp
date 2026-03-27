@@ -4935,6 +4935,27 @@ pub const BaselineCompiler = struct {
     /// Emit code for direct slot write (used for pre-compiled object literals)
     /// Stack: [..., obj, val] -> [...]
     fn emitSetSlot(self: *BaselineCompiler, slot_idx: u8) CompileError!void {
+        if (slot_idx >= JSObject.INLINE_SLOT_COUNT) {
+            const fn_ptr = @intFromPtr(&Context.jitSetSlot);
+            if (is_x86_64) {
+                try self.emitPopReg(.rcx); // val
+                try self.emitPopReg(.rdx); // obj
+                self.emitter.movRegReg(.rdi, .rbx) catch return CompileError.OutOfMemory; // ctx
+                self.emitter.movRegReg(.rsi, .rdx) catch return CompileError.OutOfMemory; // obj
+                self.emitter.movRegImm32(.rdx, slot_idx) catch return CompileError.OutOfMemory; // slot_idx
+                self.emitter.movRegImm64(.rax, fn_ptr) catch return CompileError.OutOfMemory;
+                try self.emitCallHelperReg(.rax);
+            } else if (is_aarch64) {
+                try self.emitPopReg(.x3); // val
+                try self.emitPopReg(.x1); // obj
+                self.emitter.movRegReg(.x0, .x19) catch return CompileError.OutOfMemory; // ctx
+                self.emitter.movRegImm64(.x2, slot_idx) catch return CompileError.OutOfMemory; // slot_idx
+                self.emitter.movRegImm64(.x9, fn_ptr) catch return CompileError.OutOfMemory;
+                try self.emitCallHelperReg(.x9);
+            }
+            return;
+        }
+
         // Calculate the offset into inline_slots array
         const slot_offset: i32 = OBJ_INLINE_SLOTS_OFF + @as(i32, slot_idx) * 8;
 

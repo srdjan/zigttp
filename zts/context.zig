@@ -980,6 +980,17 @@ pub const Context = struct {
         return val;
     }
 
+    /// JIT helper: write a precomputed slot index for object literal initialization.
+    /// Used as the overflow fallback for `set_slot` when the slot is not inline.
+    pub fn jitSetSlot(self: *Context, obj_val: value.JSValue, slot_idx: u16, val: value.JSValue) callconv(.c) value.JSValue {
+        _ = self;
+        if (obj_val.isObject()) {
+            const obj = object.JSObject.fromValue(obj_val);
+            obj.setSlot(slot_idx, val);
+        }
+        return val;
+    }
+
     /// JIT helper: get element by index
     pub fn jitGetElem(self: *Context, obj_val: value.JSValue, index_val: value.JSValue) callconv(.c) value.JSValue {
         const pool = self.hidden_class_pool orelse return value.JSValue.undefined_val;

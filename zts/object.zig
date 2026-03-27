@@ -1427,10 +1427,23 @@ pub const JSObject = extern struct {
         obj.overflow_slots = null;
         obj.overflow_capacity = 0;
         obj.arena_ptr = arena;
-        // Only initialize the slots we need (up to INLINE_SLOT_COUNT)
+
+        // Only initialize the slots we need. For literals wider than the inline slot
+        // budget, pre-allocate overflow storage so direct slot writes stay valid.
         const count = @min(slot_count, INLINE_SLOT_COUNT);
         for (0..count) |i| {
             obj.inline_slots[i] = value.JSValue.undefined_val;
+        }
+
+        if (slot_count > INLINE_SLOT_COUNT) {
+            const overflow_needed: u16 = @intCast(slot_count - INLINE_SLOT_COUNT);
+            const overflow_capacity = @max(overflow_needed, 4);
+            const slots = arena.allocSlice(value.JSValue, overflow_capacity) orelse return null;
+            for (0..overflow_capacity) |i| {
+                slots[i] = value.JSValue.undefined_val;
+            }
+            obj.overflow_slots = slots.ptr;
+            obj.overflow_capacity = overflow_capacity;
         }
         return obj;
     }

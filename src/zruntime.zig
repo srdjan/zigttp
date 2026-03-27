@@ -6309,6 +6309,46 @@ test "HandlerPool exhaustion and recovery" {
     try std.testing.expect(metrics.exhausted == 0);
 }
 
+test "JIT object literal overflow slots remain valid" {
+    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null or std.c.getenv("ZTS_DISABLE_JIT") != null) {
+        return error.SkipZigTest;
+    }
+
+    const prev_policy = zq.interpreter.getJitPolicy();
+    const prev_threshold = zq.interpreter.getJitThreshold();
+    const prev_warmup = zq.interpreter.getJitFeedbackWarmup();
+    defer {
+        zq.interpreter.setJitPolicy(prev_policy);
+        zq.interpreter.setJitThreshold(prev_threshold);
+        zq.interpreter.setJitFeedbackWarmup(prev_warmup);
+    }
+
+    zq.interpreter.setJitPolicy(.eager);
+    zq.interpreter.setJitThreshold(1);
+    zq.interpreter.setJitFeedbackWarmup(1);
+
+    const allocator = std.heap.c_allocator;
+    const script =
+        \\function handler(req) { return Response.text('ok'); }
+        \\function run(seed) {
+        \\  const obj = { p0: 1, p1: 2, p2: 3, p3: 4, p4: 5, p5: 6, p6: 7, p7: 8, p8: 9 };
+        \\  return obj.p8;
+        \\}
+    ;
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadCode(script, "<jit-overflow-slots>");
+
+    var i: usize = 0;
+    while (i < 64) : (i += 1) {
+        const args = [_]zq.JSValue{zq.JSValue.fromInt(@intCast(i))};
+        const result = try rt.callGlobalFunction("run", &args);
+        try std.testing.expect(result.isInt());
+        try std.testing.expectEqual(@as(i32, 9), result.getInt());
+    }
+}
+
 test "HandlerPool high contention stress" {
     const allocator = std.heap.c_allocator;
 
