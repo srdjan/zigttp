@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="zigttp is a serverless JavaScript runtime built in Zig. One binary, no dependencies, the compiler proves your code correct.">
+  <meta name="color-scheme" content="dark light">
+  <title>zigttp - Serverless JavaScript Runtime Built in Zig</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <!-- ============ Header ============ -->
+  <header class="site-header" role="banner">
+    <div class="site-header__inner">
+      <a href="/" class="site-header__logo" rel="home">
+        <img src="../docs/zigttp-logo.jpg" alt="" class="site-header__logo-mark">
+        zigttp
+      </a>
+      <nav class="site-header__nav" aria-label="Primary">
+        <ul role="list">
+          <li><a href="https://github.com/AurelioSilva/zigttp/blob/main/docs/user-guide.md">Docs</a></li>
+          <li><a href="https://github.com/AurelioSilva/zigttp/tree/main/examples">Examples</a></li>
+          <li><a href="https://github.com/AurelioSilva/zigttp">GitHub</a></li>
+          <li><a href="#quickstart">Get Started</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ============ Main ============ -->
+  <main id="main" class="page-wrap">
+
+    <!-- Identity -->
+    <div class="identity-wrap">
+    <section class="identity" aria-labelledby="identity-heading">
+      <img src="../docs/zigttp-logo.jpg" alt="zigttp logo - a blue Z with orange TS letters" class="identity__logo">
+      <h1 id="identity-heading">zigttp</h1>
+      <p class="identity__tagline">A JavaScript runtime built in Zig for serverless workloads. One binary, no dependencies - the compiler proves your code correct.</p>
+
+      <div class="identity__stats">
+        <div class="identity__stat">
+          <data value="71" class="identity__stat-value">~71ms</data>
+          <span class="identity__stat-label">Cold start</span>
+        </div>
+        <div class="identity__stat">
+          <data value="1.2" class="identity__stat-value">~1.2MB</data>
+          <span class="identity__stat-label">Binary size</span>
+        </div>
+        <div class="identity__stat">
+          <data value="3" class="identity__stat-value">3ms</data>
+          <span class="identity__stat-label">Runtime init</span>
+        </div>
+      </div>
+
+      <a href="#quickstart" class="identity__cta">Get started</a>
+    </section>
+    </div>
+
+    <!-- ============ Track 1 ============ -->
+    <section class="track" aria-labelledby="track-1-heading">
+      <div class="track__prose">
+        <h2 id="track-1-heading">What if restrictions were features?</h2>
+        <p>zigttp removes <strong>while loops, classes, try/catch, and var</strong> from JavaScript. Not because they are bad, but because removing them makes the IR tree identical to the control flow graph.</p>
+        <p>When every branch is visible at compile time, the compiler can walk every execution path. It proves that every path returns a <code>Response</code>, that <code>Result</code> values are checked before access, and that no state leaks between requests.</p>
+        <p>The restrictions are not limitations. They are the mechanism that makes static proof possible.</p>
+      </div>
+      <div class="track__code">
+        <div class="codeblock" role="region" aria-label="Handler with a compile-time diagnostic">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--ts"></span>
+            handler.ts
+          </div>
+          <pre><code><span class="kw">import</span> { env } <span class="kw">from</span> <span class="str">"zigttp:env"</span>;
+<span class="kw">import</span> { jwtVerify } <span class="kw">from</span> <span class="str">"zigttp:auth"</span>;
+
+<span class="kw">function</span> <span class="fn">handler</span>(req: <span class="ty">Request</span>): <span class="ty">Response</span> {
+  <span class="kw">const</span> token <span class="op">=</span> req.headers[<span class="str">"authorization"</span>];
+  <span class="kw">const</span> secret <span class="op">=</span> <span class="fn">env</span>(<span class="str">"JWT_SECRET"</span>);
+
+  <span class="kw">if</span> (<span class="op">!</span>token) {
+    <span class="kw">return</span> Response.<span class="fn">json</span>({ <span class="prop">error</span>: <span class="str">"no token"</span> }, { <span class="prop">status</span>: <span class="num">401</span> });
+  }
+
+  <span class="kw">const</span> result <span class="op">=</span> <span class="fn">jwtVerify</span>(token, secret);
+  <span class="kw">if</span> (result.ok) {
+    <span class="kw">return</span> Response.<span class="fn">json</span>({ <span class="prop">user</span>: result.value });
+  }
+  <span class="cm">// bug: missing return when verification fails</span>
+}</code></pre>
+          <div class="diagnostic">error[verify]: not all code paths return a Response<br>
+  --> handler.ts:15:3<br>
+   |<br>
+15 |   if (result.ok) {<br>
+   |   ^^^ this branch returns, but the else path does not<br>
+   |<br>
+   = add a return statement after the if block</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Track 2 ============ -->
+    <section class="track track--reversed" aria-labelledby="track-2-heading">
+      <div class="track__prose">
+        <h2 id="track-2-heading">Everything proven at build time</h2>
+        <p>A single build command with <code>-Dverify</code> and <code>-Dcontract</code> produces a <strong>contract manifest</strong> - a machine-readable proof of what your handler does.</p>
+        <p>The contract lists every environment variable accessed, every outbound host contacted, every cache namespace used. When the compiler can prove the full set, the handler is automatically sandboxed: it can only access what was proven.</p>
+        <p>No annotations. No configuration files. The proof comes from the code itself.</p>
+      </div>
+      <div class="track__code">
+        <div class="codeblock" role="region" aria-label="Build command and contract output">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--terminal"></span>
+            terminal
+          </div>
+          <pre><code><span class="cm">$ zig build -Dhandler=handler.ts -Dverify -Dcontract</span>
+
+<span class="fn">VERIFY</span>  All paths return Response          <span class="str">PASS</span>
+<span class="fn">VERIFY</span>  Result values checked before access  <span class="str">PASS</span>
+<span class="fn">VERIFY</span>  No module-scope mutations            <span class="str">PASS</span>
+<span class="fn">VERIFY</span>  Optional values narrowed             <span class="str">PASS</span>
+
+<span class="fn">CONTRACT</span>  contract.json written</code></pre>
+        </div>
+
+        <div class="codeblock mt-3" role="region" aria-label="Contract JSON excerpt">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--json"></span>
+            contract.json (excerpt)
+          </div>
+          <pre><code>{
+  <span class="prop">"envVars"</span>: [<span class="str">"JWT_SECRET"</span>],
+  <span class="prop">"egressHosts"</span>: [],
+  <span class="prop">"properties"</span>: {
+    <span class="prop">"pure"</span>: <span class="kw">false</span>,
+    <span class="prop">"read_only"</span>: <span class="kw">true</span>,
+    <span class="prop">"stateless"</span>: <span class="kw">true</span>,
+    <span class="prop">"retry_safe"</span>: <span class="kw">true</span>,
+    <span class="prop">"injection_safe"</span>: <span class="kw">true</span>,
+    <span class="prop">"state_isolated"</span>: <span class="kw">true</span>,
+    <span class="prop">"idempotent"</span>: <span class="kw">false</span>,
+    <span class="prop">"max_io_depth"</span>: <span class="num">1</span>
+  },
+  <span class="prop">"proofLevel"</span>: <span class="str">"complete"</span>
+}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Track 3 ============ -->
+    <section class="track" aria-labelledby="track-3-heading">
+      <div class="track__prose">
+        <h2 id="track-3-heading">Native speed, no npm</h2>
+        <p>Virtual modules replace npm packages. JWT verification, JSON Schema validation, cryptographic hashing, request caching - all implemented in <strong>native Zig</strong>, callable from JavaScript with zero interpretation overhead.</p>
+        <p>One binary. Zero supply chain. No <code>node_modules</code>, no lock files, no transitive dependency tree to audit.</p>
+        <p>The engine itself outperforms QuickJS across every benchmark category, from 63x on string operations to 3.1x on full HTTP handler throughput.</p>
+      </div>
+      <div class="track__code">
+        <div class="codeblock" role="region" aria-label="Virtual module imports">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--ts"></span>
+            handler.ts
+          </div>
+          <pre><code><span class="kw">import</span> { env } <span class="kw">from</span> <span class="str">"zigttp:env"</span>;
+<span class="kw">import</span> { sha256, base64Encode } <span class="kw">from</span> <span class="str">"zigttp:crypto"</span>;
+<span class="kw">import</span> { jwtVerify, parseBearer } <span class="kw">from</span> <span class="str">"zigttp:auth"</span>;
+<span class="kw">import</span> { validateJson } <span class="kw">from</span> <span class="str">"zigttp:validate"</span>;
+<span class="kw">import</span> { cacheGet, cacheSet } <span class="kw">from</span> <span class="str">"zigttp:cache"</span>;
+<span class="kw">import</span> { routerMatch } <span class="kw">from</span> <span class="str">"zigttp:router"</span>;
+<span class="kw">import</span> { parallel } <span class="kw">from</span> <span class="str">"zigttp:io"</span>;</code></pre>
+        </div>
+
+        <div class="mt-3">
+          <table class="bench-table bench-table--dark" aria-label="JavaScript engine benchmark comparison">
+            <caption>zts engine vs QuickJS</caption>
+            <thead>
+              <tr>
+                <th scope="col">Benchmark</th>
+                <th scope="col">zts</th>
+                <th scope="col">QuickJS</th>
+                <th scope="col">Ratio</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>stringOps</td><td>16.3M ops/s</td><td>258K ops/s</td><td>63x</td></tr>
+              <tr><td>objectCreate</td><td>8.1M ops/s</td><td>1.7M ops/s</td><td>4.8x</td></tr>
+              <tr><td>propertyAccess</td><td>13.2M ops/s</td><td>3.4M ops/s</td><td>3.9x</td></tr>
+              <tr><td>httpHandler</td><td>1.0M ops/s</td><td>332K ops/s</td><td>3.1x</td></tr>
+              <tr><td>functionCalls</td><td>12.4M ops/s</td><td>5.1M ops/s</td><td>2.4x</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Track 4 ============ -->
+    <section class="track track--reversed" aria-labelledby="track-4-heading">
+      <div class="track__prose">
+        <h2 id="track-4-heading">TypeScript and JSX, natively</h2>
+        <p>No <code>tsc</code>. No Babel. No build step. Write <code>.ts</code> and <code>.tsx</code> files directly. The native TypeScript stripper removes type annotations at load time, and the type checker validates them at build time.</p>
+        <p><strong>Sound mode</strong> goes further: it proves that arithmetic operates on numbers, boolean contexts receive values with meaningful falsy states, and discriminated unions are narrowed correctly in match expressions.</p>
+        <p>JSX compiles to virtual DOM nodes and renders to HTML strings on the server. Full SSR from a single binary.</p>
+      </div>
+      <div class="track__code">
+        <div class="codeblock" role="region" aria-label="TypeScript JSX handler example">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--ts"></span>
+            handler.tsx
+          </div>
+          <pre><code><span class="kw">import</span> { routerMatch } <span class="kw">from</span> <span class="str">"zigttp:router"</span>;
+
+<span class="kw">type</span> <span class="ty">User</span> <span class="op">=</span> {
+  <span class="prop">name</span>: <span class="ty">string</span>;
+  <span class="prop">role</span>: <span class="str">"admin"</span> <span class="op">|</span> <span class="str">"member"</span>;
+};
+
+<span class="kw">function</span> <span class="fn">UserCard</span>(props: { <span class="prop">user</span>: <span class="ty">User</span> }): <span class="ty">JSX.Element</span> {
+  <span class="kw">return</span> (
+    <span class="tag">&lt;article</span> <span class="prop">class</span><span class="op">=</span><span class="str">"card"</span><span class="tag">&gt;</span>
+      <span class="tag">&lt;h2&gt;</span>{props.user.name}<span class="tag">&lt;/h2&gt;</span>
+      <span class="tag">&lt;span&gt;</span>{props.user.role}<span class="tag">&lt;/span&gt;</span>
+    <span class="tag">&lt;/article&gt;</span>
+  );
+}
+
+<span class="kw">function</span> <span class="fn">handler</span>(req: <span class="ty">Request</span>): <span class="ty">Response</span> {
+  <span class="kw">const</span> route <span class="op">=</span> <span class="fn">routerMatch</span>(req.url, [<span class="str">"/user/:id"</span>]);
+
+  <span class="kw">if</span> (<span class="op">!</span>route) {
+    <span class="kw">return</span> Response.<span class="fn">text</span>(<span class="str">"Not found"</span>, { <span class="prop">status</span>: <span class="num">404</span> });
+  }
+
+  <span class="kw">const</span> user: <span class="ty">User</span> <span class="op">=</span> { <span class="prop">name</span>: <span class="str">"Ada"</span>, <span class="prop">role</span>: <span class="str">"admin"</span> };
+  <span class="kw">return</span> Response.<span class="fn">html</span>(
+    <span class="fn">renderToString</span>(<span class="tag">&lt;UserCard</span> <span class="prop">user</span><span class="op">=</span>{user} <span class="tag">/&gt;</span>)
+  );
+}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Track 5 ============ -->
+    <section class="track" aria-labelledby="track-5-heading">
+      <div class="track__prose">
+        <h2 id="track-5-heading">Test by declaring, not mocking</h2>
+        <p>Handlers in zigttp are <strong>pure functions</strong> of a request and its virtual module responses. There is no hidden state, no database connection, no environment to simulate.</p>
+        <p>Testing is declaring inputs and expected outputs in JSONL. Each test line specifies a request, the virtual module stubs, and the expected response. No mocking framework. No test infrastructure.</p>
+        <p>The same system powers <strong>deterministic replay</strong>: record production traces, replay them against a new handler version, and the build fails if behavior changes.</p>
+      </div>
+      <div class="track__code">
+        <div class="codeblock" role="region" aria-label="Declarative test file example">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--json"></span>
+            handler.test.jsonl
+          </div>
+          <pre><code>{<span class="str">"type"</span>:<span class="str">"test"</span>,<span class="str">"name"</span>:<span class="str">"returns 401 without token"</span>}
+{<span class="str">"type"</span>:<span class="str">"request"</span>,<span class="str">"method"</span>:<span class="str">"GET"</span>,<span class="str">"url"</span>:<span class="str">"/"</span>}
+{<span class="str">"type"</span>:<span class="str">"expect"</span>,<span class="str">"status"</span>:<span class="num">401</span>}
+
+{<span class="str">"type"</span>:<span class="str">"test"</span>,<span class="str">"name"</span>:<span class="str">"authenticates valid JWT"</span>}
+{<span class="str">"type"</span>:<span class="str">"request"</span>,<span class="str">"method"</span>:<span class="str">"GET"</span>,<span class="str">"url"</span>:<span class="str">"/"</span>,
+ <span class="str">"headers"</span>:{<span class="str">"authorization"</span>:<span class="str">"Bearer eyJ..."</span>}}
+{<span class="str">"type"</span>:<span class="str">"io"</span>,<span class="str">"module"</span>:<span class="str">"auth"</span>,<span class="str">"fn"</span>:<span class="str">"jwtVerify"</span>,
+ <span class="str">"returns"</span>:{<span class="str">"ok"</span>:<span class="kw">true</span>,<span class="str">"value"</span>:{<span class="str">"sub"</span>:<span class="str">"user-1"</span>}}}
+{<span class="str">"type"</span>:<span class="str">"expect"</span>,<span class="str">"status"</span>:<span class="num">200</span>,
+ <span class="str">"bodyContains"</span>:<span class="str">"user-1"</span>}</code></pre>
+        </div>
+
+        <div class="codeblock mt-3" role="region" aria-label="Test runner output">
+          <div class="codeblock__header">
+            <span class="codeblock__dot codeblock__dot--terminal"></span>
+            terminal
+          </div>
+          <pre><code><span class="cm">$ zig build run -- handler.ts --test handler.test.jsonl</span>
+
+  <span class="str">PASS</span>  returns 401 without token         <span class="cm">1ms</span>
+  <span class="str">PASS</span>  authenticates valid JWT            <span class="cm">1ms</span>
+
+  <span class="fn">2 tests passed</span>, 0 failed</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Numbers ============ -->
+    <div class="section-break section-break--alt">
+      <section class="numbers page-wrap" aria-labelledby="numbers-heading">
+        <h2 id="numbers-heading">Performance</h2>
+
+        <div class="numbers__grid">
+          <div class="numbers__group">
+            <h3>Cold start comparison</h3>
+            <table class="bench-table">
+              <caption>Cold start time from process spawn to first HTTP response</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Configuration</th>
+                  <th scope="col">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>zigttp (embedded bytecode)</td>
+                  <td>~71ms</td>
+                </tr>
+                <tr>
+                  <td>zigttp (runtime parsing)</td>
+                  <td>~83ms</td>
+                </tr>
+                <tr>
+                  <td>Deno 2.6.7</td>
+                  <td>150-200ms</td>
+                </tr>
+                <tr>
+                  <td>zigttp (Linux static, est.)</td>
+                  <td>18-33ms</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="numbers__group">
+            <h3>Runtime characteristics</h3>
+            <dl class="stat-list">
+              <div class="stat-list__item">
+                <dt class="stat-list__label">Runtime initialization</dt>
+                <dd class="stat-list__value">3ms</dd>
+              </div>
+              <div class="stat-list__item">
+                <dt class="stat-list__label">Container image</dt>
+                <dd class="stat-list__value">~1.2MB</dd>
+              </div>
+              <div class="stat-list__item">
+                <dt class="stat-list__label">Pool slot acquisition</dt>
+                <dd class="stat-list__value">O(1)</dd>
+              </div>
+              <div class="stat-list__item">
+                <dt class="stat-list__label">Property lookup (PIC hit)</dt>
+                <dd class="stat-list__value">O(1)</dd>
+              </div>
+              <div class="stat-list__item">
+                <dt class="stat-list__label">HTTP string intern</dt>
+                <dd class="stat-list__value">27 atoms</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ============ Quickstart ============ -->
+    <section class="quickstart page-wrap" aria-labelledby="quickstart-heading" id="quickstart">
+      <h2 id="quickstart-heading">Get started</h2>
+
+      <div class="quickstart__steps">
+        <div class="quickstart__step">
+          <span class="quickstart__step-label">Build from source (requires Zig 0.16.0+)</span>
+          <div class="codeblock" role="region" aria-label="Clone and build commands">
+            <pre><code>git clone https://github.com/AurelioSilva/zigttp.git
+cd zigttp
+zig build -Doptimize=ReleaseFast</code></pre>
+          </div>
+        </div>
+
+        <div class="quickstart__step">
+          <span class="quickstart__step-label">Write a handler</span>
+          <div class="codeblock" role="region" aria-label="Minimal handler example">
+            <pre><code><span class="kw">function</span> <span class="fn">handler</span>(req: <span class="ty">Request</span>): <span class="ty">Response</span> {
+  <span class="kw">return</span> Response.<span class="fn">json</span>({ <span class="prop">message</span>: <span class="str">"hello"</span>, <span class="prop">path</span>: req.url });
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="quickstart__step">
+          <span class="quickstart__step-label">Run it</span>
+          <div class="codeblock" role="region" aria-label="Run and test commands">
+            <pre><code>zig build run -- handler.ts -p 3000
+curl http://localhost:3000/
+<span class="cm"># {"message":"hello","path":"/"}</span></code></pre>
+          </div>
+        </div>
+
+        <a href="https://github.com/AurelioSilva/zigttp/blob/main/docs/user-guide.md" class="quickstart__link">
+          Read the full documentation
+        </a>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ============ Footer ============ -->
+  <footer class="site-footer" role="contentinfo">
+    <div class="site-footer__inner">
+      <span>Built in Zig. MIT License.</span>
+      <ul class="site-footer__links" role="list">
+        <li><a href="https://github.com/AurelioSilva/zigttp">GitHub</a></li>
+        <li><a href="https://github.com/AurelioSilva/zigttp/blob/main/docs/user-guide.md">Docs</a></li>
+        <li><a href="https://ziglang.org">Zig</a></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>
