@@ -25,7 +25,7 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize)
 }
 
 /// Write a file synchronously using POSIX operations.
-pub fn writeFile(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
+pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 

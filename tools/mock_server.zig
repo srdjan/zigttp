@@ -61,7 +61,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("  {s} {s} -> {d}\n", .{ route.method, route.url, route.status });
     }
 
-    // Start HTTP server via C sockets
     const sockfd = c.socket(c.AF_INET, c.SOCK_STREAM, 0);
     if (sockfd < 0) {
         std.debug.print("Failed to create socket\n", .{});
@@ -92,6 +91,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const client_fd = c.accept(sockfd, null, null);
         if (client_fd < 0) continue;
         defer _ = c.close(client_fd);
+
+        // Prevent SIGPIPE on write to closed client (macOS)
+        var nosigpipe: c_int = 1;
+        _ = c.setsockopt(client_fd, c.SOL_SOCKET, c.SO_NOSIGPIPE, &nosigpipe, @sizeOf(c_int));
 
         handleRequest(client_fd, routes.items);
     }

@@ -353,6 +353,17 @@ pub fn diffContracts(
                 });
             }
         }
+
+        // max_io_depth: ?u32 needs separate comparison (not a bool)
+        const old_depth = op.max_io_depth orelse 0;
+        const new_depth = np.max_io_depth orelse 0;
+        if (old_depth != new_depth) {
+            try effect_changes.append(allocator, .{
+                .field = "max_io_depth",
+                .old_value = old_depth > 0,
+                .new_value = new_depth > 0,
+            });
+        }
     }
 
     return .{

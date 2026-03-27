@@ -56,7 +56,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer new_contract.deinit(allocator);
 
     // Diff and classify
-    const diff = try contract_diff.diffContracts(allocator, &old_contract, &new_contract);
+    var diff = try contract_diff.diffContracts(allocator, &old_contract, &new_contract);
+    defer diff.deinit(allocator);
     const classification = diff.classify();
     const proof_level = contract_diff.deriveProofLevel(&new_contract);
     const recommendation = try contract_diff.generateRecommendation(allocator, classification, &diff, null);
@@ -82,7 +83,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         const path = try std.fmt.allocPrint(allocator, "{s}proof.json", .{output_dir});
         defer allocator.free(path);
-        try zts.file_io.writeFile(path, buf.items, allocator);
+        try zts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 
@@ -96,7 +97,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
         const path = try std.fmt.allocPrint(allocator, "{s}proof-report.txt", .{output_dir});
         defer allocator.free(path);
-        try zts.file_io.writeFile(path, buf.items, allocator);
+        try zts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 

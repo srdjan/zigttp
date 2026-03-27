@@ -307,7 +307,7 @@ pub const RateLimitInfo = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 8,
+    version: u32 = 9,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned

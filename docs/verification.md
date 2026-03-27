@@ -177,6 +177,26 @@ verify error: property access on optional value without checking for undefined
 - `val = "override"` - reassignment to non-optional clears tracking
 - `val?.prop` - optional chaining is safe (not flagged)
 
+### 7. State Isolation (Cross-Request Safety)
+
+The verifier detects module-scope variable mutations inside the handler body. Since handlers are re-invoked per request with fresh scope, mutating a module-level `let` binding would leak state between requests.
+
+The check walks all assignment nodes in the handler body. If the target is an identifier whose binding has a scope_id less than the handler's scope_id (meaning it's declared at module level), the verifier emits a `module_scope_mutation` error.
+
+```typescript
+// ERROR: handler mutates module-scope variable
+let counter = 0;
+
+function handler(req: Request): Response {
+    counter += 1;  // verify error: module_scope_mutation
+    return Response.json({ count: counter });
+}
+```
+
+Fix: use `const` for module-level declarations, or move mutable state to `zigttp:cache`.
+
+The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing.
+
 ## Exhaustive Path Analysis (-Dgenerate-tests)
 
 The `-Dgenerate-tests=true` build option enables compile-time exhaustive path enumeration and fault coverage analysis.

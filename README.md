@@ -24,13 +24,13 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces, SQL query names) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`.
 
-**Handler effect classification.** Every virtual module function carries a compile-time effect annotation (read, write, or none). The compiler aggregates these to prove handler-level properties: pure (no external calls), read-only (no state mutations), stateless (no mutable state dependency), retry-safe (safe for Lambda auto-retry), and deterministic (no Date.now/Math.random). These flow into deployment manifests and the build report - no annotations or configuration needed.
+**Handler effect classification.** Every virtual module function carries a compile-time effect annotation (read, write, or none). The compiler aggregates these to prove handler-level properties: pure, read-only, stateless, retry-safe, deterministic, idempotent (safe for at-least-once delivery), injection-safe (no unvalidated input in sinks), and state-isolated (no cross-request data leakage). The I/O depth bound (max virtual module calls per request) enables compile-time Lambda timeout derivation. These flow into deployment manifests, OWASP compliance mapping, and the build report - no annotations or configuration needed.
 
 **Full TypeScript type checking.** Beyond stripping type annotations, the compiler checks them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are all validated at build time. Interface declarations with all-function members are treated as nominal types to prevent structural forgery.
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**Proven deployment manifests.** `-Ddeploy=aws` generates platform-specific deployment configurations (AWS SAM templates) directly from compiler-proven contracts. Env vars become parameters, routes become API events, egress hosts become tags. Proof levels (complete/partial/none) signal what was statically verified vs what needs manual review.
+**Proven deployment manifests.** `-Ddeploy=aws` generates platform-specific deployment configurations (AWS SAM templates) directly from compiler-proven contracts. Env vars become parameters, routes become API events, egress hosts become tags and conditional VPC SecurityGroup resources. The deploy report includes OWASP Top 10 compliance mapping, cost estimation from proven I/O depth, and handler properties. Proof levels (complete/partial/none) signal what was statically verified vs what needs manual review.
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
@@ -38,7 +38,9 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Guard composition.** `guard()` from `zigttp:compose` combined with the pipe operator (`|>`) composes handlers with pre/post guards at compile time. The parser desugars `guard(auth) |> guard(log) |> handler |> guard(cors)` into a single flat function with sequential if-checks - zero runtime overhead.
 
-**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts and replaying recorded traces. The result is classified as equivalent, additive, or breaking with a machine-readable proof certificate.
+**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts and replaying recorded traces. The result is classified as equivalent, additive, or breaking with a machine-readable proof certificate. The standalone `zig build prove -- old.json new.json` CLI tool compares contracts without rebuilding (exit 0 for safe, 1 for breaking - CI-ready).
+
+**Contract-driven mock server.** `zig build mock -- tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 

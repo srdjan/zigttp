@@ -584,8 +584,12 @@ The contract builder computes handler-level properties from effect classificatio
 | `retry_safe` | Safe to retry on failure | Read-only, or all writes inside durable steps |
 | `deterministic` | Same input always produces same output | No Date.now() or Math.random() |
 | `has_egress` | Makes outbound HTTP calls | Uses fetchSync |
+| `idempotent` | Safe for at-least-once delivery | Deterministic AND retry-safe |
+| `max_io_depth` | Maximum I/O calls per request | PathGenerator path analysis |
+| `injection_safe` | No unvalidated input in sinks | FlowChecker label tracking |
+| `state_isolated` | No cross-request data leakage | Verifier Check 7 (module-scope mutation) |
 
-These properties are not advisory labels. They flow into deployment manifests as machine-readable tags (`zigttp:retrySafe`, `zigttp:readOnly`), into OpenAPI specs as `x-zigttp-properties` extensions, and into operational tooling as safety guarantees.
+These properties are not advisory labels. They flow into deployment manifests as machine-readable tags, OpenAPI specs as `x-zigttp-properties` extensions, OWASP Top 10 compliance mapping, cost estimation, and operational tooling as safety guarantees.
 
 ### Runtime Sandboxing
 
@@ -609,17 +613,25 @@ This produces `src/generated/deploy/template.json` (AWS SAM template) and `src/g
 
 - Proven environment variables as CloudFormation parameters
 - Route patterns as HttpApi events
-- Egress hosts as resource tags
-- Handler properties as metadata
+- Egress hosts as tags and conditional VPC SecurityGroup (activated via `VpcSubnetIds` parameter)
+- Handler properties as metadata tags (retrySafe, readOnly, injectionSafe, idempotent, stateIsolated, maxIoDepth)
 - Proof level (complete/partial/none) as a top-level field
 
-The deploy report separates capabilities into PROVEN sections (compiler-verified, safe to auto-configure) and NEEDS MANUAL REVIEW sections (dynamic access detected, requires human judgment). A handler with proof level `complete` has been fully characterized by the compiler - every capability is accounted for.
+The deploy report includes: PROVEN/NEEDS MANUAL REVIEW sections, FLOW ANALYSIS (secret/credential leakage, input validation), FAULT COVERAGE, HANDLER PROPERTIES, OWASP TOP 10 COVERAGE (A01-A07 mapped to proven properties), VPC EGRESS (when egress hosts exist), and COST ESTIMATE (AWS Lambda pricing derived from proven I/O depth).
+
+Two standalone tools support the deployment workflow:
+- `zig build prove -- old.json new.json` compares two contracts and classifies the change (exit 0 for safe, 1 for breaking)
+- `zig build mock -- tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases
 
 ### Fault Coverage
 
 The `-Dgenerate-tests=true` flag enables exhaustive path enumeration and fault coverage analysis. The `PathGenerator` walks the handler IR, forking at every branch point and I/O success/failure boundary, producing test cases for each execution path. The `FaultCoverageChecker` then analyzes these paths against failure severity annotations on each virtual module function.
 
 The key insight: `jwtVerify` returning `{ok: false}` is annotated as `critical` severity. If any execution path leads from a critical I/O failure to a 2xx response, the fault coverage checker warns. This catches the most common class of serverless bugs - a handler that returns 200 even when authentication failed because the developer forgot a guard clause. Cache misses returning 200 are correctly classified as graceful degradation and produce no warning.
+
+### Rate Limit Extraction
+
+When a handler uses guard composition (`zigttp:compose`) and calls `cacheIncr`, the compiler detects the rate limiting pattern and extracts it into the contract. The `rateLimiting` section in `contract.json` captures the cache namespace and whether it is static or dynamic. This enables API gateways and documentation to automatically include rate limit metadata without manual configuration.
 
 ---
 
@@ -911,6 +923,14 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `-Dopenapi` | Generate OpenAPI manifest |
 | `-Dprove=<spec>` | Prove upgrade safety |
 | `-Daot` | Enable native AOT generation |
+
+### Standalone Tools
+
+| Command | Description |
+|---------|-------------|
+| `zig build prove -- old.json new.json [dir/]` | Compare two contracts, classify as equivalent/additive/breaking |
+| `zig build mock -- tests.jsonl [--port PORT]` | Serve mock HTTP responses from generated tests |
+| `zig build bench` | Run performance benchmarks |
 
 ### Virtual Module Exports
 
