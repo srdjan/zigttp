@@ -59,6 +59,9 @@ pub const ProvenFacts = struct {
     // Verification
     results_safe: bool = false,
 
+    // Rate limiting
+    rate_limit_namespace: ?[]const u8 = null,
+
     // Fault coverage
     fault_covered: bool = false,
 };
@@ -153,6 +156,7 @@ pub fn extractProvenFacts(
             .input_validated = if (contract.properties) |p| p.input_validated else true,
             .pii_contained = if (contract.properties) |p| p.pii_contained else true,
             .results_safe = if (contract.verification) |v| v.results_safe else false,
+            .rate_limit_namespace = if (contract.rate_limiting) |rl| (if (rl.namespace.len > 0) rl.namespace else null) else null,
             .fault_covered = if (contract.properties) |p| p.fault_covered else false,
         },
         .checks_buf = checks_buf,
@@ -634,6 +638,13 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, target: DeployTa
     try writeProvenLine(w, facts.state_isolated, "state isolated (no cross-request data leakage)");
     if (facts.max_io_depth) |depth| {
         try w.print("  PROVEN  max I/O depth: {d} calls per request\n", .{depth});
+    }
+
+    if (facts.rate_limit_namespace) |ns| {
+        try w.writeAll("\nRATE LIMITING:\n");
+        try w.writeAll("  PROVEN  cacheIncr guard detected (namespace: ");
+        try w.writeAll(ns);
+        try w.writeAll(")\n");
     }
 
     try w.writeAll("\nOWASP TOP 10 COVERAGE:\n");

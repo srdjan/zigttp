@@ -381,11 +381,7 @@ pub const TypeChecker = struct {
             .match_expr => {
                 const me = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(me.discriminant);
-                for (0..me.arms_count) |i| {
-                    const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
-                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-                    self.walkExpr(arm.body);
-                }
+                self.walkMatchWithNarrowing(me);
             },
 
             .template_literal => {
@@ -635,6 +631,89 @@ pub const TypeChecker = struct {
             }
         }
         return result;
+    }
+
+    // -------------------------------------------------------------------
+    // Match expression narrowing
+    // -------------------------------------------------------------------
+
+    fn walkMatchWithNarrowing(self: *TypeChecker, me: ir.Node.MatchExpr) void {
+        // Check if discriminant is an identifier with a union type
+        const disc_tag = self.ir_view.getTag(me.discriminant) orelse return;
+        const disc_key: ?u32 = if (disc_tag == .identifier) blk: {
+            const binding = self.ir_view.getBinding(me.discriminant) orelse break :blk null;
+            break :blk packBindingKey(binding.scope_id, binding.slot);
+        } else null;
+
+        const disc_type = if (disc_key) |key| (self.narrowed.get(key) orelse self.binding_types.get(key) orelse null_type_idx) else null_type_idx;
+        const pool = self.env.pool;
+        const is_union = if (pool.getTag(disc_type)) |tag| tag == .t_union else false;
+
+        for (0..me.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+
+            if (is_union and disc_key != null and arm.pattern != ir.null_node) {
+                const narrowed_type = self.findUnionMemberForPattern(disc_type, arm.pattern);
+                if (narrowed_type != null_type_idx) {
+                    const saved = self.narrowed.get(disc_key.?);
+                    self.narrowed.put(self.allocator, disc_key.?, narrowed_type) catch {};
+                    self.walkExpr(arm.body);
+                    if (saved) |s| {
+                        self.narrowed.put(self.allocator, disc_key.?, s) catch {};
+                    } else {
+                        _ = self.narrowed.remove(disc_key.?);
+                    }
+                    continue;
+                }
+            }
+            self.walkExpr(arm.body);
+        }
+    }
+
+    fn findUnionMemberForPattern(self: *const TypeChecker, union_type: TypeIndex, pattern: ir.NodeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const members = pool.getUnionMembers(union_type);
+        if (members.len == 0) return null_type_idx;
+
+        const pattern_tag = self.ir_view.getTag(pattern) orelse return null_type_idx;
+
+        switch (pattern_tag) {
+            .lit_string => {
+                const str_idx = self.ir_view.getStringIdx(pattern) orelse return null_type_idx;
+                const pattern_str = self.ir_view.getString(str_idx) orelse return null_type_idx;
+                for (members) |member| {
+                    if (pool.getTag(member) == .t_literal_string) {
+                        const data = pool.getData(member) orelse continue;
+                        const member_name = pool.getName(data.a, @truncate(data.b));
+                        if (std.mem.eql(u8, pattern_str, member_name)) return member;
+                    }
+                }
+            },
+            .lit_int => {
+                const val = self.ir_view.getIntValue(pattern) orelse return null_type_idx;
+                const val_i16 = std.math.cast(i16, val) orelse return null_type_idx;
+                for (members) |member| {
+                    if (pool.getTag(member) == .t_literal_number) {
+                        const data = pool.getData(member) orelse continue;
+                        const member_val: i16 = @bitCast(data.a);
+                        if (member_val == val_i16) return member;
+                    }
+                }
+            },
+            .lit_bool => {
+                const val = self.ir_view.getBoolValue(pattern) orelse return null_type_idx;
+                for (members) |member| {
+                    if (pool.getTag(member) == .t_literal_bool) {
+                        const data = pool.getData(member) orelse continue;
+                        const member_val = data.a != 0;
+                        if (member_val == val) return member;
+                    }
+                }
+            },
+            else => {},
+        }
+        return null_type_idx;
     }
 
     // -------------------------------------------------------------------

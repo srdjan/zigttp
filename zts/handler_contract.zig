@@ -301,6 +301,11 @@ pub const HandlerProperties = struct {
     fault_covered: bool = false,
 };
 
+pub const RateLimitInfo = struct {
+    namespace: []const u8, // aliases into cache.namespaces (not separately owned)
+    dynamic: bool,
+};
+
 pub const HandlerContract = struct {
     version: u32 = 8,
     handler: HandlerLoc,
@@ -316,6 +321,7 @@ pub const HandlerContract = struct {
     verification: ?VerificationInfo,
     aot: ?AotInfo,
     fault_coverage: ?FaultCoverageInfo = null,
+    rate_limiting: ?RateLimitInfo = null,
     properties: ?HandlerProperties = null,
 
     pub const FunctionEntry = struct {
@@ -520,6 +526,9 @@ pub const ContractBuilder = struct {
         // Phase 3: Compute handler effect properties
         const properties = self.computeProperties();
 
+        // Phase 3b: Detect rate limiting (guard composition + cacheIncr)
+        const rate_limiting = self.detectRateLimiting();
+
         // Build routes from dispatch table
         var routes: std.ArrayList(RouteInfo) = .empty;
         errdefer {
@@ -634,6 +643,7 @@ pub const ContractBuilder = struct {
             },
             .verification = verification,
             .aot = aot_info,
+            .rate_limiting = rate_limiting,
             .properties = properties,
         };
 
@@ -1727,6 +1737,37 @@ pub const ContractBuilder = struct {
             .idempotent = deterministic and retry_safe,
         };
     }
+
+    /// Detect rate limiting: guard composition + cacheIncr usage.
+    /// When a handler uses zigttp:compose and calls cacheIncr, the cache
+    /// namespace is extracted as rate limiting metadata.
+    /// Guard composition with cacheIncr indicates rate limiting: guards
+    /// short-circuit before the handler, and cacheIncr atomically increments
+    /// a counter - the standard rate-limit-and-reject flow.
+    fn detectRateLimiting(self: *const ContractBuilder) ?RateLimitInfo {
+        if (!containsString(self.modules_list.items, "zigttp:compose")) return null;
+
+        var uses_cache_incr = false;
+        for (self.functions_map.items) |entry| {
+            if (std.mem.eql(u8, entry.module, "zigttp:cache") and containsString(entry.names.items, "cacheIncr")) {
+                uses_cache_incr = true;
+                break;
+            }
+        }
+        if (!uses_cache_incr) return null;
+
+        if (self.cache_namespaces.items.len > 0) {
+            return .{
+                .namespace = self.cache_namespaces.items[0],
+                .dynamic = self.cache_dynamic,
+            };
+        }
+
+        return .{
+            .namespace = "",
+            .dynamic = true,
+        };
+    }
 };
 
 fn containsString(items: []const []const u8, needle: []const u8) bool {
@@ -1865,6 +1906,13 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseVerification(&parser, &contract);
         } else if (std.mem.eql(u8, key, "faultCoverage")) {
             contract.fault_coverage = try parseFaultCoverage(&parser);
+        } else if (std.mem.eql(u8, key, "rateLimiting")) {
+            parser.skipWhitespace();
+            if (parser.readNull()) {
+                contract.rate_limiting = null;
+            } else {
+                contract.rate_limiting = try parseRateLimiting(&parser);
+            }
         } else if (std.mem.eql(u8, key, "properties")) {
             contract.properties = try parseProperties(&parser);
         } else {
@@ -2740,6 +2788,34 @@ fn parseFaultCoverage(parser: *JsonParser) !?FaultCoverageInfo {
     return info;
 }
 
+fn parseRateLimiting(parser: *JsonParser) !RateLimitInfo {
+    if (!parser.consume('{')) return error.InvalidJson;
+    var info = RateLimitInfo{ .namespace = "", .dynamic = true };
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "namespace")) {
+            info.namespace = parser.readString() orelse "";
+        } else if (std.mem.eql(u8, key, "dynamic")) {
+            info.dynamic = parser.readBool() orelse true;
+        } else {
+            parser.skipValue();
+        }
+    }
+    return info;
+}
+
 /// Map parsed route_type strings to static literals so they outlive the JSON source.
 fn toStaticRouteType(s: []const u8) []const u8 {
     if (std.mem.eql(u8, s, "exact")) return "exact";
@@ -3090,6 +3166,17 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  },\n");
     } else {
         try writer.writeAll("  \"faultCoverage\": null,\n");
+    }
+
+    // rateLimiting (optional)
+    if (contract.rate_limiting) |rl| {
+        try writer.writeAll("  \"rateLimiting\": {\n");
+        try writer.writeAll("    \"namespace\": ");
+        try writeJsonString(writer, rl.namespace);
+        try writer.print(",\n    \"dynamic\": {s}\n", .{if (rl.dynamic) "true" else "false"});
+        try writer.writeAll("  },\n");
+    } else {
+        try writer.writeAll("  \"rateLimiting\": null,\n");
     }
 
     // properties (optional)
