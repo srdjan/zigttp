@@ -857,6 +857,7 @@ pub const Runtime = struct {
         durable_state.* = .{
             .run_fn = durableRunCallback,
             .step_fn = durableStepCallback,
+            .step_with_timeout_fn = durableStepWithTimeoutCallback,
             .sleep_until_fn = durableSleepUntilCallback,
             .wait_signal_fn = durableWaitSignalCallback,
             .signal_fn = durableSignalCallback,
@@ -1423,6 +1424,55 @@ pub const Runtime = struct {
         const result = try self.callFunction(func_obj, &.{});
         self.active_durable_run.?.state.persistStepResult(name, ctx, result);
         return result;
+    }
+
+    fn durableStepWithTimeout(self: *Self, ctx: *zq.Context, name: []const u8, timeout_ms: i64, step_val: zq.JSValue) anyerror!zq.JSValue {
+        const active = self.active_durable_run orelse {
+            return zq.modules.util.throwError(ctx, "Error", "stepWithTimeout() must be called inside run()");
+        };
+        if (!step_val.isObject()) {
+            return zq.modules.util.throwError(ctx, "TypeError", "stepWithTimeout() expects a callable function");
+        }
+        if (active.step_depth > 0) {
+            return zq.modules.util.throwError(ctx, "Error", "nested stepWithTimeout() is not supported");
+        }
+
+        switch (active.state.beginStep(name)) {
+            .cached => |result_json| {
+                return zq.trace.jsonToJSValue(ctx, result_json);
+            },
+            .execute => {},
+            .live => {
+                active.state.persistStepStart(name);
+            },
+        }
+
+        self.active_durable_run.?.step_depth += 1;
+        defer self.active_durable_run.?.step_depth -= 1;
+
+        const deadline_ms = std.math.add(i64, unixMillis(), timeout_ms) catch std.math.maxInt(i64);
+        const func_obj = step_val.toPtr(zq.JSObject);
+        const result = self.callFunction(func_obj, &.{}) catch |err| {
+            if (err == error.DurableSuspended) return err;
+            // On execution error, check if we exceeded the deadline
+            if (unixMillis() >= deadline_ms) {
+                const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
+                self.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
+                return timeout_result;
+            }
+            return err;
+        };
+
+        // Check if execution exceeded the deadline
+        if (unixMillis() >= deadline_ms) {
+            const timeout_result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
+            self.active_durable_run.?.state.persistStepResult(name, ctx, timeout_result);
+            return timeout_result;
+        }
+
+        const ok_result = try zq.modules.util.createPlainResultOk(ctx, result);
+        self.active_durable_run.?.state.persistStepResult(name, ctx, ok_result);
+        return ok_result;
     }
 
     fn durableSleepUntil(self: *Self, ctx: *zq.Context, until_ms: i64) anyerror!zq.JSValue {
@@ -3285,6 +3335,17 @@ fn durableStepCallback(
 ) anyerror!zq.JSValue {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
     return rt.durableStep(ctx, name, step_val);
+}
+
+fn durableStepWithTimeoutCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    name: []const u8,
+    timeout_ms: i64,
+    step_val: zq.JSValue,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.durableStepWithTimeout(ctx, name, timeout_ms, step_val);
 }
 
 fn durableSleepUntilCallback(

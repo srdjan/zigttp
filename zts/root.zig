@@ -54,6 +54,7 @@ pub const bool_checker = @import("bool_checker.zig");
 pub const flow_checker = @import("flow_checker.zig");
 pub const path_generator = @import("path_generator.zig");
 pub const fault_coverage = @import("fault_coverage.zig");
+pub const route_match = @import("route_match.zig");
 pub const type_map = @import("type_map.zig");
 pub const type_pool = @import("type_pool.zig");
 pub const type_env = @import("type_env.zig");

@@ -19,8 +19,11 @@ const VerificationInfo = handler_contract.VerificationInfo;
 const handler_policy = zts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
+const manifest_alignment = @import("manifest_alignment.zig");
 const openapi_manifest = @import("openapi_manifest.zig");
+const property_expectations = @import("property_expectations.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
+const build_report = @import("report.zig");
 const sqlite = zts.sqlite;
 const sql_analysis = zts.sql_analysis;
 
@@ -115,6 +118,11 @@ const PrecompileOptions = struct {
     test_file_path: ?[]const u8 = null,
     prove_spec: ?[]const u8 = null,
     generate_tests: bool = false,
+    manifest_path: ?[]const u8 = null,
+    expect_properties_path: ?[]const u8 = null,
+    data_labels_path: ?[]const u8 = null,
+    fault_severity_path: ?[]const u8 = null,
+    report_format: ?[]const u8 = null,
 };
 
 fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
@@ -185,6 +193,41 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
         if (std.mem.eql(u8, arg, "--prove")) {
             opts.prove_spec = args.next() orelse {
                 std.debug.print("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--manifest")) {
+            opts.manifest_path = args.next() orelse {
+                std.debug.print("Missing path after --manifest\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--expect-properties")) {
+            opts.expect_properties_path = args.next() orelse {
+                std.debug.print("Missing path after --expect-properties\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--data-labels")) {
+            opts.data_labels_path = args.next() orelse {
+                std.debug.print("Missing path after --data-labels\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--fault-severity")) {
+            opts.fault_severity_path = args.next() orelse {
+                std.debug.print("Missing path after --fault-severity\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--report")) {
+            opts.report_format = args.next() orelse {
+                std.debug.print("Missing format after --report (values: json)\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -594,6 +637,86 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
 
             std.debug.print("Proven evolution: {s}\n", .{result.certificate.classification.toString()});
+        }
+
+        // Manifest alignment check if --manifest was passed
+        var manifest_alignment_result: ?manifest_alignment.ManifestAlignment = null;
+        defer if (manifest_alignment_result) |*ma| ma.deinit(allocator);
+
+        if (opts.manifest_path) |mpath| {
+            const manifest_bytes = readFilePosix(allocator, mpath, 1024 * 1024) catch |err| {
+                std.debug.print("Error reading manifest file '{s}': {}\n", .{ mpath, err });
+                return err;
+            };
+            defer allocator.free(manifest_bytes);
+
+            var parsed_manifest = manifest_alignment.parseManifest(allocator, manifest_bytes) catch |err| {
+                std.debug.print("Error parsing manifest '{s}': {}\n", .{ mpath, err });
+                return err;
+            };
+            defer parsed_manifest.deinit(allocator);
+
+            manifest_alignment_result = manifest_alignment.checkAlignment(allocator, &parsed_manifest, contract) catch |err| {
+                std.debug.print("Error checking manifest alignment: {}\n", .{err});
+                return err;
+            };
+
+            manifest_alignment.printAlignmentSummary(&manifest_alignment_result.?);
+        }
+
+        // Property expectations check if --expect-properties was passed
+        var property_result: ?property_expectations.ExpectationResult = null;
+        defer if (property_result) |pr| allocator.free(pr.mismatches);
+
+        if (opts.expect_properties_path) |epath| {
+            property_result = property_expectations.checkExpectationsFromFile(allocator, epath, contract) catch |err| {
+                std.debug.print("Error checking property expectations: {}\n", .{err});
+                return err;
+            };
+
+            property_expectations.printExpectationResults(&property_result.?);
+        }
+
+        // Structured report output if --report was passed
+        if (opts.report_format) |fmt| {
+            if (std.mem.eql(u8, fmt, "json")) {
+                var handler_report = build_report.buildReport(
+                    allocator,
+                    contract,
+                    if (manifest_alignment_result) |*ma| ma else null,
+                    if (property_result) |*pr| pr else null,
+                    handler_path_final,
+                );
+                defer {
+                    if (handler_report.verification) |v| allocator.free(v.checks);
+                    if (handler_report.manifest_alignment) |ma| allocator.free(ma.sections);
+                }
+
+                const report_path = deriveSiblingPath(allocator, output_path_final, "report.json") catch |err| {
+                    std.debug.print("Error deriving report path: {}\n", .{err});
+                    return err;
+                };
+                defer allocator.free(report_path);
+
+                var report_output: std.ArrayList(u8) = .empty;
+                defer report_output.deinit(allocator);
+                var report_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &report_output);
+
+                build_report.writeReportJson(&report_aw.writer, &handler_report) catch |err| {
+                    std.debug.print("Error serializing report: {}\n", .{err});
+                    return err;
+                };
+                report_output = report_aw.toArrayList();
+
+                writeFilePosix(report_path, report_output.items, allocator) catch |err| {
+                    std.debug.print("Error writing report '{s}': {}\n", .{ report_path, err });
+                    return err;
+                };
+
+                std.debug.print("Wrote build report to: {s}\n", .{report_path});
+            } else {
+                std.debug.print("Unknown report format: {s} (supported: json)\n", .{fmt});
+            }
         }
     }
 }

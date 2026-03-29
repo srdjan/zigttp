@@ -150,12 +150,12 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Cryptographic functions |
 | `zigttp:router` | `routerMatch` | Pattern-matching HTTP router |
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
-| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation |
+| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation with format validators (email, uuid, iso-date, iso-datetime) |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:compose` | `guard` | Compile-time handler composition via pipe operator |
-| `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, and signals |
+| `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
 
 Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
 
@@ -377,6 +377,13 @@ zig build -Dhandler=handler.ts -Dprove=old-contract.json:traces.jsonl
 
 # Combine all passes
 zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Ddeploy=aws
+
+# External enrichment flags (optional, for code generator integration)
+zig build -Dhandler=handler.ts -Dmanifest=governance-manifest.json
+zig build -Dhandler=handler.ts -Dexpect-properties=properties.json
+zig build -Dhandler=handler.ts -Ddata-labels=data-labels.json
+zig build -Dhandler=handler.ts -Dfault-severity=fault-severity.json
+zig build -Dhandler=handler.ts -Dreport=json
 ```
 
 ### Handler Verification (`-Dverify`)
@@ -530,7 +537,7 @@ zigttp-server handler.ts --durable ./oplogs
 Handlers opt into durability via the `zigttp:durable` virtual module:
 
 ```typescript
-import { run, step, sleep, waitSignal, signal } from "zigttp:durable";
+import { run, step, stepWithTimeout, sleep, waitSignal, signal } from "zigttp:durable";
 
 function handler(req: Request): Response {
     // Deliver a signal to a waiting run
@@ -554,7 +561,7 @@ function handler(req: Request): Response {
 }
 ```
 
-`run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. `sleep(ms)` and `sleepUntil(unixMs)` suspend the run until a timer fires. `waitSignal(name)` suspends until a signal arrives via `signal(key, name, payload)` or `signalAt(key, name, unixMs, payload)`. Pending runs return `202 Accepted` with a JSON body describing the wait. On crash recovery, recorded results are replayed without touching the network. A background scheduler polls for ready timers and signals. Completed runs are deduplicated by key.
+`run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. `sleep(ms)` and `sleepUntil(unixMs)` suspend the run until a timer fires. `waitSignal(name)` suspends until a signal arrives via `signal(key, name, payload)` or `signalAt(key, name, unixMs, payload)`. Pending runs return `202 Accepted` with a JSON body describing the wait. On crash recovery, recorded results are replayed without touching the network. A background scheduler polls for ready timers and signals. Completed runs are deduplicated by key. `stepWithTimeout(name, timeoutMs, fn)` executes a step with a deadline - returns `{ ok: true, value }` on completion or `{ ok: false, error: "timeout" }` if the deadline is exceeded.
 
 ### Proven Evolution (`-Dprove`)
 
@@ -596,6 +603,18 @@ const handler = withAuth |> mainHandler |> withCors;
 ```
 
 The parser desugars the pipe chain into a single flat function with sequential if-checks at compile time. Pre-guards receive the request and short-circuit on non-undefined return. Post-guards receive the response and can replace it. Exactly one non-guard handler is required.
+
+### External Enrichment Flags
+
+Five optional build flags accept external JSON files for cross-referencing against compiler-proven contracts. These work with any code generator or hand-written files - no specific tooling required.
+
+- **`-Dmanifest=<path>`** - Cross-references a declared manifest (routes, SQL tables, env vars) against the handler contract. Errors on declared items missing from code, warns on undeclared items found in code. Emits `manifest-alignment.json`.
+- **`-Dexpect-properties=<path>`** - Verifies handler-derived properties (state_isolated, injection_safe, read_only, etc.) match external expectations. Build fails on mismatches.
+- **`-Ddata-labels=<path>`** - Merges externally declared data sensitivity labels (secret, credential, etc.) with the flow checker's heuristic labels. Violations of declared labels become build errors.
+- **`-Dfault-severity=<path>`** - Overrides fault severity classification at the route level. A route declared "critical" elevates all failable calls within it to critical severity for fault coverage diagnostics.
+- **`-Dreport=json`** - Emits a structured JSON build report aggregating verification, properties, fault coverage, flow analysis, manifest alignment, and property expectations into `report.json`.
+
+All flags are optional and additive. Without them, zigttp works identically to before.
 
 ### Precompiled Bytecode
 

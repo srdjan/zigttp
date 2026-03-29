@@ -1,0 +1,44 @@
+{"type":"test","name":"valid email passes format check"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"user@example.com\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"user@example.com\"}"],"result":{"ok":true,"value":{"email":"user@example.com"}}}
+{"type":"expect","status":200,"bodyContains":"valid"}
+
+{"type":"test","name":"valid email with all format fields"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"user@example.com\",\"id\":\"550e8400-e29b-41d4-a716-446655440000\",\"date\":\"2024-01-15\",\"timestamp\":\"2024-01-15T10:30:00Z\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"user@example.com\",\"id\":\"550e8400-e29b-41d4-a716-446655440000\",\"date\":\"2024-01-15\",\"timestamp\":\"2024-01-15T10:30:00Z\"}"],"result":{"ok":true,"value":{"email":"user@example.com","id":"550e8400-e29b-41d4-a716-446655440000","date":"2024-01-15","timestamp":"2024-01-15T10:30:00Z"}}}
+{"type":"expect","status":200,"bodyContains":"valid"}
+
+{"type":"test","name":"invalid email fails format check"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"not-an-email\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"not-an-email\"}"],"result":{"ok":false,"errors":[{"path":"email","message":"invalid email format"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"email missing @ fails"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"nodomain\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"nodomain\"}"],"result":{"ok":false,"errors":[{"path":"email","message":"invalid email format"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"email with no dot in domain fails"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"user@nodot\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"user@nodot\"}"],"result":{"ok":false,"errors":[{"path":"email","message":"invalid email format"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"invalid uuid fails format check"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"a@b.co\",\"id\":\"not-a-uuid\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"a@b.co\",\"id\":\"not-a-uuid\"}"],"result":{"ok":false,"errors":[{"path":"id","message":"invalid uuid format"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"invalid iso-date fails format check"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"a@b.co\",\"date\":\"01-15-2024\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"a@b.co\",\"date\":\"01-15-2024\"}"],"result":{"ok":false,"errors":[{"path":"date","message":"invalid iso-date format"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"invalid iso-datetime fails format check"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"email\":\"a@b.co\",\"timestamp\":\"2024-01-15 10:30:00\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"email\":\"a@b.co\",\"timestamp\":\"2024-01-15 10:30:00\"}"],"result":{"ok":false,"errors":[{"path":"timestamp","message":"invalid iso-datetime format"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}
+
+{"type":"test","name":"missing required email fails"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"id\":\"550e8400-e29b-41d4-a716-446655440000\"}"}
+{"type":"io","seq":0,"module":"validate","fn":"validateJson","args":["FormatInput","{\"id\":\"550e8400-e29b-41d4-a716-446655440000\"}"],"result":{"ok":false,"errors":[{"path":"","message":"missing required field"}]}}
+{"type":"expect","status":400,"bodyContains":"errors"}

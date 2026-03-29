@@ -28,6 +28,7 @@ const NodeTag = ir.NodeTag;
 const IrView = ir.IrView;
 const null_node = ir.null_node;
 const LabelSet = mb.LabelSet;
+const DataLabel = mb.DataLabel;
 
 const packBindingKey = bool_checker_mod.packBindingKey;
 const getSourceLine = bool_checker_mod.getSourceLine;
@@ -82,6 +83,91 @@ pub const FlowProperties = struct {
 };
 
 // ---------------------------------------------------------------------------
+// External data labels
+// ---------------------------------------------------------------------------
+
+/// An externally declared label binding: a field name, its classification,
+/// and a human-readable reason shown in diagnostics.
+pub const ExternalLabel = struct {
+    field: []const u8, // e.g. "User.email" or just "email"
+    label: DataLabel,
+    reason: []const u8,
+};
+
+/// Map a JSON label string to the corresponding DataLabel enum value.
+/// Returns null for unrecognized strings.
+pub fn parseDataLabel(s: []const u8) ?DataLabel {
+    const map = .{
+        .{ "secret", DataLabel.secret },
+        .{ "credential", DataLabel.credential },
+        .{ "user_input", DataLabel.user_input },
+        .{ "config", DataLabel.config },
+        .{ "internal", DataLabel.internal },
+        .{ "external", DataLabel.external },
+        .{ "validated", DataLabel.validated },
+    };
+    inline for (map) |entry| {
+        if (std.mem.eql(u8, s, entry[0])) return entry[1];
+    }
+    return null;
+}
+
+/// Parse external label declarations from JSON bytes.
+/// Expected format: { "labels": [ { "field": "...", "label": "...", "reason": "..." }, ... ] }
+/// Returns owned slice; caller must free with the same allocator.
+pub fn parseExternalLabels(allocator: std.mem.Allocator, json_bytes: []const u8) ![]const ExternalLabel {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.InvalidExternalLabels;
+    const root = parsed.value.object;
+    const labels_val = root.get("labels") orelse return error.InvalidExternalLabels;
+    if (labels_val != .array) return error.InvalidExternalLabels;
+
+    const items = labels_val.array.items;
+    var result = try allocator.alloc(ExternalLabel, items.len);
+    var count: usize = 0;
+    errdefer {
+        for (result[0..count]) |entry| {
+            allocator.free(entry.field);
+            allocator.free(entry.reason);
+        }
+        allocator.free(result);
+    }
+
+    for (items) |item| {
+        if (item != .object) continue;
+        const obj = item.object;
+
+        const field_val = obj.get("field") orelse continue;
+        const label_val = obj.get("label") orelse continue;
+        const reason_val = obj.get("reason") orelse continue;
+
+        if (field_val != .string or label_val != .string or reason_val != .string) continue;
+
+        const data_label = parseDataLabel(label_val.string) orelse continue;
+
+        // Dupe strings so they outlive the parsed JSON tree
+        const field_dupe = try allocator.dupe(u8, field_val.string);
+        errdefer allocator.free(field_dupe);
+        const reason_dupe = try allocator.dupe(u8, reason_val.string);
+
+        result[count] = .{
+            .field = field_dupe,
+            .label = data_label,
+            .reason = reason_dupe,
+        };
+        count += 1;
+    }
+
+    // Shrink to actual count
+    if (count < result.len) {
+        result = try allocator.realloc(result, count);
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // FlowChecker
 // ---------------------------------------------------------------------------
 
@@ -103,6 +189,14 @@ pub const FlowChecker = struct {
     /// Slot of the `env` function import (for smart label refinement).
     env_fn_slot: ?u16,
 
+    /// External label overrides: property name -> LabelSet (additive, merged via OR).
+    /// Both qualified ("User.email") and short ("email") forms are registered.
+    external_labels: std.StringHashMapUnmanaged(LabelSet),
+    /// External label reasons: property name -> human-readable reason for diagnostics.
+    external_reasons: std.StringHashMapUnmanaged([]const u8),
+    /// Dynamically formatted diagnostic messages that need freeing.
+    allocated_messages: std.ArrayListUnmanaged([]const u8),
+
     properties: FlowProperties,
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) FlowChecker {
@@ -116,6 +210,9 @@ pub const FlowChecker = struct {
             .result_binding_labels = .empty,
             .req_binding_key = null,
             .env_fn_slot = null,
+            .external_labels = .empty,
+            .external_reasons = .empty,
+            .allocated_messages = .empty,
             .properties = .{},
         };
     }
@@ -125,6 +222,26 @@ pub const FlowChecker = struct {
         self.binding_labels.deinit(self.allocator);
         self.module_fn_labels.deinit(self.allocator);
         self.result_binding_labels.deinit(self.allocator);
+
+        // Free dynamically formatted diagnostic messages
+        for (self.allocated_messages.items) |msg| {
+            self.allocator.free(msg);
+        }
+        self.allocated_messages.deinit(self.allocator);
+
+        // Free duped key strings and reason strings from external labels
+        var label_iter = self.external_labels.iterator();
+        while (label_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.external_labels.deinit(self.allocator);
+
+        var reason_iter = self.external_reasons.iterator();
+        while (reason_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.external_reasons.deinit(self.allocator);
     }
 
     /// Run the flow analysis on the given handler function node.
@@ -147,6 +264,51 @@ pub const FlowChecker = struct {
 
     pub fn getProperties(self: *const FlowChecker) FlowProperties {
         return self.properties;
+    }
+
+    /// Populate external label maps from parsed ExternalLabel declarations.
+    /// For qualified field names like "User.email", both the full name and the
+    /// short form ("email") are registered. Labels are additive: if multiple
+    /// declarations target the same field, their LabelSets are merged via OR.
+    pub fn setExternalLabels(self: *FlowChecker, labels: []const ExternalLabel) void {
+        for (labels) |ext| {
+            self.registerExternalField(ext.field, ext.label, ext.reason);
+
+            // Also register short form: everything after the last dot
+            if (std.mem.lastIndexOfScalar(u8, ext.field, '.')) |dot_pos| {
+                const short = ext.field[dot_pos + 1 ..];
+                if (short.len > 0) {
+                    self.registerExternalField(short, ext.label, ext.reason);
+                }
+            }
+        }
+    }
+
+    fn registerExternalField(self: *FlowChecker, name: []const u8, label: DataLabel, reason: []const u8) void {
+        const label_set = LabelSet.fromLabel(label);
+
+        if (self.external_labels.getEntry(name)) |entry| {
+            // Merge into existing entry - no new key allocation needed
+            entry.value_ptr.* = LabelSet.merge(entry.value_ptr.*, label_set);
+        } else {
+            const duped_key = self.allocator.dupe(u8, name) catch return;
+            self.external_labels.put(self.allocator, duped_key, label_set) catch {
+                self.allocator.free(duped_key);
+                return;
+            };
+        }
+
+        if (self.external_reasons.get(name) == null) {
+            const reason_key = self.allocator.dupe(u8, name) catch return;
+            const reason_val = self.allocator.dupe(u8, reason) catch {
+                self.allocator.free(reason_key);
+                return;
+            };
+            self.external_reasons.put(self.allocator, reason_key, reason_val) catch {
+                self.allocator.free(reason_key);
+                self.allocator.free(reason_val);
+            };
+        }
     }
 
     pub fn formatDiagnostics(
@@ -379,30 +541,35 @@ pub const FlowChecker = struct {
 
             .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return LabelSet.empty;
-                const obj_labels = self.inferLabels(member.object);
+                var labels = self.inferLabels(member.object);
 
                 // req.headers.authorization carries credential label
                 if (self.isReqProperty(member.object, "headers")) {
-                    const prop_name = self.resolveAtomName(member.property) orelse return obj_labels;
+                    const prop_name = self.resolveAtomName(member.property) orelse return labels;
                     if (std.mem.eql(u8, prop_name, "authorization")) {
-                        return LabelSet.merge(obj_labels, .{ .credential = true });
+                        return LabelSet.merge(labels, .{ .credential = true });
                     }
                 }
 
                 // result.value inherits labels from the producing validation call
-                const prop_name = self.resolveAtomName(member.property) orelse return obj_labels;
+                const prop_name = self.resolveAtomName(member.property) orelse return labels;
                 if (std.mem.eql(u8, prop_name, "value")) {
-                    const obj_tag = self.ir_view.getTag(member.object) orelse return obj_labels;
+                    const obj_tag = self.ir_view.getTag(member.object) orelse return labels;
                     if (obj_tag == .identifier) {
-                        const binding = self.ir_view.getBinding(member.object) orelse return obj_labels;
+                        const binding = self.ir_view.getBinding(member.object) orelse return labels;
                         const key = packBindingKey(binding.scope_id, binding.slot);
                         if (self.result_binding_labels.get(key)) |result_labels| {
-                            return LabelSet.merge(obj_labels, result_labels);
+                            labels = LabelSet.merge(labels, result_labels);
                         }
                     }
                 }
 
-                return obj_labels;
+                // External labels: merge if the property name matches a declared field
+                if (self.external_labels.get(prop_name)) |ext_labels| {
+                    labels = LabelSet.merge(labels, ext_labels);
+                }
+
+                return labels;
             },
 
             .computed_access => {
@@ -576,7 +743,7 @@ pub const FlowChecker = struct {
                         .severity = .err,
                         .kind = .secret_in_response,
                         .node = node,
-                        .message = "secret data flows into response body",
+                        .message = self.messageWithReason("secret data flows into response body", .secret),
                         .help = "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses",
                     });
                     self.properties.no_secret_leakage = false;
@@ -586,7 +753,7 @@ pub const FlowChecker = struct {
                         .severity = .warning,
                         .kind = .credential_in_response,
                         .node = node,
-                        .message = "credential data flows into response body",
+                        .message = self.messageWithReason("credential data flows into response body", .credential),
                         .help = "auth tokens and JWT payloads should not be returned to clients",
                     });
                     self.properties.no_credential_leakage = false;
@@ -598,7 +765,7 @@ pub const FlowChecker = struct {
                         .severity = .err,
                         .kind = .secret_in_log,
                         .node = node,
-                        .message = "secret data flows into console output",
+                        .message = self.messageWithReason("secret data flows into console output", .secret),
                         .help = "env vars with sensitive names must not be logged",
                     });
                     self.properties.no_secret_leakage = false;
@@ -608,7 +775,7 @@ pub const FlowChecker = struct {
                         .severity = .err,
                         .kind = .credential_in_log,
                         .node = node,
-                        .message = "credential data flows into console output",
+                        .message = self.messageWithReason("credential data flows into console output", .credential),
                         .help = "auth tokens and JWTs must not be logged",
                     });
                     self.properties.no_credential_leakage = false;
@@ -620,7 +787,7 @@ pub const FlowChecker = struct {
                         .severity = .err,
                         .kind = .secret_in_egress_url,
                         .node = node,
-                        .message = "secret data flows into fetchSync URL",
+                        .message = self.messageWithReason("secret data flows into fetchSync URL", .secret),
                         .help = "secrets in URLs are logged by proxies and CDNs; pass secrets in headers or body instead",
                     });
                     self.properties.no_secret_leakage = false;
@@ -630,7 +797,7 @@ pub const FlowChecker = struct {
                         .severity = .warning,
                         .kind = .credential_in_egress_url,
                         .node = node,
-                        .message = "credential data flows into fetchSync URL",
+                        .message = self.messageWithReason("credential data flows into fetchSync URL", .credential),
                         .help = "pass auth tokens in headers, not URLs",
                     });
                     self.properties.no_credential_leakage = false;
@@ -642,7 +809,7 @@ pub const FlowChecker = struct {
                         .severity = .err,
                         .kind = .secret_in_egress_body,
                         .node = node,
-                        .message = "secret data flows into fetchSync request body",
+                        .message = self.messageWithReason("secret data flows into fetchSync request body", .secret),
                         .help = "do not send env secrets to external services",
                     });
                     self.properties.no_secret_leakage = false;
@@ -823,6 +990,33 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Find the first external reason matching the given label.
+    /// Iterates all external_reasons entries whose corresponding LabelSet
+    /// includes the target label. Returns null if no external label contributed.
+    fn findExternalReason(self: *const FlowChecker, label: DataLabel) ?[]const u8 {
+        var iter = self.external_reasons.iterator();
+        while (iter.next()) |entry| {
+            if (self.external_labels.get(entry.key_ptr.*)) |ext_ls| {
+                if (ext_ls.has(label)) return entry.value_ptr.*;
+            }
+        }
+        return null;
+    }
+
+    /// Return a diagnostic message, appending the external reason if one exists.
+    /// When no external reason applies, the original literal is returned as-is
+    /// (no allocation). When a reason exists, a new string is allocated and
+    /// tracked in allocated_messages for cleanup.
+    fn messageWithReason(self: *FlowChecker, base: []const u8, label: DataLabel) []const u8 {
+        const reason = self.findExternalReason(label) orelse return base;
+        const formatted = std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ base, reason }) catch return base;
+        self.allocated_messages.append(self.allocator, formatted) catch {
+            self.allocator.free(formatted);
+            return base;
+        };
+        return formatted;
+    }
+
     fn addDiagnostic(self: *FlowChecker, diag: Diagnostic) void {
         self.diagnostics.append(self.allocator, diag) catch {};
     }
@@ -875,4 +1069,109 @@ test "FlowProperties defaults to all proven" {
     try std.testing.expect(props.no_credential_leakage);
     try std.testing.expect(props.input_validated);
     try std.testing.expect(props.pii_contained);
+}
+
+test "parseDataLabel maps all known strings" {
+    try std.testing.expectEqual(DataLabel.secret, parseDataLabel("secret").?);
+    try std.testing.expectEqual(DataLabel.credential, parseDataLabel("credential").?);
+    try std.testing.expectEqual(DataLabel.user_input, parseDataLabel("user_input").?);
+    try std.testing.expectEqual(DataLabel.config, parseDataLabel("config").?);
+    try std.testing.expectEqual(DataLabel.internal, parseDataLabel("internal").?);
+    try std.testing.expectEqual(DataLabel.external, parseDataLabel("external").?);
+    try std.testing.expectEqual(DataLabel.validated, parseDataLabel("validated").?);
+    try std.testing.expect(parseDataLabel("unknown_label") == null);
+    try std.testing.expect(parseDataLabel("") == null);
+}
+
+test "parseExternalLabels with valid JSON" {
+    const json =
+        \\{
+        \\  "labels": [
+        \\    { "field": "User.email", "label": "secret", "reason": "PII field" },
+        \\    { "field": "token", "label": "credential", "reason": "auth token" }
+        \\  ]
+        \\}
+    ;
+    const labels = try parseExternalLabels(std.testing.allocator, json);
+    defer {
+        for (labels) |l| {
+            std.testing.allocator.free(l.field);
+            std.testing.allocator.free(l.reason);
+        }
+        std.testing.allocator.free(labels);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), labels.len);
+    try std.testing.expectEqualStrings("User.email", labels[0].field);
+    try std.testing.expectEqual(DataLabel.secret, labels[0].label);
+    try std.testing.expectEqualStrings("PII field", labels[0].reason);
+    try std.testing.expectEqualStrings("token", labels[1].field);
+    try std.testing.expectEqual(DataLabel.credential, labels[1].label);
+    try std.testing.expectEqualStrings("auth token", labels[1].reason);
+}
+
+test "parseExternalLabels with empty labels array" {
+    const json =
+        \\{ "labels": [] }
+    ;
+    const labels = try parseExternalLabels(std.testing.allocator, json);
+    defer std.testing.allocator.free(labels);
+
+    try std.testing.expectEqual(@as(usize, 0), labels.len);
+}
+
+test "setExternalLabels registers short form from qualified name" {
+    // We cannot construct a full FlowChecker without a valid IrView,
+    // so test the external label maps directly via a minimal instance.
+    // The IrView is only used by check/walkStmt, not by setExternalLabels.
+    var checker = FlowChecker{
+        .allocator = std.testing.allocator,
+        .ir_view = undefined,
+        .atoms = null,
+        .diagnostics = .empty,
+        .binding_labels = .empty,
+        .module_fn_labels = .empty,
+        .result_binding_labels = .empty,
+        .req_binding_key = null,
+        .env_fn_slot = null,
+        .external_labels = .empty,
+        .external_reasons = .empty,
+        .allocated_messages = .empty,
+        .properties = .{},
+    };
+    defer {
+        // Clean up only the maps we populated (skip ir_view-dependent deinit)
+        var li = checker.external_labels.iterator();
+        while (li.next()) |entry| checker.allocator.free(entry.key_ptr.*);
+        checker.external_labels.deinit(checker.allocator);
+        var ri = checker.external_reasons.iterator();
+        while (ri.next()) |entry| {
+            checker.allocator.free(entry.key_ptr.*);
+            checker.allocator.free(entry.value_ptr.*);
+        }
+        checker.external_reasons.deinit(checker.allocator);
+    }
+
+    const ext = [_]ExternalLabel{
+        .{ .field = "User.email", .label = .secret, .reason = "PII field" },
+        .{ .field = "plainField", .label = .credential, .reason = "token data" },
+    };
+    checker.setExternalLabels(&ext);
+
+    // Qualified name registered
+    const email_labels = checker.external_labels.get("User.email").?;
+    try std.testing.expect(email_labels.has(.secret));
+
+    // Short form also registered
+    const short_labels = checker.external_labels.get("email").?;
+    try std.testing.expect(short_labels.has(.secret));
+
+    // Non-qualified name registered directly (no dot, no short form duplication)
+    const plain_labels = checker.external_labels.get("plainField").?;
+    try std.testing.expect(plain_labels.has(.credential));
+
+    // Reasons registered
+    try std.testing.expectEqualStrings("PII field", checker.external_reasons.get("User.email").?);
+    try std.testing.expectEqualStrings("PII field", checker.external_reasons.get("email").?);
+    try std.testing.expectEqualStrings("token data", checker.external_reasons.get("plainField").?);
 }

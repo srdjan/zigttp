@@ -3,6 +3,7 @@
 //! Exports:
 //!   run(key: string, fn: () => Response) -> Response
 //!   step(name: string, fn: () => unknown) -> unknown
+//!   stepWithTimeout(name: string, timeoutMs: number, fn: () => unknown) -> { ok: true, value } | { ok: false, error: "timeout" }
 //!
 //! The actual execution/storage behavior lives in the runtime layer. This
 //! module validates JS arguments, then delegates to runtime-owned callbacks.
@@ -20,6 +21,7 @@ pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.d
 pub const DurableCallbacks = struct {
     run_fn: *const fn (*anyopaque, *context.Context, []const u8, value.JSValue) anyerror!value.JSValue,
     step_fn: *const fn (*anyopaque, *context.Context, []const u8, value.JSValue) anyerror!value.JSValue,
+    step_with_timeout_fn: *const fn (*anyopaque, *context.Context, []const u8, i64, value.JSValue) anyerror!value.JSValue,
     sleep_until_fn: *const fn (*anyopaque, *context.Context, i64) anyerror!value.JSValue,
     wait_signal_fn: *const fn (*anyopaque, *context.Context, []const u8) anyerror!value.JSValue,
     signal_fn: *const fn (*anyopaque, *context.Context, []const u8, []const u8, value.JSValue) anyerror!value.JSValue,
@@ -46,6 +48,12 @@ pub const binding = mb.ModuleBinding{
            .effect = .write, .returns = .unknown, .param_types = &.{ .string, .unknown },
            .contract_extractions = &.{.{ .category = .durable_step }},
            .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "stepWithTimeout", .func = stepWithTimeoutNative, .arg_count = 3,
+           .effect = .write, .returns = .result, .param_types = &.{ .string, .number, .unknown },
+           .failure_severity = .expected,
+           .contract_extractions = &.{.{ .category = .durable_step }},
+           .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true },
+           .traceable = true },
         .{ .name = "sleep", .func = sleepNative, .arg_count = 1,
            .effect = .write, .returns = .undefined, .param_types = &.{.number},
            .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
@@ -114,6 +122,34 @@ fn stepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
     }
 
     return callbacks.step_fn(callbacks.runtime_ptr, ctx, name, args[1]);
+}
+
+fn stepWithTimeoutNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx = util.castContext(ctx_ptr);
+    const callbacks = getCallbacks(ctx) orelse {
+        return util.throwError(ctx, "Error", "stepWithTimeout() requires --durable <DIR>");
+    };
+
+    if (args.len < 3) {
+        return util.throwError(ctx, "TypeError", "stepWithTimeout() expects a string name, timeout in milliseconds, and function");
+    }
+
+    const name = util.extractString(args[0]) orelse {
+        return util.throwError(ctx, "TypeError", "stepWithTimeout() name must be a string");
+    };
+    const timeout_ms_f = util.extractFloat(args[1]) orelse {
+        return util.throwError(ctx, "TypeError", "stepWithTimeout() timeout must be a number");
+    };
+    if (!std.math.isFinite(timeout_ms_f)) {
+        return util.throwError(ctx, "TypeError", "stepWithTimeout() timeout must be finite");
+    }
+    if (!args[2].isCallable()) {
+        return util.throwError(ctx, "TypeError", "stepWithTimeout() expects a function as its third argument");
+    }
+
+    const clamped = @max(timeout_ms_f, 0);
+    const timeout_ms: i64 = @intFromFloat(clamped);
+    return callbacks.step_with_timeout_fn(callbacks.runtime_ptr, ctx, name, timeout_ms, args[2]);
 }
 
 fn sleepNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {

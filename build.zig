@@ -18,6 +18,13 @@ pub fn build(b: *std.Build) void {
     const prove_spec = b.option([]const u8, "prove", "Prove upgrade safety (format: contract.json or contract.json:traces.jsonl)");
     const generate_tests = b.option(bool, "generate-tests", "Generate exhaustive test cases from path analysis") orelse false;
 
+    // External enrichment flags (optional, for cross-referencing with code generators)
+    const manifest_path = b.option([]const u8, "manifest", "External manifest JSON for cross-referencing against handler contract");
+    const expect_properties_path = b.option([]const u8, "expect-properties", "Expected handler properties JSON for build-time verification");
+    const data_labels_path = b.option([]const u8, "data-labels", "External data label declarations JSON for flow checker enrichment");
+    const fault_severity_path = b.option([]const u8, "fault-severity", "External fault severity overrides JSON for coverage analysis");
+    const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
+
     // zts module (Zig TypeScript compiler - the primary JS engine)
     const zts_mod = b.addModule("zts", .{
         .root_source_file = b.path("zts/root.zig"),
@@ -53,6 +60,19 @@ pub fn build(b: *std.Build) void {
     const run_precompile_tests = b.addRunArtifact(precompile_tests);
     const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
     precompile_test_step.dependOn(&run_precompile_tests.step);
+
+    const prop_expect_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/property_expectations.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    prop_expect_tests.root_module.addImport("zts", zts_mod);
+    const run_prop_expect_tests = b.addRunArtifact(prop_expect_tests);
+    const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
+    prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
 
     // Precompile tool (build-time compiler with full zts)
     // Build for host since it runs at build time
@@ -128,6 +148,26 @@ pub fn build(b: *std.Build) void {
         if (generate_tests) {
             run_precompile.addArg("--generate-tests");
         }
+        if (manifest_path) |mp| {
+            run_precompile.addArg("--manifest");
+            run_precompile.addArg(mp);
+        }
+        if (expect_properties_path) |ep| {
+            run_precompile.addArg("--expect-properties");
+            run_precompile.addArg(ep);
+        }
+        if (data_labels_path) |dl| {
+            run_precompile.addArg("--data-labels");
+            run_precompile.addArg(dl);
+        }
+        if (fault_severity_path) |fs| {
+            run_precompile.addArg("--fault-severity");
+            run_precompile.addArg(fs);
+        }
+        if (report_format) |rf| {
+            run_precompile.addArg("--report");
+            run_precompile.addArg(rf);
+        }
         run_precompile.addArg(path);
         run_precompile.addArg("src/generated/embedded_handler.zig");
 
@@ -195,6 +235,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_precompile_tests.step);
+    test_step.dependOn(&run_prop_expect_tests.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{

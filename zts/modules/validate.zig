@@ -17,7 +17,10 @@
 //!     Remove a compiled schema from the registry.
 //!
 //! Supported JSON Schema subset:
-//!   type, required, properties, minLength, maxLength, minimum, maximum, enum, items
+//!   type, required, properties, minLength, maxLength, minimum, maximum, enum, items, format
+//!
+//! Supported format values (string type only):
+//!   email, uuid, iso-date, iso-datetime
 
 const std = @import("std");
 const context = @import("../context.zig");
@@ -76,12 +79,28 @@ const SchemaType = enum {
     null_type,
 };
 
+const FormatType = enum {
+    email,
+    uuid,
+    iso_date,
+    iso_datetime,
+
+    fn fromString(s: []const u8) ?FormatType {
+        if (std.mem.eql(u8, s, "email")) return .email;
+        if (std.mem.eql(u8, s, "uuid")) return .uuid;
+        if (std.mem.eql(u8, s, "iso-date")) return .iso_date;
+        if (std.mem.eql(u8, s, "iso-datetime")) return .iso_datetime;
+        return null; // Unknown formats silently ignored per JSON Schema spec
+    }
+};
+
 const CompiledSchema = struct {
     schema_type: ?SchemaType = null,
     min_length: ?u32 = null,
     max_length: ?u32 = null,
     minimum: ?f64 = null,
     maximum: ?f64 = null,
+    format: ?FormatType = null,
     properties: ?std.StringHashMap(*CompiledSchema) = null,
     required: ?[][]const u8 = null,
     items: ?*CompiledSchema = null,
@@ -375,6 +394,16 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
         }
     }
 
+    // format (only meaningful for strings)
+    if (obj.get("format")) |format_val| {
+        switch (format_val) {
+            .string => |s| {
+                schema.format = FormatType.fromString(s);
+            },
+            else => {},
+        }
+    }
+
     return schema;
 }
 
@@ -460,6 +489,81 @@ fn validateValueAgainstSchema(ctx: *context.Context, schema: *const CompiledSche
     return util.createPlainResultErrs(ctx, err_array.toValue());
 }
 
+fn validateFormat(fmt: FormatType, str: []const u8) bool {
+    return switch (fmt) {
+        .email => validateEmail(str),
+        .uuid => validateUuid(str),
+        .iso_date => validateIsoDate(str),
+        .iso_datetime => validateIsoDatetime(str),
+    };
+}
+
+fn validateEmail(str: []const u8) bool {
+    // Must have exactly one @, non-empty local part, non-empty domain with a dot
+    var at_index: ?usize = null;
+    for (str, 0..) |c, i| {
+        if (c == '@') {
+            if (at_index != null) return false; // multiple @
+            at_index = i;
+        }
+    }
+    const at = at_index orelse return false; // no @
+    if (at == 0) return false; // empty local part
+    const domain = str[at + 1 ..];
+    if (domain.len == 0) return false; // empty domain
+    // Domain must contain at least one dot
+    return std.mem.indexOfScalar(u8, domain, '.') != null;
+}
+
+fn validateUuid(str: []const u8) bool {
+    // 8-4-4-4-12 hex format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    if (str.len != 36) return false;
+    for (str, 0..) |c, i| {
+        if (i == 8 or i == 13 or i == 18 or i == 23) {
+            if (c != '-') return false;
+        } else {
+            if (!isHexDigit(c)) return false;
+        }
+    }
+    return true;
+}
+
+fn validateIsoDate(str: []const u8) bool {
+    // YYYY-MM-DD
+    if (str.len != 10) return false;
+    return isDigit(str[0]) and isDigit(str[1]) and isDigit(str[2]) and isDigit(str[3]) and
+        str[4] == '-' and
+        isDigit(str[5]) and isDigit(str[6]) and
+        str[7] == '-' and
+        isDigit(str[8]) and isDigit(str[9]);
+}
+
+fn validateIsoDatetime(str: []const u8) bool {
+    // Minimum: YYYY-MM-DDTHH:MM:SS (19 chars)
+    if (str.len < 19) return false;
+    // Date part
+    if (!validateIsoDate(str[0..10])) return false;
+    // T separator
+    if (str[10] != 'T') return false;
+    // HH:MM:SS
+    if (!isDigit(str[11]) or !isDigit(str[12])) return false;
+    if (str[13] != ':') return false;
+    if (!isDigit(str[14]) or !isDigit(str[15])) return false;
+    if (str[16] != ':') return false;
+    if (!isDigit(str[17]) or !isDigit(str[18])) return false;
+    // Optional timezone suffix (Z, +HH:MM, -HH:MM) or fractional seconds
+    // Accept anything after the base pattern per JSON Schema's lenient format spec
+    return true;
+}
+
+fn isDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+fn isHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
 fn validateRecursive(ctx: *context.Context, schema: *const CompiledSchema, val: value.JSValue, path: []const u8, errors: *std.ArrayList(ValidationError)) void {
     // Type check
     if (schema.schema_type) |expected_type| {
@@ -489,6 +593,18 @@ fn validateRecursive(ctx: *context.Context, schema: *const CompiledSchema, val: 
             if (schema.max_length) |max| {
                 if (str.len > max) {
                     errors.append(ctx.allocator, .{ .path = path, .message = "string too long" }) catch {};
+                }
+            }
+            // Format validation
+            if (schema.format) |fmt| {
+                if (!validateFormat(fmt, str)) {
+                    const msg: []const u8 = switch (fmt) {
+                        .email => "invalid email format",
+                        .uuid => "invalid uuid format",
+                        .iso_date => "invalid iso-date format",
+                        .iso_datetime => "invalid iso-datetime format",
+                    };
+                    errors.append(ctx.allocator, .{ .path = path, .message = msg }) catch {};
                 }
             }
         }
@@ -774,4 +890,125 @@ test "parseSchemaType: all types" {
     try std.testing.expect(parseSchemaType("object").? == .object_type);
     try std.testing.expect(parseSchemaType("null").? == .null_type);
     try std.testing.expect(parseSchemaType("unknown") == null);
+}
+
+test "FormatType.fromString: known formats" {
+    try std.testing.expect(FormatType.fromString("email").? == .email);
+    try std.testing.expect(FormatType.fromString("uuid").? == .uuid);
+    try std.testing.expect(FormatType.fromString("iso-date").? == .iso_date);
+    try std.testing.expect(FormatType.fromString("iso-datetime").? == .iso_datetime);
+    try std.testing.expect(FormatType.fromString("unknown") == null);
+    try std.testing.expect(FormatType.fromString("uri") == null);
+}
+
+test "schema compilation: format field" {
+    const allocator = std.testing.allocator;
+    const schema_json = "{\"type\":\"string\",\"format\":\"email\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, schema_json, .{});
+    defer parsed.deinit();
+
+    const schema = try compileSchemaFromJson(allocator, parsed.value);
+    defer {
+        schema.deinit(allocator);
+        allocator.destroy(schema);
+    }
+
+    try std.testing.expect(schema.schema_type.? == .string);
+    try std.testing.expect(schema.format.? == .email);
+}
+
+test "schema compilation: unknown format ignored" {
+    const allocator = std.testing.allocator;
+    const schema_json = "{\"type\":\"string\",\"format\":\"uri\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, schema_json, .{});
+    defer parsed.deinit();
+
+    const schema = try compileSchemaFromJson(allocator, parsed.value);
+    defer {
+        schema.deinit(allocator);
+        allocator.destroy(schema);
+    }
+
+    try std.testing.expect(schema.schema_type.? == .string);
+    try std.testing.expect(schema.format == null);
+}
+
+test "schema compilation: format on property" {
+    const allocator = std.testing.allocator;
+    const schema_json =
+        \\{"type":"object","properties":{"email":{"type":"string","format":"email"},"id":{"type":"string","format":"uuid"}}}
+    ;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, schema_json, .{});
+    defer parsed.deinit();
+
+    const schema = try compileSchemaFromJson(allocator, parsed.value);
+    defer {
+        schema.deinit(allocator);
+        allocator.destroy(schema);
+    }
+
+    const email_schema = schema.properties.?.get("email").?;
+    try std.testing.expect(email_schema.format.? == .email);
+
+    const id_schema = schema.properties.?.get("id").?;
+    try std.testing.expect(id_schema.format.? == .uuid);
+}
+
+test "validateEmail: valid addresses" {
+    try std.testing.expect(validateEmail("user@example.com"));
+    try std.testing.expect(validateEmail("a@b.co"));
+    try std.testing.expect(validateEmail("user+tag@sub.domain.org"));
+}
+
+test "validateEmail: invalid addresses" {
+    try std.testing.expect(!validateEmail(""));
+    try std.testing.expect(!validateEmail("noatsign"));
+    try std.testing.expect(!validateEmail("@nodomain.com"));
+    try std.testing.expect(!validateEmail("user@"));
+    try std.testing.expect(!validateEmail("user@nodot"));
+    try std.testing.expect(!validateEmail("user@@double.com"));
+}
+
+test "validateUuid: valid UUIDs" {
+    try std.testing.expect(validateUuid("550e8400-e29b-41d4-a716-446655440000"));
+    try std.testing.expect(validateUuid("00000000-0000-0000-0000-000000000000"));
+    try std.testing.expect(validateUuid("ABCDEF01-2345-6789-abcd-ef0123456789"));
+}
+
+test "validateUuid: invalid UUIDs" {
+    try std.testing.expect(!validateUuid(""));
+    try std.testing.expect(!validateUuid("not-a-uuid"));
+    try std.testing.expect(!validateUuid("550e8400e29b41d4a716446655440000")); // no dashes
+    try std.testing.expect(!validateUuid("550e8400-e29b-41d4-a716-44665544000")); // too short
+    try std.testing.expect(!validateUuid("550e8400-e29b-41d4-a716-4466554400000")); // too long
+    try std.testing.expect(!validateUuid("550e8400-e29b-41d4-a716-44665544000g")); // non-hex char
+}
+
+test "validateIsoDate: valid dates" {
+    try std.testing.expect(validateIsoDate("2024-01-15"));
+    try std.testing.expect(validateIsoDate("0000-00-00"));
+    try std.testing.expect(validateIsoDate("9999-12-31"));
+}
+
+test "validateIsoDate: invalid dates" {
+    try std.testing.expect(!validateIsoDate(""));
+    try std.testing.expect(!validateIsoDate("2024-1-15")); // single digit month
+    try std.testing.expect(!validateIsoDate("01-15-2024")); // wrong order
+    try std.testing.expect(!validateIsoDate("2024/01/15")); // wrong separator
+    try std.testing.expect(!validateIsoDate("2024-01-1")); // too short
+}
+
+test "validateIsoDatetime: valid datetimes" {
+    try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00"));
+    try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00Z"));
+    try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00+05:30"));
+    try std.testing.expect(validateIsoDatetime("2024-01-15T10:30:00.123Z"));
+}
+
+test "validateIsoDatetime: invalid datetimes" {
+    try std.testing.expect(!validateIsoDatetime("")); // empty
+    try std.testing.expect(!validateIsoDatetime("2024-01-15")); // date only
+    try std.testing.expect(!validateIsoDatetime("2024-01-15 10:30:00")); // space instead of T
+    try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30")); // missing seconds
+    try std.testing.expect(!validateIsoDatetime("2024-01-15T1:30:00")); // single digit hour
 }
