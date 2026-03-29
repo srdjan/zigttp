@@ -63,19 +63,34 @@ pub fn atomName(atom: object.Atom, ctx: *context.Context) ?[]const u8 {
 
 /// Helper to create Result.ok(value)
 pub fn createResultOk(ctx: *context.Context, val: value.JSValue) value.JSValue {
-    const result_obj = ctx.createObject(ctx.result_prototype) catch return value.JSValue.undefined_val;
-    result_obj.class_id = .result;
-    result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.true_val;
-    result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = val;
-    return result_obj.toValue();
+    return createResult(ctx, true, val, null);
 }
 
 /// Helper to create Result.err(error)
 pub fn createResultErr(ctx: *context.Context, err_val: value.JSValue) value.JSValue {
+    return createResult(ctx, false, err_val, .@"error");
+}
+
+/// Helper to create Result err payload with a specific field name.
+pub fn createResultErrWithField(ctx: *context.Context, err_val: value.JSValue, field_atom: object.Atom) value.JSValue {
+    return createResult(ctx, false, err_val, field_atom);
+}
+
+/// Shared constructor for native Result objects.
+pub fn createResult(
+    ctx: *context.Context,
+    is_ok: bool,
+    payload: value.JSValue,
+    error_field: ?object.Atom,
+) value.JSValue {
     const result_obj = ctx.createObject(ctx.result_prototype) catch return value.JSValue.undefined_val;
     result_obj.class_id = .result;
-    result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.false_val;
-    result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = err_val;
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.fromBool(is_ok);
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = payload;
+    result_obj.inline_slots[object.JSObject.Slots.RESULT_ERROR_FIELD] = if (error_field) |atom|
+        value.JSValue.fromInt(@intCast(@intFromEnum(atom)))
+    else
+        value.JSValue.undefined_val;
     return result_obj.toValue();
 }
 

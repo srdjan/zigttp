@@ -2023,6 +2023,8 @@ pub const CodeGen = struct {
 
             if (pattern_tag == .match_pattern) {
                 try self.emitObjectPatternTest(arm.pattern, body_labels[i]);
+            } else if (pattern_tag == .array_pattern) {
+                try self.emitArrayPatternTest(arm.pattern, body_labels[i]);
             } else {
                 try self.emitEqTest(arm.pattern, body_labels[i]);
             }
@@ -2085,15 +2087,9 @@ pub const CodeGen = struct {
             try self.emitGetField(@truncate(@intFromEnum(atom)));
 
             if (prop.value == null_node) {
-                // Wildcard value - just pop the field value, this property always matches
-                try self.emit(.drop);
-                self.popStack(1);
+                try self.emitWildcardPresenceCheck(skip_label);
             } else {
-                try self.emitNode(prop.value);
-                try self.emit(.strict_eq);
-                self.popStack(1); // strict_eq consumes two, pushes one
-                try self.emitJump(.if_false, skip_label);
-                self.popStack(1); // if_false consumes condition
+                try self.emitPatternValueTest(prop.value, skip_label);
             }
         }
 
@@ -2101,6 +2097,192 @@ pub const CodeGen = struct {
         try self.emitJump(.goto, target_label);
 
         try self.placeLabel(skip_label);
+    }
+
+    fn emitArrayPatternTest(self: *CodeGen, pattern_node: NodeIndex, target_label: u32) !void {
+        const pattern = self.ir.getArray(pattern_node) orelse return;
+        const skip_label = try self.createLabel();
+
+        try self.emitArrayLengthAndElementTests(pattern, skip_label);
+
+        try self.emitJump(.goto, target_label);
+        try self.placeLabel(skip_label);
+    }
+
+    fn emitPatternValueTest(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32) anyerror!void {
+        if (pattern_node == null_node) {
+            try self.emit(.drop);
+            self.popStack(1);
+            return;
+        }
+
+        const pattern_tag = self.ir.getTag(pattern_node) orelse return;
+        switch (pattern_tag) {
+            .match_pattern => {
+                const nested = self.ir.getMatchPattern(pattern_node) orelse return;
+                if (nested.props_count == 0) {
+                    try self.emit(.drop);
+                    self.popStack(1);
+                    return;
+                }
+                try self.emitGuardedNestedTest(pattern_node, fail_label, .object);
+            },
+            .array_pattern => {
+                const nested = self.ir.getArray(pattern_node) orelse return;
+                if (nested.elements_count == 0) {
+                    try self.emit(.drop);
+                    self.popStack(1);
+                    return;
+                }
+                try self.emitGuardedNestedTest(pattern_node, fail_label, .array);
+            },
+            else => {
+                try self.emitNode(pattern_node);
+                try self.emit(.strict_eq);
+                self.popStack(1);
+                try self.emitJump(.if_false, fail_label);
+                self.popStack(1);
+            },
+        }
+    }
+
+    const NestedPatternKind = enum { object, array };
+
+    /// Emit undefined guard around a nested object or array pattern test.
+    /// If the value is undefined, jumps to fail_label. Otherwise dispatches
+    /// to the appropriate nested test.
+    fn emitGuardedNestedTest(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32, kind: NestedPatternKind) anyerror!void {
+        const cleanup_label = try self.createLabel();
+        const done_label = try self.createLabel();
+        try self.emitUndefinedCheck(cleanup_label);
+        switch (kind) {
+            .object => try self.emitObjectPatternProps(pattern_node, fail_label),
+            .array => try self.emitArrayPatternElements(pattern_node, fail_label),
+        }
+        try self.emitJump(.goto, done_label);
+        try self.placeLabel(cleanup_label);
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, fail_label);
+        try self.placeLabel(done_label);
+    }
+
+    /// Emit: dup, push_undefined, strict_eq, if_true -> target_label
+    fn emitUndefinedCheck(self: *CodeGen, target_label: u32) !void {
+        try self.emit(.dup);
+        self.pushStack(1);
+        try self.emit(.push_undefined);
+        self.pushStack(1);
+        try self.emit(.strict_eq);
+        self.popStack(1);
+        try self.emitJump(.if_true, target_label);
+        self.popStack(1);
+    }
+
+    /// Emit wildcard presence check: if TOS is undefined, jump to fail_label;
+    /// otherwise drop the value and continue.
+    fn emitWildcardPresenceCheck(self: *CodeGen, fail_label: u32) !void {
+        const missing_label = try self.createLabel();
+        const next_label = try self.createLabel();
+        try self.emitUndefinedCheck(missing_label);
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, next_label);
+        try self.placeLabel(missing_label);
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, fail_label);
+        try self.placeLabel(next_label);
+    }
+
+    /// Push an integer value, using small-int optimization when possible.
+    fn emitIntValue(self: *CodeGen, val: i32) !void {
+        if (val >= 0 and val <= std.math.maxInt(u8)) {
+            try self.emitSmallInt(@intCast(val));
+        } else {
+            try self.emitPushConst(try self.addConstant(JSValue.fromInt(val)));
+        }
+    }
+
+    /// Shared core of object pattern property testing with cleanup/done labels.
+    fn emitObjectPatternProps(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32) anyerror!void {
+        const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
+        const cleanup_label = try self.createLabel();
+        const done_label = try self.createLabel();
+
+        var j: u8 = 0;
+        while (j < pattern.props_count) : (j += 1) {
+            const prop_idx = self.ir.getListIndex(pattern.props_start, j);
+            const prop = self.ir.getProperty(prop_idx) orelse continue;
+
+            const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
+            const key_str = self.ir.getString(key_str_idx) orelse continue;
+            const atom = self.resolveKeyAtom(key_str, key_str_idx) catch continue;
+
+            try self.emit(.dup);
+            self.pushStack(1);
+            try self.emitGetField(@truncate(@intFromEnum(atom)));
+
+            if (prop.value == null_node) {
+                try self.emitWildcardPresenceCheck(cleanup_label);
+            } else {
+                try self.emitPatternValueTest(prop.value, cleanup_label);
+            }
+        }
+
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, done_label);
+
+        try self.placeLabel(cleanup_label);
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, fail_label);
+        try self.placeLabel(done_label);
+    }
+
+    /// Shared core of array pattern length check + element testing with cleanup/done labels.
+    fn emitArrayPatternElements(self: *CodeGen, pattern_node: NodeIndex, fail_label: u32) anyerror!void {
+        const pattern = self.ir.getArray(pattern_node) orelse return;
+        const cleanup_label = try self.createLabel();
+        const done_label = try self.createLabel();
+
+        try self.emitArrayLengthAndElementTests(pattern, cleanup_label);
+
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, done_label);
+
+        try self.placeLabel(cleanup_label);
+        try self.emit(.drop);
+        self.popStack(1);
+        try self.emitJump(.goto, fail_label);
+        try self.placeLabel(done_label);
+    }
+
+    /// Emit length check + per-element tests for an array pattern.
+    fn emitArrayLengthAndElementTests(self: *CodeGen, pattern: anytype, fail_label: u32) !void {
+        try self.emit(.dup);
+        self.pushStack(1);
+        try self.emit(.get_length);
+        try self.emitIntValue(@intCast(pattern.elements_count));
+        try self.emit(.strict_eq);
+        self.popStack(1);
+        try self.emitJump(.if_false, fail_label);
+        self.popStack(1);
+
+        var i: u16 = 0;
+        while (i < pattern.elements_count) : (i += 1) {
+            const elem_idx = self.ir.getListIndex(pattern.elements_start, i);
+            if (elem_idx == null_node) continue;
+
+            try self.emit(.dup);
+            self.pushStack(1);
+            try self.emitIntValue(@intCast(i));
+            try self.emit(.get_elem);
+            self.popStack(1);
+            try self.emitPatternValueTest(elem_idx, fail_label);
+        }
     }
 
     fn emitBlock(self: *CodeGen, block: Node.BlockData) !void {

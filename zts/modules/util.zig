@@ -7,6 +7,7 @@
 const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
+const builtins_helpers = @import("../builtins/helpers.zig");
 const string = @import("../string.zig");
 const object = @import("../object.zig");
 const arena_mod = @import("../arena.zig");
@@ -64,36 +65,18 @@ pub fn extractFloat(val: value.JSValue) ?f64 {
 
 /// Create a plain result object: { ok: true, value: payload }
 pub fn createPlainResultOk(ctx: *context.Context, payload: value.JSValue) !value.JSValue {
-    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-    const obj = try ctx.createObject(null);
-    const ok_atom = object.Atom.ok;
-    const value_atom = object.Atom.value;
-    try obj.setProperty(ctx.allocator, pool, ok_atom, value.JSValue.true_val);
-    try obj.setProperty(ctx.allocator, pool, value_atom, payload);
-    return obj.toValue();
+    return builtins_helpers.createResultOk(ctx, payload);
 }
 
 /// Create a plain error result: { ok: false, error: message }
 pub fn createPlainResultErr(ctx: *context.Context, message: []const u8) !value.JSValue {
-    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-    const obj = try ctx.createObject(null);
-    const ok_atom = object.Atom.ok;
-    const error_atom = try ctx.atoms.intern("error");
     const msg_val = try ctx.createString(message);
-    try obj.setProperty(ctx.allocator, pool, ok_atom, value.JSValue.false_val);
-    try obj.setProperty(ctx.allocator, pool, error_atom, msg_val);
-    return obj.toValue();
+    return builtins_helpers.createResultErr(ctx, msg_val);
 }
 
 /// Create a plain errors result: { ok: false, errors: errors_array }
 pub fn createPlainResultErrs(ctx: *context.Context, errors: value.JSValue) !value.JSValue {
-    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-    const obj = try ctx.createObject(null);
-    const ok_atom = object.Atom.ok;
-    const errors_atom = try ctx.atoms.intern("errors");
-    try obj.setProperty(ctx.allocator, pool, ok_atom, value.JSValue.false_val);
-    try obj.setProperty(ctx.allocator, pool, errors_atom, errors);
-    return obj.toValue();
+    return builtins_helpers.createResultErrWithField(ctx, errors, .errors);
 }
 
 pub fn throwError(ctx: *context.Context, name: []const u8, message: []const u8) value.JSValue {

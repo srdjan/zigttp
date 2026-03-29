@@ -1248,6 +1248,9 @@ pub const Parser = struct {
         if (self.check(.lbrace)) {
             return self.parseMatchObjectPattern();
         }
+        if (self.check(.lbracket)) {
+            return self.parseMatchArrayPattern();
+        }
 
         // Wildcard: _
         if (self.check(.identifier)) {
@@ -1270,7 +1273,7 @@ pub const Parser = struct {
             },
             .undefined_lit => self.parseUndefinedLiteral(),
             else => {
-                self.errorAtCurrent("expected pattern (literal, object, or '_' wildcard)");
+                self.errorAtCurrent("expected pattern (literal, object, array, or '_' wildcard)");
                 return error.ParseError;
             },
         };
@@ -1334,6 +1337,40 @@ pub const Parser = struct {
             .data = .{ .match_pattern = .{
                 .props_start = props_start,
                 .props_count = props_len,
+            } },
+        });
+    }
+
+    fn parseMatchArrayPattern(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance(); // consume '['
+
+        var elements = std.ArrayList(NodeIndex).empty;
+        defer elements.deinit(self.allocator);
+
+        while (!self.check(.rbracket) and !self.check(.eof)) {
+            if (self.check(.comma)) {
+                try elements.append(self.allocator, null_node);
+                self.advance();
+                continue;
+            }
+
+            const elem = try self.parseMatchPattern();
+            try elements.append(self.allocator, elem);
+
+            if (!self.match(.comma)) break;
+        }
+
+        try self.expect(.rbracket, "']'");
+
+        const elements_start = try self.addNodeList(elements.items);
+        return try self.nodes.add(.{
+            .tag = .array_pattern,
+            .loc = loc,
+            .data = .{ .array = .{
+                .elements_start = elements_start,
+                .elements_count = @intCast(elements.items.len),
+                .has_spread = false,
             } },
         });
     }
@@ -4930,6 +4967,24 @@ test "parse match expression with wildcard" {
         \\const x = match (v) {
         \\  when 1: "one",
         \\  when _: "other"
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "parse match expression with nested object and array patterns" {
+    var parser = Parser.init(std.testing.allocator,
+        \\const x = match (value) {
+        \\  when { user: { role: "admin" }, tags: ["a", _, "c"] }: 1,
+        \\  default: 0
         \\};
     );
     defer parser.deinit();

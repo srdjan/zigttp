@@ -881,11 +881,12 @@ pub const BoolChecker = struct {
     // Property access type inference (Phase 4)
     // -----------------------------------------------------------------------
 
-    /// Known property types for Result objects: { ok: boolean, value: unknown, error: string }
+    /// Known property types for Result objects: { ok: boolean, value: unknown, error?: string, errors?: unknown }
     fn resultPropertyType(self: *const BoolChecker, prop_atom: u16) ExprType {
         const name = self.resolveAtomName(prop_atom) orelse return .unknown;
         if (std.mem.eql(u8, name, "ok")) return .boolean;
         if (std.mem.eql(u8, name, "error")) return .string;
+        if (std.mem.eql(u8, name, "errors")) return .unknown;
         if (std.mem.eql(u8, name, "value")) return .unknown;
         return .unknown;
     }

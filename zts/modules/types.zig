@@ -49,10 +49,12 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const ok_n = pool.addName(allocator, "ok");
     const val_n = pool.addName(allocator, "value");
     const err_n = pool.addName(allocator, "error");
+    const errs_n = pool.addName(allocator, "errors");
     const result_type = pool.addRecord(allocator, &.{
         .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
-        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_unknown, .optional = false },
-        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = false },
+        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_unknown, .optional = true },
+        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = true },
+        .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
     });
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
@@ -62,7 +64,12 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     for (builtin_modules.all) |binding| {
         for (binding.exports) |func| {
             const return_type_idx = mapReturnKind(
-                func.returns, pool, result_type, optional_string, object_ref, optional_object,
+                func.returns,
+                pool,
+                result_type,
+                optional_string,
+                object_ref,
+                optional_object,
             );
 
             var sig = type_env_mod.FunctionSig{};
@@ -71,7 +78,12 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
             sig.param_count = param_count;
             for (func.param_types[0..param_count], 0..) |pt, i| {
                 sig.param_types[i] = mapReturnKind(
-                    pt, pool, result_type, optional_string, object_ref, optional_object,
+                    pt,
+                    pool,
+                    result_type,
+                    optional_string,
+                    object_ref,
+                    optional_object,
                 );
             }
 

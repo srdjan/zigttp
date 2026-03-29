@@ -355,6 +355,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .unwrapErr, wrap(result.resultUnwrapErr), 0);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .map, wrap(result.resultMap), 1);
     try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .mapErr, wrap(result.resultMapErr), 1);
+    try addMethod(ctx, allocator, pool, result_proto, root_class_idx, .andThen, wrap(result.resultAndThen), 1);
     try addMethodDynamic(ctx, result_proto, "match", wrap(result.resultMatch), 1);
     const result_obj = try object.JSObject.create(allocator, root_class_idx, null, pool);
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .ok, wrap(result.resultOk), 1);

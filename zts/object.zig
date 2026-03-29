@@ -232,49 +232,52 @@ pub const Atom = enum(u32) {
     unwrapOr = 203,
     unwrapErr = 204,
     mapErr = 205,
+    @"error" = 206,
+    errors = 207,
+    andThen = 208,
     // JSON methods
-    tryParse = 206,
+    tryParse = 209,
     // Common HTTP header atoms (pre-interned for fast request object creation)
-    @"content-type" = 207,
-    @"content-length" = 208,
-    accept = 209,
-    host = 210,
-    @"user-agent" = 211,
-    authorization = 212,
-    @"cache-control" = 213,
-    connection = 214,
-    @"accept-encoding" = 215,
-    cookie = 216,
-    @"x-forwarded-for" = 217,
-    @"x-request-id" = 218,
+    @"content-type" = 210,
+    @"content-length" = 211,
+    accept = 212,
+    host = 213,
+    @"user-agent" = 214,
+    authorization = 215,
+    @"cache-control" = 216,
+    connection = 217,
+    @"accept-encoding" = 218,
+    cookie = 219,
+    @"x-forwarded-for" = 220,
+    @"x-request-id" = 221,
     // Additional CORS and caching headers
-    @"content-encoding" = 219,
-    @"transfer-encoding" = 220,
-    @"if-modified-since" = 221,
-    @"if-none-match" = 222,
-    etag = 223,
-    @"last-modified" = 224,
-    vary = 225,
-    origin = 226,
-    @"access-control-allow-origin" = 227,
-    @"access-control-allow-methods" = 228,
-    @"access-control-allow-headers" = 229,
-    @"access-control-allow-credentials" = 230,
-    @"access-control-max-age" = 231,
-    expires = 232,
-    pragma = 233,
-    toJSON = 234,
-    rawJson = 235, // Response.rawJson() for pre-serialized JSON
+    @"content-encoding" = 222,
+    @"transfer-encoding" = 223,
+    @"if-modified-since" = 224,
+    @"if-none-match" = 225,
+    etag = 226,
+    @"last-modified" = 227,
+    vary = 228,
+    origin = 229,
+    @"access-control-allow-origin" = 230,
+    @"access-control-allow-methods" = 231,
+    @"access-control-allow-headers" = 232,
+    @"access-control-allow-credentials" = 233,
+    @"access-control-max-age" = 234,
+    expires = 235,
+    pragma = 236,
+    toJSON = 237,
+    rawJson = 238, // Response.rawJson() for pre-serialized JSON
     // Query parameter support
-    path = 236, // URL path without query string
-    query = 237, // Query parameters object
+    path = 239, // URL path without query string
+    query = 240, // Query parameters object
     // Reserved for more builtins
-    __count__ = 238,
+    __count__ = 241,
 
-    // Dynamic atoms start at 239
+    // Dynamic atoms start at 242
     _,
 
-    pub const FIRST_DYNAMIC: u32 = 239;
+    pub const FIRST_DYNAMIC: u32 = 242;
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
@@ -496,7 +499,7 @@ pub const Atom = enum(u32) {
             .@"hx-swap" => "hx-swap",
             .@"hx-trigger" => "hx-trigger",
             .@"hx-on--after-request" => "hx-on--after-request",
-            // Result type (197-205)
+            // Result type (197-208)
             .Result => "Result",
             .ok => "ok",
             .err => "err",
@@ -506,9 +509,12 @@ pub const Atom = enum(u32) {
             .unwrapOr => "unwrapOr",
             .unwrapErr => "unwrapErr",
             .mapErr => "mapErr",
-            // JSON methods (206)
+            .@"error" => "error",
+            .errors => "errors",
+            .andThen => "andThen",
+            // JSON methods (209)
             .tryParse => "tryParse",
-            // HTTP headers (207-233)
+            // HTTP headers (210-233)
             .@"content-type" => "content-type",
             .@"content-length" => "content-length",
             .accept => "accept",
@@ -738,6 +744,9 @@ const predefined_atom_map = std.StaticStringMap(Atom).initComptime(.{
     .{ "unwrapOr", .unwrapOr },
     .{ "unwrapErr", .unwrapErr },
     .{ "mapErr", .mapErr },
+    .{ "error", .@"error" },
+    .{ "errors", .errors },
+    .{ "andThen", .andThen },
     // JSON methods
     .{ "tryParse", .tryParse },
     // HTTP headers (pre-interned for fast request object creation)
@@ -1329,6 +1338,8 @@ pub const JSObject = extern struct {
         pub const RESULT_IS_OK: usize = 0;
         /// Result objects: the value (either ok value or error)
         pub const RESULT_VALUE: usize = 1;
+        /// Result objects: atom id for error field kind (`error`/`errors`), undefined for ok
+        pub const RESULT_ERROR_FIELD: usize = 2;
 
         /// WeakMap/WeakSet: internal hash map data pointer
         pub const WEAK_COLLECTION_DATA: usize = 0;
@@ -1875,6 +1886,9 @@ pub const JSObject = extern struct {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
+        if (self.class_id == .result and isResultCoreProperty(name)) {
+            if (self.getResultCoreProperty(name)) |val| return val;
+        }
         // Range iterator: compute length on demand
         if (self.class_id == .range_iterator and name == .length) {
             return value.JSValue.fromInt(@intCast(self.getRangeLength()));
@@ -1901,6 +1915,9 @@ pub const JSObject = extern struct {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
+        if (self.class_id == .result and isResultCoreProperty(name)) {
+            if (self.getResultCoreProperty(name)) |val| return val;
+        }
         // Range iterator: compute length on demand
         if (self.class_id == .range_iterator and name == .length) {
             return value.JSValue.fromInt(@intCast(self.getRangeLength()));
@@ -1921,6 +1938,9 @@ pub const JSObject = extern struct {
                     self.setArrayLength(@intCast(len));
                 }
             }
+            return;
+        }
+        if (self.class_id == .result and isResultCoreProperty(name)) {
             return;
         }
 
@@ -1990,12 +2010,14 @@ pub const JSObject = extern struct {
 
     /// Check if property exists (including prototype chain)
     pub fn hasProperty(self: *const JSObject, pool: *const HiddenClassPool, name: Atom) bool {
+        if (self.class_id == .result and isResultCoreProperty(name)) return true;
         return self.getProperty(pool, name) != null;
     }
 
     /// Delete property
     pub fn deleteProperty(self: *JSObject, pool: *const HiddenClassPool, name: Atom) bool {
         if (self.class_id == .array and name == .length) return false;
+        if (self.class_id == .result and isResultCoreProperty(name)) return false;
         if (pool.findProperty(self.hidden_class_idx, name)) |offset| {
             const flags = pool.getPropertyFlags(self.hidden_class_idx, name) orelse return true;
             if (!flags.configurable) return false;
@@ -2022,8 +2044,18 @@ pub const JSObject = extern struct {
         var keys = std.ArrayList(Atom).empty;
         errdefer keys.deinit(allocator);
 
+        if (self.class_id == .result) {
+            try keys.append(allocator, .ok);
+            if (self.inline_slots[Slots.RESULT_IS_OK].isTrue()) {
+                try keys.append(allocator, .value);
+            } else if (self.resultErrorFieldAtom()) |error_field| {
+                try keys.append(allocator, error_field);
+            }
+        }
+
         const prop_names = pool.propertyNames(self.hidden_class_idx);
         for (prop_names) |name| {
+            if (self.class_id == .result and isResultCoreProperty(name)) continue;
             const flags = pool.getPropertyFlags(self.hidden_class_idx, name) orelse continue;
             if (flags.enumerable) {
                 try keys.append(allocator, name);
@@ -2036,6 +2068,35 @@ pub const JSObject = extern struct {
     /// Convert to JSValue
     pub fn toValue(self: *JSObject) value.JSValue {
         return value.JSValue.fromPtr(self);
+    }
+
+    fn isResultCoreProperty(name: Atom) bool {
+        return switch (name) {
+            .ok, .value, .@"error", .errors => true,
+            else => false,
+        };
+    }
+
+    pub fn resultErrorFieldAtom(self: *const JSObject) ?Atom {
+        const slot = self.inline_slots[Slots.RESULT_ERROR_FIELD];
+        if (!slot.isInt()) return null;
+        return @enumFromInt(@as(u16, @intCast(slot.getInt())));
+    }
+
+    fn getResultCoreProperty(self: *const JSObject, name: Atom) ?value.JSValue {
+        return switch (name) {
+            .ok => self.inline_slots[Slots.RESULT_IS_OK],
+            .value => if (self.inline_slots[Slots.RESULT_IS_OK].isTrue())
+                self.inline_slots[Slots.RESULT_VALUE]
+            else
+                value.JSValue.undefined_val,
+            .@"error", .errors => blk: {
+                if (self.inline_slots[Slots.RESULT_IS_OK].isTrue()) break :blk value.JSValue.undefined_val;
+                const field_atom = self.resultErrorFieldAtom() orelse break :blk value.JSValue.undefined_val;
+                break :blk if (field_atom == name) self.inline_slots[Slots.RESULT_VALUE] else value.JSValue.undefined_val;
+            },
+            else => null,
+        };
     }
 
     /// Get from JSValue (unsafe - caller must verify isObject)
