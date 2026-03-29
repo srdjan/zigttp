@@ -160,6 +160,7 @@ When the BoolChecker cannot determine the type statically, it infers `unknown`. 
 | imported virtual-module call | known return type when modeled |
 | optional virtual-module return | optional string/object |
 | Result property access (`result.ok`) | known property type when modeled |
+| Generic alias application (`Result<string>`) | instantiated record type |
 | `if (x)` where x is optional | narrows to non-optional in then-branch |
 | `typeof x === "T"` guard (then-branch) | T (narrowed) |
 | `typeof x !== "T"` guard (else-branch) | T (narrowed) |

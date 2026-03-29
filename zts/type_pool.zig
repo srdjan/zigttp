@@ -305,7 +305,7 @@ pub const TypePool = struct {
         const tag = self.getTag(idx) orelse return idx;
 
         switch (tag) {
-            .t_generic_param => {
+            .t_generic_param, .t_ref => {
                 const name = self.getRefName(idx);
                 for (param_names, 0..) |pn, i| {
                     if (std.mem.eql(u8, name, pn) and i < param_types.len) {
@@ -442,6 +442,16 @@ pub const TypePool = struct {
         const tag = self.getTag(idx) orelse return "";
         if (tag != .t_ref and tag != .t_generic_param) return "";
         return self.getName(data.a, @intCast(data.b));
+    }
+
+    /// Get generic application base and type arguments.
+    pub fn getGenericAppInfo(self: *const TypePool, idx: TypeIndex) struct { base: TypeIndex, args: []const TypeIndex } {
+        const data = self.getData(idx) orelse return .{ .base = null_type_idx, .args = &.{} };
+        if (self.getTag(idx) != .t_generic_app) return .{ .base = null_type_idx, .args = &.{} };
+        const start: u16 = data.b & 0xFF;
+        const count: u16 = data.b >> 8;
+        if (start + count > self.members.items.len) return .{ .base = data.a, .args = &.{} };
+        return .{ .base = data.a, .args = self.members.items[start .. start + count] };
     }
 
     // -------------------------------------------------------------------

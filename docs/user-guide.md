@@ -741,13 +741,23 @@ Functions like `jwtVerify`, `validateJson`, `validateObject`, and `coerceJson` r
 `{ ok: true, value: T } | { ok: false, error: string }`. The handler verifier enforces
 that `.ok` is checked before `.value` is accessed.
 
+You can define a generic `Result<T>` alias for your own annotations:
+
+```typescript
+type Result<T> = { ok: boolean; value: T; error: string };
+```
+
+The type checker instantiates this when used - `Result<object>` becomes `{ ok: boolean; value: object; error: string }`.
+
 ```typescript
 import { jwtVerify } from "zigttp:auth";
 import { validateJson } from "zigttp:validate";
 
+type Result<T> = { ok: boolean; value: T; error: string };
+
 function handler(req: Request): Response {
     const token = req.headers["authorization"];
-    const auth = jwtVerify(token, "secret");
+    const auth: Result<object> = jwtVerify(token, "secret");
     if (!auth.ok) return Response.json({ error: auth.error }, { status: 401 });
 
     const body = validateJson("user", req.body);
@@ -1355,9 +1365,11 @@ The TypeScript stripper performs a single-pass transformation:
 
 1. Removes type annotations (`: Type`, `as Type`)
 2. Removes interface and type declarations
-3. Removes generics (`<T>`)
+3. Removes generics (`<T>`) and generic type aliases (`type Result<T> = ...`)
 4. Preserves all runtime code unchanged
 5. Optionally evaluates `comptime()` expressions
+
+Generic type aliases are resolved by the type checker. When you write `type Result<T> = { ok: boolean; value: T }` and use `Result<string>` in an annotation, the checker instantiates it to `{ ok: boolean; value: string }` for structural validation.
 
 ### Basic TypeScript Handler
 

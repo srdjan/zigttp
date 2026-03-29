@@ -63,6 +63,16 @@ pub const FunctionSig = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Generic type alias (type Result<T> = ...)
+// ---------------------------------------------------------------------------
+
+pub const GenericAlias = struct {
+    param_names: [8][]const u8 = undefined,
+    param_count: u8 = 0,
+    body: TypeIndex = null_type_idx,
+};
+
+// ---------------------------------------------------------------------------
 // Type Environment
 // ---------------------------------------------------------------------------
 
@@ -72,6 +82,8 @@ pub const TypeEnv = struct {
 
     /// Type namespace: type alias name -> resolved TypeIndex
     type_aliases: std.StringHashMapUnmanaged(TypeIndex),
+    /// Generic type aliases: name -> uninstantiated body + param names
+    generic_aliases: std.StringHashMapUnmanaged(GenericAlias),
     /// Interface namespace: interface name -> resolved TypeIndex
     interfaces: std.StringHashMapUnmanaged(TypeIndex),
     /// Variable types: packed(context_line, context_col) -> TypeIndex
@@ -94,6 +106,7 @@ pub const TypeEnv = struct {
             .pool = pool,
             .allocator = allocator,
             .type_aliases = .empty,
+            .generic_aliases = .empty,
             .interfaces = .empty,
             .var_types = .empty,
             .fn_signatures = .empty,
@@ -106,6 +119,7 @@ pub const TypeEnv = struct {
 
     pub fn deinit(self: *TypeEnv) void {
         self.type_aliases.deinit(self.allocator);
+        self.generic_aliases.deinit(self.allocator);
         self.interfaces.deinit(self.allocator);
         self.var_types.deinit(self.allocator);
         self.fn_signatures.deinit(self.allocator);
@@ -127,9 +141,19 @@ pub const TypeEnv = struct {
     /// then variable/param/return annotations.
     pub fn populateFromTypeMap(self: *TypeEnv, tm: *const TypeMap) void {
         // First pass: type aliases and interfaces (defines the type namespace)
+        // Collect generic_params entries keyed by (name_start, name_end) for alias lookup.
+        var generic_params_map: std.AutoHashMapUnmanaged(u64, TypeMapEntry) = .empty;
+        defer generic_params_map.deinit(self.allocator);
+        for (tm.entries.items) |entry| {
+            if (entry.kind == .generic_params and entry.name_start != 0) {
+                const key = (@as(u64, entry.name_start) << 32) | entry.name_end;
+                generic_params_map.put(self.allocator, key, entry) catch {};
+            }
+        }
+
         for (tm.entries.items) |entry| {
             switch (entry.kind) {
-                .type_alias => self.processTypeAlias(tm, entry),
+                .type_alias => self.processTypeAlias(tm, entry, &generic_params_map),
                 .interface_decl => self.processInterface(tm, entry),
                 else => {},
             }
@@ -175,11 +199,45 @@ pub const TypeEnv = struct {
         }
     }
 
-    fn processTypeAlias(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
+    fn processTypeAlias(
+        self: *TypeEnv,
+        tm: *const TypeMap,
+        entry: TypeMapEntry,
+        generic_params_map: *const std.AutoHashMapUnmanaged(u64, TypeMapEntry),
+    ) void {
         const name = tm.getNameText(entry) orelse return;
         const type_text = tm.getTypeText(entry);
         if (type_text.len == 0) return;
 
+        // Check for matching generic_params entry (same name range).
+        const gp_key = (@as(u64, entry.name_start) << 32) | entry.name_end;
+        if (generic_params_map.get(gp_key)) |gp_entry| {
+            const params_text = tm.getTypeText(gp_entry);
+            if (params_text.len > 0) {
+                // Parse comma-separated param names and resolve body in generic scope.
+                var alias = GenericAlias{};
+                self.pushGenericScope();
+
+                var it = std.mem.splitScalar(u8, params_text, ',');
+                while (it.next()) |raw_param| {
+                    const param_name = std.mem.trim(u8, raw_param, " \t\n\r");
+                    if (param_name.len == 0) continue;
+                    if (alias.param_count >= 8) break;
+                    _ = self.addGenericParam(param_name);
+                    alias.param_names[alias.param_count] = self.internName(param_name);
+                    alias.param_count += 1;
+                }
+
+                alias.body = self.resolveType(type_text);
+                self.popGenericScope();
+
+                const owned_name = self.internName(name);
+                self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
+                return;
+            }
+        }
+
+        // Non-generic alias: simple name -> type mapping.
         const type_idx = self.resolveType(type_text);
         const owned_name = self.internName(name);
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch {};
@@ -233,6 +291,8 @@ pub const TypeEnv = struct {
 
     /// Resolve a type expression string to a TypeIndex.
     /// Checks type aliases and interfaces before falling back to the parser.
+    /// For generic applications (e.g. Result<string>), instantiates the generic
+    /// alias body by substituting type parameters with the provided arguments.
     pub fn resolveType(self: *TypeEnv, type_text: []const u8) TypeIndex {
         // Trim whitespace
         const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
@@ -251,7 +311,36 @@ pub const TypeEnv = struct {
             }
         }
         // Fall back to type expression parser
-        return parseTypeExpr(self.pool, self.allocator, trimmed);
+        const parsed = parseTypeExpr(self.pool, self.allocator, trimmed);
+
+        // If the parser produced a generic application (e.g. Result<string>),
+        // try to instantiate it against a known generic alias.
+        return self.tryInstantiateGenericApp(parsed);
+    }
+
+    /// If idx is a t_generic_app whose base resolves to a generic alias,
+    /// instantiate the alias body with the provided type arguments.
+    fn tryInstantiateGenericApp(self: *TypeEnv, idx: TypeIndex) TypeIndex {
+        if (idx == null_type_idx) return idx;
+        if (self.pool.getTag(idx) != .t_generic_app) return idx;
+
+        const info = self.pool.getGenericAppInfo(idx);
+        if (info.base == null_type_idx) return idx;
+
+        // The base should be a t_ref; get its name.
+        const base_name = self.pool.getRefName(info.base);
+        if (base_name.len == 0) return idx;
+
+        const alias = self.generic_aliases.get(base_name) orelse return idx;
+        if (info.args.len != alias.param_count) return idx;
+
+        return self.pool.instantiate(
+            self.allocator,
+            alias.body,
+            alias.param_names[0..alias.param_count],
+            info.args,
+            0,
+        );
     }
 
     /// Look up a variable's declared type by name.
@@ -509,4 +598,164 @@ test "TypeEnv generic scope" {
     const resolved2 = env.resolveType("T");
     // It will be a ref type now, not the generic param
     try std.testing.expect(resolved2 != t_idx);
+}
+
+test "TypeEnv generic type alias Result<string>" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Simulate: type Result<T> = { ok: boolean; value: T; error: string }
+    //           const auth: Result<object> = jwtVerify(token, secret);
+    const source = "type Result<T> = { ok: boolean; value: T; error: string };const auth: Result<object> = jwtVerify();";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    // type_alias entry: body is "{ ok: boolean; value: T; error: string }"
+    try tm.addEntry(allocator, .{
+        .kind = .type_alias,
+        .source_start = 17, // "{ ok: boolean; value: T; error: string }"
+        .source_end = 57,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5, // "Result"
+        .name_end = 11,
+    });
+
+    // generic_params entry: "T" (same name range as the alias)
+    try tm.addEntry(allocator, .{
+        .kind = .generic_params,
+        .source_start = 12, // "T"
+        .source_end = 13,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5, // "Result"
+        .name_end = 11,
+    });
+
+    // var annotation: auth: Result<object>
+    try tm.addEntry(allocator, .{
+        .kind = .var_annotation,
+        .source_start = 70, // "Result<object>"
+        .source_end = 84,
+        .context_line = 1,
+        .context_col = 58,
+        .name_start = 64, // "auth"
+        .name_end = 68,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    // "Result" should be in generic_aliases, not type_aliases
+    try std.testing.expect(env.getTypeAlias("Result") == null);
+    try std.testing.expect(env.generic_aliases.get("Result") != null);
+
+    // auth should resolve to an instantiated record with value: object (ref)
+    const auth_type = env.getVarTypeByName("auth");
+    try std.testing.expect(auth_type != null);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(auth_type.?).?);
+
+    const fields = pool.getRecordFields(auth_type.?);
+    try std.testing.expectEqual(@as(usize, 3), fields.len);
+
+    // ok: boolean
+    try std.testing.expectEqual(pool.idx_boolean, fields[0].type_idx);
+    // value: should be a ref("object"), not a generic param
+    try std.testing.expect(pool.getTag(fields[1].type_idx) != .t_generic_param);
+    // error: string
+    try std.testing.expectEqual(pool.idx_string, fields[2].type_idx);
+}
+
+test "TypeEnv generic alias with multiple params" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Simulate: type Pair<A, B> = { first: A; second: B }
+    //           const p: Pair<string, number> = ...
+    const source = "type Pair<A, B> = { first: A; second: B };const p: Pair<string, number> = x;";
+    var tm = TypeMap.init(source);
+    defer tm.deinit(allocator);
+
+    try tm.addEntry(allocator, .{
+        .kind = .type_alias,
+        .source_start = 18, // "{ first: A; second: B }"
+        .source_end = 41,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5, // "Pair"
+        .name_end = 9,
+    });
+
+    try tm.addEntry(allocator, .{
+        .kind = .generic_params,
+        .source_start = 10, // "A, B"
+        .source_end = 14,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = 5,
+        .name_end = 9,
+    });
+
+    try tm.addEntry(allocator, .{
+        .kind = .var_annotation,
+        .source_start = 51, // "Pair<string, number>"
+        .source_end = 71,
+        .context_line = 1,
+        .context_col = 42,
+        .name_start = 48, // "p"
+        .name_end = 49,
+    });
+
+    env.populateFromTypeMap(&tm);
+
+    const p_type = env.getVarTypeByName("p");
+    try std.testing.expect(p_type != null);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(p_type.?).?);
+
+    const fields = pool.getRecordFields(p_type.?);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    // first: string
+    try std.testing.expectEqual(pool.idx_string, fields[0].type_idx);
+    // second: number
+    try std.testing.expectEqual(pool.idx_number, fields[1].type_idx);
+}
+
+test "TypeEnv resolveType instantiates generic alias inline" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // Manually register a generic alias: type Box<T> = { value: T }
+    env.pushGenericScope();
+    const t_param = env.addGenericParam("T");
+    _ = t_param;
+    const val_n = pool.addName(allocator, "value");
+    const body = pool.addRecord(allocator, &.{
+        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = env.resolveType("T"), .optional = false },
+    });
+    env.popGenericScope();
+
+    const owned = env.internName("Box");
+    env.generic_aliases.put(allocator, owned, .{
+        .param_names = .{ env.internName("T"), undefined, undefined, undefined, undefined, undefined, undefined, undefined },
+        .param_count = 1,
+        .body = body,
+    }) catch {};
+
+    // resolveType("Box<number>") should instantiate to { value: number }
+    const resolved = env.resolveType("Box<number>");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(resolved).?);
+    const fields = pool.getRecordFields(resolved);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
 }

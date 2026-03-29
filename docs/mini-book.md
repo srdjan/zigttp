@@ -133,7 +133,7 @@ function handler(req: Request): Response {
 }
 ```
 
-Beyond stripping, the zts type checker validates annotations against actual usage. If you annotate a parameter as `string` and pass a number, the compiler catches it. Virtual module return types are fully typed - `jwtVerify` returns `{ok: boolean, value?: object, error?: string}`, and the type checker knows this.
+Beyond stripping, the zts type checker validates annotations against actual usage. If you annotate a parameter as `string` and pass a number, the compiler catches it. Virtual module return types are fully typed - `jwtVerify` returns `{ok: boolean, value?: object, error?: string}`, and the type checker knows this. Generic type aliases are fully supported: `type Result<T> = { ok: boolean; value: T; error: string }` can be used in annotations like `const auth: Result<object>`, and the checker instantiates the body with the provided type arguments.
 
 ### JSX and Server-Side Rendering
 
@@ -412,7 +412,7 @@ This two-pass design is deliberate. The IR tree is the artifact that all static 
 
 ### TypeScript Stripping
 
-The TypeScript stripper is a separate pass that runs before parsing. It removes type annotations, interface declarations, type aliases, and generics while preserving source positions for accurate error reporting. The stripper also enforces zigttp-specific TypeScript restrictions: the `any` type is a compile-time error (use `unknown` with narrowing instead), and type assertions (`as`, `satisfies`) are rejected (use type guards instead).
+The TypeScript stripper is a separate pass that runs before parsing. It removes type annotations, interface declarations, type aliases, and generics while preserving source positions for accurate error reporting. Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are recorded with their parameter names; the type checker instantiates them when used in annotations (`Result<string>` resolves to the concrete record type). The stripper also enforces zigttp-specific TypeScript restrictions: the `any` type is a compile-time error (use `unknown` with narrowing instead), and type assertions (`as`, `satisfies`) are rejected (use type guards instead).
 
 ### Sound Mode
 

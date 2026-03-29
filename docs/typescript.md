@@ -29,6 +29,20 @@ The type stripper (`zts/stripper.zig`) removes TypeScript syntax before parsing,
 - Generic params on functions: `function id<T>(x: T): T { ... }`
 - Generic arrow functions in .ts files: `const id = <T>(x: T): T => x;`
 
+**Generic type aliases** (stripped and type-checked):
+
+Generic type aliases like `type Result<T> = { ok: boolean; value: T }` are stripped at load time and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
+
+```typescript
+type Result<T> = { ok: boolean; value: T; error: string };
+type Pair<A, B> = { first: A; second: B };
+
+const auth: Result<object> = jwtVerify(token, secret);  // checked as { ok: boolean; value: object; error: string }
+const pair: Pair<string, number> = { first: "a", second: 1 };
+```
+
+Up to 8 type parameters per alias are supported.
+
 ### Examples
 
 ```typescript
