@@ -38,6 +38,7 @@ pub const BuildReport = struct {
     flow_analysis: ?FlowAnalysisSection = null,
     manifest_alignment: ?ManifestAlignmentSection = null,
     property_expectations: ?PropertyExpectationsSection = null,
+    integration: ?IntegrationSection = null,
 };
 
 pub const VerificationSection = struct {
@@ -94,6 +95,16 @@ pub const PropertyExpectationsSection = struct {
     mismatches: u32,
 };
 
+pub const IntegrationSection = struct {
+    generator_pack: bool = false,
+    sql_schema: bool = false,
+    manifest: bool = false,
+    property_expectations: bool = false,
+    data_labels: bool = false,
+    replay: bool = false,
+    fault_severity: bool = false,
+};
+
 // -------------------------------------------------------------------------
 // Report construction
 // -------------------------------------------------------------------------
@@ -107,6 +118,7 @@ pub fn buildReport(
     contract: *const HandlerContract,
     alignment: ?*const ManifestAlignment,
     prop_result: ?*const ExpectationResult,
+    integration_inputs: ?*const IntegrationSection,
     handler_path: []const u8,
 ) BuildReport {
     const proof_level = contract_diff.deriveProofLevel(contract);
@@ -166,6 +178,8 @@ pub fn buildReport(
         .mismatches = @intCast(r.mismatches.len),
     } else null;
 
+    const integration_section: ?IntegrationSection = if (integration_inputs) |inputs| inputs.* else null;
+
     return .{
         .handler = handler_path,
         .proof_level = proof_level.toString(),
@@ -175,6 +189,7 @@ pub fn buildReport(
         .flow_analysis = flow_analysis,
         .manifest_alignment = manifest_alignment_section,
         .property_expectations = property_expectations_section,
+        .integration = integration_section,
     };
 }
 
@@ -322,6 +337,19 @@ pub fn writeReportJson(writer: anytype, report: *const BuildReport) !void {
         try writer.print("    \"passed\": {s},\n", .{if (pe.passed) "true" else "false"});
         try writer.print("    \"checkedRoutes\": {d},\n", .{pe.checked_routes});
         try writer.print("    \"mismatches\": {d}\n", .{pe.mismatches});
+        try writer.writeAll("  }");
+    }
+
+    if (report.integration) |integration| {
+        try writer.writeAll(",\n");
+        try writer.writeAll("  \"integration\": {\n");
+        try writer.print("    \"generatorPack\": {s},\n", .{if (integration.generator_pack) "true" else "false"});
+        try writer.print("    \"sqlSchema\": {s},\n", .{if (integration.sql_schema) "true" else "false"});
+        try writer.print("    \"manifest\": {s},\n", .{if (integration.manifest) "true" else "false"});
+        try writer.print("    \"propertyExpectations\": {s},\n", .{if (integration.property_expectations) "true" else "false"});
+        try writer.print("    \"dataLabels\": {s},\n", .{if (integration.data_labels) "true" else "false"});
+        try writer.print("    \"replay\": {s},\n", .{if (integration.replay) "true" else "false"});
+        try writer.print("    \"faultSeverity\": {s}\n", .{if (integration.fault_severity) "true" else "false"});
         try writer.writeAll("  }");
     }
 
@@ -531,7 +559,7 @@ test "buildReport: from contract with verification and properties" {
         .warnings = 0,
     };
 
-    const br = buildReport(allocator, &contract, null, null, "handler.ts");
+    const br = buildReport(allocator, &contract, null, null, null, "handler.ts");
     defer {
         if (br.verification) |v| allocator.free(v.checks);
     }
@@ -557,7 +585,7 @@ test "buildReport: minimal contract" {
     var contract = emptyContract();
     defer contract.deinit(allocator);
 
-    const report = buildReport(allocator, &contract, null, null, "minimal.ts");
+    const report = buildReport(allocator, &contract, null, null, null, "minimal.ts");
 
     try std.testing.expectEqualStrings("minimal.ts", report.handler);
     try std.testing.expectEqualStrings("none", report.proof_level);

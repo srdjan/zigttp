@@ -80,6 +80,11 @@ pub const ModuleCompiler = struct {
 
             const root = js_parser.parse() catch |err| {
                 std.log.err("Parse error in module '{s}': {}", .{ module.path, err });
+                var err_buf: [1024]u8 = undefined;
+                const formatted = js_parser.errors.formatFirstError(&err_buf);
+                if (formatted.len > 0) {
+                    std.log.err("{s}", .{formatted});
+                }
                 js_parser.deinit();
                 return err;
             };

@@ -125,7 +125,10 @@ pub const ModuleGraph = struct {
             const is_tsx = std.mem.endsWith(u8, owned_path, ".tsx");
             const strip_result = stripper.strip(self.allocator, owned_source, .{
                 .tsx_mode = is_tsx,
-            }) catch null;
+            }) catch |err| blk: {
+                std.debug.print("TypeScript strip failed for module '{s}': {}\n", .{ owned_path, err });
+                break :blk null;
+            };
             if (strip_result) |sr| {
                 stripped = sr.code;
             }
@@ -149,6 +152,7 @@ pub const ModuleGraph = struct {
         if (depth > MAX_NESTING_DEPTH) return error.ImportNestingTooDeep;
 
         var module = &self.module_list.items[module_idx];
+        const module_path = module.path;
         const source = module.stripped_source orelse module.source;
 
         // Quick-parse to extract import declarations
@@ -179,7 +183,7 @@ pub const ModuleGraph = struct {
             const resolve_result = resolver.resolve(module_str);
             switch (resolve_result) {
                 .file => |specifier| {
-                    const importing_dir = file_resolver.dirName(module.path);
+                    const importing_dir = file_resolver.dirName(module_path);
                     const resolved_path = try file_resolver.resolve(self.allocator, specifier, importing_dir, null);
 
                     // Check if already in graph (dedup)
@@ -191,6 +195,10 @@ pub const ModuleGraph = struct {
 
                     // Read the file
                     const dep_source = read_file(self.allocator, resolved_path) catch {
+                        std.debug.print(
+                            "Module graph read failed: importer={s} specifier={s} resolved={s}\n",
+                            .{ module_path, specifier, resolved_path },
+                        );
                         self.allocator.free(resolved_path);
                         return error.ImportFileNotFound;
                     };

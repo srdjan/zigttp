@@ -122,6 +122,7 @@ const PrecompileOptions = struct {
     expect_properties_path: ?[]const u8 = null,
     data_labels_path: ?[]const u8 = null,
     fault_severity_path: ?[]const u8 = null,
+    generator_pack_path: ?[]const u8 = null,
     report_format: ?[]const u8 = null,
 };
 
@@ -225,6 +226,13 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
             };
             continue;
         }
+        if (std.mem.eql(u8, arg, "--generator-pack")) {
+            opts.generator_pack_path = args.next() orelse {
+                std.debug.print("Missing path after --generator-pack\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--report")) {
             opts.report_format = args.next() orelse {
                 std.debug.print("Missing format after --report (values: json)\n", .{});
@@ -259,6 +267,75 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
     return opts;
 }
 
+const ResolvedGeneratorPack = struct {
+    sql_schema_path: ?[]const u8 = null,
+    manifest_path: ?[]const u8 = null,
+    expect_properties_path: ?[]const u8 = null,
+    data_labels_path: ?[]const u8 = null,
+    replay_trace_path: ?[]const u8 = null,
+    fault_severity_path: ?[]const u8 = null,
+    report_format: ?[]const u8 = null,
+
+    fn deinit(self: *ResolvedGeneratorPack, allocator: std.mem.Allocator) void {
+        const owned = [_]?[]const u8{
+            self.sql_schema_path,
+            self.manifest_path,
+            self.expect_properties_path,
+            self.data_labels_path,
+            self.replay_trace_path,
+            self.fault_severity_path,
+            self.report_format,
+        };
+        for (owned) |value| {
+            if (value) |slice| allocator.free(slice);
+        }
+    }
+};
+
+fn dupJsonValue(
+    allocator: std.mem.Allocator,
+    obj: std.json.ObjectMap,
+    key: []const u8,
+    resolve_base: ?[]const u8,
+) !?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    if (value != .string) return error.InvalidGeneratorPack;
+    if (resolve_base) |base_dir| {
+        if (!std.fs.path.isAbsolute(value.string)) {
+            return try std.fs.path.resolve(allocator, &.{ base_dir, value.string });
+        }
+    }
+    return try allocator.dupe(u8, value.string);
+}
+
+fn resolveGeneratorPack(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) !ResolvedGeneratorPack {
+    const bytes = try readFilePosix(allocator, path, 1024 * 1024);
+    defer allocator.free(bytes);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.InvalidGeneratorPack;
+    const obj = parsed.value.object;
+    const base_dir = std.fs.path.dirname(path) orelse ".";
+
+    var result: ResolvedGeneratorPack = .{};
+    errdefer result.deinit(allocator);
+
+    result.sql_schema_path = try dupJsonValue(allocator, obj, "sqlSchema", base_dir);
+    result.manifest_path = try dupJsonValue(allocator, obj, "manifest", base_dir);
+    result.expect_properties_path = try dupJsonValue(allocator, obj, "expectProperties", base_dir);
+    result.data_labels_path = try dupJsonValue(allocator, obj, "dataLabels", base_dir);
+    result.replay_trace_path = try dupJsonValue(allocator, obj, "replay", base_dir);
+    result.fault_severity_path = try dupJsonValue(allocator, obj, "faultSeverity", base_dir);
+    result.report_format = try dupJsonValue(allocator, obj, "report", null);
+
+    return result;
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
         if (builtin.mode == .Debug) .init else {};
@@ -267,10 +344,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
-    const opts = parsePrecompileArgs(init.args) catch |err| {
+    var opts = parsePrecompileArgs(init.args) catch |err| {
         if (err == error.MissingArgument) return;
         return err;
     };
+
+    var generator_pack: ?ResolvedGeneratorPack = null;
+    defer if (generator_pack) |*pack| pack.deinit(allocator);
+    if (opts.generator_pack_path) |pack_path| {
+        generator_pack = resolveGeneratorPack(allocator, pack_path) catch |err| {
+            std.debug.print("Error resolving generator pack '{s}': {}\n", .{ pack_path, err });
+            return err;
+        };
+        if (opts.sql_schema_path == null) opts.sql_schema_path = generator_pack.?.sql_schema_path;
+        if (opts.manifest_path == null) opts.manifest_path = generator_pack.?.manifest_path;
+        if (opts.expect_properties_path == null) opts.expect_properties_path = generator_pack.?.expect_properties_path;
+        if (opts.data_labels_path == null) opts.data_labels_path = generator_pack.?.data_labels_path;
+        if (opts.replay_trace_path == null) opts.replay_trace_path = generator_pack.?.replay_trace_path;
+        if (opts.fault_severity_path == null) opts.fault_severity_path = generator_pack.?.fault_severity_path;
+        if (opts.report_format == null) opts.report_format = generator_pack.?.report_format;
+    }
 
     const handler_path_final = opts.handler_path;
     const output_path_final = opts.output_path;
@@ -680,11 +773,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Structured report output if --report was passed
         if (opts.report_format) |fmt| {
             if (std.mem.eql(u8, fmt, "json")) {
+                const integration_inputs = build_report.IntegrationSection{
+                    .generator_pack = opts.generator_pack_path != null,
+                    .sql_schema = opts.sql_schema_path != null,
+                    .manifest = opts.manifest_path != null,
+                    .property_expectations = opts.expect_properties_path != null,
+                    .data_labels = opts.data_labels_path != null,
+                    .replay = opts.replay_trace_path != null,
+                    .fault_severity = opts.fault_severity_path != null,
+                };
                 var handler_report = build_report.buildReport(
                     allocator,
                     contract,
                     if (manifest_alignment_result) |*ma| ma else null,
                     if (property_result) |*pr| pr else null,
+                    &integration_inputs,
                     handler_path_final,
                 );
                 defer {
@@ -1135,6 +1238,12 @@ fn compileHandler(
 
     const needs_contract = true; // Always extract for auto-sandboxing
 
+    try validateVirtualModuleImports(
+        ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        &atoms,
+        filename,
+    );
+
     // Check for file imports before proceeding with single-module compilation
     const has_file_imports = hasFileImports(&js_parser, root);
 
@@ -1530,6 +1639,54 @@ fn compileHandler(
         .contract = contract,
         .generated_tests = generated_tests_jsonl,
     };
+}
+
+fn resolveImportedAtomName(
+    atom_value: u32,
+    atoms: ?*zts.context.AtomTable,
+) ?[]const u8 {
+    const atom: zts.object.Atom = @enumFromInt(atom_value);
+    if (atom.isPredefined()) return atom.toPredefinedName();
+    if (atoms) |table| return table.getName(atom);
+    return null;
+}
+
+fn validateVirtualModuleImports(
+    view: ir.IrView,
+    atoms: ?*zts.context.AtomTable,
+    filename: []const u8,
+) !void {
+    const node_count = view.nodeCount();
+    for (0..node_count) |idx| {
+        const node_idx: ir.NodeIndex = @intCast(idx);
+        const tag = view.getTag(node_idx) orelse continue;
+        if (tag != .import_decl) continue;
+
+        const import_decl = view.getImportDecl(node_idx) orelse continue;
+        const module_str = view.getString(import_decl.module_idx) orelse continue;
+        const virtual_module = zts.modules.VirtualModule.fromSpecifier(module_str) orelse continue;
+
+        var name_buf: [32][]const u8 = undefined;
+        var name_count: usize = 0;
+        var j: u8 = 0;
+        while (j < import_decl.specifiers_count) : (j += 1) {
+            const spec_idx = view.getListIndex(import_decl.specifiers_start, j);
+            const spec = view.getImportSpec(spec_idx) orelse continue;
+            const imported_name = resolveImportedAtomName(spec.imported_atom, atoms) orelse continue;
+            if (name_count < name_buf.len) {
+                name_buf[name_count] = imported_name;
+                name_count += 1;
+            }
+        }
+
+        if (zts.modules.validateImports(virtual_module, name_buf[0..name_count])) |missing| {
+            std.debug.print(
+                "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
+                .{ module_str, missing, filename },
+            );
+            return error.InvalidImportSpecifier;
+        }
+    }
 }
 
 /// Scan parsed IR for file import declarations
@@ -2903,4 +3060,60 @@ test "buildContractWithPolicy requires sql schema when zigttp:sql is used" {
         error.MissingSqlSchema,
         buildTestContractForSource(allocator, source, entry_path, null),
     );
+}
+
+test "compileHandler rejects invalid virtual-module imports" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { definitelyMissing } from "zigttp:sql";
+        \\
+        \\function handler(req) {
+        \\  return Response.json({ ok: definitelyMissing });
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.InvalidImportSpecifier,
+        compileHandler(
+            allocator,
+            source,
+            "handler.js",
+            false,
+            false,
+            false,
+            null,
+            null,
+            false,
+        ),
+    );
+}
+
+test "resolveGeneratorPack parses integration paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const pack_json =
+        \\{
+        \\  "sqlSchema": "schema.sql",
+        \\  "manifest": "governance-manifest.json",
+        \\  "expectProperties": "handler-properties.expected.json",
+        \\  "dataLabels": "data-labels.json",
+        \\  "replay": "simulation-traces.jsonl",
+        \\  "faultSeverity": "fault-severity.json",
+        \\  "report": "json"
+        \\}
+    ;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pack.json", .data = pack_json });
+
+    const allocator = std.testing.allocator;
+    const pack_path = try tmp.dir.realPathFileAlloc(std.testing.io, "pack.json", allocator);
+    defer allocator.free(pack_path);
+
+    var pack = try resolveGeneratorPack(allocator, pack_path);
+    defer pack.deinit(allocator);
+
+    try std.testing.expect(std.mem.endsWith(u8, pack.sql_schema_path.?, "/schema.sql"));
+    try std.testing.expect(std.mem.endsWith(u8, pack.manifest_path.?, "/governance-manifest.json"));
+    try std.testing.expectEqualStrings("json", pack.report_format.?);
 }

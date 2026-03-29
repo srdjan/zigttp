@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
     const expect_properties_path = b.option([]const u8, "expect-properties", "Expected handler properties JSON for build-time verification");
     const data_labels_path = b.option([]const u8, "data-labels", "External data label declarations JSON for flow checker enrichment");
     const fault_severity_path = b.option([]const u8, "fault-severity", "External fault severity overrides JSON for coverage analysis");
+    const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/data-label/replay/report wiring");
     const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
 
     // zts module (Zig TypeScript compiler - the primary JS engine)
@@ -163,6 +164,10 @@ pub fn build(b: *std.Build) void {
         if (fault_severity_path) |fs| {
             run_precompile.addArg("--fault-severity");
             run_precompile.addArg(fs);
+        }
+        if (generator_pack_path) |gp| {
+            run_precompile.addArg("--generator-pack");
+            run_precompile.addArg(gp);
         }
         if (report_format) |rf| {
             run_precompile.addArg("--report");

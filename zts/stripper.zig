@@ -388,7 +388,7 @@ const Stripper = struct {
 
             if (self.looksLikeTypeStart()) {
                 const ret_type_start = self.pos;
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' });
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';', '=' }, true);
                 const ret_type_end = self.pos;
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
@@ -452,6 +452,20 @@ const Stripper = struct {
             if (c == ',' and paren_depth == 1) {
                 last_ident_start = 0;
                 last_ident_end = 0;
+            }
+
+            // Optional parameter marker in TypeScript: `name?: Type`
+            if (c == '?' and paren_depth == 1) {
+                const question_pos = self.pos;
+                self.pos += 1;
+                self.col += 1;
+                self.skipWhitespaceTracked();
+                if (self.pos < self.source.len and self.source[self.pos] == ':') {
+                    self.blankSpan(question_pos, self.pos);
+                    continue;
+                }
+                self.pos = question_pos;
+                self.col -= 1;
             }
 
             // Strip type annotations in params
@@ -525,7 +539,7 @@ const Stripper = struct {
             if (self.looksLikeTypeStart()) {
                 const ret_type_start = self.pos;
                 // Skip to => or {
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'});
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{'{'}, true);
                 const ret_type_end = self.pos;
                 // Check for =>
                 self.skipWhitespaceTracked();
@@ -656,7 +670,11 @@ const Stripper = struct {
                 if (brace_depth > 0) brace_depth -= 1;
             } else if (c == ',' and paren_depth == 0 and angle_depth == 0 and bracket_depth == 0 and brace_depth == 0) {
                 return; // Next param
-            } else if (c == '=' and paren_depth == 0 and angle_depth == 0) {
+            } else if (c == '=' and
+                paren_depth == 0 and
+                angle_depth == 0 and
+                !(self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>'))
+            {
                 return; // Default value
             }
 
@@ -730,7 +748,7 @@ const Stripper = struct {
                 self.col += 7;
                 self.skipWhitespaceTracked();
                 // Skip base type(s)
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' });
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' }, false);
                 self.skipWhitespaceTracked();
             }
         }
@@ -745,7 +763,7 @@ const Stripper = struct {
             self.col += 1;
             self.skipWhitespaceTracked();
             type_body_start = self.pos;
-            try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' });
+            try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' }, false);
             type_body_end = self.pos;
         }
 
@@ -817,16 +835,101 @@ const Stripper = struct {
         self.col += 6;
         self.skipWhitespaceTracked();
 
-        const type_kw = self.peekKeyword();
-        if (type_kw == null or !std.mem.eql(u8, type_kw.?, "type")) {
+        const decl_kw = self.peekKeyword();
+        if (decl_kw == null) {
             self.pos = saved_pos;
             self.line = saved_line;
             self.col = saved_col;
             return false;
         }
 
-        // Skip to end of statement
-        self.skipToStatementEnd();
+        const is_type = std.mem.eql(u8, decl_kw.?, "type");
+        const is_interface = std.mem.eql(u8, decl_kw.?, "interface");
+        if (!is_type and !is_interface) {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        }
+
+        self.pos += decl_kw.?.len;
+        self.col += @intCast(decl_kw.?.len);
+        self.skipWhitespaceTracked();
+
+        // Handle `export type { Foo }` re-exports.
+        if (is_type and self.pos < self.source.len and self.source[self.pos] == '{') {
+            self.skipToStatementEnd();
+            self.blankSpan(saved_pos, self.pos);
+            return true;
+        }
+
+        if (!self.peekIdentifierStart()) {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        }
+
+        const name_start = self.pos;
+        _ = self.scanIdentifier();
+        const name_end = self.pos;
+        self.skipWhitespaceTracked();
+
+        var generic_start: usize = 0;
+        var generic_end: usize = 0;
+        if (self.pos < self.source.len and self.source[self.pos] == '<') {
+            generic_start = self.pos;
+            if (!self.skipBalancedAngles()) {
+                self.pos = saved_pos;
+                self.line = saved_line;
+                self.col = saved_col;
+                return false;
+            }
+            generic_end = self.pos;
+            self.skipWhitespaceTracked();
+        }
+
+        if (is_interface) {
+            const extends_kw = self.peekKeyword();
+            if (extends_kw != null and std.mem.eql(u8, extends_kw.?, "extends")) {
+                self.pos += 7; // "extends"
+                self.col += 7;
+                self.skipWhitespaceTracked();
+                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' }, false);
+                self.skipWhitespaceTracked();
+            }
+        }
+
+        var type_body_start: usize = 0;
+        var type_body_end: usize = 0;
+
+        if (is_type and self.pos < self.source.len and self.source[self.pos] == '=') {
+            self.pos += 1;
+            self.col += 1;
+            self.skipWhitespaceTracked();
+            type_body_start = self.pos;
+            try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' }, false);
+            type_body_end = self.pos;
+        }
+
+        if (is_interface and self.pos < self.source.len and self.source[self.pos] == '{') {
+            type_body_start = self.pos;
+            self.skipBalancedBraces();
+            type_body_end = self.pos;
+        }
+
+        self.skipWhitespaceTracked();
+        if (self.pos < self.source.len and self.source[self.pos] == ';') {
+            self.pos += 1;
+            self.col += 1;
+        }
+
+        const kind: TypeMapKind = if (is_type) .type_alias else .interface_decl;
+        self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
+        if (generic_start != 0) {
+            self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
+        }
+
         self.blankSpan(saved_pos, self.pos);
         return true;
     }
@@ -944,7 +1047,10 @@ const Stripper = struct {
 
         // This looks like a type annotation - skip the type
         const type_start = self.pos;
-        try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ',', ')', ';', '=', '{', '}' });
+        try self.skipTypeExpressionUntilDelimiter(
+            &[_]u8{ ',', ')', ';', '=', '{', '}' },
+            false,
+        );
         // Trim trailing whitespace from type text
         const type_end = trimTrailingWs(self.source, type_start, self.pos);
 
@@ -1299,7 +1405,11 @@ const Stripper = struct {
         }
     }
 
-    fn skipTypeExpressionUntilDelimiter(self: *Self, delimiters: []const u8) StripError!void {
+    fn skipTypeExpressionUntilDelimiter(
+        self: *Self,
+        delimiters: []const u8,
+        stop_before_arrow: bool,
+    ) StripError!void {
         var paren_depth: u16 = 0;
         var bracket_depth: u16 = 0;
         var angle_depth: u16 = 0;
@@ -1325,7 +1435,7 @@ const Stripper = struct {
                     if (c == d) return;
                 }
                 // Check for arrow
-                if (c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') {
+                if (stop_before_arrow and c == '=' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '>') {
                     return; // Stop before =>
                 }
             }
@@ -1719,6 +1829,33 @@ test "export type stripped" {
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
+test "exported type alias declaration stripped" {
+    const source =
+        \\export type Result<T, E> = {
+        \\  ok: boolean;
+        \\  value?: T;
+        \\  error?: E;
+        \\};
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "exported interface declaration stripped" {
+    const source =
+        \\export interface AppCapabilities {
+        \\  taskRepo: Repository<Task>;
+        \\  clock: Clock;
+        \\}
+    ;
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
 // NOTE: enum, namespace, decorator, implements, and access modifier detection
 // has been moved to the parser (Stage 4). The stripper now passes these through
 // so the parser can produce consistent error messages for both .ts and .js files.
@@ -1847,6 +1984,27 @@ test "function params annotation stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "function add(a") != null);
 }
 
+test "optional function param annotation stripped" {
+    const result = try strip(std.testing.allocator, "function greet(name?: string) { return name; }", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "name?") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "function greet(name") != null);
+}
+
+test "function-typed param annotation stripped" {
+    const result = try strip(
+        std.testing.allocator,
+        "function use(loadState: (id: string) => string | undefined) { return loadState(\"1\"); }",
+        .{},
+    );
+    defer @constCast(&result).deinit();
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "loadState:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "=> string") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "function use(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "return loadState(\"1\")") != null);
+}
+
 test "function return type stripped" {
     const result = try strip(std.testing.allocator, "function add(a, b): number { return a + b; }", .{});
     defer @constCast(&result).deinit();
@@ -1890,6 +2048,13 @@ test "generic function stripped" {
 
 test "generic type alias stripped" {
     const result = try strip(std.testing.allocator, "type Box<T> = { value: T };", .{});
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "function type alias stripped" {
+    const result = try strip(std.testing.allocator, "type HandlerFn = (req: Request) => Response;", .{});
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
