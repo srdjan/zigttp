@@ -101,15 +101,15 @@ pub fn resultErr(handle: *ModuleHandle, message: []const u8) !value.JSValue {
 /// Create a Result object: { ok: false, error: payload }
 pub fn resultErrValue(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const builtins_helpers = @import("builtins/helpers.zig");
-    return builtins_helpers.createResultErr(ctx, payload);
+    const util = @import("modules/util.zig");
+    return util.createPlainResultErrValue(ctx, payload);
 }
 
 /// Create a Result object: { ok: false, errors: payload }
 pub fn resultErrs(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const builtins_helpers = @import("builtins/helpers.zig");
-    return builtins_helpers.createResultErrWithField(ctx, payload, .errors);
+    const util = @import("modules/util.zig");
+    return util.createPlainResultErrs(ctx, payload);
 }
 
 /// Throw a JS error. Sets ctx.exception and returns exception_val.

@@ -589,9 +589,17 @@ pub const TypePool = struct {
     }
 
     fn literalEquals(self: *const TypePool, a: TypeIndex, b: TypeIndex) bool {
+        const a_tag = self.getTag(a) orelse return false;
+        const b_tag = self.getTag(b) orelse return false;
+        if (a_tag != b_tag) return false;
+
         const a_data = self.getData(a) orelse return false;
         const b_data = self.getData(b) orelse return false;
-        return a_data.a == b_data.a and a_data.b == b_data.b;
+        return switch (a_tag) {
+            .t_literal_string => std.mem.eql(u8, self.getName(a_data.a, @truncate(a_data.b)), self.getName(b_data.a, @truncate(b_data.b))),
+            .t_literal_number, .t_literal_bool => a_data.a == b_data.a,
+            else => a_data.a == b_data.a and a_data.b == b_data.b,
+        };
     }
 
     // -------------------------------------------------------------------

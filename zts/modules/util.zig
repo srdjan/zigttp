@@ -74,6 +74,11 @@ pub fn createPlainResultErr(ctx: *context.Context, message: []const u8) !value.J
     return builtins_helpers.createResultErr(ctx, msg_val);
 }
 
+/// Create an error result from a JSValue payload: { ok: false, error: payload }
+pub fn createPlainResultErrValue(ctx: *context.Context, payload: value.JSValue) value.JSValue {
+    return builtins_helpers.createResultErr(ctx, payload);
+}
+
 /// Create a plain errors result: { ok: false, errors: errors_array }
 pub fn createPlainResultErrs(ctx: *context.Context, errors: value.JSValue) !value.JSValue {
     return builtins_helpers.createResultErrWithField(ctx, errors, .errors);

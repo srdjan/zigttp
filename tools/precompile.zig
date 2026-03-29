@@ -127,11 +127,26 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
     var output_path: ?[]const u8 = null;
 
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--aot")) { opts.emit_aot = true; continue; }
-        if (std.mem.eql(u8, arg, "--verify")) { opts.emit_verify = true; continue; }
-        if (std.mem.eql(u8, arg, "--generate-tests")) { opts.generate_tests = true; continue; }
-        if (std.mem.eql(u8, arg, "--contract")) { opts.emit_contract = true; continue; }
-        if (std.mem.eql(u8, arg, "--openapi")) { opts.emit_openapi = true; continue; }
+        if (std.mem.eql(u8, arg, "--aot")) {
+            opts.emit_aot = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--verify")) {
+            opts.emit_verify = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--generate-tests")) {
+            opts.generate_tests = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--contract")) {
+            opts.emit_contract = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--openapi")) {
+            opts.emit_openapi = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
             opts.sql_schema_path = args.next() orelse {
                 std.debug.print("Missing path after --sql-schema\n", .{});
@@ -174,8 +189,14 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
             };
             continue;
         }
-        if (handler_path == null) { handler_path = arg; continue; }
-        if (output_path == null) { output_path = arg; continue; }
+        if (handler_path == null) {
+            handler_path = arg;
+            continue;
+        }
+        if (output_path == null) {
+            output_path = arg;
+            continue;
+        }
         std.debug.print("Unexpected argument: {s}\n", .{arg});
         return error.InvalidArgument;
     }
@@ -1101,8 +1122,27 @@ fn compileHandler(
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
 
+        var verify_type_pool: ?zts.TypePool = null;
+        var verify_type_env: ?zts.TypeEnv = null;
+        var verify_type_checker: ?zts.TypeChecker = null;
+        defer if (verify_type_checker) |*checker| checker.deinit();
+        defer if (verify_type_env) |*env| env.deinit();
+        defer if (verify_type_pool) |*pool| pool.deinit(allocator);
+
+        const verifier_env: ?*const zts.TypeEnv = if (strip_result) |sr| blk: {
+            verify_type_pool = zts.TypePool.init(allocator);
+            verify_type_env = zts.TypeEnv.init(allocator, &verify_type_pool.?);
+            zts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
+            verify_type_env.?.populateFromTypeMap(&sr.type_map);
+            verify_type_checker = zts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
+            _ = verify_type_checker.?.check(root) catch 0;
+            break :blk &verify_type_env.?;
+        } else null;
+
+        const verifier_type_checker: ?*const zts.TypeChecker = if (verify_type_checker) |*checker| checker else null;
+
         if (handler_fn) |hf| {
-            var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms);
+            var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_type_checker);
             defer verifier.deinit();
 
             const error_count = try verifier.verify(hf);

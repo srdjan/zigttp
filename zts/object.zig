@@ -1886,7 +1886,7 @@ pub const JSObject = extern struct {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
-        if (self.class_id == .result and isResultCoreProperty(name)) {
+        if (self.class_id == .result) {
             if (self.getResultCoreProperty(name)) |val| return val;
         }
         // Range iterator: compute length on demand
@@ -1915,7 +1915,7 @@ pub const JSObject = extern struct {
         if (self.class_id == .array and name == .length) {
             return self.inline_slots[Slots.ARRAY_LENGTH];
         }
-        if (self.class_id == .result and isResultCoreProperty(name)) {
+        if (self.class_id == .result) {
             if (self.getResultCoreProperty(name)) |val| return val;
         }
         // Range iterator: compute length on demand

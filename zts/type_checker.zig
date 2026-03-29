@@ -21,6 +21,7 @@ const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
 const bool_checker_mod = @import("bool_checker.zig");
+const match_analysis_mod = @import("match_analysis.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -54,6 +55,7 @@ pub const DiagnosticKind = enum {
     arg_count_mismatch, // wrong number of arguments
     arg_type_mismatch, // argument type doesn't match parameter
     return_type_mismatch, // return value doesn't match declared return type
+    non_exhaustive_match, // match is not provably exhaustive
 };
 
 pub const Diagnostic = struct {
@@ -181,9 +183,16 @@ pub const TypeChecker = struct {
                     const key = packBindingKey(binding.scope_id, binding.slot);
                     const inferred = self.inferType(vd.init);
 
-                    // Look up declared type by variable name
-                    const name = self.resolveAtomName(binding.slot);
-                    const declared = if (name) |n| self.env.getVarTypeByName(n) orelse null_type_idx else null_type_idx;
+                    const loc = self.ir_view.getLoc(node);
+                    const declared = if (loc) |l|
+                        (self.env.getVarTypeByLoc(l.line, l.column) orelse blk: {
+                            const name = self.resolveAtomName(binding.slot);
+                            break :blk if (name) |n| self.env.getVarTypeByName(n) orelse null_type_idx else null_type_idx;
+                        })
+                    else blk: {
+                        const name = self.resolveAtomName(binding.slot);
+                        break :blk if (name) |n| self.env.getVarTypeByName(n) orelse null_type_idx else null_type_idx;
+                    };
 
                     if (declared != null_type_idx and inferred != null_type_idx) {
                         if (!self.env.pool.isAssignableTo(inferred, declared)) {
@@ -254,7 +263,8 @@ pub const TypeChecker = struct {
             },
 
             .function_decl => {
-                const func = self.ir_view.getFunction(node) orelse return;
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                const func = self.ir_view.getFunction(decl.init) orelse return;
                 // Look up function signature from TypeEnv
                 const loc = self.ir_view.getLoc(node);
                 const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
@@ -382,6 +392,15 @@ pub const TypeChecker = struct {
                 const me = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(me.discriminant);
                 self.walkMatchWithNarrowing(me);
+                if (!self.isMatchExhaustive(me)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .non_exhaustive_match,
+                        .node = node,
+                        .message = "match expression is not provably exhaustive",
+                        .help = "add 'default:' or 'when _:' arm, or cover every union variant",
+                    });
+                }
             },
 
             .template_literal => {
@@ -417,9 +436,22 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
 
         return switch (tag) {
-            .lit_bool => pool.idx_boolean,
-            .lit_int, .lit_float => pool.idx_number,
-            .lit_string, .template_literal => pool.idx_string,
+            .lit_bool => blk: {
+                const val = self.ir_view.getBoolValue(node) orelse break :blk pool.idx_boolean;
+                break :blk pool.addLiteralBool(self.allocator, val);
+            },
+            .lit_int => blk: {
+                const val = self.ir_view.getIntValue(node) orelse break :blk pool.idx_number;
+                const int_val = std.math.cast(i16, val) orelse break :blk pool.idx_number;
+                break :blk pool.addLiteralNumber(self.allocator, int_val);
+            },
+            .lit_float => pool.idx_number,
+            .lit_string => blk: {
+                const str_idx = self.ir_view.getStringIdx(node) orelse break :blk pool.idx_string;
+                const str = self.ir_view.getString(str_idx) orelse break :blk pool.idx_string;
+                break :blk pool.addLiteralString(self.allocator, str);
+            },
+            .template_literal => pool.idx_string,
             .lit_null => pool.idx_undefined, // parser rejects null, but map defensively
             .lit_undefined => pool.idx_undefined,
             .object_literal => self.inferObjectLiteralType(node),
@@ -672,48 +704,15 @@ pub const TypeChecker = struct {
     }
 
     fn findUnionMemberForPattern(self: *const TypeChecker, union_type: TypeIndex, pattern: ir.NodeIndex) TypeIndex {
-        const pool = self.env.pool;
-        const members = pool.getUnionMembers(union_type);
-        if (members.len == 0) return null_type_idx;
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool);
+        return analysis.narrowTypeForPattern(union_type, pattern);
+    }
 
-        const pattern_tag = self.ir_view.getTag(pattern) orelse return null_type_idx;
-
-        switch (pattern_tag) {
-            .lit_string => {
-                const str_idx = self.ir_view.getStringIdx(pattern) orelse return null_type_idx;
-                const pattern_str = self.ir_view.getString(str_idx) orelse return null_type_idx;
-                for (members) |member| {
-                    if (pool.getTag(member) == .t_literal_string) {
-                        const data = pool.getData(member) orelse continue;
-                        const member_name = pool.getName(data.a, @truncate(data.b));
-                        if (std.mem.eql(u8, pattern_str, member_name)) return member;
-                    }
-                }
-            },
-            .lit_int => {
-                const val = self.ir_view.getIntValue(pattern) orelse return null_type_idx;
-                const val_i16 = std.math.cast(i16, val) orelse return null_type_idx;
-                for (members) |member| {
-                    if (pool.getTag(member) == .t_literal_number) {
-                        const data = pool.getData(member) orelse continue;
-                        const member_val: i16 = @bitCast(data.a);
-                        if (member_val == val_i16) return member;
-                    }
-                }
-            },
-            .lit_bool => {
-                const val = self.ir_view.getBoolValue(pattern) orelse return null_type_idx;
-                for (members) |member| {
-                    if (pool.getTag(member) == .t_literal_bool) {
-                        const data = pool.getData(member) orelse continue;
-                        const member_val = data.a != 0;
-                        if (member_val == val) return member;
-                    }
-                }
-            },
-            else => {},
-        }
-        return null_type_idx;
+    fn isMatchExhaustive(self: *const TypeChecker, me: ir.Node.MatchExpr) bool {
+        const disc_type = self.inferType(me.discriminant);
+        if (disc_type == null_type_idx) return false;
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool);
+        return analysis.isMatchExhaustive(disc_type, me);
     }
 
     // -------------------------------------------------------------------
@@ -803,6 +802,41 @@ pub const TypeChecker = struct {
 const packBindingKey = bool_checker_mod.packBindingKey;
 const getSourceLine = bool_checker_mod.getSourceLine;
 
+fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
+    const allocator = std.testing.allocator;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    defer checker.deinit();
+
+    const errors = try checker.check(root);
+    try std.testing.expectEqual(expect_errors, errors);
+
+    if (expect_warnings) |w| {
+        var warning_count: u32 = 0;
+        for (checker.getDiagnostics()) |diag| {
+            if (diag.severity == .warning) warning_count += 1;
+        }
+        try std.testing.expectEqual(w, warning_count);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -834,4 +868,35 @@ test "TypeChecker init and deinit" {
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), checker.diagnostics.items.len);
+}
+
+test "TypeChecker proves literal union match exhaustiveness" {
+    try checkTypedSource(
+        \\const value: "a" | "b" = "a";
+        \\const out = match (value) {
+        \\  when "a": 1,
+        \\  when "b": 2,
+        \\};
+    , 0, 0);
+}
+
+test "TypeChecker proves discriminated union match exhaustiveness" {
+    try checkTypedSource(
+        \\const ok = { kind: "ok", value: "x" };
+        \\const err = { kind: "err", error: "bad" };
+        \\const result = true ? ok : err;
+        \\const out = match (result) {
+        \\  when { kind: "ok" }: result.value,
+        \\  when { kind: "err" }: result.error,
+        \\};
+    , 0, 0);
+}
+
+test "TypeChecker warns on non-exhaustive match over union" {
+    try checkTypedSource(
+        \\const value: "a" | "b" = "a";
+        \\const out = match (value) {
+        \\  when "a": 1,
+        \\};
+    , 0, 1);
 }

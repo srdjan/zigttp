@@ -5,7 +5,7 @@
 //! 2. Result values are checked before access (result safety)
 //! 3. No unreachable code after unconditional returns
 //! 4. No unused variable declarations
-//! 5. Match expressions have default arms
+//! 5. Match expressions are provably exhaustive or have default arms
 //! 6. Optional values from virtual modules are checked before use
 //!
 //! This is possible because zigttp's JS subset bans most non-trivial control flow:
@@ -18,14 +18,22 @@ const std = @import("std");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
+const type_checker_mod = @import("type_checker.zig");
 const modules_resolver = @import("modules/resolver.zig");
 const bool_checker_mod = @import("bool_checker.zig");
+const match_analysis_mod = @import("match_analysis.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
 const IrView = ir.IrView;
 const null_node = ir.null_node;
+const TypeEnv = type_env_mod.TypeEnv;
+const TypeChecker = type_checker_mod.TypeChecker;
+const TypeIndex = type_pool_mod.TypeIndex;
+const null_type_idx = type_pool_mod.null_type_idx;
 
 // ---------------------------------------------------------------------------
 // Diagnostic types
@@ -173,6 +181,8 @@ pub const HandlerVerifier = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*context.AtomTable,
+    type_env: ?*const TypeEnv,
+    type_checker: ?*const TypeChecker,
     diagnostics: std.ArrayList(Diagnostic),
 
     // Result checking state
@@ -191,11 +201,19 @@ pub const HandlerVerifier = struct {
     handler_scope_id: ?ir.ScopeId = null,
     has_module_mutation: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) HandlerVerifier {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*context.AtomTable,
+        type_env: ?*const TypeEnv,
+        type_checker: ?*const TypeChecker,
+    ) HandlerVerifier {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
             .atoms = atoms,
+            .type_env = type_env,
+            .type_checker = type_checker,
             .diagnostics = .empty,
             .result_bindings = .empty,
             .result_function_slots = .empty,
@@ -736,15 +754,13 @@ pub const HandlerVerifier = struct {
             .match_expr => {
                 const match_e = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExprForRefs(match_e.discriminant);
-                var has_default = false;
                 var mi: u8 = 0;
                 while (mi < match_e.arms_count) : (mi += 1) {
                     const arm_idx = self.ir_view.getListIndex(match_e.arms_start, mi);
                     const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-                    if (arm.pattern == null_node) has_default = true;
                     self.walkExprForRefs(arm.body);
                 }
-                if (!has_default) {
+                if (!self.isMatchExhaustive(match_e)) {
                     self.addDiagnostic(.{
                         .severity = .warning,
                         .kind = .non_exhaustive_match,
@@ -990,6 +1006,46 @@ pub const HandlerVerifier = struct {
         }
     }
 
+    fn isMatchExhaustive(self: *const HandlerVerifier, me: ir.Node.MatchExpr) bool {
+        for (0..me.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+            if (arm.pattern == null_node) return true;
+        }
+
+        const disc_type = self.resolveMatchDiscriminantType(me.discriminant);
+        if (disc_type == null_type_idx) return false;
+
+        const env = self.type_env orelse return false;
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, env.pool);
+        return analysis.isMatchExhaustive(disc_type, me);
+    }
+
+    fn resolveMatchDiscriminantType(self: *const HandlerVerifier, node: NodeIndex) TypeIndex {
+        if (self.type_checker) |tc| {
+            const inferred = tc.inferType(node);
+            if (inferred != null_type_idx) return inferred;
+        }
+
+        const env = self.type_env orelse return null_type_idx;
+        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
+        if (tag != .identifier) return null_type_idx;
+
+        const binding = self.ir_view.getBinding(node) orelse return null_type_idx;
+        const target_key = bindingKey(binding.scope_id, binding.slot);
+
+        for (self.all_bindings.items) |tracked| {
+            if (tracked.key() != target_key) continue;
+            const loc = self.ir_view.getLoc(tracked.decl_node) orelse continue;
+            if (env.getVarTypeByLoc(loc.line, loc.column)) |type_idx| {
+                return type_idx;
+            }
+        }
+
+        const name = self.resolveAtomName(binding.slot) orelse return null_type_idx;
+        return env.getVarTypeByName(name) orelse null_type_idx;
+    }
+
     /// Increment reference count for a binding (scope-aware).
     fn incrementRefCount(self: *HandlerVerifier, binding_ref: ir.BindingRef) void {
         const target_key = bindingKey(binding_ref.scope_id, binding_ref.slot);
@@ -1003,7 +1059,7 @@ pub const HandlerVerifier = struct {
 
     /// Resolve an atom index to its string name.
     /// Uses predefined atom names or the atom table for dynamic atoms.
-    fn resolveAtomName(self: *HandlerVerifier, atom_idx: u16) ?[]const u8 {
+    fn resolveAtomName(self: *const HandlerVerifier, atom_idx: u16) ?[]const u8 {
         const atom: object.Atom = @enumFromInt(atom_idx);
         if (atom.isPredefined()) {
             return atom.toPredefinedName();
@@ -1415,7 +1471,7 @@ test "verifier init and deinit" {
 
     const view = IrView.fromIRStore(&store, &constants);
 
-    var verifier = HandlerVerifier.init(std.testing.allocator, view, null);
+    var verifier = HandlerVerifier.init(std.testing.allocator, view, null, null, null);
     defer verifier.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), verifier.getDiagnostics().len);
@@ -1434,7 +1490,7 @@ test "diagnostic formatting" {
 
     const view = IrView.fromIRStore(&store, &constants);
 
-    var verifier = HandlerVerifier.init(std.testing.allocator, view, null);
+    var verifier = HandlerVerifier.init(std.testing.allocator, view, null, null, null);
     defer verifier.deinit();
 
     verifier.addDiagnostic(.{
@@ -1457,4 +1513,72 @@ test "diagnostic formatting" {
     output_buf = aw.toArrayList();
     try std.testing.expect(output_buf.items.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error") != null);
+}
+
+fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match_warnings: u32) !void {
+    const allocator = std.testing.allocator;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    var pool = type_pool_mod.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = type_env_mod.TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, null, &env);
+    defer type_checker.deinit();
+    _ = try type_checker.check(root);
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, null, &env, &type_checker);
+    defer verifier.deinit();
+
+    const errors = try verifier.verify(handler_fn);
+    try std.testing.expectEqual(expect_errors, errors);
+
+    var warning_count: u32 = 0;
+    for (verifier.getDiagnostics()) |diag| {
+        if (diag.severity == .warning and diag.kind == .non_exhaustive_match) {
+            warning_count += 1;
+        }
+    }
+    try std.testing.expectEqual(expect_match_warnings, warning_count);
+}
+
+test "HandlerVerifier accepts exhaustive literal union match without default" {
+    try verifyTypedHandlerSource(
+        \\const value: "a" | "b" = "a";
+        \\function handler(req) {
+        \\  const out = match (value) {
+        \\    when "a": 1,
+        \\    when "b": 2,
+        \\  };
+        \\  return Response.json({ out });
+        \\}
+    , 0, 0);
+}
+
+test "HandlerVerifier still warns on non-exhaustive union match" {
+    try verifyTypedHandlerSource(
+        \\const value: "a" | "b" = "a";
+        \\function handler(req) {
+        \\  const out = match (value) {
+        \\    when "a": 1,
+        \\  };
+        \\  return Response.json({ out });
+        \\}
+    , 0, 1);
 }

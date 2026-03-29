@@ -2103,7 +2103,7 @@ pub const CodeGen = struct {
         const pattern = self.ir.getArray(pattern_node) orelse return;
         const skip_label = try self.createLabel();
 
-        try self.emitArrayLengthAndElementTests(pattern, skip_label);
+        try self.emitArrayLengthAndElementTests(pattern.elements_start, pattern.elements_count, skip_label);
 
         try self.emitJump(.goto, target_label);
         try self.placeLabel(skip_label);
@@ -2247,7 +2247,7 @@ pub const CodeGen = struct {
         const cleanup_label = try self.createLabel();
         const done_label = try self.createLabel();
 
-        try self.emitArrayLengthAndElementTests(pattern, cleanup_label);
+        try self.emitArrayLengthAndElementTests(pattern.elements_start, pattern.elements_count, cleanup_label);
 
         try self.emit(.drop);
         self.popStack(1);
@@ -2261,19 +2261,19 @@ pub const CodeGen = struct {
     }
 
     /// Emit length check + per-element tests for an array pattern.
-    fn emitArrayLengthAndElementTests(self: *CodeGen, pattern: anytype, fail_label: u32) !void {
+    fn emitArrayLengthAndElementTests(self: *CodeGen, elements_start: NodeIndex, elements_count: u16, fail_label: u32) !void {
         try self.emit(.dup);
         self.pushStack(1);
         try self.emit(.get_length);
-        try self.emitIntValue(@intCast(pattern.elements_count));
+        try self.emitIntValue(@intCast(elements_count));
         try self.emit(.strict_eq);
         self.popStack(1);
         try self.emitJump(.if_false, fail_label);
         self.popStack(1);
 
         var i: u16 = 0;
-        while (i < pattern.elements_count) : (i += 1) {
-            const elem_idx = self.ir.getListIndex(pattern.elements_start, i);
+        while (i < elements_count) : (i += 1) {
+            const elem_idx = self.ir.getListIndex(elements_start, i);
             if (elem_idx == null_node) continue;
 
             try self.emit(.dup);
