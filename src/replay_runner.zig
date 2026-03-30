@@ -23,43 +23,16 @@ const trace = zq.trace;
 pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
     const replay_path = config.runtime_config.replay_file_path orelse return error.NoReplayFile;
 
-    // Read trace file
-    const trace_source = readFile(allocator, replay_path) catch |err| {
-        std.log.err("Failed to read trace file '{s}': {}", .{ replay_path, err });
-        return err;
-    };
-    defer allocator.free(trace_source);
-
-    // Parse traces
-    const groups = try trace.parseTraceFile(allocator, trace_source);
-    defer {
-        for (groups) |g| allocator.free(g.io_calls);
-        allocator.free(groups);
-    }
+    const groups = try loadTraceGroups(allocator, replay_path);
+    defer freeTraceGroups(allocator, groups);
 
     if (groups.len == 0) {
         std.log.info("No traces found in '{s}'\n", .{replay_path});
         return;
     }
 
-    // Resolve handler source
-    const handler_code = switch (config.handler) {
-        .file_path => |path| readFile(allocator, path) catch |err| {
-            std.log.err("Failed to read handler '{s}': {}", .{ path, err });
-            return err;
-        },
-        .inline_code => |code| try allocator.dupe(u8, code),
-        .embedded_bytecode => {
-            std.log.err("Replay with embedded bytecode not yet supported", .{});
-            return error.UnsupportedReplaySource;
-        },
-    };
-    defer allocator.free(handler_code);
-
-    const handler_filename = switch (config.handler) {
-        .file_path => |path| path,
-        else => "eval",
-    };
+    const handler_source = try resolveHandlerSource(allocator, config);
+    defer allocator.free(handler_source.code);
 
     // Build replay runtime config: keep replay_file_path set so Runtime
     // installs replay stubs instead of real virtual module functions.
@@ -74,79 +47,28 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         results.deinit(allocator);
     }
 
-    std.log.info("Replaying {d} traces against {s}...\n", .{ groups.len, handler_filename });
+    std.log.info("Replaying {d} traces against {s}...\n", .{ groups.len, handler_source.filename });
 
     for (groups, 0..) |group, trace_idx| {
-        const result = replayOne(allocator, replay_config, handler_code, handler_filename, &group, trace_idx) catch |err| {
-            try results.append(allocator, .{
-                .match = false,
-                .expected_status = if (group.response) |r| r.status else 200,
-                .actual_status = 0,
-                .body_match = false,
-                .expected_body_owned = &.{},
-                .actual_body_owned = &.{},
-                .io_divergences = 0,
-                .io_total = @intCast(group.io_calls.len),
-                .err = err,
-            });
-            summary.diverged += 1;
-            summary.total += 1;
+        const result = replayOne(
+            allocator,
+            replay_config,
+            handler_source.code,
+            handler_source.filename,
+            &group,
+            trace_idx,
+        ) catch |err| {
+            const failed_result = ReplayResult.fromReplayError(group, err);
+            try results.append(allocator, failed_result);
+            summary.record(failed_result);
             continue;
         };
         try results.append(allocator, result);
-        summary.total += 1;
-        if (result.match) {
-            summary.identical += 1;
-        } else if (result.expected_status != result.actual_status) {
-            summary.status_changed += 1;
-        } else if (!result.body_match) {
-            summary.body_changed += 1;
-        } else {
-            summary.diverged += 1;
-        }
+        summary.record(result);
     }
 
-    // Print summary
-    std.log.info("\nReplay results for {s}:\n", .{handler_filename});
-    std.log.info("  {d}/{d} identical\n", .{ summary.identical, summary.total });
-    if (summary.status_changed > 0) {
-        std.log.info("  {d} status code changes\n", .{summary.status_changed});
-    }
-    if (summary.body_changed > 0) {
-        std.log.info("  {d} body changes\n", .{summary.body_changed});
-    }
-    if (summary.diverged > 0) {
-        std.log.info("  {d} diverged (I/O mismatch or runtime error)\n", .{summary.diverged});
-    }
-
-    // Print diffs for non-matching traces (up to 10)
-    var diff_count: u32 = 0;
-    for (results.items, 0..) |result, idx| {
-        if (result.match) continue;
-        if (diff_count >= 10) {
-            std.log.info("\n  ... and {d} more differences\n", .{summary.total - summary.identical - diff_count});
-            break;
-        }
-        diff_count += 1;
-
-        if (result.err) |err| {
-            std.log.info("\nTrace #{d}: error - {}\n", .{ idx, err });
-            continue;
-        }
-
-        if (result.expected_status != result.actual_status) {
-            std.log.info("\nTrace #{d}: status changed {d} -> {d}\n", .{ idx, result.expected_status, result.actual_status });
-        }
-        if (!result.body_match) {
-            std.log.info("\nTrace #{d}: body changed\n", .{idx});
-            if (result.expected_body_owned.len > 0) {
-                std.log.info("  - {s}\n", .{result.expected_body_owned});
-            }
-            if (result.actual_body_owned.len > 0) {
-                std.log.info("  + {s}\n", .{result.actual_body_owned});
-            }
-        }
-    }
+    printReplaySummary(handler_source.filename, summary);
+    printReplayDiffs(results.items, summary);
 
     if (summary.identical == summary.total) {
         std.log.info("\nAll {d} traces passed.\n", .{summary.total});
@@ -279,6 +201,20 @@ pub const ReplayResult = struct {
     io_total: u32,
     err: ?anyerror,
 
+    pub fn fromReplayError(group: trace.RequestTraceGroup, err: anyerror) ReplayResult {
+        return .{
+            .match = false,
+            .expected_status = if (group.response) |response| response.status else 200,
+            .actual_status = 0,
+            .body_match = false,
+            .expected_body_owned = &.{},
+            .actual_body_owned = &.{},
+            .io_divergences = 0,
+            .io_total = @intCast(group.io_calls.len),
+            .err = err,
+        };
+    }
+
     pub fn deinit(self: *const ReplayResult, allocator: std.mem.Allocator) void {
         if (self.expected_body_owned.len > 0) allocator.free(self.expected_body_owned);
         if (self.actual_body_owned.len > 0) allocator.free(self.actual_body_owned);
@@ -291,6 +227,27 @@ pub const ReplaySummary = struct {
     status_changed: u32 = 0,
     body_changed: u32 = 0,
     diverged: u32 = 0,
+
+    pub fn record(self: *ReplaySummary, result: ReplayResult) void {
+        self.total += 1;
+        if (result.match) {
+            self.identical += 1;
+            return;
+        }
+        if (result.err != null) {
+            self.diverged += 1;
+            return;
+        }
+        if (result.expected_status != result.actual_status) {
+            self.status_changed += 1;
+            return;
+        }
+        if (!result.body_match) {
+            self.body_changed += 1;
+            return;
+        }
+        self.diverged += 1;
+    }
 };
 
 // ============================================================================
@@ -299,6 +256,90 @@ pub const ReplaySummary = struct {
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return zq.file_io.readFile(allocator, path, 100 * 1024 * 1024);
+}
+
+const HandlerSource = struct {
+    code: []const u8,
+    filename: []const u8,
+};
+
+fn loadTraceGroups(allocator: std.mem.Allocator, replay_path: []const u8) ![]trace.RequestTraceGroup {
+    const trace_source = readFile(allocator, replay_path) catch |err| {
+        std.log.err("Failed to read trace file '{s}': {}", .{ replay_path, err });
+        return err;
+    };
+    defer allocator.free(trace_source);
+
+    return trace.parseTraceFile(allocator, trace_source);
+}
+
+fn freeTraceGroups(allocator: std.mem.Allocator, groups: []trace.RequestTraceGroup) void {
+    for (groups) |group| allocator.free(group.io_calls);
+    allocator.free(groups);
+}
+
+fn resolveHandlerSource(allocator: std.mem.Allocator, config: ServerConfig) !HandlerSource {
+    return switch (config.handler) {
+        .file_path => |path| .{
+            .code = readFile(allocator, path) catch |err| {
+                std.log.err("Failed to read handler '{s}': {}", .{ path, err });
+                return err;
+            },
+            .filename = path,
+        },
+        .inline_code => |code| .{
+            .code = try allocator.dupe(u8, code),
+            .filename = "eval",
+        },
+        .embedded_bytecode => {
+            std.log.err("Replay with embedded bytecode not yet supported", .{});
+            return error.UnsupportedReplaySource;
+        },
+    };
+}
+
+fn printReplaySummary(handler_filename: []const u8, summary: ReplaySummary) void {
+    std.log.info("\nReplay results for {s}:\n", .{handler_filename});
+    std.log.info("  {d}/{d} identical\n", .{ summary.identical, summary.total });
+    if (summary.status_changed > 0) {
+        std.log.info("  {d} status code changes\n", .{summary.status_changed});
+    }
+    if (summary.body_changed > 0) {
+        std.log.info("  {d} body changes\n", .{summary.body_changed});
+    }
+    if (summary.diverged > 0) {
+        std.log.info("  {d} diverged (I/O mismatch or runtime error)\n", .{summary.diverged});
+    }
+}
+
+fn printReplayDiffs(results: []const ReplayResult, summary: ReplaySummary) void {
+    var diff_count: u32 = 0;
+    for (results, 0..) |result, idx| {
+        if (result.match) continue;
+        if (diff_count >= 10) {
+            std.log.info("\n  ... and {d} more differences\n", .{summary.total - summary.identical - diff_count});
+            break;
+        }
+        diff_count += 1;
+
+        if (result.err) |err| {
+            std.log.info("\nTrace #{d}: error - {}\n", .{ idx, err });
+            continue;
+        }
+
+        if (result.expected_status != result.actual_status) {
+            std.log.info("\nTrace #{d}: status changed {d} -> {d}\n", .{ idx, result.expected_status, result.actual_status });
+        }
+        if (!result.body_match) {
+            std.log.info("\nTrace #{d}: body changed\n", .{idx});
+            if (result.expected_body_owned.len > 0) {
+                std.log.info("  - {s}\n", .{result.expected_body_owned});
+            }
+            if (result.actual_body_owned.len > 0) {
+                std.log.info("  + {s}\n", .{result.actual_body_owned});
+            }
+        }
+    }
 }
 
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;

@@ -121,19 +121,15 @@ pub const HandlerAnalyzer = struct {
     fn findRequestBinding(self: *HandlerAnalyzer, func: Node.FunctionExpr) void {
         if (func.params_count == 0) return;
         const req_param = self.ir.getListIndex(func.params_start, 0);
-        const req_tag = self.ir.getTag(req_param) orelse return;
-        if (req_tag == .identifier) {
-            const binding = self.ir.getBinding(req_param) orelse return;
-            if (binding.kind == .local or binding.kind == .argument) {
-                self.request_binding_slot = binding.slot;
-            }
+        if (self.getBindableSlot(req_param)) |slot| {
+            self.request_binding_slot = slot;
             return;
         }
-        if (req_tag == .pattern_element) {
-            const elem = self.ir.getPatternElem(req_param) orelse return;
-            if (elem.binding.kind == .local or elem.binding.kind == .argument) {
-                self.request_binding_slot = elem.binding.slot;
-            }
+        const req_tag = self.ir.getTag(req_param) orelse return;
+        if (req_tag != .pattern_element) return;
+        const elem = self.ir.getPatternElem(req_param) orelse return;
+        if (bindingSlotIfBindable(elem.binding)) |slot| {
+            self.request_binding_slot = slot;
         }
     }
 
@@ -151,24 +147,14 @@ pub const HandlerAnalyzer = struct {
 
                 const decl = self.ir.getVarDecl(stmt_idx) orelse continue;
                 if (decl.init == null_node) continue;
-                const init_tag = self.ir.getTag(decl.init) orelse continue;
-                if (init_tag != .member_access) continue;
-
-                const member = self.ir.getMember(decl.init) orelse continue;
+                const member = self.getMemberAccess(decl.init) orelse continue;
                 if (member.property != @intFromEnum(object.Atom.body)) continue;
 
                 // Body binding must come from request.body.
-                const obj_tag = self.ir.getTag(member.object) orelse continue;
-                if (obj_tag != .identifier) continue;
-                const obj_binding = self.ir.getBinding(member.object) orelse continue;
-                if (self.request_binding_slot) |req_slot| {
-                    if (obj_binding.slot != req_slot) continue;
-                }
+                if (!self.matchesOptionalSlot(member.object, self.request_binding_slot)) continue;
 
-                if (decl.binding.kind == .local or decl.binding.kind == .argument) {
-                    self.body_binding_slot = decl.binding.slot;
-                    return;
-                }
+                self.body_binding_slot = bindingSlotIfBindable(decl.binding) orelse continue;
+                return;
             }
         }
     }
@@ -196,29 +182,20 @@ pub const HandlerAnalyzer = struct {
 
             // Check if init is a member access
             if (decl.init == null_node) return;
-            const init_tag = self.ir.getTag(decl.init) orelse return;
-            if (init_tag != .member_access) return;
-
-            const member = self.ir.getMember(decl.init) orelse return;
+            const member = self.getMemberAccess(decl.init) orelse return;
 
             // Check if property is request.url or request.path
             if (member.property == @intFromEnum(object.Atom.url) or
                 member.property == @intFromEnum(object.Atom.path))
             {
                 // Route binding must come from request.url/path.
-                const obj_tag = self.ir.getTag(member.object) orelse return;
-                if (obj_tag != .identifier) return;
-                const obj_binding = self.ir.getBinding(member.object) orelse return;
-                if (self.request_binding_slot) |req_slot| {
-                    if (obj_binding.slot != req_slot) return;
-                }
+                if (!self.matchesOptionalSlot(member.object, self.request_binding_slot)) return;
 
                 // This is `const route = something.url/path`
                 // Store the binding slot
-                if (decl.binding.kind == .local or decl.binding.kind == .argument) {
-                    self.route_binding_slot = decl.binding.slot;
-                    self.route_atom = @enumFromInt(member.property);
-                }
+                const slot = bindingSlotIfBindable(decl.binding) orelse return;
+                self.route_binding_slot = slot;
+                self.route_atom = @enumFromInt(member.property);
             }
         }
     }
@@ -444,6 +421,38 @@ pub const HandlerAnalyzer = struct {
         url_bytes: []const u8,
     };
 
+    fn getBindableSlot(self: *HandlerAnalyzer, node: NodeIndex) ?u16 {
+        const tag = self.ir.getTag(node) orelse return null;
+        if (tag != .identifier) return null;
+        const binding = self.ir.getBinding(node) orelse return null;
+        return bindingSlotIfBindable(binding);
+    }
+
+    fn getMemberAccess(self: *HandlerAnalyzer, node: NodeIndex) ?Node.MemberExpr {
+        const tag = self.ir.getTag(node) orelse return null;
+        if (tag != .member_access) return null;
+        return self.ir.getMember(node);
+    }
+
+    fn matchesSlot(self: *HandlerAnalyzer, node: NodeIndex, slot: u16) bool {
+        const binding = self.ir.getBinding(node) orelse return false;
+        return binding.slot == slot;
+    }
+
+    fn matchesOptionalSlot(self: *HandlerAnalyzer, node: NodeIndex, maybe_slot: ?u16) bool {
+        const slot = maybe_slot orelse return true;
+        return self.matchesSlot(node, slot);
+    }
+
+    fn isGlobalIdentifier(self: *HandlerAnalyzer, node: NodeIndex, atom: object.Atom) bool {
+        const tag = self.ir.getTag(node) orelse return false;
+        if (tag != .identifier) return false;
+
+        const binding = self.ir.getBinding(node) orelse return false;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return false;
+        return binding.slot == @intFromEnum(atom);
+    }
+
     /// Analyze condition for URL matching pattern
     fn analyzeCondition(self: *HandlerAnalyzer, cond_node: NodeIndex) ?UrlPatternInfo {
         const tag = self.ir.getTag(cond_node) orelse return null;
@@ -521,20 +530,13 @@ pub const HandlerAnalyzer = struct {
         if (call.args_count != 1) return null;
 
         // Callee should be member access
-        const callee_tag = self.ir.getTag(call.callee) orelse return null;
-        if (callee_tag != .member_access) return null;
-
-        const member = self.ir.getMember(call.callee) orelse return null;
+        const member = self.getMemberAccess(call.callee) orelse return null;
 
         // Property should be 'indexOf'
         if (member.property != @intFromEnum(object.Atom.indexOf)) return null;
 
         // Object should be the url identifier
-        const obj_tag = self.ir.getTag(member.object) orelse return null;
-        if (obj_tag != .identifier) return null;
-
-        const binding = self.ir.getBinding(member.object) orelse return null;
-        if (binding.slot != self.route_binding_slot.?) return null;
+        if (!self.matchesSlot(member.object, self.route_binding_slot.?)) return null;
 
         // Get the prefix string from the argument
         const arg_idx = self.ir.getListIndex(call.args_start, 0);
@@ -614,18 +616,8 @@ pub const HandlerAnalyzer = struct {
         if (call.args_count < 1) return null;
 
         // Callee should be Response.rawJson
-        const callee_tag = self.ir.getTag(call.callee) orelse return null;
-        if (callee_tag != .member_access) return null;
-
-        const member = self.ir.getMember(call.callee) orelse return null;
-
-        // Check if object is Response
-        const obj_tag = self.ir.getTag(member.object) orelse return null;
-        if (obj_tag != .identifier) return null;
-
-        const binding = self.ir.getBinding(member.object) orelse return null;
-        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
+        const member = self.getMemberAccess(call.callee) orelse return null;
+        if (!self.isGlobalIdentifier(member.object, object.Atom.Response)) return null;
 
         // Check method is rawJson
         if (member.property != @intFromEnum(object.Atom.rawJson)) return null;
@@ -737,18 +729,8 @@ pub const HandlerAnalyzer = struct {
         if (call.args_count < 1) return null;
 
         // Callee should be Response.json or Response.text
-        const callee_tag = self.ir.getTag(call.callee) orelse return null;
-        if (callee_tag != .member_access) return null;
-
-        const member = self.ir.getMember(call.callee) orelse return null;
-
-        // Check if object is Response
-        const obj_tag = self.ir.getTag(member.object) orelse return null;
-        if (obj_tag != .identifier) return null;
-
-        const binding = self.ir.getBinding(member.object) orelse return null;
-        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.slot != @intFromEnum(object.Atom.Response)) return null;
+        const member = self.getMemberAccess(call.callee) orelse return null;
+        if (!self.isGlobalIdentifier(member.object, object.Atom.Response)) return null;
 
         const response_kind: ResponseKind = if (member.property == @intFromEnum(object.Atom.json))
             .json_obj
@@ -838,17 +820,11 @@ pub const HandlerAnalyzer = struct {
         const call = self.ir.getCall(node) orelse return false;
         if (call.args_count != 1) return false;
 
-        const callee_tag = self.ir.getTag(call.callee) orelse return false;
-        if (callee_tag != .member_access) return false;
-        const member = self.ir.getMember(call.callee) orelse return false;
+        const member = self.getMemberAccess(call.callee) orelse return false;
         if (member.property != @intFromEnum(object.Atom.parse)) return false;
 
         // Must be JSON.parse(...)
-        const obj_tag = self.ir.getTag(member.object) orelse return false;
-        if (obj_tag != .identifier) return false;
-        const obj_binding = self.ir.getBinding(member.object) orelse return false;
-        if (obj_binding.kind != .global and obj_binding.kind != .undeclared_global) return false;
-        if (obj_binding.slot != @intFromEnum(object.Atom.JSON)) return false;
+        if (!self.isGlobalIdentifier(member.object, object.Atom.JSON)) return false;
 
         // Argument must be request.body or a local bound from request.body
         const arg_idx = self.ir.getListIndex(call.args_start, 0);
@@ -856,26 +832,13 @@ pub const HandlerAnalyzer = struct {
     }
 
     fn isRequestBodySource(self: *HandlerAnalyzer, node: NodeIndex) bool {
-        const tag = self.ir.getTag(node) orelse return false;
-        if (tag == .identifier) {
-            const binding = self.ir.getBinding(node) orelse return false;
-            if (self.body_binding_slot) |slot| {
-                return binding.slot == slot;
-            }
-            return false;
+        if (self.body_binding_slot) |slot| {
+            if (self.matchesSlot(node, slot)) return true;
         }
-        if (tag != .member_access) return false;
 
-        const member = self.ir.getMember(node) orelse return false;
+        const member = self.getMemberAccess(node) orelse return false;
         if (member.property != @intFromEnum(object.Atom.body)) return false;
-
-        const obj_tag = self.ir.getTag(member.object) orelse return false;
-        if (obj_tag != .identifier) return false;
-        const obj_binding = self.ir.getBinding(member.object) orelse return false;
-        if (self.request_binding_slot) |req_slot| {
-            return obj_binding.slot == req_slot;
-        }
-        return false;
+        return self.matchesOptionalSlot(member.object, self.request_binding_slot);
     }
 
     /// Extract status from options object: {status: 404}
@@ -1091,6 +1054,13 @@ fn findHandlerFunctionForTest(ir_view: IrView, root: NodeIndex) ?NodeIndex {
     }
 
     return null;
+}
+
+fn bindingSlotIfBindable(binding: anytype) ?u16 {
+    return switch (binding.kind) {
+        .local, .argument => binding.slot,
+        else => null,
+    };
 }
 
 test "HandlerAnalyzer extracts switch route patterns" {

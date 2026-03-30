@@ -328,23 +328,15 @@ fn parseExpectedProperties(
 
         const value = parser.readBool() orelse return error.InvalidJson;
 
-        // Validate that the property name matches a known bool field
-        var valid = false;
-        for (bool_field_names) |name| {
-            if (std.mem.eql(u8, key, name)) {
-                valid = true;
-                break;
-            }
-        }
-
-        if (valid) {
+        if (isKnownBoolProperty(key)) {
             try properties.append(allocator, .{
                 .field_name = key,
                 .expected = value,
             });
-        } else {
-            std.debug.print("Warning: unknown property '{s}' in expectations, skipping\n", .{key});
+            continue;
         }
+
+        std.debug.print("Warning: unknown property '{s}' in expectations, skipping\n", .{key});
     }
 }
 
@@ -366,28 +358,7 @@ pub fn checkExpectations(
     var checked: u32 = 0;
 
     for (expectations.routes) |route_exp| {
-        // Find matching route in contract by path + method
-        var found = false;
-        for (contract.api.routes.items) |api_route| {
-            if (std.mem.eql(u8, api_route.path, route_exp.path) and
-                std.mem.eql(u8, api_route.method, route_exp.method))
-            {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            // Also check base routes by pattern (method-less)
-            for (contract.routes.items) |route| {
-                if (std.mem.eql(u8, route.pattern, route_exp.path)) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        if (!found) {
+        if (!routeExists(contract, route_exp)) {
             std.debug.print("Warning: route {s} {s} not found in contract, skipping\n", .{
                 route_exp.method, route_exp.path,
             });
@@ -404,13 +375,7 @@ pub fn checkExpectations(
             const actual = getBoolProperty(&props, prop_exp.field_name) orelse continue;
 
             if (actual != prop_exp.expected) {
-                try mismatches.append(allocator, .{
-                    .route_path = route_exp.path,
-                    .route_method = route_exp.method,
-                    .property = prop_exp.field_name,
-                    .expected = prop_exp.expected,
-                    .actual = actual,
-                });
+                try mismatches.append(allocator, makeMismatch(route_exp, prop_exp, actual));
             }
         }
     }
@@ -420,6 +385,43 @@ pub fn checkExpectations(
         .mismatches = mismatches_slice,
         .checked_routes = checked,
         .passed = mismatches_slice.len == 0,
+    };
+}
+
+fn isKnownBoolProperty(name: []const u8) bool {
+    for (bool_field_names) |field_name| {
+        if (std.mem.eql(u8, name, field_name)) return true;
+    }
+    return false;
+}
+
+fn routeExists(contract: *const HandlerContract, route_exp: RouteExpectation) bool {
+    for (contract.api.routes.items) |api_route| {
+        if (std.mem.eql(u8, api_route.path, route_exp.path) and
+            std.mem.eql(u8, api_route.method, route_exp.method))
+        {
+            return true;
+        }
+    }
+
+    for (contract.routes.items) |route| {
+        if (std.mem.eql(u8, route.pattern, route_exp.path)) return true;
+    }
+
+    return false;
+}
+
+fn makeMismatch(
+    route_exp: RouteExpectation,
+    prop_exp: PropertyExpectation,
+    actual: bool,
+) PropertyMismatch {
+    return .{
+        .route_path = route_exp.path,
+        .route_method = route_exp.method,
+        .property = prop_exp.field_name,
+        .expected = prop_exp.expected,
+        .actual = actual,
     };
 }
 

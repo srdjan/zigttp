@@ -24,9 +24,9 @@ A guide to the serverless JavaScript runtime that proves your code correct befor
 
 Every serverless platform makes the same promise: write a function, deploy it, let the platform handle the rest. In practice, that promise comes with baggage. Node.js cold starts measure in hundreds of milliseconds. A "hello world" Lambda ships tens of megabytes of runtime. Your handler pulls in npm packages that pull in more packages, and nobody can tell you exactly what the function does at deploy time - what env vars it reads, what hosts it calls, whether every code path actually returns a response.
 
-zigttp is a JavaScript runtime built from scratch in Zig, designed specifically for Function-as-a-Service workloads. It takes a different position on what a serverless runtime should be. Instead of running arbitrary JavaScript and hoping for the best, zigttp restricts the language to a analyzable subset and then uses those restrictions to prove things about your code at compile time.
+zigttp is a JavaScript runtime built from scratch in Zig for Function-as-a-Service workloads. Rather than running arbitrary JavaScript, zigttp restricts the language to an analyzable subset and uses those restrictions to prove things about your code at compile time.
 
-The core insight is this: if you give up features that make static analysis intractable - classes, exceptions, while loops, async/await, Promises - you get something back that no general-purpose runtime can offer. The compiler can walk every possible execution path through your handler. It can prove that every path returns a Response. It can extract exactly which environment variables your code reads, which external hosts it contacts, and which cache namespaces it touches. It can generate a least-privilege sandbox, a deployment manifest, and a test suite - all from the source code alone.
+Giving up features that make static analysis intractable - classes, exceptions, while loops, async/await, Promises - buys something no general-purpose runtime can offer. The compiler can walk every execution path through your handler, prove that each one returns a Response, and extract exactly which environment variables your code reads, which external hosts it contacts, and which cache namespaces it touches. From the source code alone, it generates a least-privilege sandbox, a deployment manifest, and a test suite.
 
 ### Design Philosophy
 
@@ -160,7 +160,7 @@ function handler(request) {
 }
 ```
 
-Components are plain functions. Props are plain objects. Children are passed as additional arguments. There is no component lifecycle, no state management, no re-rendering - this is server-side rendering in its purest form.
+Components are plain functions. Props are plain objects. Children are passed as additional arguments. No component lifecycle, no state management, no re-rendering.
 
 ### Compile-Time Evaluation
 
@@ -182,7 +182,7 @@ Most serverless handlers need the same handful of capabilities: read an environm
 
 zigttp replaces all of this with virtual modules - native Zig implementations exposed through ES module syntax. When you write `import { jwtVerify } from "zigttp:auth"`, the import resolves to a native function that executes directly in Zig. There is no JavaScript interpretation overhead for these calls. There is no npm. There is no `node_modules` directory.
 
-Each virtual module export carries metadata that the compiler uses for verification, contract extraction, and effect classification. This is not just a performance optimization - it is the foundation for everything the compiler can prove about your handler.
+Each virtual module export carries metadata that the compiler uses for verification, contract extraction, and effect classification. This metadata is the foundation for everything the compiler can prove about your handler.
 
 ### zigttp:env
 
@@ -396,7 +396,7 @@ Durable execution with crash recovery, timers, and inter-handler signaling. `run
 
 Every virtual module export carries an effect annotation: `read`, `write`, or `none`. The contract builder aggregates these across all imported functions to derive handler-level properties. A handler that only calls `env()` and `cacheGet()` is classified as `read_only`. A handler that calls `cacheSet()` but wraps it in a durable `step()` is classified as `retry_safe`. A handler that makes no virtual module calls at all is `pure`.
 
-These classifications are not advisory - they flow into deployment manifests as machine-readable tags, into sandbox policies as access restrictions, and into operational dashboards as safety guarantees.
+These classifications flow into deployment manifests as machine-readable tags, into sandbox policies as access restrictions, and into operational dashboards as safety guarantees.
 
 ---
 
@@ -408,7 +408,7 @@ zts is the JavaScript engine at the heart of zigttp. It is written entirely in Z
 
 The compiler works in two phases. The first pass tokenizes the source and runs a Pratt parser that produces an Intermediate Representation (IR) - a tree of typed nodes representing expressions, statements, scopes, and bindings. The second pass walks the IR and emits bytecode for the stack-based VM.
 
-This two-pass design is deliberate. The IR tree is the artifact that all static analysis operates on: the verifier walks it to check exhaustive returns, the contract builder walks it to extract capabilities, the path generator walks it to enumerate execution paths, the bool checker walks it for type-directed analysis. Because zigttp's JS subset has no back-edges (no while loops, no goto), the IR tree IS the control flow graph. This is the single most important architectural decision in zts - it makes every compile-time analysis a tree walk instead of a graph algorithm.
+This two-pass design is deliberate. The IR tree is the artifact that all static analysis operates on: the verifier walks it to check exhaustive returns, the contract builder walks it to extract capabilities, the path generator walks it to enumerate execution paths, the bool checker walks it for type-directed analysis. Because zigttp's JS subset has no back-edges (no while loops, no goto), the IR tree IS the control flow graph. Every compile-time analysis is a tree walk instead of a graph algorithm.
 
 ### TypeScript Stripping
 
@@ -589,7 +589,7 @@ The contract builder computes handler-level properties from effect classificatio
 | `injection_safe` | No unvalidated input in sinks | FlowChecker label tracking |
 | `state_isolated` | No cross-request data leakage | Verifier Check 7 (module-scope mutation) |
 
-These properties are not advisory labels. They flow into deployment manifests as machine-readable tags, OpenAPI specs as `x-zigttp-properties` extensions, OWASP Top 10 compliance mapping, cost estimation, and operational tooling as safety guarantees.
+These properties flow into deployment manifests as machine-readable tags, OpenAPI specs as `x-zigttp-properties` extensions, OWASP Top 10 compliance mapping, cost estimation, and operational tooling as safety guarantees.
 
 ### Runtime Sandboxing
 
@@ -627,7 +627,7 @@ Two standalone tools support the deployment workflow:
 
 The `-Dgenerate-tests=true` flag enables exhaustive path enumeration and fault coverage analysis. The `PathGenerator` walks the handler IR, forking at every branch point and I/O success/failure boundary, producing test cases for each execution path. The `FaultCoverageChecker` then analyzes these paths against failure severity annotations on each virtual module function.
 
-The key insight: `jwtVerify` returning `{ok: false}` is annotated as `critical` severity. If any execution path leads from a critical I/O failure to a 2xx response, the fault coverage checker warns. This catches the most common class of serverless bugs - a handler that returns 200 even when authentication failed because the developer forgot a guard clause. Cache misses returning 200 are correctly classified as graceful degradation and produce no warning.
+`jwtVerify` returning `{ok: false}` is annotated as `critical` severity. If any execution path leads from a critical I/O failure to a 2xx response, the fault coverage checker warns. This catches the most common class of serverless bugs - a handler that returns 200 even when authentication failed because the developer forgot a guard clause. Cache misses returning 200 are correctly classified as graceful degradation and produce no warning.
 
 ### Rate Limit Extraction
 
@@ -701,7 +701,7 @@ The path generator produces test cases automatically. It walks the handler's IR 
 
 ## 8. Durable Execution
 
-FaaS platforms kill instances without warning. If your handler makes three API calls and the instance dies after the second, you lose work. Retry logic is brittle. Idempotency keys help but do not solve the fundamental problem: the handler has no memory of what it already did.
+FaaS platforms kill instances without warning. If your handler makes three API calls and the instance dies after the second, you lose work. Retry logic is brittle. Idempotency keys help but do not solve the underlying problem: the handler has no memory of what it already did.
 
 zigttp's durable execution mode solves this with a write-ahead oplog. Enable it with `--durable <dir>`:
 
