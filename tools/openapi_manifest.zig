@@ -77,35 +77,36 @@ pub fn writeOpenApiJson(
             try writeOperationId(writer, candidate);
             try writer.writeAll(",\n");
 
-            if (candidate.path_params.items.len > 0) {
+            if (candidate.path_params.items.len > 0 or candidate.query_params.items.len > 0 or candidate.header_params.items.len > 0) {
                 try writer.writeAll("        \"parameters\": [\n");
-                try writePathParameters(writer, &candidate);
+                try writeParameters(writer, &candidate);
                 try writer.writeAll("\n        ],\n");
             }
 
-            if (candidate.request_schema_refs.items.len == 1 and
-                hasSchema(contract, candidate.request_schema_refs.items[0]))
-            {
+            if (candidate.request_bodies.items.len > 0) {
                 try writer.writeAll("        \"requestBody\": {\n");
                 try writer.writeAll("          \"required\": true,\n");
                 try writer.writeAll("          \"content\": {\n");
-                try writer.writeAll("            \"application/json\": {\n");
-                try writer.writeAll("              \"schema\": {\n");
-                try writer.writeAll("                \"$ref\": \"#/components/schemas/");
-                try writeJsonStringContent(writer, candidate.request_schema_refs.items[0]);
-                try writer.writeByte('"');
-                try writer.writeAll("\n");
-                try writer.writeAll("              }\n");
-                try writer.writeAll("            }\n");
+                try writeRequestBodies(writer, contract, &candidate);
                 try writer.writeAll("          }\n");
                 try writer.writeAll("        },\n");
-            } else if (candidate.request_schema_refs.items.len > 0 or candidate.request_schema_dynamic) {
+            } else if (candidate.request_schema_refs.items.len > 0 or candidate.request_schema_dynamic or candidate.request_bodies_dynamic) {
                 try writer.writeAll("        \"x-zigttp-requestSchemas\": [");
                 for (candidate.request_schema_refs.items, 0..) |schema_ref, j| {
                     if (j > 0) try writer.writeAll(", ");
                     try writeJsonString(writer, schema_ref);
                 }
                 try writer.writeAll("],\n");
+            }
+
+            if (candidate.query_params_dynamic) {
+                try writer.writeAll("        \"x-zigttp-queryParamsDynamic\": true,\n");
+            }
+            if (candidate.header_params_dynamic) {
+                try writer.writeAll("        \"x-zigttp-headerParamsDynamic\": true,\n");
+            }
+            if (candidate.request_bodies_dynamic) {
+                try writer.writeAll("        \"x-zigttp-requestBodiesDynamic\": true,\n");
             }
 
             if (candidate.requires_bearer or candidate.requires_jwt) {
@@ -115,9 +116,9 @@ pub fn writeOpenApiJson(
             }
 
             try writer.writeAll("        \"responses\": {\n");
-            try writeResponse(writer, &candidate);
+            try writeResponses(writer, contract, &candidate);
             try writer.writeAll("\n        }");
-            if (candidate.response_schema_dynamic) {
+            if (candidate.responses_dynamic or candidate.response_schema_dynamic) {
                 try writer.writeAll(",\n");
                 try writer.writeAll("        \"x-zigttp-responseSchemaDynamic\": true\n");
             } else {
@@ -221,33 +222,52 @@ fn writeOperationId(writer: anytype, route: ApiRouteInfo) !void {
     try writer.writeByte('"');
 }
 
-fn writeResponse(writer: anytype, route: *const ApiRouteInfo) !void {
-    if (route.response_status) |status| {
+fn writeResponses(writer: anytype, contract: *const HandlerContract, route: *const ApiRouteInfo) !void {
+    if (route.responses.items.len == 0) {
+        try writeSingleResponse(writer, contract, route.response_status, route.response_content_type, route.response_schema_ref, route.response_schema_json);
+        return;
+    }
+
+    for (route.responses.items, 0..) |response, idx| {
+        if (idx > 0) try writer.writeAll(",\n");
+        try writeSingleResponse(writer, contract, response.status, response.content_type, response.schema_ref, response.schema_json);
+    }
+}
+
+fn writeSingleResponse(
+    writer: anytype,
+    contract: *const HandlerContract,
+    status: ?u16,
+    content_type: ?[]const u8,
+    schema_ref: ?[]const u8,
+    schema_json: ?[]const u8,
+) !void {
+    if (status) |value| {
         try writer.writeAll("          \"");
-        try writer.print("{d}", .{status});
+        try writer.print("{d}", .{value});
         try writer.writeAll("\": {\n");
     } else {
         try writer.writeAll("          \"default\": {\n");
     }
 
     try writer.writeAll("            \"description\": ");
-    if (route.response_status) |status| {
+    if (status) |value| {
         try writer.writeByte('"');
         try writer.writeAll("HTTP ");
-        try writer.print("{d}", .{status});
+        try writer.print("{d}", .{value});
         try writer.writeAll(" response\"");
     } else {
         try writeJsonString(writer, "Handler response");
     }
 
-    if (route.response_content_type) |content_type| {
+    if (content_type) |value| {
         try writer.writeAll(",\n");
         try writer.writeAll("            \"content\": {\n");
         try writer.writeAll("              ");
-        try writeJsonString(writer, content_type);
+        try writeJsonString(writer, value);
         try writer.writeAll(": {\n");
         try writer.writeAll("                \"schema\": ");
-        try writeContentSchema(writer, route, content_type);
+        try writeContentSchema(writer, contract, value, schema_ref, schema_json);
         try writer.writeAll("\n");
         try writer.writeAll("              }\n");
         try writer.writeAll("            }\n");
@@ -258,16 +278,26 @@ fn writeResponse(writer: anytype, route: *const ApiRouteInfo) !void {
     try writer.writeAll("          }");
 }
 
-fn writeContentSchema(writer: anytype, route: *const ApiRouteInfo, content_type: []const u8) !void {
+fn writeContentSchema(
+    writer: anytype,
+    contract: *const HandlerContract,
+    content_type: []const u8,
+    schema_ref: ?[]const u8,
+    schema_json: ?[]const u8,
+) !void {
     if (std.mem.startsWith(u8, content_type, "application/json")) {
-        if (route.response_schema_ref) |schema_ref| {
+        if (schema_ref) |value| {
+            if (!hasSchema(contract, value)) {
+                try writer.writeAll("{}");
+                return;
+            }
             try writer.writeAll("{\"$ref\":\"#/components/schemas/");
-            try writeJsonStringContent(writer, schema_ref);
+            try writeJsonStringContent(writer, value);
             try writer.writeAll("\"}");
             return;
         }
-        if (route.response_schema_json) |schema_json| {
-            try writer.writeAll(schema_json);
+        if (schema_json) |value| {
+            try writer.writeAll(value);
             return;
         }
         try writer.writeAll("{}");
@@ -277,21 +307,50 @@ fn writeContentSchema(writer: anytype, route: *const ApiRouteInfo, content_type:
     try writer.writeAll("{\"type\":\"string\"}");
 }
 
-fn writePathParameters(writer: anytype, route: *const ApiRouteInfo) !void {
-    for (route.path_params.items, 0..) |param, i| {
-        if (i > 0) try writer.writeAll(",\n");
-        try writer.writeAll("          {\n");
-        try writer.writeAll("            \"name\": ");
-        try writeJsonString(writer, param.name);
-        try writer.writeAll(",\n");
-        try writer.writeAll("            \"in\": ");
-        try writeJsonString(writer, param.location);
-        try writer.writeAll(",\n");
-        try writer.writeAll("            \"required\": true,\n");
-        try writer.writeAll("            \"schema\": ");
-        try writer.writeAll(param.schema_json);
+fn writeParameters(writer: anytype, route: *const ApiRouteInfo) !void {
+    var wrote_any = false;
+    for (route.path_params.items) |param| {
+        if (wrote_any) try writer.writeAll(",\n");
+        wrote_any = true;
+        try writeParameter(writer, &param);
+    }
+    for (route.query_params.items) |param| {
+        if (wrote_any) try writer.writeAll(",\n");
+        wrote_any = true;
+        try writeParameter(writer, &param);
+    }
+    for (route.header_params.items) |param| {
+        if (wrote_any) try writer.writeAll(",\n");
+        wrote_any = true;
+        try writeParameter(writer, &param);
+    }
+}
+
+fn writeParameter(writer: anytype, param: *const handler_contract.ApiParamInfo) !void {
+    try writer.writeAll("          {\n");
+    try writer.writeAll("            \"name\": ");
+    try writeJsonString(writer, param.name);
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"in\": ");
+    try writeJsonString(writer, param.location);
+    try writer.writeAll(",\n");
+    try writer.print("            \"required\": {s},\n", .{if (std.mem.eql(u8, param.location, "path")) "true" else if (param.required) "true" else "false"});
+    try writer.writeAll("            \"schema\": ");
+    try writer.writeAll(param.schema_json);
+    try writer.writeAll("\n");
+    try writer.writeAll("          }");
+}
+
+fn writeRequestBodies(writer: anytype, contract: *const HandlerContract, route: *const ApiRouteInfo) !void {
+    for (route.request_bodies.items, 0..) |body, idx| {
+        if (idx > 0) try writer.writeAll(",\n");
+        try writer.writeAll("            ");
+        try writeJsonString(writer, body.content_type orelse "application/octet-stream");
+        try writer.writeAll(": {\n");
+        try writer.writeAll("              \"schema\": ");
+        try writeContentSchema(writer, contract, body.content_type orelse "application/octet-stream", body.schema_ref, body.schema_json);
         try writer.writeAll("\n");
-        try writer.writeAll("          }");
+        try writer.writeAll("            }");
     }
 }
 
@@ -348,7 +407,38 @@ test "writeOpenApiJson renders schema and route" {
     try path_params.append(allocator, .{
         .name = try allocator.dupe(u8, "id"),
         .location = "path",
+        .required = true,
         .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var query_params: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
+    try query_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "verbose"),
+        .location = "query",
+        .required = false,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var header_params: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
+    try header_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "authorization"),
+        .location = "header",
+        .required = false,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var request_bodies: std.ArrayList(handler_contract.ApiBodyInfo) = .empty;
+    try request_bodies.append(allocator, .{
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_ref = try allocator.dupe(u8, "user"),
+    });
+    var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
+    try responses.append(allocator, .{
+        .status = 201,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+    try responses.append(allocator, .{
+        .status = 401,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}"),
     });
 
     var routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
@@ -360,6 +450,10 @@ test "writeOpenApiJson renders schema and route" {
         .requires_bearer = true,
         .requires_jwt = true,
         .path_params = path_params,
+        .query_params = query_params,
+        .header_params = header_params,
+        .request_bodies = request_bodies,
+        .responses = responses,
         .response_status = 201,
         .response_content_type = try allocator.dupe(u8, "application/json"),
         .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
@@ -399,7 +493,11 @@ test "writeOpenApiJson renders schema and route" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"post\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "#/components/schemas/user") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"parameters\": [") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verbose\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"authorization\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"required\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"required\": false") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"properties\":{\"id\":{\"type\":\"string\"}}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"401\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"bearerAuth\"") != null);
 }

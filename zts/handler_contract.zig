@@ -146,11 +146,67 @@ pub const ApiAuthInfo = struct {
 pub const ApiParamInfo = struct {
     name: []const u8, // owned
     location: []const u8 = "path", // static literal
+    required: bool = false,
     schema_json: []const u8, // owned JSON source
 
     pub fn deinit(self: *ApiParamInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         allocator.free(self.schema_json);
+    }
+
+    pub fn dupeOwned(self: ApiParamInfo, allocator: std.mem.Allocator) !ApiParamInfo {
+        return .{
+            .name = try allocator.dupe(u8, self.name),
+            .location = self.location,
+            .required = self.required,
+            .schema_json = try allocator.dupe(u8, self.schema_json),
+        };
+    }
+};
+
+pub const ApiBodyInfo = struct {
+    content_type: ?[]const u8 = null, // owned when present
+    schema_ref: ?[]const u8 = null, // owned when present
+    schema_json: ?[]const u8 = null, // owned when present
+    dynamic: bool = false,
+
+    pub fn deinit(self: *ApiBodyInfo, allocator: std.mem.Allocator) void {
+        if (self.content_type) |content_type| allocator.free(content_type);
+        if (self.schema_ref) |schema_ref| allocator.free(schema_ref);
+        if (self.schema_json) |schema_json| allocator.free(schema_json);
+    }
+
+    pub fn dupeOwned(self: ApiBodyInfo, allocator: std.mem.Allocator) !ApiBodyInfo {
+        return .{
+            .content_type = try dupeOptionalString(allocator, self.content_type),
+            .schema_ref = try dupeOptionalString(allocator, self.schema_ref),
+            .schema_json = try dupeOptionalString(allocator, self.schema_json),
+            .dynamic = self.dynamic,
+        };
+    }
+};
+
+pub const ApiResponseInfo = struct {
+    status: ?u16 = null,
+    content_type: ?[]const u8 = null, // owned when present
+    schema_ref: ?[]const u8 = null, // owned when present
+    schema_json: ?[]const u8 = null, // owned when present
+    dynamic: bool = false,
+
+    pub fn deinit(self: *ApiResponseInfo, allocator: std.mem.Allocator) void {
+        if (self.content_type) |content_type| allocator.free(content_type);
+        if (self.schema_ref) |schema_ref| allocator.free(schema_ref);
+        if (self.schema_json) |schema_json| allocator.free(schema_json);
+    }
+
+    pub fn dupeOwned(self: ApiResponseInfo, allocator: std.mem.Allocator) !ApiResponseInfo {
+        return .{
+            .status = self.status,
+            .content_type = try dupeOptionalString(allocator, self.content_type),
+            .schema_ref = try dupeOptionalString(allocator, self.schema_ref),
+            .schema_json = try dupeOptionalString(allocator, self.schema_json),
+            .dynamic = self.dynamic,
+        };
     }
 };
 
@@ -162,6 +218,17 @@ pub const ApiRouteInfo = struct {
     requires_bearer: bool,
     requires_jwt: bool,
     path_params: std.ArrayList(ApiParamInfo) = .empty,
+    query_params: std.ArrayList(ApiParamInfo) = .empty,
+    header_params: std.ArrayList(ApiParamInfo) = .empty,
+    query_params_dynamic: bool = false,
+    header_params_dynamic: bool = false,
+    request_bodies: std.ArrayList(ApiBodyInfo) = .empty,
+    request_bodies_dynamic: bool = false,
+    responses: std.ArrayList(ApiResponseInfo) = .empty,
+    responses_dynamic: bool = false,
+    // Legacy scalar response fields, kept for backward compatibility with
+    // older contract.json consumers. backfillApiRouteCollections bridges
+    // these into the responses collection during deserialization.
     response_status: ?u16 = null,
     response_content_type: ?[]const u8 = null, // owned when present
     response_schema_ref: ?[]const u8 = null, // owned when present
@@ -179,6 +246,22 @@ pub const ApiRouteInfo = struct {
             param.deinit(allocator);
         }
         self.path_params.deinit(allocator);
+        for (self.query_params.items) |*param| {
+            param.deinit(allocator);
+        }
+        self.query_params.deinit(allocator);
+        for (self.header_params.items) |*param| {
+            param.deinit(allocator);
+        }
+        self.header_params.deinit(allocator);
+        for (self.request_bodies.items) |*body| {
+            body.deinit(allocator);
+        }
+        self.request_bodies.deinit(allocator);
+        for (self.responses.items) |*response| {
+            response.deinit(allocator);
+        }
+        self.responses.deinit(allocator);
         if (self.response_content_type) |content_type| {
             allocator.free(content_type);
         }
@@ -871,9 +954,9 @@ pub const ContractBuilder = struct {
                                 if (self.getCategoryTarget(ext.category)) |target| {
                                     const transform: ?*const fn ([]const u8) []const u8 =
                                         if (ext.transform) |t| switch (t) {
-                                        .extract_host => &extractHost,
-                                        .identity => null,
-                                    } else null;
+                                            .extract_host => &extractHost,
+                                            .identity => null,
+                                        } else null;
                                     try self.extractLiteralArgAt(call, ext.arg_position, target.list, target.dynamic, transform);
                                 }
                             },
@@ -947,7 +1030,6 @@ pub const ContractBuilder = struct {
             dynamic_flag.* = true;
         }
     }
-
 
     // -----------------------------------------------------------------
     // Helpers
@@ -1345,10 +1427,34 @@ pub const ContractBuilder = struct {
         }
 
         const func = self.ir_view.getFunction(fn_node) orelse return;
-        try self.scanFunctionNodeForApiFacts(func.body, route);
+        const request_binding_slot = self.findRequestBindingSlot(func);
+        try self.scanFunctionNodeForApiFacts(func.body, request_binding_slot, route);
+        try self.syncRouteRequestBodies(route);
+        try self.syncLegacyRouteResponse(route);
     }
 
-    fn scanFunctionNodeForApiFacts(self: *ContractBuilder, node_idx: NodeIndex, route: *ApiRouteInfo) !void {
+    fn findRequestBindingSlot(self: *const ContractBuilder, func: Node.FunctionExpr) ?u16 {
+        if (func.params_count == 0) return null;
+        const req_param = self.ir_view.getListIndex(func.params_start, 0);
+        const req_tag = self.ir_view.getTag(req_param) orelse return null;
+        if (req_tag == .identifier) {
+            const binding = self.ir_view.getBinding(req_param) orelse return null;
+            if (binding.kind == .local or binding.kind == .argument) return binding.slot;
+            return null;
+        }
+        if (req_tag == .pattern_element) {
+            const elem = self.ir_view.getPatternElem(req_param) orelse return null;
+            if (elem.binding.kind == .local or elem.binding.kind == .argument) return elem.binding.slot;
+        }
+        return null;
+    }
+
+    fn scanFunctionNodeForApiFacts(
+        self: *ContractBuilder,
+        node_idx: NodeIndex,
+        request_binding_slot: ?u16,
+        route: *ApiRouteInfo,
+    ) !void {
         if (node_idx == null_node) return;
 
         const tag = self.ir_view.getTag(node_idx) orelse return;
@@ -1357,97 +1463,99 @@ pub const ContractBuilder = struct {
                 const block = self.ir_view.getBlock(node_idx) orelse return;
                 var i: u16 = 0;
                 while (i < block.stmts_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(block.stmts_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(block.stmts_start, i), request_binding_slot, route);
                 }
             },
             .expr_stmt, .throw_stmt => {
                 if (self.ir_view.getOptValue(node_idx)) |value_node| {
-                    try self.scanFunctionNodeForApiFacts(value_node, route);
+                    try self.scanFunctionNodeForApiFacts(value_node, request_binding_slot, route);
                 }
             },
             .return_stmt => {
                 if (self.ir_view.getOptValue(node_idx)) |value_node| {
                     try self.captureApiResponse(value_node, route);
-                    try self.scanFunctionNodeForApiFacts(value_node, route);
+                    try self.scanFunctionNodeForApiFacts(value_node, request_binding_slot, route);
                 }
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node_idx) orelse return;
-                if (decl.init != null_node) try self.scanFunctionNodeForApiFacts(decl.init, route);
+                if (decl.init != null_node) try self.scanFunctionNodeForApiFacts(decl.init, request_binding_slot, route);
             },
             .if_stmt => {
                 const if_stmt = self.ir_view.getIfStmt(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(if_stmt.condition, route);
-                try self.scanFunctionNodeForApiFacts(if_stmt.then_branch, route);
-                try self.scanFunctionNodeForApiFacts(if_stmt.else_branch, route);
+                try self.scanFunctionNodeForApiFacts(if_stmt.condition, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(if_stmt.then_branch, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(if_stmt.else_branch, request_binding_slot, route);
             },
             .switch_stmt => {
                 const switch_stmt = self.ir_view.getSwitchStmt(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(switch_stmt.discriminant, route);
+                try self.scanFunctionNodeForApiFacts(switch_stmt.discriminant, request_binding_slot, route);
                 var i: u8 = 0;
                 while (i < switch_stmt.cases_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(switch_stmt.cases_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(switch_stmt.cases_start, i), request_binding_slot, route);
                 }
             },
             .case_clause => {
                 const case_clause = self.ir_view.getCaseClause(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(case_clause.test_expr, route);
+                try self.scanFunctionNodeForApiFacts(case_clause.test_expr, request_binding_slot, route);
                 var i: u16 = 0;
                 while (i < case_clause.body_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(case_clause.body_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(case_clause.body_start, i), request_binding_slot, route);
                 }
             },
             .for_of_stmt, .for_in_stmt => {
                 const for_iter = self.ir_view.getForIter(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(for_iter.iterable, route);
-                try self.scanFunctionNodeForApiFacts(for_iter.body, route);
+                try self.scanFunctionNodeForApiFacts(for_iter.iterable, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(for_iter.body, request_binding_slot, route);
             },
             .binary_op => {
                 const binary = self.ir_view.getBinary(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(binary.left, route);
-                try self.scanFunctionNodeForApiFacts(binary.right, route);
+                try self.scanFunctionNodeForApiFacts(binary.left, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(binary.right, request_binding_slot, route);
             },
             .unary_op => {
                 const unary = self.ir_view.getUnary(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(unary.operand, route);
+                try self.scanFunctionNodeForApiFacts(unary.operand, request_binding_slot, route);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(ternary.condition, route);
-                try self.scanFunctionNodeForApiFacts(ternary.then_branch, route);
-                try self.scanFunctionNodeForApiFacts(ternary.else_branch, route);
+                try self.scanFunctionNodeForApiFacts(ternary.condition, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(ternary.then_branch, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(ternary.else_branch, request_binding_slot, route);
             },
             .assignment => {
                 const assignment = self.ir_view.getAssignment(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(assignment.target, route);
-                try self.scanFunctionNodeForApiFacts(assignment.value, route);
+                try self.scanFunctionNodeForApiFacts(assignment.target, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(assignment.value, request_binding_slot, route);
             },
             .array_literal => {
                 const array = self.ir_view.getArray(node_idx) orelse return;
                 var i: u16 = 0;
                 while (i < array.elements_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(array.elements_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(array.elements_start, i), request_binding_slot, route);
                 }
             },
             .object_literal => {
                 const obj = self.ir_view.getObject(node_idx) orelse return;
                 var i: u16 = 0;
                 while (i < obj.properties_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(obj.properties_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(obj.properties_start, i), request_binding_slot, route);
                 }
             },
             .object_property => {
                 const prop = self.ir_view.getProperty(node_idx) orelse return;
-                if (prop.is_computed) try self.scanFunctionNodeForApiFacts(prop.key, route);
-                try self.scanFunctionNodeForApiFacts(prop.value, route);
+                if (prop.is_computed) try self.scanFunctionNodeForApiFacts(prop.key, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(prop.value, request_binding_slot, route);
             },
             .member_access, .computed_access, .optional_chain => {
+                try self.captureApiRequestAccess(node_idx, request_binding_slot, route);
                 const member = self.ir_view.getMember(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(member.object, route);
-                try self.scanFunctionNodeForApiFacts(member.computed, route);
+                try self.scanFunctionNodeForApiFacts(member.object, request_binding_slot, route);
+                try self.scanFunctionNodeForApiFacts(member.computed, request_binding_slot, route);
             },
             .call, .method_call, .optional_call => {
                 const call = self.ir_view.getCall(node_idx) orelse return;
+                try self.captureApiHeaderGetter(call, request_binding_slot, route);
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return;
                 if (callee_tag == .identifier) {
                     const binding = self.ir_view.getBinding(call.callee) orelse return;
@@ -1464,23 +1572,23 @@ pub const ContractBuilder = struct {
                         }
                     }
                 }
-                try self.scanFunctionNodeForApiFacts(call.callee, route);
+                try self.scanFunctionNodeForApiFacts(call.callee, request_binding_slot, route);
                 var i: u8 = 0;
                 while (i < call.args_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(call.args_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(call.args_start, i), request_binding_slot, route);
                 }
             },
             .match_expr => {
                 const match_expr = self.ir_view.getMatchExpr(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(match_expr.discriminant, route);
+                try self.scanFunctionNodeForApiFacts(match_expr.discriminant, request_binding_slot, route);
                 var i: u8 = 0;
                 while (i < match_expr.arms_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(match_expr.arms_start, i), route);
+                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(match_expr.arms_start, i), request_binding_slot, route);
                 }
             },
             .match_arm => {
                 const arm = self.ir_view.getMatchArm(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(arm.body, route);
+                try self.scanFunctionNodeForApiFacts(arm.body, request_binding_slot, route);
             },
             .break_stmt, .continue_stmt => {},
             .function_decl, .function_expr, .arrow_function => return,
@@ -1517,6 +1625,7 @@ pub const ContractBuilder = struct {
             try route.path_params.append(self.allocator, .{
                 .name = try self.allocator.dupe(u8, name),
                 .location = "path",
+                .required = true,
                 .schema_json = try self.allocator.dupe(u8, "{\"type\":\"string\"}"),
             });
             i = end;
@@ -1610,52 +1719,190 @@ pub const ContractBuilder = struct {
         route: *ApiRouteInfo,
         candidate: *ResponseSchemaCandidate,
     ) !void {
-        if (candidate.status) |status| {
-            if (route.response_status == null) {
-                route.response_status = status;
-            } else if (route.response_status.? != status) {
-                route.response_status = null;
-                route.response_schema_dynamic = true;
+        if (candidate.dynamic) route.responses_dynamic = true;
+        try self.appendResponseVariant(route, candidate);
+    }
+
+    fn captureApiRequestAccess(
+        self: *ContractBuilder,
+        node_idx: NodeIndex,
+        request_binding_slot: ?u16,
+        route: *ApiRouteInfo,
+    ) !void {
+        const request_slot = request_binding_slot orelse return;
+        const tag = self.ir_view.getTag(node_idx) orelse return;
+        if (tag != .member_access and tag != .computed_access and tag != .optional_chain) return;
+
+        const member = self.ir_view.getMember(node_idx) orelse return;
+        const root_property = self.requestRootProperty(member.object, request_slot) orelse return;
+        const leaf_name = self.memberAccessName(member) orelse {
+            if (std.mem.eql(u8, root_property, "query")) {
+                route.query_params_dynamic = true;
+            } else if (std.mem.eql(u8, root_property, "headers")) {
+                route.header_params_dynamic = true;
             }
+            return;
+        };
+
+        if (std.mem.eql(u8, root_property, "query")) {
+            try self.appendApiParam(&route.query_params, leaf_name, "query", false, false);
+            return;
+        }
+        if (std.mem.eql(u8, root_property, "headers")) {
+            try self.appendApiParam(&route.header_params, leaf_name, "header", false, true);
+        }
+    }
+
+    fn captureApiHeaderGetter(
+        self: *ContractBuilder,
+        call: Node.CallExpr,
+        request_binding_slot: ?u16,
+        route: *ApiRouteInfo,
+    ) !void {
+        const request_slot = request_binding_slot orelse return;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag != .member_access and callee_tag != .computed_access and callee_tag != .optional_chain) return;
+
+        const member = self.ir_view.getMember(call.callee) orelse return;
+        const method_name = self.memberAccessName(member) orelse return;
+        if (!std.mem.eql(u8, method_name, "get")) return;
+
+        const root_property = self.requestRootProperty(member.object, request_slot) orelse return;
+        if (!std.mem.eql(u8, root_property, "headers")) return;
+
+        if (call.args_count == 0) {
+            route.header_params_dynamic = true;
+            return;
         }
 
-        if (candidate.content_type) |content_type| {
-            if (route.response_content_type == null) {
-                route.response_content_type = try self.allocator.dupe(u8, content_type);
-            } else if (!std.mem.eql(u8, route.response_content_type.?, content_type)) {
-                self.allocator.free(route.response_content_type.?);
-                route.response_content_type = null;
-                route.response_schema_dynamic = true;
-            }
+        const name_idx = self.ir_view.getListIndex(call.args_start, 0);
+        const name = self.getLiteralString(name_idx) orelse {
+            route.header_params_dynamic = true;
+            return;
+        };
+        try self.appendApiParam(&route.header_params, name, "header", false, true);
+    }
+
+    fn requestRootProperty(
+        self: *const ContractBuilder,
+        node_idx: NodeIndex,
+        request_binding_slot: u16,
+    ) ?[]const u8 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        if (tag != .member_access and tag != .computed_access and tag != .optional_chain) return null;
+        const member = self.ir_view.getMember(node_idx) orelse return null;
+        if (!self.isRequestIdentifier(member.object, request_binding_slot)) return null;
+        return self.memberAccessName(member);
+    }
+
+    fn isRequestIdentifier(self: *const ContractBuilder, node_idx: NodeIndex, request_binding_slot: u16) bool {
+        const tag = self.ir_view.getTag(node_idx) orelse return false;
+        if (tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(node_idx) orelse return false;
+        return binding.slot == request_binding_slot;
+    }
+
+    fn memberAccessName(self: *const ContractBuilder, member: Node.MemberExpr) ?[]const u8 {
+        if (member.computed != null_node) return self.getLiteralString(member.computed);
+        return self.resolveAtomName(member.property);
+    }
+
+    fn appendApiParam(
+        self: *ContractBuilder,
+        params: *std.ArrayList(ApiParamInfo),
+        raw_name: []const u8,
+        location: []const u8,
+        required: bool,
+        lowercase_name: bool,
+    ) !void {
+        const needle = if (lowercase_name)
+            try lowerAsciiOwned(self.allocator, raw_name)
+        else
+            try self.allocator.dupe(u8, raw_name);
+        defer self.allocator.free(needle);
+
+        if (containsApiParam(params.items, needle)) return;
+
+        try params.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, needle),
+            .location = location,
+            .required = required,
+            .schema_json = try self.allocator.dupe(u8, "{\"type\":\"string\"}"),
+        });
+    }
+
+    fn syncRouteRequestBodies(self: *ContractBuilder, route: *ApiRouteInfo) !void {
+        for (route.request_bodies.items) |*body| body.deinit(self.allocator);
+        route.request_bodies.clearRetainingCapacity();
+        route.request_bodies_dynamic = route.request_schema_dynamic;
+
+        for (route.request_schema_refs.items) |schema_ref| {
+            if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
+            try route.request_bodies.append(self.allocator, .{
+                .content_type = try self.allocator.dupe(u8, "application/json"),
+                .schema_ref = try self.allocator.dupe(u8, schema_ref),
+            });
+        }
+    }
+
+    fn syncLegacyRouteResponse(self: *ContractBuilder, route: *ApiRouteInfo) !void {
+        route.response_status = null;
+        if (route.response_content_type) |content_type| self.allocator.free(content_type);
+        route.response_content_type = null;
+        if (route.response_schema_ref) |schema_ref| self.allocator.free(schema_ref);
+        route.response_schema_ref = null;
+        if (route.response_schema_json) |schema_json| self.allocator.free(schema_json);
+        route.response_schema_json = null;
+        route.response_schema_dynamic = route.responses_dynamic;
+
+        if (route.responses.items.len != 1) {
+            if (route.responses.items.len > 1) route.response_schema_dynamic = true;
+            return;
         }
 
-        if (candidate.schema_ref) |schema_ref| {
-            if (route.response_schema_ref == null and route.response_schema_json == null) {
-                route.response_schema_ref = try self.allocator.dupe(u8, schema_ref);
-            } else if (route.response_schema_ref == null or !std.mem.eql(u8, route.response_schema_ref.?, schema_ref)) {
-                if (route.response_schema_ref) |existing| self.allocator.free(existing);
-                if (route.response_schema_json) |existing_json| self.allocator.free(existing_json);
-                route.response_schema_ref = null;
-                route.response_schema_json = null;
-                route.response_schema_dynamic = true;
-            }
-        }
-
-        if (candidate.schema_json) |schema_json| {
-            if (route.response_schema_ref == null and route.response_schema_json == null) {
-                route.response_schema_json = try self.allocator.dupe(u8, schema_json);
-            } else if (route.response_schema_json == null or !std.mem.eql(u8, route.response_schema_json.?, schema_json)) {
-                if (route.response_schema_ref) |existing| self.allocator.free(existing);
-                if (route.response_schema_json) |existing_json| self.allocator.free(existing_json);
-                route.response_schema_ref = null;
-                route.response_schema_json = null;
-                route.response_schema_dynamic = true;
-            }
-        }
-
-        if (candidate.dynamic) {
+        const response = route.responses.items[0];
+        if (response.dynamic) {
             route.response_schema_dynamic = true;
+            return;
         }
+
+        route.response_status = response.status;
+        if (response.content_type) |content_type| {
+            route.response_content_type = try self.allocator.dupe(u8, content_type);
+        }
+        if (response.schema_ref) |schema_ref| {
+            route.response_schema_ref = try self.allocator.dupe(u8, schema_ref);
+        }
+        if (response.schema_json) |schema_json| {
+            route.response_schema_json = try self.allocator.dupe(u8, schema_json);
+        }
+    }
+
+    fn appendResponseVariant(
+        self: *ContractBuilder,
+        route: *ApiRouteInfo,
+        candidate: *const ResponseSchemaCandidate,
+    ) !void {
+        for (route.responses.items) |existing| {
+            if (responseVariantMatches(existing, candidate)) return;
+        }
+
+        try route.responses.append(self.allocator, .{
+            .status = candidate.status,
+            .content_type = if (candidate.content_type) |content_type|
+                try self.allocator.dupe(u8, content_type)
+            else
+                null,
+            .schema_ref = if (candidate.schema_ref) |schema_ref|
+                try self.allocator.dupe(u8, schema_ref)
+            else
+                null,
+            .schema_json = if (candidate.schema_json) |schema_json|
+                try self.allocator.dupe(u8, schema_json)
+            else
+                null,
+            .dynamic = candidate.dynamic,
+        });
     }
 
     fn extractResponseSchemaRef(self: *ContractBuilder, node_idx: NodeIndex) !?[]u8 {
@@ -1838,7 +2085,7 @@ pub const ContractBuilder = struct {
     }
 };
 
-fn containsString(items: []const []const u8, needle: []const u8) bool {
+pub fn containsString(items: []const []const u8, needle: []const u8) bool {
     for (items) |item| {
         if (std.mem.eql(u8, item, needle)) return true;
     }
@@ -1852,7 +2099,36 @@ fn containsApiParam(items: []const ApiParamInfo, needle: []const u8) bool {
     return false;
 }
 
+fn containsRequestBodySchemaRef(items: []const ApiBodyInfo, needle: []const u8) bool {
+    for (items) |item| {
+        if (item.schema_ref) |schema_ref| {
+            if (std.mem.eql(u8, schema_ref, needle)) return true;
+        }
+    }
+    return false;
+}
 
+fn responseVariantMatches(existing: ApiResponseInfo, candidate: *const ContractBuilder.ResponseSchemaCandidate) bool {
+    return existing.status == candidate.status and
+        eqlOptionalString(existing.content_type, candidate.content_type) and
+        eqlOptionalString(existing.schema_ref, candidate.schema_ref) and
+        eqlOptionalString(existing.schema_json, candidate.schema_json) and
+        existing.dynamic == candidate.dynamic;
+}
+
+fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
+}
+
+fn lowerAsciiOwned(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, input.len);
+    for (input, 0..) |c, i| {
+        out[i] = std.ascii.toLower(c);
+    }
+    return out;
+}
 
 const ParsedRouteKey = struct {
     method: []const u8,
@@ -2632,6 +2908,22 @@ fn parseApiRoutes(
                 route.requires_jwt = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "pathParams")) {
                 try parseApiParams(parser, allocator, &route.path_params);
+            } else if (std.mem.eql(u8, key, "queryParams")) {
+                try parseApiParams(parser, allocator, &route.query_params);
+            } else if (std.mem.eql(u8, key, "headerParams")) {
+                try parseApiParams(parser, allocator, &route.header_params);
+            } else if (std.mem.eql(u8, key, "queryParamsDynamic")) {
+                route.query_params_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "headerParamsDynamic")) {
+                route.header_params_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "requestBodies")) {
+                try parseApiBodies(parser, allocator, &route.request_bodies);
+            } else if (std.mem.eql(u8, key, "requestBodiesDynamic")) {
+                route.request_bodies_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "responses")) {
+                try parseApiResponses(parser, allocator, &route.responses);
+            } else if (std.mem.eql(u8, key, "responsesDynamic")) {
+                route.responses_dynamic = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "responseStatus")) {
                 route.response_status = if (parser.readNull()) null else (parser.readU16() orelse null);
             } else if (std.mem.eql(u8, key, "responseContentType")) {
@@ -2650,6 +2942,7 @@ fn parseApiRoutes(
             }
         }
 
+        try backfillApiRouteCollections(allocator, &route);
         try list.append(allocator, route);
     }
 }
@@ -2673,6 +2966,7 @@ fn parseApiParams(
         var param = ApiParamInfo{
             .name = try allocator.dupe(u8, ""),
             .location = "path",
+            .required = false,
             .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
         };
         errdefer param.deinit(allocator);
@@ -2695,7 +2989,14 @@ fn parseApiParams(
                 param.name = try allocator.dupe(u8, parser.readString() orelse "");
             } else if (std.mem.eql(u8, key, "location")) {
                 const raw = parser.readString() orelse "path";
-                param.location = if (std.mem.eql(u8, raw, "path")) "path" else "path";
+                param.location = if (std.mem.eql(u8, raw, "query"))
+                    "query"
+                else if (std.mem.eql(u8, raw, "header"))
+                    "header"
+                else
+                    "path";
+            } else if (std.mem.eql(u8, key, "required")) {
+                param.required = parser.readBool() orelse false;
             } else if (std.mem.eql(u8, key, "schema")) {
                 const raw = parser.readRawValue() orelse return error.InvalidJson;
                 allocator.free(param.schema_json);
@@ -2706,6 +3007,140 @@ fn parseApiParams(
         }
 
         try list.append(allocator, param);
+    }
+}
+
+fn parseApiBodies(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ApiBodyInfo),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var body = ApiBodyInfo{};
+        errdefer body.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "contentType")) {
+                body.content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "schemaRef")) {
+                body.schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "schema")) {
+                if (!parser.readNull()) {
+                    const raw = parser.readRawValue() orelse return error.InvalidJson;
+                    body.schema_json = try allocator.dupe(u8, raw);
+                }
+            } else if (std.mem.eql(u8, key, "dynamic")) {
+                body.dynamic = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, body);
+    }
+}
+
+fn parseApiResponses(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(ApiResponseInfo),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var response = ApiResponseInfo{};
+        errdefer response.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "status")) {
+                response.status = if (parser.readNull()) null else (parser.readU16() orelse null);
+            } else if (std.mem.eql(u8, key, "contentType")) {
+                response.content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "schemaRef")) {
+                response.schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
+            } else if (std.mem.eql(u8, key, "schema")) {
+                if (!parser.readNull()) {
+                    const raw = parser.readRawValue() orelse return error.InvalidJson;
+                    response.schema_json = try allocator.dupe(u8, raw);
+                }
+            } else if (std.mem.eql(u8, key, "dynamic")) {
+                response.dynamic = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, response);
+    }
+}
+
+fn backfillApiRouteCollections(allocator: std.mem.Allocator, route: *ApiRouteInfo) !void {
+    if (route.request_bodies.items.len == 0) {
+        route.request_bodies_dynamic = route.request_bodies_dynamic or route.request_schema_dynamic;
+        for (route.request_schema_refs.items) |schema_ref| {
+            if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
+            try route.request_bodies.append(allocator, .{
+                .content_type = try allocator.dupe(u8, "application/json"),
+                .schema_ref = try allocator.dupe(u8, schema_ref),
+            });
+        }
+    }
+
+    // Backfill from legacy scalar response fields when no collection entries exist.
+    // These scalar fields are kept for backward compatibility with older contract.json consumers.
+    if (route.responses.items.len == 0 and
+        (route.response_status != null or route.response_content_type != null or route.response_schema_ref != null or route.response_schema_json != null or route.response_schema_dynamic))
+    {
+        try route.responses.append(allocator, .{
+            .status = route.response_status,
+            .content_type = try dupeOptionalString(allocator, route.response_content_type),
+            .schema_ref = try dupeOptionalString(allocator, route.response_schema_ref),
+            .schema_json = try dupeOptionalString(allocator, route.response_schema_json),
+            .dynamic = route.response_schema_dynamic,
+        });
+        route.responses_dynamic = route.responses_dynamic or route.response_schema_dynamic;
     }
 }
 
@@ -3320,21 +3755,52 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("        \"pathParams\": [");
         for (route.path_params.items, 0..) |param, j| {
             if (j > 0) try writer.writeAll(",");
-            try writer.writeAll("\n          {\n");
-            try writer.writeAll("            \"name\": ");
-            try writeJsonString(writer, param.name);
-            try writer.writeAll(",\n");
-            try writer.writeAll("            \"location\": ");
-            try writeJsonString(writer, param.location);
-            try writer.writeAll(",\n");
-            try writer.writeAll("            \"schema\": ");
-            try writer.writeAll(param.schema_json);
-            try writer.writeAll("\n          }");
+            try writeApiParamJson(writer, &param);
         }
         if (route.path_params.items.len > 0) {
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
+        try writer.writeAll("        \"queryParams\": [");
+        for (route.query_params.items, 0..) |param, j| {
+            if (j > 0) try writer.writeAll(",");
+            try writeApiParamJson(writer, &param);
+        }
+        if (route.query_params.items.len > 0) {
+            try writer.writeAll("\n        ");
+        }
+        try writer.writeAll("],\n");
+        try writer.writeAll("        \"headerParams\": [");
+        for (route.header_params.items, 0..) |param, j| {
+            if (j > 0) try writer.writeAll(",");
+            try writeApiParamJson(writer, &param);
+        }
+        if (route.header_params.items.len > 0) {
+            try writer.writeAll("\n        ");
+        }
+        try writer.writeAll("],\n");
+        try writer.print("        \"queryParamsDynamic\": {s},\n", .{if (route.query_params_dynamic) "true" else "false"});
+        try writer.print("        \"headerParamsDynamic\": {s},\n", .{if (route.header_params_dynamic) "true" else "false"});
+        try writer.writeAll("        \"requestBodies\": [");
+        for (route.request_bodies.items, 0..) |body, j| {
+            if (j > 0) try writer.writeAll(",");
+            try writeApiBodyJson(writer, &body);
+        }
+        if (route.request_bodies.items.len > 0) {
+            try writer.writeAll("\n        ");
+        }
+        try writer.writeAll("],\n");
+        try writer.print("        \"requestBodiesDynamic\": {s},\n", .{if (route.request_bodies_dynamic) "true" else "false"});
+        try writer.writeAll("        \"responses\": [");
+        for (route.responses.items, 0..) |response, j| {
+            if (j > 0) try writer.writeAll(",");
+            try writeApiResponseJson(writer, &response);
+        }
+        if (route.responses.items.len > 0) {
+            try writer.writeAll("\n        ");
+        }
+        try writer.writeAll("],\n");
+        try writer.print("        \"responsesDynamic\": {s},\n", .{if (route.responses_dynamic) "true" else "false"});
         try writer.writeAll("        \"responseStatus\": ");
         if (route.response_status) |status| {
             try writer.print("{d}", .{status});
@@ -3507,6 +3973,10 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("}\n");
 }
 
+pub fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
+    return if (s) |v| try allocator.dupe(u8, v) else null;
+}
+
 pub fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
@@ -3527,6 +3997,81 @@ pub fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
     try writeJsonStringContent(writer, s);
     try writer.writeByte('"');
+}
+
+fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {
+    try writer.writeAll("\n          {\n");
+    try writer.writeAll("            \"name\": ");
+    try writeJsonString(writer, param.name);
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"location\": ");
+    try writeJsonString(writer, param.location);
+    try writer.writeAll(",\n");
+    try writer.print("            \"required\": {s},\n", .{if (param.required) "true" else "false"});
+    try writer.writeAll("            \"schema\": ");
+    try writer.writeAll(param.schema_json);
+    try writer.writeAll("\n          }");
+}
+
+fn writeApiBodyJson(writer: anytype, body: *const ApiBodyInfo) !void {
+    try writer.writeAll("\n          {\n");
+    try writer.writeAll("            \"contentType\": ");
+    if (body.content_type) |content_type| {
+        try writeJsonString(writer, content_type);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"schemaRef\": ");
+    if (body.schema_ref) |schema_ref| {
+        try writeJsonString(writer, schema_ref);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"schema\": ");
+    if (body.schema_json) |schema_json| {
+        try writer.writeAll(schema_json);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.print("            \"dynamic\": {s}\n", .{if (body.dynamic) "true" else "false"});
+    try writer.writeAll("          }");
+}
+
+fn writeApiResponseJson(writer: anytype, response: *const ApiResponseInfo) !void {
+    try writer.writeAll("\n          {\n");
+    try writer.writeAll("            \"status\": ");
+    if (response.status) |status| {
+        try writer.print("{d}", .{status});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"contentType\": ");
+    if (response.content_type) |content_type| {
+        try writeJsonString(writer, content_type);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"schemaRef\": ");
+    if (response.schema_ref) |schema_ref| {
+        try writeJsonString(writer, schema_ref);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.writeAll("            \"schema\": ");
+    if (response.schema_json) |schema_json| {
+        try writer.writeAll(schema_json);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.print("            \"dynamic\": {s}\n", .{if (response.dynamic) "true" else "false"});
+    try writer.writeAll("          }");
 }
 
 // -------------------------------------------------------------------------
@@ -3675,18 +4220,52 @@ test "parseFromJson roundtrip preserves api route response schema" {
     try path_params.append(allocator, .{
         .name = try allocator.dupe(u8, "id"),
         .location = "path",
+        .required = true,
         .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var query_params: std.ArrayList(ApiParamInfo) = .empty;
+    try query_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "verbose"),
+        .location = "query",
+        .required = false,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var header_params: std.ArrayList(ApiParamInfo) = .empty;
+    try header_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "authorization"),
+        .location = "header",
+        .required = false,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var request_bodies: std.ArrayList(ApiBodyInfo) = .empty;
+    try request_bodies.append(allocator, .{
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_ref = try allocator.dupe(u8, "user.create"),
+    });
+    var responses: std.ArrayList(ApiResponseInfo) = .empty;
+    try responses.append(allocator, .{
+        .status = 200,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_ref = try allocator.dupe(u8, "user"),
     });
 
     var routes: std.ArrayList(ApiRouteInfo) = .empty;
     try routes.append(allocator, .{
         .method = try allocator.dupe(u8, "GET"),
         .path = try allocator.dupe(u8, "/users/:id"),
-        .request_schema_refs = .empty,
+        .request_schema_refs = blk: {
+            var refs: std.ArrayList([]const u8) = .empty;
+            try refs.append(allocator, try allocator.dupe(u8, "user.create"));
+            break :blk refs;
+        },
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
         .path_params = path_params,
+        .query_params = query_params,
+        .header_params = header_params,
+        .request_bodies = request_bodies,
+        .responses = responses,
         .response_status = 200,
         .response_content_type = try allocator.dupe(u8, "application/json"),
         .response_schema_ref = try allocator.dupe(u8, "user"),
@@ -3735,6 +4314,15 @@ test "parseFromJson roundtrip preserves api route response schema" {
     try std.testing.expectEqualStrings("/users/:id", route.path);
     try std.testing.expectEqual(@as(usize, 1), route.path_params.items.len);
     try std.testing.expectEqualStrings("id", route.path_params.items[0].name);
+    try std.testing.expect(route.path_params.items[0].required);
+    try std.testing.expectEqual(@as(usize, 1), route.query_params.items.len);
+    try std.testing.expectEqualStrings("verbose", route.query_params.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), route.header_params.items.len);
+    try std.testing.expectEqualStrings("authorization", route.header_params.items[0].name);
+    try std.testing.expectEqual(@as(usize, 1), route.request_bodies.items.len);
+    try std.testing.expectEqualStrings("user.create", route.request_bodies.items[0].schema_ref.?);
+    try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
+    try std.testing.expectEqual(@as(u16, 200), route.responses.items[0].status.?);
     try std.testing.expectEqualStrings("user", route.response_schema_ref.?);
 }
 

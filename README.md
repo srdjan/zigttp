@@ -423,6 +423,7 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
+- **API surface** from proven routes: method/path, path/query/header params, JSON request bodies, response variants, and bearer auth metadata
 - **Handler properties** derived from effect classification of virtual module functions (pure, read_only, stateless, retry_safe, deterministic)
 - **Behavioral paths** - every execution path through the handler with route, branching conditions, I/O sequence, and response status (exhaustive when the path count stays below 1024)
 - **Verification results** (when combined with `-Dverify`)
@@ -489,6 +490,47 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 ```
 
 The `"dynamic": false` fields are the key signal. They mean "we can enumerate every value statically." When a handler uses a variable instead of a string literal (`env(someVar)` instead of `env("JWT_SECRET")`), the contract honestly reports `"dynamic": true`.
+
+### OpenAPI and TypeScript SDK
+
+The same proven route facts can also be emitted as OpenAPI and as a generated TypeScript client:
+
+```bash
+zig build -Dhandler=examples/routing/api-surface.ts -Dcontract -Dopenapi -Dsdk=ts
+```
+
+This writes three sibling artifacts in `src/generated/`:
+
+- `contract.json`
+- `openapi.json`
+- `client.ts`
+
+The current API emitters include facts the compiler can prove without guessing:
+
+- route method and path
+- path, query, and header params reached through literal access
+- proven JSON request bodies from `validateJson(...)` / `coerceJson(...)`
+- proven response variants, including multiple status codes when statically visible
+- bearer auth metadata
+- `x-zigttp-*` hints whenever part of the surface stays dynamic
+
+The generated SDK only exposes typed helpers for routes it can prove end to end. Everything else remains available through `requestRaw()` and is listed in `skippedOperations`.
+A fully proven route can be consumed like this:
+
+```ts
+import { createClient } from "./src/generated/client";
+
+const api = createClient({ baseUrl: "https://api.example.com" });
+
+const result = await api.postProfilesId({
+    params: { id: "user_123" },
+    query: { verbose: "true" },
+    body: { displayName: "Ada" },
+    headers: { "x-client-id": "cli-42" },
+});
+
+console.log(result.data.displayName);
+```
 
 **Auto-sandboxing**: The contract is used to derive a `RuntimePolicy` embedded in the binary. Sections with `dynamic: false` are restricted to exactly the proven literals. Sections with `dynamic: true` remain unrestricted. The build reports what was proven:
 

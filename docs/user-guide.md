@@ -23,9 +23,11 @@ Functions, Cloudflare Workers), powered by Zig and zts.
 14. [Performance Tuning](#performance-tuning-for-faas)
 15. [Compile-Time Verification](#compile-time-verification)
 16. [Contract Manifest](#contract-manifest)
-17. [Runtime Sandboxing](#runtime-sandboxing)
-18. [Declarative Handler Testing](#declarative-handler-testing)
-19. [Troubleshooting](#troubleshooting)
+17. [OpenAPI Manifest](#openapi-manifest)
+18. [TypeScript SDK](#typescript-sdk)
+19. [Runtime Sandboxing](#runtime-sandboxing)
+20. [Declarative Handler Testing](#declarative-handler-testing)
+21. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -2059,6 +2061,7 @@ The contract extracts from the handler's IR:
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Registered SQL query names, operations, and touched tables from `sql("name", "...")`
 - Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
+- API route facts: method/path, path params, query params, header params, JSON request bodies, response variants, and auth requirements when they are statically proven
 - Handler effect properties derived from virtual module effect classification (pure, read_only, stateless, retry_safe, deterministic, has_egress)
 - Verification results (when combined with `-Dverify`)
 
@@ -2073,6 +2076,42 @@ zig build -Dhandler=handler.ts -Dverify -Dcontract
 The contract is written to `src/generated/contract.json` alongside the embedded
 bytecode.
 
+For a route-focused example:
+
+```bash
+zig build -Dhandler=examples/routing/api-surface.ts -Dcontract
+```
+
+Route entries can include additive API fields like:
+
+```json
+{
+  "method": "POST",
+  "path": "/profiles/:id",
+  "pathParams": [
+    { "name": "id", "location": "path", "required": true, "schema": { "type": "string" } }
+  ],
+  "queryParams": [
+    { "name": "verbose", "location": "query", "required": false, "schema": { "type": "string" } }
+  ],
+  "headerParams": [
+    { "name": "x-client-id", "location": "header", "required": false, "schema": { "type": "string" } }
+  ],
+  "requestBodies": [
+    { "contentType": "application/json", "schemaRef": "profile.update", "schema": null, "dynamic": false }
+  ],
+  "responses": [
+    { "status": 200, "contentType": "application/json", "schemaRef": null, "schema": { "type": "object" }, "dynamic": false }
+  ],
+  "queryParamsDynamic": false,
+  "headerParamsDynamic": false,
+  "requestBodiesDynamic": false,
+  "responsesDynamic": false
+}
+```
+
+The legacy summary fields (`responseStatus`, `responseContentType`, `responseSchemaRef`, `responseSchema`) are still emitted for compatibility. The `*Dynamic` flags remain the honest signal that the compiler saw part of the surface but could not enumerate it completely.
+
 ## OpenAPI Manifest
 
 Add `-Dopenapi` to emit a compiler-derived `openapi.json` alongside the
@@ -2085,12 +2124,81 @@ zig build -Dhandler=handler.ts -Dopenapi
 The current emitter only includes facts the compiler can prove:
 
 - `schemaCompile("name", JSON.stringify({...}))` schemas become component schemas
-- `validateJson("name", ...)` and `coerceJson("name", ...)` become request schema refs
+- `validateJson("name", ...)` and `coerceJson("name", ...)` become JSON request bodies
 - `parseBearer()` / `jwtVerify()` enable bearer auth metadata
 - `routerMatch()` route tables with literal `"METHOD /path"` keys become OpenAPI paths
+- literal request access becomes path, query, and header parameters
+- proven response variants become OpenAPI `responses`
 
 Dynamic schemas or routes are preserved as `x-zigttp-*` hints instead of guessed
 OpenAPI operations. The manifest is written to `src/generated/openapi.json`.
+
+```bash
+zig build -Dhandler=examples/routing/api-surface.ts -Dopenapi
+```
+
+When those facts are proven, the generated manifest includes:
+
+- `POST /profiles/{id}`
+- path/query/header parameters
+- `requestBody.content["application/json"]`
+- response entries under `responses`
+- `x-zigttp-*` flags if any part of the route stays dynamic
+
+## TypeScript SDK
+
+Add `-Dsdk=ts` to emit a dependency-free TypeScript client beside the embedded
+handler:
+
+```bash
+zig build -Dhandler=examples/routing/api-surface.ts -Dsdk=ts
+```
+
+The generated file is written to `src/generated/client.ts`.
+The standalone precompile tool accepts the matching flag:
+
+```bash
+precompile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
+```
+
+Typed helpers are generated only for routes the compiler can prove end to end:
+
+- non-dynamic path/query params
+- zero or one proven JSON request body
+- one proven JSON response shape
+
+Routes that do not meet those constraints are still accessible through
+`requestRaw()` and are listed in `skippedOperations`.
+
+Generated method shape:
+
+```ts
+method({ params?, query?, body?, headers?, signal? })
+```
+
+Example consumer for a fully proven route:
+
+```ts
+import { createClient } from "./src/generated/client";
+
+const api = createClient({
+    baseUrl: "https://api.example.com",
+});
+
+const result = await api.postProfilesId({
+    params: { id: "user_123" },
+    query: { verbose: "true" },
+    body: { displayName: "Ada" },
+    headers: { "x-client-id": "cli-42" },
+});
+
+console.log(result.status);
+console.log(result.data.displayName);
+```
+
+The generated client deliberately prefers omission over approximation. If the
+compiler cannot prove a clean typed helper, it records the reason instead of
+inventing a broad type.
 
 ## Handler Effect Properties
 

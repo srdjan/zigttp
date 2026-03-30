@@ -4,7 +4,7 @@
 //! This eliminates runtime parsing overhead and removes the need for source files
 //! in deployment.
 //!
-//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
+//! Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -21,6 +21,7 @@ const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
 const manifest_alignment = @import("manifest_alignment.zig");
 const openapi_manifest = @import("openapi_manifest.zig");
+const sdk_codegen = @import("sdk_codegen.zig");
 const property_expectations = @import("property_expectations.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
 const build_report = @import("report.zig");
@@ -111,6 +112,7 @@ const PrecompileOptions = struct {
     emit_verify: bool = false,
     emit_contract: bool = false,
     emit_openapi: bool = false,
+    sdk_target: ?[]const u8 = null,
     sql_schema_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
     deploy_target_str: ?[]const u8 = null,
@@ -154,6 +156,13 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
         }
         if (std.mem.eql(u8, arg, "--openapi")) {
             opts.emit_openapi = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--sdk")) {
+            opts.sdk_target = args.next() orelse {
+                std.debug.print("Missing target after --sdk (values: ts)\n", .{});
+                return error.MissingArgument;
+            };
             continue;
         }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
@@ -252,7 +261,7 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         std.debug.print(usage, .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -371,6 +380,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const emit_verify = opts.emit_verify;
     const emit_contract = opts.emit_contract;
     const emit_openapi = opts.emit_openapi;
+    const sdk_target = opts.sdk_target;
     const sql_schema_path = opts.sql_schema_path;
     const policy_path = opts.policy_path;
     const deploy_target_str = opts.deploy_target_str;
@@ -558,6 +568,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
 
             std.debug.print("Wrote OpenAPI manifest to: {s}\n", .{openapi_path});
+        }
+
+        if (sdk_target) |target| {
+            try writeSdkArtifact(allocator, output_path_final, contract, target);
         }
 
         // Write generated tests if --generate-tests was passed
@@ -2192,16 +2206,44 @@ fn mergeModuleContract(
             .request_schema_dynamic = route.request_schema_dynamic,
             .requires_bearer = route.requires_bearer,
             .requires_jwt = route.requires_jwt,
+            .query_params_dynamic = route.query_params_dynamic,
+            .header_params_dynamic = route.header_params_dynamic,
+            .request_bodies_dynamic = route.request_bodies_dynamic,
+            .responses_dynamic = route.responses_dynamic,
             .response_status = route.response_status,
             .response_content_type = if (route.response_content_type) |content_type|
                 try allocator.dupe(u8, content_type)
             else
                 null,
+            .response_schema_ref = if (route.response_schema_ref) |schema_ref|
+                try allocator.dupe(u8, schema_ref)
+            else
+                null,
+            .response_schema_json = if (route.response_schema_json) |schema_json|
+                try allocator.dupe(u8, schema_json)
+            else
+                null,
+            .response_schema_dynamic = route.response_schema_dynamic,
         };
         errdefer route_copy.deinit(allocator);
 
         for (route.request_schema_refs.items) |schema_ref| {
             try appendUniqueString(allocator, &route_copy.request_schema_refs, schema_ref, false);
+        }
+        for (route.path_params.items) |param| {
+            try route_copy.path_params.append(allocator, try param.dupeOwned(allocator));
+        }
+        for (route.query_params.items) |param| {
+            try route_copy.query_params.append(allocator, try param.dupeOwned(allocator));
+        }
+        for (route.header_params.items) |param| {
+            try route_copy.header_params.append(allocator, try param.dupeOwned(allocator));
+        }
+        for (route.request_bodies.items) |body| {
+            try route_copy.request_bodies.append(allocator, try body.dupeOwned(allocator));
+        }
+        for (route.responses.items) |response| {
+            try route_copy.responses.append(allocator, try response.dupeOwned(allocator));
         }
 
         try target.api.routes.append(allocator, route_copy);
@@ -2483,6 +2525,41 @@ fn deriveSiblingPath(allocator: std.mem.Allocator, output_path: []const u8, suff
     @memcpy(result[0..dir.len], dir);
     @memcpy(result[dir.len..], suffix);
     return result;
+}
+
+fn writeSdkArtifact(
+    allocator: std.mem.Allocator,
+    output_path: []const u8,
+    contract: *const HandlerContract,
+    sdk_target: []const u8,
+) !void {
+    if (!std.mem.eql(u8, sdk_target, "ts")) {
+        std.debug.print("Unknown SDK target: {s} (supported: ts)\n", .{sdk_target});
+        return error.InvalidArgument;
+    }
+
+    const sdk_path = deriveSiblingPath(allocator, output_path, "client.ts") catch |err| {
+        std.debug.print("Error deriving SDK path: {}\n", .{err});
+        return err;
+    };
+    defer allocator.free(sdk_path);
+
+    var sdk_output: std.ArrayList(u8) = .empty;
+    defer sdk_output.deinit(allocator);
+    var sdk_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sdk_output);
+
+    sdk_codegen.writeTypeScriptClient(&sdk_aw.writer, allocator, contract, .{}) catch |err| {
+        std.debug.print("Error serializing SDK artifact: {}\n", .{err});
+        return err;
+    };
+    sdk_output = sdk_aw.toArrayList();
+
+    writeFilePosix(sdk_path, sdk_output.items, allocator) catch |err| {
+        std.debug.print("Error writing SDK file '{s}': {}\n", .{ sdk_path, err });
+        return err;
+    };
+
+    std.debug.print("Wrote TypeScript SDK to: {s}\n", .{sdk_path});
 }
 
 fn writeZigFile(
@@ -3121,4 +3198,71 @@ test "resolveGeneratorPack parses integration paths" {
     try std.testing.expect(std.mem.endsWith(u8, pack.sql_schema_path.?, "/schema.sql"));
     try std.testing.expect(std.mem.endsWith(u8, pack.manifest_path.?, "/governance-manifest.json"));
     try std.testing.expectEqualStrings("json", pack.report_format.?);
+}
+
+test "writeSdkArtifact writes client sibling file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const allocator = std.testing.allocator;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "embedded_handler.zig", .data = "" });
+    const output_path = try tmp.dir.realPathFileAlloc(std.testing.io, "embedded_handler.zig", allocator);
+    defer allocator.free(output_path);
+
+    var schemas: std.ArrayList(handler_contract.ApiSchemaInfo) = .empty;
+    try schemas.append(allocator, .{
+        .name = try allocator.dupe(u8, "health"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}"),
+    });
+
+    var routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
+    try routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/health"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_ref = try allocator.dupe(u8, "health"),
+        .response_schema_dynamic = false,
+    });
+
+    var contract = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "health.ts"), .line = 1, .column = 1 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = handler_contract.emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .api = .{
+            .schemas = schemas,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = routes,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(allocator);
+
+    try writeSdkArtifact(allocator, output_path, &contract, "ts");
+
+    const client_path = try tmp.dir.realPathFileAlloc(std.testing.io, "client.ts", allocator);
+    defer allocator.free(client_path);
+    const bytes = try readFilePosix(allocator, client_path, 64 * 1024);
+    defer allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "async getHealth(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "export type Health = {") != null);
 }

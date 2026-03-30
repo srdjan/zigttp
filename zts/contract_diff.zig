@@ -1062,20 +1062,146 @@ fn compareApiRouteResponse(
     old: *const ApiRouteInfo,
     new: *const ApiRouteInfo,
 ) !ApiResponseChange {
-    if (old.response_status != new.response_status) return .breaking;
-    if (!eqlOptionalString(old.response_content_type, new.response_content_type)) return .breaking;
+    var change = try compareApiParams(allocator, old.query_params.items, new.query_params.items);
+    change = mergeApiChange(change, try compareApiParams(allocator, old.header_params.items, new.header_params.items));
+    change = mergeApiChange(change, try compareRequestBodies(allocator, old, new));
+    change = mergeApiChange(change, try compareResponses(allocator, old, new));
+    return change;
+}
 
-    if (old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
+fn mergeApiChange(current: ApiResponseChange, next: ApiResponseChange) ApiResponseChange {
+    if (current == .breaking or next == .breaking) return .breaking;
+    if (current == .dynamic or next == .dynamic) return .dynamic;
+    if (current == .additive or next == .additive) return .additive;
+    return .unchanged;
+}
 
-    if (old.response_schema_ref != null or new.response_schema_ref != null) {
-        if (old.response_schema_ref == null or new.response_schema_ref == null) return .dynamic;
-        if (std.mem.eql(u8, old.response_schema_ref.?, new.response_schema_ref.?)) return .unchanged;
+fn compareApiParams(
+    allocator: std.mem.Allocator,
+    old_items: []const handler_contract.ApiParamInfo,
+    new_items: []const handler_contract.ApiParamInfo,
+) !ApiResponseChange {
+    var has_addition = false;
+    for (old_items) |old_item| {
+        const new_item = findApiParam(new_items, old_item.name) orelse return .breaking;
+        if (!std.mem.eql(u8, old_item.location, new_item.location)) return .breaking;
+        if (old_item.required and !new_item.required) {
+            has_addition = true;
+        } else if (!old_item.required and new_item.required) {
+            return .breaking;
+        }
+        const schema_change = try compareSchemaJson(allocator, old_item.schema_json, new_item.schema_json);
+        if (schema_change == .breaking or schema_change == .dynamic) return .breaking;
+        if (schema_change == .additive) has_addition = true;
+    }
+    for (new_items) |new_item| {
+        if (findApiParam(old_items, new_item.name) == null) has_addition = true;
+    }
+    return if (has_addition) .additive else .unchanged;
+}
+
+fn findApiParam(items: []const handler_contract.ApiParamInfo, name: []const u8) ?*const handler_contract.ApiParamInfo {
+    for (items) |*item| {
+        if (std.mem.eql(u8, item.name, name)) return item;
+    }
+    return null;
+}
+
+fn compareRequestBodies(
+    allocator: std.mem.Allocator,
+    old: *const ApiRouteInfo,
+    new: *const ApiRouteInfo,
+) !ApiResponseChange {
+    if (old.request_bodies_dynamic or new.request_bodies_dynamic or old.request_schema_dynamic or new.request_schema_dynamic) {
+        return .dynamic;
+    }
+
+    if (old.request_bodies.items.len == 0 and new.request_bodies.items.len == 0) {
+        if (old.request_schema_refs.items.len != new.request_schema_refs.items.len) return .breaking;
+        for (old.request_schema_refs.items) |schema_ref| {
+            if (!containsString(new.request_schema_refs.items, schema_ref)) return .breaking;
+        }
+        return .unchanged;
+    }
+
+    if (old.request_bodies.items.len != new.request_bodies.items.len) return .breaking;
+    if (old.request_bodies.items.len == 0) return .unchanged;
+
+    for (old.request_bodies.items) |old_body| {
+        const new_body = findRequestBody(new.request_bodies.items, old_body.content_type) orelse return .breaking;
+        if (old_body.dynamic or new_body.dynamic) return .dynamic;
+        if (!eqlOptionalString(old_body.content_type, new_body.content_type)) return .breaking;
+        const schema_change = try compareBodySchemas(allocator, old_body.schema_ref, old_body.schema_json, new_body.schema_ref, new_body.schema_json);
+        if (schema_change != .unchanged) return .breaking;
+    }
+
+    return .unchanged;
+}
+
+fn findRequestBody(items: []const handler_contract.ApiBodyInfo, content_type: ?[]const u8) ?*const handler_contract.ApiBodyInfo {
+    for (items) |*item| {
+        if (eqlOptionalString(item.content_type, content_type)) return item;
+    }
+    return null;
+}
+
+fn compareResponses(
+    allocator: std.mem.Allocator,
+    old: *const ApiRouteInfo,
+    new: *const ApiRouteInfo,
+) !ApiResponseChange {
+    if (old.responses.items.len == 0 and new.responses.items.len == 0) {
+        if (old.response_status != new.response_status) return .breaking;
+        if (!eqlOptionalString(old.response_content_type, new.response_content_type)) return .breaking;
+
+        if (old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
+
+        return try compareBodySchemas(allocator, old.response_schema_ref, old.response_schema_json, new.response_schema_ref, new.response_schema_json);
+    }
+
+    if (old.responses_dynamic or new.responses_dynamic or old.response_schema_dynamic or new.response_schema_dynamic) return .dynamic;
+    if (old.responses.items.len != new.responses.items.len) return .breaking;
+
+    var has_addition = false;
+    for (old.responses.items) |old_response| {
+        const new_response = findResponse(new.responses.items, old_response.status, old_response.content_type) orelse return .breaking;
+        if (old_response.dynamic or new_response.dynamic) return .dynamic;
+        const schema_change = try compareBodySchemas(allocator, old_response.schema_ref, old_response.schema_json, new_response.schema_ref, new_response.schema_json);
+        if (schema_change == .breaking) return .breaking;
+        if (schema_change == .dynamic) return .dynamic;
+        if (schema_change == .additive) has_addition = true;
+    }
+
+    return if (has_addition) .additive else .unchanged;
+}
+
+fn findResponse(
+    items: []const handler_contract.ApiResponseInfo,
+    status: ?u16,
+    content_type: ?[]const u8,
+) ?*const handler_contract.ApiResponseInfo {
+    for (items) |*item| {
+        if (item.status == status and eqlOptionalString(item.content_type, content_type)) return item;
+    }
+    return null;
+}
+
+fn compareBodySchemas(
+    allocator: std.mem.Allocator,
+    old_schema_ref: ?[]const u8,
+    old_schema_json: ?[]const u8,
+    new_schema_ref: ?[]const u8,
+    new_schema_json: ?[]const u8,
+) !ApiResponseChange {
+    if (old_schema_ref != null or new_schema_ref != null) {
+        if (old_schema_ref == null or new_schema_ref == null) return .dynamic;
+        if (std.mem.eql(u8, old_schema_ref.?, new_schema_ref.?)) return .unchanged;
         return .breaking;
     }
 
-    if (old.response_schema_json != null or new.response_schema_json != null) {
-        if (old.response_schema_json == null or new.response_schema_json == null) return .dynamic;
-        return try compareSchemaJson(allocator, old.response_schema_json.?, new.response_schema_json.?);
+    if (old_schema_json != null or new_schema_json != null) {
+        if (old_schema_json == null or new_schema_json == null) return .dynamic;
+        return try compareSchemaJson(allocator, old_schema_json.?, new_schema_json.?);
     }
 
     return .unchanged;
@@ -1240,12 +1366,7 @@ fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
-fn containsString(haystack: []const []const u8, needle: []const u8) bool {
-    for (haystack) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
-    }
-    return false;
-}
+const containsString = handler_contract.containsString;
 
 fn findSqlQuery(
     haystack: []const handler_contract.SqlQueryInfo,
@@ -1524,6 +1645,53 @@ test "diffContracts api response field addition is additive" {
     defer diff.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 1), diff.api_route_changes.items.len);
+    try std.testing.expectEqual(ApiResponseChange.additive, diff.api_route_changes.items[0].response);
+    try std.testing.expectEqual(Classification.additive, diff.classify());
+}
+
+test "diffContracts api query param addition is additive" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    try old.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var query_params: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
+    try query_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "verbose"),
+        .location = "query",
+        .required = false,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+    try new.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .query_params = query_params,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+    });
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
     try std.testing.expectEqual(ApiResponseChange.additive, diff.api_route_changes.items[0].response);
     try std.testing.expectEqual(Classification.additive, diff.classify());
 }

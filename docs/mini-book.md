@@ -921,6 +921,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `-Dsql-schema=<path>` | SQLite schema for query validation |
 | `-Dpolicy=<path>` | Capability policy JSON override |
 | `-Dopenapi` | Generate OpenAPI manifest |
+| `-Dsdk=ts` | Generate TypeScript SDK client |
 | `-Dprove=<spec>` | Prove upgrade safety |
 | `-Daot` | Enable native AOT generation |
 
