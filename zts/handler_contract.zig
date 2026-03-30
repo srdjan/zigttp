@@ -306,6 +306,68 @@ pub const RateLimitInfo = struct {
     dynamic: bool,
 };
 
+// -------------------------------------------------------------------------
+// Behavioral contract types
+// -------------------------------------------------------------------------
+
+/// A condition that distinguishes one execution path from another.
+/// Conditions are derived from branch points in the handler's IR tree.
+pub const PathCondition = struct {
+    kind: Kind,
+    module: ?[]const u8 = null, // for io conditions (owned)
+    func: ?[]const u8 = null, // for io conditions (owned)
+    value: ?[]const u8 = null, // for req conditions (owned)
+
+    pub const Kind = enum {
+        io_ok,
+        io_fail,
+        req_method,
+        req_url,
+    };
+
+    pub fn deinit(self: *PathCondition, allocator: std.mem.Allocator) void {
+        if (self.module) |m| allocator.free(m);
+        if (self.func) |f| allocator.free(f);
+        if (self.value) |v| allocator.free(v);
+    }
+};
+
+/// A single I/O call in a behavior path's sequence.
+pub const PathIoCall = struct {
+    module: []const u8, // owned
+    func: []const u8, // owned
+
+    pub fn deinit(self: *PathIoCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.module);
+        allocator.free(self.func);
+    }
+};
+
+/// One exhaustively-enumerated execution path through the handler.
+/// Each path is a unique combination of (route, I/O outcomes, response).
+pub const BehaviorPath = struct {
+    route_method: []const u8, // owned
+    route_pattern: []const u8, // owned
+    conditions: std.ArrayList(PathCondition),
+    io_sequence: std.ArrayList(PathIoCall),
+    response_status: u16,
+    io_depth: u32,
+    is_failure_path: bool,
+
+    pub fn deinit(self: *BehaviorPath, allocator: std.mem.Allocator) void {
+        allocator.free(self.route_method);
+        allocator.free(self.route_pattern);
+        for (self.conditions.items) |*c| {
+            @constCast(c).deinit(allocator);
+        }
+        self.conditions.deinit(allocator);
+        for (self.io_sequence.items) |*io| {
+            @constCast(io).deinit(allocator);
+        }
+        self.io_sequence.deinit(allocator);
+    }
+};
+
 pub const HandlerContract = struct {
     version: u32 = 9,
     handler: HandlerLoc,
@@ -323,6 +385,8 @@ pub const HandlerContract = struct {
     fault_coverage: ?FaultCoverageInfo = null,
     rate_limiting: ?RateLimitInfo = null,
     properties: ?HandlerProperties = null,
+    behaviors: std.ArrayList(BehaviorPath) = .empty,
+    behaviors_exhaustive: bool = false,
 
     pub const FunctionEntry = struct {
         module: []const u8, // owned
@@ -362,6 +426,10 @@ pub const HandlerContract = struct {
         self.sql.deinit(allocator);
         self.durable.deinit(allocator);
         self.api.deinit(allocator);
+        for (self.behaviors.items) |*b| {
+            @constCast(b).deinit(allocator);
+        }
+        self.behaviors.deinit(allocator);
     }
 };
 
@@ -1915,6 +1983,10 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             }
         } else if (std.mem.eql(u8, key, "properties")) {
             contract.properties = try parseProperties(&parser);
+        } else if (std.mem.eql(u8, key, "behaviors")) {
+            try parseBehaviors(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
+            contract.behaviors_exhaustive = parser.readBool() orelse false;
         } else {
             // Skip unknown fields
             parser.skipValue();
@@ -2750,6 +2822,174 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
     return props;
 }
 
+fn parseBehaviors(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
+    parser.skipWhitespace();
+    if (parser.readNull()) return;
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var path = BehaviorPath{
+            .route_method = &.{},
+            .route_pattern = &.{},
+            .conditions = .empty,
+            .io_sequence = .empty,
+            .response_status = 0,
+            .io_depth = 0,
+            .is_failure_path = false,
+        };
+        errdefer path.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "method")) {
+                path.route_method = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "pattern")) {
+                path.route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "status")) {
+                path.response_status = @intCast(parser.readU32() orelse 0);
+            } else if (std.mem.eql(u8, key, "ioDepth")) {
+                path.io_depth = parser.readU32() orelse 0;
+            } else if (std.mem.eql(u8, key, "failurePath")) {
+                path.is_failure_path = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "conditions")) {
+                try parseBehaviorConditions(parser, allocator, &path.conditions);
+            } else if (std.mem.eql(u8, key, "ioSequence")) {
+                try parseBehaviorIoSequence(parser, allocator, &path.io_sequence);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try contract.behaviors.append(allocator, path);
+    }
+}
+
+fn parseBehaviorConditions(parser: *JsonParser, allocator: std.mem.Allocator, conditions: *std.ArrayList(PathCondition)) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var cond = PathCondition{ .kind = .io_ok };
+        errdefer cond.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "kind")) {
+                const kind_str = parser.readString() orelse return error.InvalidJson;
+                cond.kind = std.meta.stringToEnum(PathCondition.Kind, kind_str) orelse .io_ok;
+            } else if (std.mem.eql(u8, key, "module")) {
+                cond.module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "func")) {
+                cond.func = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "value")) {
+                cond.value = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try conditions.append(allocator, cond);
+    }
+}
+
+fn parseBehaviorIoSequence(parser: *JsonParser, allocator: std.mem.Allocator, io_seq: *std.ArrayList(PathIoCall)) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var io_call = PathIoCall{ .module = &.{}, .func = &.{} };
+        errdefer io_call.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "module")) {
+                io_call.module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "func")) {
+                io_call.func = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try io_seq.append(allocator, io_call);
+    }
+}
+
 fn parseFaultCoverage(parser: *JsonParser) !?FaultCoverageInfo {
     parser.skipWhitespace();
     if (parser.readNull()) return null;
@@ -3201,9 +3441,67 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("    \"maxIoDepth\": null,\n");
         }
         try writer.print("    \"faultCovered\": {s}\n", .{if (p.fault_covered) "true" else "false"});
-        try writer.writeAll("  }\n");
+        try writer.writeAll("  },\n");
     } else {
-        try writer.writeAll("  \"properties\": null\n");
+        try writer.writeAll("  \"properties\": null,\n");
+    }
+
+    // behaviors (optional)
+    if (contract.behaviors.items.len > 0) {
+        try writer.writeAll("  \"behaviors\": [\n");
+        for (contract.behaviors.items, 0..) |path, i| {
+            if (i > 0) try writer.writeAll(",\n");
+            try writer.writeAll("    {\n");
+            try writer.writeAll("      \"method\": ");
+            try writeJsonString(writer, path.route_method);
+            try writer.writeAll(",\n");
+            try writer.writeAll("      \"pattern\": ");
+            try writeJsonString(writer, path.route_pattern);
+            try writer.writeAll(",\n");
+            try writer.print("      \"status\": {d},\n", .{path.response_status});
+            try writer.print("      \"ioDepth\": {d},\n", .{path.io_depth});
+            try writer.print("      \"failurePath\": {s},\n", .{if (path.is_failure_path) "true" else "false"});
+
+            // conditions
+            try writer.writeAll("      \"conditions\": [");
+            for (path.conditions.items, 0..) |cond, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.writeAll("{\"kind\": ");
+                try writeJsonString(writer, @tagName(cond.kind));
+                if (cond.module) |m| {
+                    try writer.writeAll(", \"module\": ");
+                    try writeJsonString(writer, m);
+                }
+                if (cond.func) |f| {
+                    try writer.writeAll(", \"func\": ");
+                    try writeJsonString(writer, f);
+                }
+                if (cond.value) |v| {
+                    try writer.writeAll(", \"value\": ");
+                    try writeJsonString(writer, v);
+                }
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("],\n");
+
+            // io_sequence
+            try writer.writeAll("      \"ioSequence\": [");
+            for (path.io_sequence.items, 0..) |io, j| {
+                if (j > 0) try writer.writeAll(", ");
+                try writer.writeAll("{\"module\": ");
+                try writeJsonString(writer, io.module);
+                try writer.writeAll(", \"func\": ");
+                try writeJsonString(writer, io.func);
+                try writer.writeByte('}');
+            }
+            try writer.writeAll("]\n");
+            try writer.writeAll("    }");
+        }
+        try writer.writeAll("\n  ],\n");
+        try writer.print("  \"behaviorsExhaustive\": {s}\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
+    } else {
+        try writer.writeAll("  \"behaviors\": [],\n");
+        try writer.print("  \"behaviorsExhaustive\": {s}\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     }
 
     try writer.writeAll("}\n");
@@ -3597,4 +3895,78 @@ test "writeContractJson with data" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"exhaustiveReturns\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"patternCount\": 3") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"dynamic\": true") != null);
+}
+
+test "behaviors serialization roundtrip" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{
+        \\  "version": 9,
+        \\  "handler": { "path": "handler.ts", "line": 1, "column": 0 },
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": { "literal": [], "dynamic": false },
+        \\  "egress": { "hosts": [], "dynamic": false },
+        \\  "cache": { "namespaces": [], "dynamic": false },
+        \\  "api": {},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "behaviors": [
+        \\    {
+        \\      "method": "GET",
+        \\      "pattern": "/users/:id",
+        \\      "status": 200,
+        \\      "ioDepth": 2,
+        \\      "failurePath": false,
+        \\      "conditions": [
+        \\        {"kind": "io_ok", "module": "auth", "func": "jwtVerify"},
+        \\        {"kind": "io_ok", "module": "cache", "func": "cacheGet"}
+        \\      ],
+        \\      "ioSequence": [
+        \\        {"module": "auth", "func": "jwtVerify"},
+        \\        {"module": "cache", "func": "cacheGet"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "method": "GET",
+        \\      "pattern": "/users/:id",
+        \\      "status": 401,
+        \\      "ioDepth": 1,
+        \\      "failurePath": true,
+        \\      "conditions": [
+        \\        {"kind": "io_fail", "module": "auth", "func": "jwtVerify"}
+        \\      ],
+        \\      "ioSequence": [
+        \\        {"module": "auth", "func": "jwtVerify"}
+        \\      ]
+        \\    }
+        \\  ],
+        \\  "behaviorsExhaustive": true
+        \\}
+    ;
+
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), contract.behaviors.items.len);
+    try std.testing.expect(contract.behaviors_exhaustive);
+
+    const path0 = contract.behaviors.items[0];
+    try std.testing.expectEqualStrings("GET", path0.route_method);
+    try std.testing.expectEqualStrings("/users/:id", path0.route_pattern);
+    try std.testing.expectEqual(@as(u16, 200), path0.response_status);
+    try std.testing.expectEqual(@as(u32, 2), path0.io_depth);
+    try std.testing.expect(!path0.is_failure_path);
+    try std.testing.expectEqual(@as(usize, 2), path0.conditions.items.len);
+    try std.testing.expectEqual(PathCondition.Kind.io_ok, path0.conditions.items[0].kind);
+    try std.testing.expectEqualStrings("auth", path0.conditions.items[0].module.?);
+    try std.testing.expectEqualStrings("jwtVerify", path0.conditions.items[0].func.?);
+    try std.testing.expectEqual(@as(usize, 2), path0.io_sequence.items.len);
+
+    const path1 = contract.behaviors.items[1];
+    try std.testing.expectEqual(@as(u16, 401), path1.response_status);
+    try std.testing.expect(path1.is_failure_path);
+    try std.testing.expectEqual(PathCondition.Kind.io_fail, path1.conditions.items[0].kind);
 }

@@ -110,6 +110,40 @@ pub const PropertiesChange = struct {
     new_value: bool,
 };
 
+pub const BehaviorPathChange = struct {
+    method: []const u8,
+    pattern: []const u8,
+    status: u16,
+    change: BehaviorChangeKind,
+};
+
+pub const BehaviorChangeKind = enum {
+    preserved,
+    response_changed,
+    removed,
+    added,
+};
+
+pub const BehaviorDiff = struct {
+    preserved: u32 = 0,
+    response_changed: u32 = 0,
+    removed: u32 = 0,
+    added: u32 = 0,
+    changes: std.ArrayList(BehaviorPathChange) = .empty,
+
+    pub fn deinit(self: *BehaviorDiff, allocator: std.mem.Allocator) void {
+        self.changes.deinit(allocator);
+    }
+
+    pub fn total(self: *const BehaviorDiff) u32 {
+        return self.preserved + self.response_changed + self.removed + self.added;
+    }
+
+    pub fn hasBreaking(self: *const BehaviorDiff) bool {
+        return self.removed > 0 or self.response_changed > 0;
+    }
+};
+
 pub const ReplaySummary = struct {
     total: u32 = 0,
     identical: u32 = 0,
@@ -133,6 +167,8 @@ pub const ContractDiff = struct {
     dynamic_changes: std.ArrayList(DynamicChange),
     /// Informational only - not used for classification.
     effect_changes: std.ArrayList(PropertiesChange) = .empty,
+    /// Behavioral path diff - present when both contracts have behaviors.
+    behavior_diff: ?BehaviorDiff = null,
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
@@ -143,6 +179,7 @@ pub const ContractDiff = struct {
         self.sql_changes.deinit(allocator);
         self.dynamic_changes.deinit(allocator);
         self.effect_changes.deinit(allocator);
+        if (self.behavior_diff) |*bd| bd.deinit(allocator);
     }
 
     pub fn capabilitiesWidened(self: *const ContractDiff) bool {
@@ -366,6 +403,12 @@ pub fn diffContracts(
         }
     }
 
+    // Behavioral path comparison (when both contracts have behaviors)
+    var behavior_diff: ?BehaviorDiff = null;
+    if (old.behaviors.items.len > 0 or new.behaviors.items.len > 0) {
+        behavior_diff = try diffBehaviors(allocator, old.behaviors.items, new.behaviors.items);
+    }
+
     return .{
         .routes = routes,
         .api_route_changes = api_route_changes,
@@ -375,7 +418,107 @@ pub fn diffContracts(
         .sql_changes = sql_changes,
         .dynamic_changes = dynamic_changes,
         .effect_changes = effect_changes,
+        .behavior_diff = behavior_diff,
     };
+}
+
+// -------------------------------------------------------------------------
+// Behavioral diff
+// -------------------------------------------------------------------------
+
+const BehaviorPath = handler_contract.BehaviorPath;
+const PathCondition = handler_contract.PathCondition;
+
+/// Compare two sets of behavioral paths. A path is identified by its
+/// (method, pattern, conditions) tuple. If the conditions match but the
+/// response status differs, the path is classified as response_changed.
+fn diffBehaviors(
+    allocator: std.mem.Allocator,
+    old_paths: []const BehaviorPath,
+    new_paths: []const BehaviorPath,
+) !BehaviorDiff {
+    var diff = BehaviorDiff{};
+    errdefer diff.deinit(allocator);
+
+    // For each old path, check if a matching new path exists
+    for (old_paths) |old_path| {
+        if (findMatchingPath(new_paths, &old_path)) |new_path| {
+            if (old_path.response_status == new_path.response_status) {
+                diff.preserved += 1;
+                try diff.changes.append(allocator, .{
+                    .method = old_path.route_method,
+                    .pattern = old_path.route_pattern,
+                    .status = old_path.response_status,
+                    .change = .preserved,
+                });
+            } else {
+                diff.response_changed += 1;
+                try diff.changes.append(allocator, .{
+                    .method = old_path.route_method,
+                    .pattern = old_path.route_pattern,
+                    .status = new_path.response_status,
+                    .change = .response_changed,
+                });
+            }
+        } else {
+            diff.removed += 1;
+            try diff.changes.append(allocator, .{
+                .method = old_path.route_method,
+                .pattern = old_path.route_pattern,
+                .status = old_path.response_status,
+                .change = .removed,
+            });
+        }
+    }
+
+    // Find new paths not present in old
+    for (new_paths) |new_path| {
+        if (findMatchingPath(old_paths, &new_path) == null) {
+            diff.added += 1;
+            try diff.changes.append(allocator, .{
+                .method = new_path.route_method,
+                .pattern = new_path.route_pattern,
+                .status = new_path.response_status,
+                .change = .added,
+            });
+        }
+    }
+
+    return diff;
+}
+
+/// Find a path in the list that matches the target by (method, pattern, conditions).
+fn findMatchingPath(paths: []const BehaviorPath, target: *const BehaviorPath) ?*const BehaviorPath {
+    for (paths) |*path| {
+        if (behaviorPathKeysMatch(path, target)) return path;
+    }
+    return null;
+}
+
+/// Two behavior paths match if they have the same route and the same conditions.
+fn behaviorPathKeysMatch(a: *const BehaviorPath, b: *const BehaviorPath) bool {
+    if (!std.mem.eql(u8, a.route_method, b.route_method)) return false;
+    if (!std.mem.eql(u8, a.route_pattern, b.route_pattern)) return false;
+    if (a.conditions.items.len != b.conditions.items.len) return false;
+
+    for (a.conditions.items, b.conditions.items) |ca, cb| {
+        if (!conditionsEqual(&ca, &cb)) return false;
+    }
+    return true;
+}
+
+fn conditionsEqual(a: *const PathCondition, b: *const PathCondition) bool {
+    if (a.kind != b.kind) return false;
+    if (!eqlOptStr(a.module, b.module)) return false;
+    if (!eqlOptStr(a.func, b.func)) return false;
+    if (!eqlOptStr(a.value, b.value)) return false;
+    return true;
+}
+
+fn eqlOptStr(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null and b == null) return true;
+    if (a == null or b == null) return false;
+    return std.mem.eql(u8, a.?, b.?);
 }
 
 // -------------------------------------------------------------------------
@@ -452,6 +595,16 @@ pub fn writeProofJson(cert: *const ProofCertificate, writer: anytype) !void {
     try writer.writeAll("  \"proof_level\": \"");
     try writer.writeAll(cert.proof_level.toString());
     try writer.writeAll("\",\n");
+
+    // Behavioral diff
+    if (cert.diff.behavior_diff) |bd| {
+        try writer.writeAll("  \"behavioralDiff\": {\n");
+        try writer.print("    \"preserved\": {d},\n", .{bd.preserved});
+        try writer.print("    \"responseChanged\": {d},\n", .{bd.response_changed});
+        try writer.print("    \"removed\": {d},\n", .{bd.removed});
+        try writer.print("    \"added\": {d}\n", .{bd.added});
+        try writer.writeAll("  },\n");
+    }
 
     try writer.writeAll("  \"recommendation\": ");
     try writeJsonString(writer, cert.recommendation);
@@ -619,6 +772,43 @@ pub fn writeProofReport(writer: anytype, cert: *const ProofCertificate) !void {
             try writer.writeAll(": proven -> dynamic\n");
         } else {
             try writer.writeAll(": dynamic -> proven\n");
+        }
+    }
+
+    // Behavioral diff
+    if (cert.diff.behavior_diff) |bd| {
+        try writer.writeAll("\nBehavioral Paths:\n");
+        try writer.print("  {d} preserved, {d} changed, {d} removed, {d} added\n", .{
+            bd.preserved,
+            bd.response_changed,
+            bd.removed,
+            bd.added,
+        });
+        for (bd.changes.items) |change| {
+            switch (change.change) {
+                .preserved => {},
+                .response_changed => {
+                    try writer.writeAll("  ~ CHANGED  ");
+                    try writer.writeAll(change.method);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(change.pattern);
+                    try writer.print(" -> {d}\n", .{change.status});
+                },
+                .removed => {
+                    try writer.writeAll("  - REMOVED  ");
+                    try writer.writeAll(change.method);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(change.pattern);
+                    try writer.print(" ({d})\n", .{change.status});
+                },
+                .added => {
+                    try writer.writeAll("  + ADDED    ");
+                    try writer.writeAll(change.method);
+                    try writer.writeByte(' ');
+                    try writer.writeAll(change.pattern);
+                    try writer.print(" ({d})\n", .{change.status});
+                },
+            }
         }
     }
 
@@ -1542,4 +1732,86 @@ test "writeProofReport output" {
     try std.testing.expect(std.mem.indexOf(u8, report, "+ ADDED    /api/v2") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "100 traces replayed") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "100 identical") != null);
+}
+
+test "diffBehaviors identical paths" {
+    const allocator = std.testing.allocator;
+
+    var cond_a: std.ArrayList(handler_contract.PathCondition) = .empty;
+    defer cond_a.deinit(allocator);
+    try cond_a.append(allocator, .{ .kind = .io_ok, .module = "auth", .func = "jwtVerify" });
+
+    var io_a: std.ArrayList(handler_contract.PathIoCall) = .empty;
+    defer io_a.deinit(allocator);
+    try io_a.append(allocator, .{ .module = "auth", .func = "jwtVerify" });
+
+    const path_a = handler_contract.BehaviorPath{
+        .route_method = "GET",
+        .route_pattern = "/users/:id",
+        .conditions = cond_a,
+        .io_sequence = io_a,
+        .response_status = 200,
+        .io_depth = 1,
+        .is_failure_path = false,
+    };
+
+    const old_paths = [_]handler_contract.BehaviorPath{path_a};
+    const new_paths = [_]handler_contract.BehaviorPath{path_a};
+
+    var bd = try diffBehaviors(allocator, &old_paths, &new_paths);
+    defer bd.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), bd.preserved);
+    try std.testing.expectEqual(@as(u32, 0), bd.removed);
+    try std.testing.expectEqual(@as(u32, 0), bd.added);
+    try std.testing.expectEqual(@as(u32, 0), bd.response_changed);
+    try std.testing.expect(!bd.hasBreaking());
+}
+
+test "diffBehaviors removed path is breaking" {
+    const allocator = std.testing.allocator;
+
+    const path_a = handler_contract.BehaviorPath{
+        .route_method = "GET",
+        .route_pattern = "/health",
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 0,
+        .is_failure_path = false,
+    };
+
+    const old_paths = [_]handler_contract.BehaviorPath{path_a};
+    const new_paths = [_]handler_contract.BehaviorPath{};
+
+    var bd = try diffBehaviors(allocator, &old_paths, &new_paths);
+    defer bd.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), bd.preserved);
+    try std.testing.expectEqual(@as(u32, 1), bd.removed);
+    try std.testing.expect(bd.hasBreaking());
+}
+
+test "diffBehaviors added path" {
+    const allocator = std.testing.allocator;
+
+    const path_a = handler_contract.BehaviorPath{
+        .route_method = "POST",
+        .route_pattern = "/users",
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 201,
+        .io_depth = 0,
+        .is_failure_path = false,
+    };
+
+    const old_paths = [_]handler_contract.BehaviorPath{};
+    const new_paths = [_]handler_contract.BehaviorPath{path_a};
+
+    var bd = try diffBehaviors(allocator, &old_paths, &new_paths);
+    defer bd.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), bd.preserved);
+    try std.testing.expectEqual(@as(u32, 1), bd.added);
+    try std.testing.expect(!bd.hasBreaking());
 }

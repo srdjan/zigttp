@@ -103,7 +103,7 @@ pub const PathGenerator = struct {
     tests: std.ArrayList(GeneratedTest),
     path_count: u32,
 
-    const MAX_PATHS = 1024;
+    pub const MAX_PATHS = 1024;
 
     const FnMeta = struct {
         module: []const u8,
@@ -192,6 +192,76 @@ pub const PathGenerator = struct {
             // Expected response
             try writer.print("{{\"type\":\"expect\",\"status\":{d}}}\n", .{test_case.expected_status});
         }
+    }
+
+    /// Convert generated tests into BehaviorPath structs for the contract.
+    /// Caller owns the returned list and its contents.
+    pub fn toBehaviorPaths(self: *const PathGenerator, allocator: std.mem.Allocator) !std.ArrayList(handler_contract.BehaviorPath) {
+        var paths: std.ArrayList(handler_contract.BehaviorPath) = .empty;
+        errdefer {
+            for (paths.items) |*p| p.deinit(allocator);
+            paths.deinit(allocator);
+        }
+
+        for (self.tests.items) |test_case| {
+            var conditions: std.ArrayList(handler_contract.PathCondition) = .empty;
+            errdefer {
+                for (conditions.items) |*c| @constCast(c).deinit(allocator);
+                conditions.deinit(allocator);
+            }
+
+            var is_failure = false;
+            for (test_case.constraints) |constraint| {
+                if (constraint.isFailure()) is_failure = true;
+
+                const cond: handler_contract.PathCondition = switch (constraint) {
+                    .req_method => |v| .{
+                        .kind = .req_method,
+                        .value = try allocator.dupe(u8, v),
+                    },
+                    .req_url => |v| .{
+                        .kind = .req_url,
+                        .value = try allocator.dupe(u8, v),
+                    },
+                    .stub_truthy, .result_ok => |info| .{
+                        .kind = .io_ok,
+                        .module = try allocator.dupe(u8, info.module),
+                        .func = try allocator.dupe(u8, info.func),
+                    },
+                    .stub_falsy, .result_not_ok => |info| .{
+                        .kind = .io_fail,
+                        .module = try allocator.dupe(u8, info.module),
+                        .func = try allocator.dupe(u8, info.func),
+                    },
+                };
+                try conditions.append(allocator, cond);
+            }
+
+            var io_sequence: std.ArrayList(handler_contract.PathIoCall) = .empty;
+            errdefer {
+                for (io_sequence.items) |*io| @constCast(io).deinit(allocator);
+                io_sequence.deinit(allocator);
+            }
+
+            for (test_case.io_stubs.items) |stub| {
+                try io_sequence.append(allocator, .{
+                    .module = try allocator.dupe(u8, stub.module),
+                    .func = try allocator.dupe(u8, stub.func),
+                });
+            }
+
+            try paths.append(allocator, .{
+                .route_method = try allocator.dupe(u8, test_case.method),
+                .route_pattern = try allocator.dupe(u8, test_case.url),
+                .conditions = conditions,
+                .io_sequence = io_sequence,
+                .response_status = test_case.expected_status,
+                .io_depth = @intCast(test_case.io_stubs.items.len),
+                .is_failure_path = is_failure,
+            });
+        }
+
+        return paths;
     }
 
     // -------------------------------------------------------------------

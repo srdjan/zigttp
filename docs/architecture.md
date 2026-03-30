@@ -74,7 +74,7 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 - `handler_contract.zig` - Contract extraction from IR
 - `handler_policy.zig` - Runtime policy derivation from contracts
 - `bytecode_verifier.zig` - Bytecode structural integrity validation
-- `path_generator.zig` - Exhaustive execution path enumeration
+- `path_generator.zig` - Exhaustive execution path enumeration and behavioral contract generation
 - `fault_coverage.zig` - Fault coverage analysis against FailureSeverity annotations
 
 #### JIT Compilation
@@ -385,11 +385,26 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
 
-### Compile-Time Path Analysis
+### Compile-Time Path Analysis and Behavioral Contract
 
-The `PathGenerator` (`zts/path_generator.zig`) performs exhaustive path enumeration at build time, enabled via `-Dgenerate-tests=true`. It walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary to produce a test case for each execution path.
+`PathGenerator` (`zts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
 
-The `FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response - a structural pattern correlated with bugs. Results flow into `contract.json` (`faultCoverage` section), `HandlerProperties.fault_covered`, and deployment manifest tags.
+Each enumerated path becomes a `BehaviorPath` (`zts/handler_contract.zig`) in the contract's `behaviors` section. A `BehaviorPath` records route method/pattern, branching conditions (which I/O calls succeed or fail), the I/O call sequence, response status, I/O depth, and whether it represents a failure path. `behaviors_exhaustive` is true when PathGenerator did not hit the 1024-path cap.
+
+`FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response. Results flow into `contract.json`, `HandlerProperties.fault_covered`, and deployment manifest tags.
+
+### Upgrade Verification
+
+`upgrade_verifier` (`tools/upgrade_verifier.zig`) combines surface diff, behavioral diff, property regressions, and coverage gap analysis into a four-value `UpgradeVerdict`:
+
+- **safe** - all behavioral paths preserved, no property regressions
+- **safe_with_additions** - new paths added, existing behavior preserved
+- **breaking** - paths removed, responses changed, or critical property lost (retry_safe, injection_safe, state_isolated, fault_covered, no_secret_leakage, no_credential_leakage)
+- **needs_review** - structurally OK but warning-level property regressions (deterministic, idempotent, read_only) or significant coverage gaps
+
+The behavioral diff (`contract_diff.diffBehaviors`) matches paths by (method, pattern, conditions) tuple. Two paths match when they have the same route and I/O success/failure conditions. A matched path with a different response status is `response_changed` (breaking).
+
+Output: `upgrade-manifest.json` with verdict, justification, surface summary, behavioral summary, property regressions/gains with severity, and coverage gap metrics. Both `zig build prove` and `-Dprove` produce this artifact.
 
 ### Guard Composition
 

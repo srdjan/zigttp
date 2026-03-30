@@ -12,6 +12,7 @@ const zts = @import("zts");
 const handler_contract = zts.handler_contract;
 const contract_diff = zts.contract_diff;
 const readFilePosix = zts.file_io.readFile;
+const upgrade_verifier = @import("upgrade_verifier.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
@@ -101,11 +102,31 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("Wrote {s}\n", .{path});
     }
 
+    // Write upgrade-manifest.json (behavioral upgrade verification)
+    var manifest = try upgrade_verifier.analyzeUpgrade(allocator, &diff, classification, null, &new_contract);
+    defer manifest.deinit(allocator);
+    {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        try upgrade_verifier.writeUpgradeManifestJson(&manifest, &aw.writer);
+        buf = aw.toArrayList();
+
+        const path = try std.fmt.allocPrint(allocator, "{s}upgrade-manifest.json", .{output_dir});
+        defer allocator.free(path);
+        try zts.file_io.writeFile(allocator, path, buf.items);
+        std.debug.print("Wrote {s}\n", .{path});
+    }
+
     std.debug.print("Classification: {s}\n", .{classification.toString()});
+    std.debug.print("Upgrade verdict: {s}\n", .{manifest.verdict.toString()});
     std.debug.print("Proof level: {s}\n", .{proof_level.toString()});
 
-    if (classification == .breaking) {
+    if (classification == .breaking or manifest.verdict == .breaking) {
         std.process.exit(1);
+    }
+    if (manifest.verdict == .needs_review) {
+        std.process.exit(2);
     }
 }
 

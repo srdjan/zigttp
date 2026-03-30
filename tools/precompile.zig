@@ -724,7 +724,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
             defer allocator.free(prove_dir);
 
-            prove_upgrade.writeProofOutputs(allocator, &result.certificate, prove_dir) catch |err| {
+            prove_upgrade.writeProofOutputs(allocator, &result, prove_dir) catch |err| {
                 std.debug.print("Error writing proof outputs: {}\n", .{err});
                 return err;
             };
@@ -1552,9 +1552,10 @@ fn compileHandler(
         }
     }
 
-    // Generate exhaustive test cases from path analysis
+    // Generate exhaustive test cases from path analysis.
+    // Also runs when emitting a contract, to populate behavioral paths.
     var generated_tests_jsonl: ?[]const u8 = null;
-    if (generate_tests) {
+    if (generate_tests or (emit_contract and contract != null)) {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
@@ -1583,6 +1584,10 @@ fn compileHandler(
                     }
                     props.max_io_depth = if (tests.len > 0) max_depth else null;
                 }
+
+                // Populate behavioral contract from exhaustive paths
+                contract.?.behaviors = try gen.toBehaviorPaths(allocator);
+                contract.?.behaviors_exhaustive = gen.getTests().len < zts.PathGenerator.MAX_PATHS;
             }
 
             // Fault coverage analysis on generated paths

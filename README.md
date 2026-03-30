@@ -38,7 +38,9 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Guard composition.** `guard()` from `zigttp:compose` combined with the pipe operator (`|>`) composes handlers with pre/post guards at compile time. The parser desugars `guard(auth) |> guard(log) |> handler |> guard(cors)` into a single flat function with sequential if-checks - zero runtime overhead.
 
-**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts and replaying recorded traces. The result is classified as equivalent, additive, or breaking with a machine-readable proof certificate. The standalone `zig build prove -- old.json new.json` CLI tool compares contracts without rebuilding (exit 0 for safe, 1 for breaking - CI-ready).
+**Behavioral contract.** `-Dcontract` enumerates every execution path through the handler and embeds them in contract.json as structured `behaviors`. Each path records the route, branching conditions (which I/O calls succeed or fail), the I/O sequence, and the resulting HTTP status. The restricted JS subset has no back-edges and no exceptions, so path enumeration is finite and exhaustive. Comparing two behavioral contracts shows which paths were preserved, which changed response codes, which were removed, and which are new.
+
+**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zig build prove -- old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
 
 **Contract-driven mock server.** `zig build mock -- tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
@@ -296,7 +298,7 @@ Options:
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
-**Deployment Pipeline**: Contract manifests (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution (`-Dprove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
+**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
 
 **Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression.
 
@@ -422,6 +424,7 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
 - **Handler properties** derived from effect classification of virtual module functions (pure, read_only, stateless, retry_safe, deterministic)
+- **Behavioral paths** - every execution path through the handler with route, branching conditions, I/O sequence, and response status (exhaustive when the path count stays below 1024)
 - **Verification results** (when combined with `-Dverify`)
 - **Route patterns** (when combined with `-Daot`)
 
@@ -450,7 +453,38 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
     "retrySafe": false,
     "deterministic": true,
     "hasEgress": true
-  }
+  },
+  "behaviors": [
+    {
+      "method": "GET",
+      "pattern": "/users/:id",
+      "status": 200,
+      "ioDepth": 2,
+      "failurePath": false,
+      "conditions": [
+        {"kind": "io_ok", "module": "auth", "func": "jwtVerify"},
+        {"kind": "io_ok", "module": "cache", "func": "cacheGet"}
+      ],
+      "ioSequence": [
+        {"module": "auth", "func": "jwtVerify"},
+        {"module": "cache", "func": "cacheGet"}
+      ]
+    },
+    {
+      "method": "GET",
+      "pattern": "/users/:id",
+      "status": 401,
+      "ioDepth": 1,
+      "failurePath": true,
+      "conditions": [
+        {"kind": "io_fail", "module": "auth", "func": "jwtVerify"}
+      ],
+      "ioSequence": [
+        {"module": "auth", "func": "jwtVerify"}
+      ]
+    }
+  ],
+  "behaviorsExhaustive": true
 }
 ```
 
@@ -571,13 +605,18 @@ Compare two handler versions and classify the upgrade:
 zig build -Dhandler=handler-v2.ts -Dprove=old-contract.json:traces.jsonl
 ```
 
-The system diffs the old and new contracts (env vars, egress hosts, cache namespaces, SQL query names, routes) and replays recorded traces against the new handler. Results are classified as:
+Two diff levels run against the old and new contracts. The surface diff compares I/O capabilities (env vars, egress hosts, cache namespaces, SQL query names, routes). The behavioral diff compares every execution path, matching by route and branching conditions, then classifying each as preserved, response-changed, removed, or added.
 
-- **equivalent**: Same contract, same responses for all recorded traces
-- **additive**: New capabilities added (new env vars, new routes) but all existing behavior preserved
-- **breaking**: Existing behavior changed or capabilities removed
+Property regressions carry severity. Losing `retry_safe` or `injection_safe` is critical. Losing `deterministic` or `idempotent` is a warning. Losing `pure` is informational.
 
-Output is a machine-readable proof certificate and a human-readable report.
+The upgrade verdict combines these signals:
+
+- **safe**: Identical behavior, no property regressions
+- **safe_with_additions**: New paths or capabilities added, existing behavior preserved
+- **breaking**: Paths removed, responses changed, or critical property lost
+- **needs_review**: Structurally OK but warning-level regressions or significant coverage gaps
+
+Output: `proof.json` (machine-readable certificate), `proof-report.txt` (human-readable), and `upgrade-manifest.json` (verdict with full breakdown).
 
 ### Guard Composition (`zigttp:compose`)
 
