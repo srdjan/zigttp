@@ -173,6 +173,19 @@ pub const TypePool = struct {
         return self.nodes.items[idx].tag;
     }
 
+    /// Widen a literal type to its base type. Returns the index unchanged
+    /// for non-literal types. Used to prevent let bindings from being locked
+    /// to a specific literal value.
+    pub fn widenLiteral(self: *const TypePool, idx: TypeIndex) TypeIndex {
+        const tag = self.getTag(idx) orelse return idx;
+        return switch (tag) {
+            .t_literal_string => self.idx_string,
+            .t_literal_number => self.idx_number,
+            .t_literal_bool => self.idx_boolean,
+            else => idx,
+        };
+    }
+
     /// Get the data for a type index.
     pub fn getData(self: *const TypePool, idx: TypeIndex) ?TypeData {
         if (idx == null_type_idx or idx >= self.nodes.items.len) return null;
@@ -462,10 +475,11 @@ pub const TypePool = struct {
     /// Implements structural subtyping: source is assignable if it has at least
     /// all the fields/members of target with compatible types.
     pub fn isAssignableTo(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
-        // Same type or unknown target - always assignable
         if (source == target) return true;
+        // Unknown target accepts anything; null_type_idx means inference
+        // produced no result, so skip rather than reject.
         if (target == null_type_idx or target == self.idx_unknown) return true;
-        if (source == null_type_idx) return false;
+        if (source == null_type_idx) return true;
 
         const src_tag = self.getTag(source) orelse return false;
         const tgt_tag = self.getTag(target) orelse return false;
@@ -475,8 +489,15 @@ pub const TypePool = struct {
         // nothing is assignable to never
         if (tgt_tag == .t_never) return false;
 
-        // Nominal types: only equal indices match
-        if (self.isNominal(target) and source != target) return false;
+        // Nominal types: only equal indices match, unless the source is
+        // a record (object literal) which should be structurally checked
+        // against the nominal target's fields.
+        if (self.isNominal(target) and source != target) {
+            if (src_tag == .t_record and tgt_tag == .t_record) {
+                return self.isRecordAssignable(source, target);
+            }
+            return false;
+        }
 
         // Same primitive tags
         if (src_tag == tgt_tag) {
@@ -526,6 +547,11 @@ pub const TypePool = struct {
             }
             return true;
         }
+
+        // Record is assignable to unresolved ref types. The TypePool cannot
+        // resolve refs to their definitions (that requires the TypeEnv), so
+        // accept rather than reject a potentially valid structural match.
+        if (src_tag == .t_record and tgt_tag == .t_ref) return true;
 
         return false;
     }

@@ -200,8 +200,13 @@ pub const TypeChecker = struct {
                         }
                     }
 
-                    // Track inferred type for use in later expressions
-                    const effective = if (declared != null_type_idx) declared else inferred;
+                    // Track inferred type for use in later expressions.
+                    // For let bindings without explicit type annotations, widen
+                    // literal types to their base type so reassignment works.
+                    var effective = if (declared != null_type_idx) declared else inferred;
+                    if (effective != null_type_idx and declared == null_type_idx and vd.kind == .let) {
+                        effective = self.env.pool.widenLiteral(effective);
+                    }
                     if (effective != null_type_idx) {
                         self.binding_types.put(self.allocator, key, effective) catch {};
                     }
@@ -211,9 +216,39 @@ pub const TypeChecker = struct {
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
                 self.walkExpr(if_s.condition);
-                self.walkStmt(if_s.then_branch);
-                if (if_s.else_branch != null_node) {
-                    self.walkStmt(if_s.else_branch);
+
+                // Narrowing: if the condition is a simple identifier with a
+                // nullable type, narrow to the inner type in the then-branch.
+                // Also handles negated guards: if (!x) { return; } narrows
+                // x to non-nullable after the if-block.
+                const narrow = self.extractNarrowingGuard(if_s.condition);
+                if (narrow.key != 0 and narrow.narrowed_type != null_type_idx) {
+                    const saved = self.binding_types.get(narrow.key);
+                    self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                    self.walkStmt(if_s.then_branch);
+                    // Restore after then-branch
+                    if (saved) |s| {
+                        self.binding_types.put(self.allocator, narrow.key, s) catch {};
+                    } else {
+                        _ = self.binding_types.remove(narrow.key);
+                    }
+                    if (if_s.else_branch != null_node) {
+                        self.walkStmt(if_s.else_branch);
+                    }
+
+                    // If the then-branch unconditionally returns and the
+                    // condition was negated (!x), narrow x after the if-block
+                    // (the "early return" pattern).
+                    if (narrow.negated and if_s.else_branch == null_node) {
+                        if (self.branchAlwaysReturns(if_s.then_branch)) {
+                            self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                        }
+                    }
+                } else {
+                    self.walkStmt(if_s.then_branch);
+                    if (if_s.else_branch != null_node) {
+                        self.walkStmt(if_s.else_branch);
+                    }
                 }
             },
 
@@ -497,6 +532,90 @@ pub const TypeChecker = struct {
         };
     }
 
+    // -------------------------------------------------------------------
+    // If-guard narrowing helpers
+    // -------------------------------------------------------------------
+
+    const NarrowingGuard = struct {
+        key: u32 = 0,
+        narrowed_type: TypeIndex = null_type_idx,
+        negated: bool = false,
+    };
+
+    /// Extract a narrowing guard from an if-condition.
+    /// Handles: if (x), if (!x), if (x !== undefined), if (x === undefined)
+    fn extractNarrowingGuard(self: *const TypeChecker, condition: NodeIndex) NarrowingGuard {
+        const tag = self.ir_view.getTag(condition) orelse return .{};
+
+        // if (x) - truthiness guard on nullable binding
+        if (tag == .identifier) {
+            const r = self.resolveNullableBinding(condition) orelse return .{};
+            return .{ .key = r.key, .narrowed_type = r.inner, .negated = false };
+        }
+
+        // if (x !== undefined) or if (x === undefined)
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(condition) orelse return .{};
+            if (bin.op != .strict_neq and bin.op != .strict_eq) return .{};
+
+            const lhs_tag = self.ir_view.getTag(bin.left) orelse return .{};
+            const rhs_tag = self.ir_view.getTag(bin.right) orelse return .{};
+
+            const ident_node = if (lhs_tag == .identifier and rhs_tag == .lit_undefined)
+                bin.left
+            else if (rhs_tag == .identifier and lhs_tag == .lit_undefined)
+                bin.right
+            else
+                return .{};
+
+            const r = self.resolveNullableBinding(ident_node) orelse return .{};
+            return .{
+                .key = r.key,
+                .narrowed_type = r.inner,
+                .negated = bin.op == .strict_eq, // === undefined is negated (narrows in else)
+            };
+        }
+
+        // if (!x) - negated truthiness guard
+        if (tag == .unary_op) {
+            const un = self.ir_view.getUnary(condition) orelse return .{};
+            if (un.op != .not) return .{};
+            const inner_tag = self.ir_view.getTag(un.operand) orelse return .{};
+            if (inner_tag != .identifier) return .{};
+            const r = self.resolveNullableBinding(un.operand) orelse return .{};
+            return .{ .key = r.key, .narrowed_type = r.inner, .negated = true };
+        }
+
+        return .{};
+    }
+
+    const NullableBinding = struct { key: u32, inner: TypeIndex };
+
+    /// If `ident_node` is an identifier bound to a nullable type, return
+    /// its binding key and the unwrapped inner type.
+    fn resolveNullableBinding(self: *const TypeChecker, ident_node: NodeIndex) ?NullableBinding {
+        const binding = self.ir_view.getBinding(ident_node) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const current = self.binding_types.get(key) orelse return null;
+        const current_tag = self.env.pool.getTag(current) orelse return null;
+        if (current_tag != .t_nullable) return null;
+        return .{ .key = key, .inner = self.env.pool.getNullableInner(current) };
+    }
+
+    /// Check if a branch unconditionally returns (simple check for early-return pattern).
+    fn branchAlwaysReturns(self: *const TypeChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag == .return_stmt) return true;
+        if (tag == .block) {
+            const block = self.ir_view.getBlock(node) orelse return false;
+            if (block.stmts_count == 0) return false;
+            // Check the last statement
+            const last = self.ir_view.getListIndex(block.stmts_start, @intCast(block.stmts_count - 1));
+            return self.branchAlwaysReturns(last);
+        }
+        return false;
+    }
+
     fn inferBinaryType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const bin = self.ir_view.getBinary(node) orelse return null_type_idx;
         const pool = self.env.pool;
@@ -507,8 +626,8 @@ pub const TypeChecker = struct {
             .sub, .mul, .div, .mod, .pow => pool.idx_number,
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => pool.idx_number,
             .add => {
-                const lt = self.inferType(bin.left);
-                const rt = self.inferType(bin.right);
+                const lt = pool.widenLiteral(self.inferType(bin.left));
+                const rt = pool.widenLiteral(self.inferType(bin.right));
                 if (lt == pool.idx_string or rt == pool.idx_string) return pool.idx_string;
                 if (lt == pool.idx_number and rt == pool.idx_number) return pool.idx_number;
                 return null_type_idx;
