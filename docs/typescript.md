@@ -77,6 +77,55 @@ TSX is supported: JSX tags remain intact while type annotations inside `{ ... }`
 
 ---
 
+## Type Checking
+
+The type checker (`zts/type_checker.zig`) validates type annotations at build time. It runs after stripping and parsing, before bytecode generation.
+
+### Checked Properties
+
+- Variable declaration types match initializer types
+- Function argument types match declared parameter types
+- Return values match declared return types
+- Property access on known record types
+- Virtual module function signatures (argument count and types)
+- Discriminated union narrowing in match expressions
+
+### Structural Matching
+
+Object literals are structurally matched against declared interface and type alias types. A `{ message: string, count: number }` literal passes as a `ResponseData` interface if the fields match, regardless of whether the type was declared as `type` or `interface`.
+
+Interfaces whose members are all functions are treated as nominal (identity-based matching only). This prevents structural forgery of capability objects.
+
+### Optional Narrowing
+
+The type checker narrows nullable types through if-guards. Functions like `env()`, `cacheGet()`, and `parseBearer()` return optional values (`T | undefined`). Three guard patterns trigger narrowing:
+
+```typescript
+const val = env("KEY");
+
+if (val) {
+    // val is string here (narrowed from string | undefined)
+    sha256(val);
+}
+
+if (!val) return Response.text("missing");
+// val is string here (early return pattern)
+
+if (val !== undefined) {
+    // val is string here (explicit check)
+}
+```
+
+### Literal Widening
+
+`const` bindings retain their literal type (`const x = 200` has type `200`). `let` bindings without explicit annotations are widened to the base type (`let x = 200` has type `number`), so `x = 404` compiles without error.
+
+### Generic Type Aliases
+
+Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.
+
+---
+
 ## Compile-Time Evaluation
 
 The `comptime()` function (`zts/comptime.zig`) evaluates expressions at compile time and replaces them with literal values. It integrates with the type stripper as a pre-parse transformation.

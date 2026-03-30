@@ -548,9 +548,9 @@ pub const TypePool = struct {
             return true;
         }
 
-        // Record is assignable to unresolved ref types. The TypePool cannot
-        // resolve refs to their definitions (that requires the TypeEnv), so
-        // accept rather than reject a potentially valid structural match.
+        // Unresolved refs are effectively unknown: the TypePool cannot
+        // resolve ref names to their definitions (that requires the TypeEnv).
+        // Accept records against refs rather than rejecting valid code.
         if (src_tag == .t_record and tgt_tag == .t_ref) return true;
 
         return false;

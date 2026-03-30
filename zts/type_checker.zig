@@ -217,28 +217,20 @@ pub const TypeChecker = struct {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
                 self.walkExpr(if_s.condition);
 
-                // Narrowing: if the condition is a simple identifier with a
-                // nullable type, narrow to the inner type in the then-branch.
-                // Also handles negated guards: if (!x) { return; } narrows
-                // x to non-nullable after the if-block.
+                // Narrow nullable types in then-branch when condition is a
+                // simple guard: if (x), if (!x), if (x !== undefined).
                 const narrow = self.extractNarrowingGuard(if_s.condition);
                 if (narrow.key != 0 and narrow.narrowed_type != null_type_idx) {
                     const saved = self.binding_types.get(narrow.key);
                     self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
                     self.walkStmt(if_s.then_branch);
-                    // Restore after then-branch
                     if (saved) |s| {
                         self.binding_types.put(self.allocator, narrow.key, s) catch {};
                     } else {
                         _ = self.binding_types.remove(narrow.key);
                     }
-                    if (if_s.else_branch != null_node) {
-                        self.walkStmt(if_s.else_branch);
-                    }
 
-                    // If the then-branch unconditionally returns and the
-                    // condition was negated (!x), narrow x after the if-block
-                    // (the "early return" pattern).
+                    // if (!x) { return; } narrows x after the block
                     if (narrow.negated and if_s.else_branch == null_node) {
                         if (self.branchAlwaysReturns(if_s.then_branch)) {
                             self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
@@ -246,9 +238,10 @@ pub const TypeChecker = struct {
                     }
                 } else {
                     self.walkStmt(if_s.then_branch);
-                    if (if_s.else_branch != null_node) {
-                        self.walkStmt(if_s.else_branch);
-                    }
+                }
+
+                if (if_s.else_branch != null_node) {
+                    self.walkStmt(if_s.else_branch);
                 }
             },
 
