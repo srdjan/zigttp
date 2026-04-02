@@ -1705,14 +1705,15 @@ fn compileHandler(
                         viol_buf.deinit(allocator);
                     }
 
-                    // Pre-format violations summary for build output (without path yet)
+                    // Pre-format violations summary for build output. Path is unknown here;
+                    // the emit section in main() appends the file path separately.
                     var sum_buf: std.ArrayList(u8) = .empty;
                     var sum_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sum_buf);
                     zts.property_diagnostics.formatViolationsSummary(
                         &sum_aw.writer,
                         violations.items,
                         filename,
-                        null, // violations_jsonl_path filled in at emit time
+                        null,
                     ) catch {};
                     sum_buf = sum_aw.toArrayList();
                     if (sum_buf.items.len > 0) {
