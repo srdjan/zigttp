@@ -161,6 +161,14 @@ pub const PathGenerator = struct {
         return self.tests.items;
     }
 
+    /// Find a test case by exact name match. Returns null if not found.
+    pub fn findTestByName(self: *const PathGenerator, name: []const u8) ?*const GeneratedTest {
+        for (self.tests.items) |*t| {
+            if (std.mem.eql(u8, t.name, name)) return t;
+        }
+        return null;
+    }
+
     /// Write all generated tests as JSONL to writer.
     pub fn writeJsonl(self: *const PathGenerator, writer: anytype) !void {
         for (self.tests.items) |test_case| {

@@ -57,6 +57,10 @@ const CompiledHandler = struct {
     contract: ?HandlerContract = null,
     /// Generated test JSONL (when --generate-tests is passed)
     generated_tests: ?[]const u8 = null,
+    /// Counterexample tests for fault coverage violations (when violations exist)
+    violations_jsonl: ?[]const u8 = null,
+    /// Pre-formatted violations summary for build output (when violations exist)
+    violations_summary: ?[]const u8 = null,
 
     fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.aot) |*analysis| {
@@ -73,6 +77,12 @@ const CompiledHandler = struct {
         }
         if (self.generated_tests) |gt| {
             allocator.free(gt);
+        }
+        if (self.violations_jsonl) |vj| {
+            allocator.free(vj);
+        }
+        if (self.violations_summary) |vs| {
+            allocator.free(vs);
         }
         if (self.bytecode.len > 0) {
             allocator.free(self.bytecode);
@@ -588,6 +598,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
             };
 
             std.debug.print("Wrote generated tests to: {s}\n", .{tests_path});
+        }
+
+        // Write fault coverage violation counterexample tests and print summary
+        if (compiled.violations_jsonl) |viol_jsonl| {
+            const viol_path = deriveSiblingPath(allocator, output_path_final, "handler.violations.jsonl") catch |err| {
+                std.debug.print("Error deriving violations output path: {}\n", .{err});
+                return err;
+            };
+            defer allocator.free(viol_path);
+
+            writeFilePosix(viol_path, viol_jsonl, allocator) catch |err| {
+                std.debug.print("Error writing violations file '{s}': {}\n", .{ viol_path, err });
+                return err;
+            };
+
+            if (compiled.violations_summary) |summary| {
+                std.debug.print("{s}", .{summary});
+            }
+            std.debug.print("  Counterexample tests written to: {s}\n", .{viol_path});
+            std.debug.print("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
         }
 
         // Generate deployment manifest if --deploy was passed
@@ -1569,6 +1599,8 @@ fn compileHandler(
     // Generate exhaustive test cases from path analysis.
     // Also runs when emitting a contract, to populate behavioral paths.
     var generated_tests_jsonl: ?[]const u8 = null;
+    var violations_jsonl: ?[]const u8 = null;
+    var violations_summary: ?[]const u8 = null;
     if (generate_tests or (emit_contract and contract != null)) {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
@@ -1645,6 +1677,52 @@ fn compileHandler(
                 }
             }
 
+            // Collect fault coverage violations and generate counterexample tests.
+            // These tests demonstrate the bug: they pass on the buggy handler and
+            // fail once the handler is fixed to return non-2xx on auth/validation failure.
+            if (fc_report.warning_count > 0) {
+                var violations: std.ArrayList(zts.property_diagnostics.PropertyViolation) = .empty;
+                defer violations.deinit(allocator);
+                zts.property_diagnostics.collectFaultViolations(
+                    allocator,
+                    &violations,
+                    fc_report.diagnostics,
+                    gen.getTests(),
+                );
+                if (violations.items.len > 0) {
+                    var viol_buf: std.ArrayList(u8) = .empty;
+                    var viol_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &viol_buf);
+                    zts.property_diagnostics.writeViolationsJsonl(
+                        &viol_aw.writer,
+                        allocator,
+                        violations.items,
+                        gen.getTests(),
+                    ) catch {};
+                    viol_buf = viol_aw.toArrayList();
+                    if (viol_buf.items.len > 0) {
+                        violations_jsonl = try viol_buf.toOwnedSlice(allocator);
+                    } else {
+                        viol_buf.deinit(allocator);
+                    }
+
+                    // Pre-format violations summary for build output (without path yet)
+                    var sum_buf: std.ArrayList(u8) = .empty;
+                    var sum_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sum_buf);
+                    zts.property_diagnostics.formatViolationsSummary(
+                        &sum_aw.writer,
+                        violations.items,
+                        filename,
+                        null, // violations_jsonl_path filled in at emit time
+                    ) catch {};
+                    sum_buf = sum_aw.toArrayList();
+                    if (sum_buf.items.len > 0) {
+                        violations_summary = try sum_buf.toOwnedSlice(allocator);
+                    } else {
+                        sum_buf.deinit(allocator);
+                    }
+                }
+            }
+
             if (!builtin.is_test) {
                 std.debug.print("Generated {d} test case(s) from path analysis\n", .{test_count});
             }
@@ -1657,6 +1735,8 @@ fn compileHandler(
         .transpiled_source = transpiled_source,
         .contract = contract,
         .generated_tests = generated_tests_jsonl,
+        .violations_jsonl = violations_jsonl,
+        .violations_summary = violations_summary,
     };
 }
 
