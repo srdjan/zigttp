@@ -47,8 +47,10 @@ pub const PropertyViolation = struct {
     kind: ViolationKind,
     /// Human-readable description. Does not own the memory - points into the
     /// source system's diagnostic string (FlowChecker, FaultCoverage, HandlerVerifier).
+    /// Exception: when owns_strings is true, message was duped and must be freed.
     message: []const u8,
     /// Suggested fix. May be null. Does not own the memory.
+    /// Exception: when owns_strings is true, help was duped and must be freed.
     help: ?[]const u8,
     /// Source file line number (0 = unknown).
     loc_line: u32,
@@ -57,7 +59,19 @@ pub const PropertyViolation = struct {
     /// When non-null, identifies a GeneratedTest that demonstrates this violation.
     counterexample_name: ?[]const u8, // does not own
     counterexample_index: ?usize,
+    /// When true, message and help were duped by the collector and must be freed.
+    owns_strings: bool = false,
 };
+
+/// Free owned strings in violations that were allocated by collectors.
+pub fn deinitViolations(allocator: std.mem.Allocator, violations: []const PropertyViolation) void {
+    for (violations) |v| {
+        if (v.owns_strings) {
+            allocator.free(v.message);
+            if (v.help) |h| allocator.free(h);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Collection helpers
@@ -130,15 +144,31 @@ pub fn collectFlowViolations(
             loc_col = loc.column;
         }
 
+        // Dupe strings: flow messages may be allocated by messageWithReason and
+        // freed when the FlowChecker deinits, which happens before JSONL/summary
+        // generation. owns_strings = true signals the caller to free them.
+        const message = allocator.dupe(u8, diag.message) catch continue;
+        const help: ?[]const u8 = if (diag.help) |h|
+            allocator.dupe(u8, h) catch {
+                allocator.free(message);
+                continue;
+            }
+        else
+            null;
+
         violations.append(allocator, .{
             .kind = kind,
-            .message = diag.message,
-            .help = diag.help,
+            .message = message,
+            .help = help,
             .loc_line = loc_line,
             .loc_col = loc_col,
             .counterexample_name = null,
             .counterexample_index = null,
-        }) catch {};
+            .owns_strings = true,
+        }) catch {
+            allocator.free(message);
+            if (help) |h| allocator.free(h);
+        };
     }
 }
 

@@ -600,7 +600,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             std.debug.print("Wrote generated tests to: {s}\n", .{tests_path});
         }
 
-        // Write fault coverage violation counterexample tests and print summary
+        // Write property violation counterexample tests and print unified summary.
+        // violations_summary covers all analyzers (flow, verifier, fault coverage).
+        // violations_jsonl is only present when fault-coverage counterexamples exist.
         if (compiled.violations_jsonl) |viol_jsonl| {
             const viol_path = deriveSiblingPath(allocator, output_path_final, "handler.violations.jsonl") catch |err| {
                 std.debug.print("Error deriving violations output path: {}\n", .{err});
@@ -618,6 +620,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
             std.debug.print("  Counterexample tests written to: {s}\n", .{viol_path});
             std.debug.print("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
+        } else if (compiled.violations_summary) |summary| {
+            // Violations from flow or verifier analysis (no counterexample JSONL).
+            std.debug.print("{s}", .{summary});
         }
 
         // Generate deployment manifest if --deploy was passed
@@ -1391,6 +1396,15 @@ fn compileHandler(
         }
     }
 
+    // Unified violations list: collects from FlowChecker, HandlerVerifier, and
+    // FaultCoverageChecker. Declared here so it spans the verifier block,
+    // buildContractWithPolicy (flow violations), and the PathGenerator block (fault violations).
+    var all_violations: std.ArrayList(zts.property_diagnostics.PropertyViolation) = .empty;
+    defer {
+        zts.property_diagnostics.deinitViolations(allocator, all_violations.items);
+        all_violations.deinit(allocator);
+    }
+
     // Run handler verification if requested
     var verify_info: ?VerificationInfo = null;
     var state_isolated: bool = true;
@@ -1462,6 +1476,12 @@ fn compileHandler(
             };
             state_isolated = !verifier.has_module_mutation;
 
+            // Collect verifier violations (result_unsafe, optional_unchecked) into
+            // the unified list. These are warnings that passed verification but
+            // still represent structural risks worth surfacing.
+            const ir_view_v = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+            zts.property_diagnostics.collectVerifierViolations(allocator, &all_violations, diags, ir_view_v);
+
             std.debug.print("Verification passed\n", .{});
         } else {
             std.debug.print("Warning: no handler function found for verification\n", .{});
@@ -1530,6 +1550,8 @@ fn compileHandler(
             aot = try analyzeAot(allocator, &js_parser, &atoms, root);
 
             // Build contract if requested or needed for policy validation.
+            // This is an early-return path (transpiler fallback); violations_out
+            // is null here because PathGenerator hasn't run yet.
             const contract = if (needs_contract)
                 try buildContractWithPolicy(
                     allocator,
@@ -1542,6 +1564,7 @@ fn compileHandler(
                     if (strip_result) |*sr| &sr.type_map else null,
                     policy,
                     sql_schema_path,
+                    null,
                 )
             else
                 null;
@@ -1588,6 +1611,7 @@ fn compileHandler(
             if (strip_result) |*sr| &sr.type_map else null,
             policy,
             sql_schema_path,
+            &all_violations,
         );
 
         // Inject state isolation result from verifier (Check 7)
@@ -1677,50 +1701,50 @@ fn compileHandler(
                 }
             }
 
-            // Collect fault coverage violations and generate counterexample tests.
-            // These tests demonstrate the bug: they pass on the buggy handler and
-            // fail once the handler is fixed to return non-2xx on auth/validation failure.
+            // Collect fault coverage violations into the unified all_violations list.
+            // Flow and verifier violations were already collected earlier.
             if (fc_report.warning_count > 0) {
-                var violations: std.ArrayList(zts.property_diagnostics.PropertyViolation) = .empty;
-                defer violations.deinit(allocator);
                 zts.property_diagnostics.collectFaultViolations(
                     allocator,
-                    &violations,
+                    &all_violations,
                     fc_report.diagnostics,
                     gen.getTests(),
                 );
-                if (violations.items.len > 0) {
-                    var viol_buf: std.ArrayList(u8) = .empty;
-                    var viol_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &viol_buf);
-                    zts.property_diagnostics.writeViolationsJsonl(
-                        &viol_aw.writer,
-                        allocator,
-                        violations.items,
-                        gen.getTests(),
-                    ) catch {};
-                    viol_buf = viol_aw.toArrayList();
-                    if (viol_buf.items.len > 0) {
-                        violations_jsonl = try viol_buf.toOwnedSlice(allocator);
-                    } else {
-                        viol_buf.deinit(allocator);
-                    }
+            }
 
-                    // Pre-format violations summary for build output. Path is unknown here;
-                    // the emit section in main() appends the file path separately.
-                    var sum_buf: std.ArrayList(u8) = .empty;
-                    var sum_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sum_buf);
-                    zts.property_diagnostics.formatViolationsSummary(
-                        &sum_aw.writer,
-                        violations.items,
-                        filename,
-                        null,
-                    ) catch {};
-                    sum_buf = sum_aw.toArrayList();
-                    if (sum_buf.items.len > 0) {
-                        violations_summary = try sum_buf.toOwnedSlice(allocator);
-                    } else {
-                        sum_buf.deinit(allocator);
-                    }
+            // Generate JSONL counterexamples and summary from all violations
+            // (fault coverage, flow, and verifier combined).
+            if (all_violations.items.len > 0) {
+                var viol_buf: std.ArrayList(u8) = .empty;
+                var viol_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &viol_buf);
+                zts.property_diagnostics.writeViolationsJsonl(
+                    &viol_aw.writer,
+                    allocator,
+                    all_violations.items,
+                    gen.getTests(),
+                ) catch {};
+                viol_buf = viol_aw.toArrayList();
+                if (viol_buf.items.len > 0) {
+                    violations_jsonl = try viol_buf.toOwnedSlice(allocator);
+                } else {
+                    viol_buf.deinit(allocator);
+                }
+
+                // Pre-format violations summary for build output. Path is unknown here;
+                // the emit section in main() appends the file path separately.
+                var sum_buf: std.ArrayList(u8) = .empty;
+                var sum_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sum_buf);
+                zts.property_diagnostics.formatViolationsSummary(
+                    &sum_aw.writer,
+                    all_violations.items,
+                    filename,
+                    null,
+                ) catch {};
+                sum_buf = sum_aw.toArrayList();
+                if (sum_buf.items.len > 0) {
+                    violations_summary = try sum_buf.toOwnedSlice(allocator);
+                } else {
+                    sum_buf.deinit(allocator);
                 }
             }
 
@@ -2039,6 +2063,7 @@ fn buildContractWithPolicy(
     type_map: ?*const zts.TypeMap,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
+    violations_out: ?*std.ArrayList(zts.property_diagnostics.PropertyViolation),
 ) !HandlerContract {
     var contract = try buildContract(
         allocator,
@@ -2089,6 +2114,12 @@ fn buildContractWithPolicy(
                 props.input_validated = flow_props.input_validated;
                 props.pii_contained = flow_props.pii_contained;
                 props.injection_safe = flow_props.injection_safe;
+            }
+
+            // Collect flow violations while flow is still alive (strings are duped).
+            if (violations_out) |vout| {
+                const ir_view_flow = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+                zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view_flow);
             }
 
             if (!builtin.is_test and flow_errors == 0) {
@@ -3155,6 +3186,7 @@ fn buildTestContractForSource(
         null,
         null,
         sql_schema_path,
+        null,
     );
 }
 
