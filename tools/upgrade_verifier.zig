@@ -93,6 +93,8 @@ fn propertySeverity(field: []const u8, gained: bool) Severity {
     if (std.mem.eql(u8, field, "no_secret_leakage")) return .critical;
     if (std.mem.eql(u8, field, "no_credential_leakage")) return .critical;
     if (std.mem.eql(u8, field, "fault_covered")) return .critical;
+    if (std.mem.eql(u8, field, "result_safe")) return .critical;
+    if (std.mem.eql(u8, field, "optional_safe")) return .critical;
 
     if (std.mem.eql(u8, field, "idempotent")) return .warning;
     if (std.mem.eql(u8, field, "deterministic")) return .warning;

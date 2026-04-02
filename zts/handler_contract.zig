@@ -382,6 +382,13 @@ pub const HandlerProperties = struct {
     // --- Fault coverage (from FaultCoverageChecker) ---
     /// Every failable I/O call site has an explicit failure path.
     fault_covered: bool = false,
+    // --- Result and optional safety (from HandlerVerifier, when -Dverify is run) ---
+    /// Proven: every result.ok access is guarded before use.
+    /// False = unproven (verification not run). True = verified safe.
+    result_safe: bool = false,
+    /// Proven: every optional value from virtual modules is narrowed before use.
+    /// False = unproven (verification not run). True = verified safe.
+    optional_safe: bool = false,
 };
 
 pub const RateLimitInfo = struct {
@@ -3249,6 +3256,10 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
             }
         } else if (std.mem.eql(u8, key, "faultCovered")) {
             props.fault_covered = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "resultSafe")) {
+            props.result_safe = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "optionalSafe")) {
+            props.optional_safe = parser.readBool() orelse false;
         } else {
             parser.skipValue();
         }
@@ -3906,7 +3917,9 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         } else {
             try writer.writeAll("    \"maxIoDepth\": null,\n");
         }
-        try writer.print("    \"faultCovered\": {s}\n", .{if (p.fault_covered) "true" else "false"});
+        try writer.print("    \"faultCovered\": {s},\n", .{if (p.fault_covered) "true" else "false"});
+        try writer.print("    \"resultSafe\": {s},\n", .{if (p.result_safe) "true" else "false"});
+        try writer.print("    \"optionalSafe\": {s}\n", .{if (p.optional_safe) "true" else "false"});
         try writer.writeAll("  },\n");
     } else {
         try writer.writeAll("  \"properties\": null,\n");
