@@ -267,7 +267,7 @@ pub fn fillVerifierCounterexamples(
         // Pass 2: find any test that calls the function (even with success result).
         // The handler never branches on result.ok so PathGenerator produces no failure
         // path. We synthesize the failure by overriding the stub in the output.
-        for (tests, 0..) |t, i| {
+        outer2: for (tests, 0..) |t, i| {
             for (t.io_stubs.items) |stub| {
                 const mod_match = std.mem.eql(u8, stub.module, src_mod) or
                     std.mem.endsWith(u8, src_mod, stub.module);
@@ -275,10 +275,9 @@ pub fn fillVerifierCounterexamples(
                     v.counterexample_name = t.name;
                     v.counterexample_index = i;
                     v.counterexample_force_failure = true;
-                    break;
+                    break :outer2;
                 }
             }
-            if (v.counterexample_index != null) break;
         }
     }
 }
