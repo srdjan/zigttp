@@ -22,14 +22,26 @@ const SchemaAlias = struct {
 
 const InlineAlias = struct {
     route_index: usize,
-    type_name: []const u8,
+    type_name: []const u8, // owned
+    /// Non-null for union arm types. Owned dupe of the response's schema_json.
+    /// When null the emitter falls back to route.response_schema_json.
+    schema_json_override: ?[]const u8 = null,
+};
+
+/// One arm of a multi-response discriminated union.
+const UnionArm = struct {
+    status: u16,
+    type_name: []const u8, // borrowed from schema_aliases or inline_aliases
 };
 
 const RoutePlan = struct {
     route_index: usize,
     method_name: []const u8,
     request_type_name: ?[]const u8,
-    response_type_name: []const u8,
+    /// Null when response_union is set.
+    response_type_name: ?[]const u8,
+    /// Non-null for routes with multiple response codes; owned slice.
+    response_union: ?[]UnionArm = null,
 };
 
 const SkippedOperation = struct {
@@ -97,11 +109,11 @@ pub fn writeTypeScriptClient(
     }
 
     for (inline_aliases.items) |alias| {
-        const route = contract.api.routes.items[alias.route_index];
+        const schema_json = if (alias.schema_json_override) |sj| sj else contract.api.routes.items[alias.route_index].response_schema_json.?;
         try writer.writeAll("export type ");
         try writer.writeAll(alias.type_name);
         try writer.writeAll(" = ");
-        try emitSchemaType(writer, allocator, route.response_schema_json.?, 0);
+        try emitSchemaType(writer, allocator, schema_json, 0);
         try writer.writeAll(";\n\n");
     }
 
@@ -169,9 +181,22 @@ pub fn writeTypeScriptClient(
         try writer.writeAll(plan.method_name);
         try writer.writeByte('(');
         try writeMethodArgs(writer, route, plan.request_type_name);
-        try writer.writeAll("): Promise<TypedResponse<");
-        try writer.writeAll(plan.response_type_name);
-        try writer.writeAll(">> {\n");
+        if (plan.response_union) |arms| {
+            try writer.writeAll("): Promise<\n");
+            for (arms, 0..) |arm, i| {
+                if (i > 0) {
+                    try writer.writeAll("\n      | ");
+                } else {
+                    try writer.writeAll("      ");
+                }
+                try writer.print("{{ status: {d}; data: {s}; response: Response }}", .{ arm.status, arm.type_name });
+            }
+            try writer.writeAll("\n    > {\n");
+        } else {
+            try writer.writeAll("): Promise<TypedResponse<");
+            try writer.writeAll(plan.response_type_name.?);
+            try writer.writeAll(">> {\n");
+        }
         try writer.writeAll("      const input = args ?? {};\n");
         try writer.writeAll("      const headers = mergeHeaders(undefined, input.headers);\n");
         if (plan.request_type_name != null) {
@@ -190,10 +215,15 @@ pub fn writeTypeScriptClient(
         }
         try writer.writeAll("        signal: input.signal,\n");
         try writer.writeAll("      });\n");
-        try writer.writeAll("      const data = (await response.json()) as ");
-        try writer.writeAll(plan.response_type_name);
-        try writer.writeAll(";\n");
-        try writer.writeAll("      return { status: response.status, data, response };\n");
+        if (plan.response_union != null) {
+            try writer.writeAll("      const data = await response.json();\n");
+            try writer.writeAll("      return { status: response.status, data, response } as any;\n");
+        } else {
+            try writer.writeAll("      const data = (await response.json()) as ");
+            try writer.writeAll(plan.response_type_name.?);
+            try writer.writeAll(";\n");
+            try writer.writeAll("      return { status: response.status, data, response };\n");
+        }
         try writer.writeAll("    }");
     }
 
@@ -346,8 +376,66 @@ fn buildRoutePlans(
             });
             continue;
         }
-        if (route.responses.items.len != 1) {
-            try appendSkipped(skipped, allocator, idx, "multiple responses are not supported");
+        if (route.responses.items.len > 1) {
+            // Multi-response: build a discriminated union, one arm per status code.
+            var arms: std.ArrayList(UnionArm) = .empty;
+            var skip_reason: ?[]const u8 = null;
+
+            for (route.responses.items) |response| {
+                if (skip_reason != null) break;
+                if (response.dynamic) { skip_reason = "response schema is dynamic"; break; }
+                const ct = response.content_type orelse { skip_reason = "response is not proven JSON"; break; };
+                if (!std.mem.eql(u8, ct, "application/json")) { skip_reason = "response is not proven JSON"; break; }
+                const status = response.status orelse 200;
+                const arm_type_name: []const u8 = arm_blk: {
+                    if (response.schema_ref) |schema_ref| {
+                        const alias = findSchemaAlias(schema_aliases.items, schema_ref) orelse {
+                            skip_reason = "response schema is not representable as TypeScript";
+                            break :arm_blk "";
+                        };
+                        break :arm_blk alias.type_name;
+                    }
+                    if (response.schema_json) |schema_json| {
+                        var parsed = parsedSchema(allocator, schema_json) catch {
+                            skip_reason = "response schema is not representable as TypeScript";
+                            break :arm_blk "";
+                        };
+                        parsed.deinit();
+                        const base_name = try baseInlineResponseNameWithStatus(allocator, route, status);
+                        defer allocator.free(base_name);
+                        var inline_name = try sanitizeTypeName(allocator, base_name);
+                        try uniquifyOwnedName(allocator, &used_type_names, &inline_name);
+                        try inline_aliases.append(allocator, .{
+                            .route_index = idx,
+                            .type_name = inline_name,
+                            .schema_json_override = try allocator.dupe(u8, schema_json),
+                        });
+                        break :arm_blk inline_aliases.items[inline_aliases.items.len - 1].type_name;
+                    }
+                    skip_reason = "response schema is not proven";
+                    break :arm_blk "";
+                };
+                if (skip_reason != null) break;
+                try arms.append(allocator, .{ .status = status, .type_name = arm_type_name });
+            }
+
+            if (skip_reason) |reason| {
+                arms.deinit(allocator);
+                try appendSkipped(skipped, allocator, idx, reason);
+                continue;
+            }
+
+            var method_name = try methodNameForRoute(allocator, route);
+            errdefer allocator.free(method_name);
+            try uniquifyOwnedName(allocator, &used_method_names, &method_name);
+            const arms_slice = try arms.toOwnedSlice(allocator);
+            try route_plans.append(allocator, .{
+                .route_index = idx,
+                .method_name = method_name,
+                .request_type_name = request_type_name,
+                .response_type_name = null,
+                .response_union = arms_slice,
+            });
             continue;
         }
         const response = route.responses.items[0];
@@ -431,18 +519,59 @@ fn baseInlineResponseName(allocator: std.mem.Allocator, route: ApiRouteInfo) ![]
     return out.toOwnedSlice(allocator);
 }
 
+/// Like baseInlineResponseName but appends the HTTP status code before "Response",
+/// e.g. "GetUsersId200Response" - used for per-arm types in discriminated unions.
+fn baseInlineResponseNameWithStatus(allocator: std.mem.Allocator, route: ApiRouteInfo, status: u16) ![]u8 {
+    const method = try titleCaseSegment(allocator, route.method);
+    errdefer allocator.free(method);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, method);
+    allocator.free(method);
+
+    if (std.mem.eql(u8, route.path, "/")) {
+        try out.appendSlice(allocator, "Root");
+    } else {
+        var start: usize = 0;
+        while (start < route.path.len) {
+            while (start < route.path.len and route.path[start] == '/') : (start += 1) {}
+            if (start >= route.path.len) break;
+            var end = start;
+            while (end < route.path.len and route.path[end] != '/') : (end += 1) {}
+            const segment = route.path[start..end];
+            const cleaned = if (segment.len > 0 and segment[0] == ':') segment[1..] else segment;
+            const titled = try titleCaseSegment(allocator, cleaned);
+            defer allocator.free(titled);
+            try out.appendSlice(allocator, titled);
+            start = end;
+        }
+    }
+    var status_buf: [5]u8 = undefined;
+    const status_str = std.fmt.bufPrint(&status_buf, "{d}", .{status}) catch "0";
+    try out.appendSlice(allocator, status_str);
+    try out.appendSlice(allocator, "Response");
+    return out.toOwnedSlice(allocator);
+}
+
 fn freeSchemaAliases(list: *std.ArrayList(SchemaAlias), allocator: std.mem.Allocator) void {
     for (list.items) |alias| allocator.free(alias.type_name);
     list.deinit(allocator);
 }
 
 fn freeInlineAliases(list: *std.ArrayList(InlineAlias), allocator: std.mem.Allocator) void {
-    for (list.items) |alias| allocator.free(alias.type_name);
+    for (list.items) |alias| {
+        allocator.free(alias.type_name);
+        if (alias.schema_json_override) |sj| allocator.free(sj);
+    }
     list.deinit(allocator);
 }
 
 fn freeRoutePlans(list: *std.ArrayList(RoutePlan), allocator: std.mem.Allocator) void {
-    for (list.items) |plan| allocator.free(plan.method_name);
+    for (list.items) |plan| {
+        allocator.free(plan.method_name);
+        if (plan.response_union) |arms| allocator.free(arms);
+    }
     list.deinit(allocator);
 }
 
@@ -1128,4 +1257,86 @@ test "writeTypeScriptClient emits inline response alias" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "export type GetHealthResponse = {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "async getHealth(") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "TypedResponse<GetHealthResponse>") != null);
+}
+
+test "writeTypeScriptClient emits discriminated union for multi-response route" {
+    const allocator = std.testing.allocator;
+
+    // Named schema for the 200 response.
+    var schemas: std.ArrayList(ApiSchemaInfo) = .empty;
+    try schemas.append(allocator, .{
+        .name = try allocator.dupe(u8, "user"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\",\"name\"]}"),
+    });
+
+    // Route with two responses: 200 via schema_ref, 404 via inline schema_json.
+    var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
+    try responses.append(allocator, .{
+        .status = 200,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_ref = try allocator.dupe(u8, "user"),
+    });
+    try responses.append(allocator, .{
+        .status = 404,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}"),
+    });
+
+    var routes: std.ArrayList(ApiRouteInfo) = .empty;
+    try routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .responses = responses,
+        .responses_dynamic = false,
+    });
+
+    var contract = handler_contract.HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "users.ts"), .line = 1, .column = 1 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = handler_contract.emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .api = .{
+            .schemas = schemas,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = routes,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+    };
+    defer contract.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeTypeScriptClient(&aw.writer, allocator, &contract, .{});
+    output = aw.toArrayList();
+
+    // Named schema type emitted.
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "export type User = {") != null);
+    // Inline type for the 404 arm emitted.
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "export type GetUsersId404Response = {") != null);
+    // Method generated (not in skippedOperations).
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "async getUsersId(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "multiple responses are not supported") == null);
+    // Discriminated union return type contains both arms.
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "status: 200; data: User") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "status: 404; data: GetUsersId404Response") != null);
+    // Body uses the as-any cast pattern.
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "} as any;") != null);
 }
