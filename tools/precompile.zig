@@ -3497,3 +3497,43 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
     try std.testing.expect(std.mem.indexOf(u8, vj, "jwtVerify") != null);
     try std.testing.expect(std.mem.indexOf(u8, vj, "\"ok\":false") != null);
 }
+
+test "compileHandler sets result_safe and optional_safe when verification passes" {
+    const allocator = std.testing.allocator;
+    // Handler that properly checks jwtVerify result and env optional before use.
+    // Uses Response.text to avoid object-literal AOT serialization (pre-existing
+    // leak in serializeObjectLiteral is unrelated to this test).
+    const source =
+        \\import { parseBearer } from "zigttp:auth";
+        \\import { jwtVerify } from "zigttp:auth";
+        \\import { env } from "zigttp:env";
+        \\
+        \\function handler(req: Request): Response {
+        \\  const token = parseBearer(req);
+        \\  if (!token) return Response.text("no token", { status: 401 });
+        \\  const result = jwtVerify(token, "secret");
+        \\  if (!result.ok) return Response.text(result.error, { status: 401 });
+        \\  const name = env("NAME") ?? "world";
+        \\  return Response.text(name);
+        \\}
+    ;
+
+    var compiled = try compileHandler(
+        allocator,
+        source,
+        "handler.ts",
+        false, // emit_aot
+        true,  // emit_verify
+        true,  // emit_contract
+        null,  // policy
+        null,  // sql_schema_path
+        false, // generate_tests
+    );
+    defer compiled.deinit(allocator);
+
+    try std.testing.expect(!compiled.verify_failed);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.result_safe);
+    try std.testing.expect(props.optional_safe);
+}
