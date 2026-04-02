@@ -338,16 +338,9 @@ pub fn writeViolationsJsonl(
         // IO stubs. For synthetic failure counterexamples, override the target
         // function's result to the failure value so the test demonstrates the bug.
         for (test_case.io_stubs.items) |stub| {
-            const result_json = if (v.counterexample_force_failure)
-                if (v.source_func) |sf|
-                    if (std.mem.eql(u8, stub.func, sf))
-                        "{\"ok\":false,\"error\":\"test-error\"}"
-                    else
-                        stub.result_json
-                else
-                    stub.result_json
-            else
-                stub.result_json;
+            const is_override = v.counterexample_force_failure and
+                if (v.source_func) |sf| std.mem.eql(u8, stub.func, sf) else false;
+            const result_json = if (is_override) "{\"ok\":false,\"error\":\"test-error\"}" else stub.result_json;
             try writer.print(
                 "{{\"type\":\"io\",\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}\n",
                 .{ stub.seq, stub.module, stub.func, result_json },
