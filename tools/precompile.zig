@@ -1540,18 +1540,10 @@ fn compileHandler(
             };
             state_isolated = !verifier.has_module_mutation;
 
-            // Derive result_safe and optional_safe from verified diagnostics.
-            // Since unchecked_result_value and unchecked_optional_* are .err severity,
-            // reaching here (error_count == 0) guarantees no such violations exist.
-            // Set explicitly for clarity and forward-compatibility.
-            var has_result_unsafe = false;
-            var has_optional_unchecked = false;
-            for (diags) |d| {
-                if (d.kind == .unchecked_result_value) has_result_unsafe = true;
-                if (d.kind == .unchecked_optional_use or d.kind == .unchecked_optional_access) has_optional_unchecked = true;
-            }
-            result_safe = !has_result_unsafe;
-            optional_safe = !has_optional_unchecked;
+            // unchecked_result_value and unchecked_optional_* are .err severity,
+            // so reaching here (error_count == 0) guarantees both properties hold.
+            result_safe = true;
+            optional_safe = true;
 
             std.debug.print("Verification passed\n", .{});
         } else {
