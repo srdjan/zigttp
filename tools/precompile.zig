@@ -1431,6 +1431,9 @@ fn compileHandler(
     // Run handler verification if requested
     var verify_info: ?VerificationInfo = null;
     var state_isolated: bool = true;
+    // result_safe and optional_safe default false (unproven) until verification runs and passes.
+    var result_safe: bool = false;
+    var optional_safe: bool = false;
     if (emit_verify) {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
@@ -1536,6 +1539,19 @@ fn compileHandler(
                 .bytecode_verified = true, // will be set after bytecode gen
             };
             state_isolated = !verifier.has_module_mutation;
+
+            // Derive result_safe and optional_safe from verified diagnostics.
+            // Since unchecked_result_value and unchecked_optional_* are .err severity,
+            // reaching here (error_count == 0) guarantees no such violations exist.
+            // Set explicitly for clarity and forward-compatibility.
+            var has_result_unsafe = false;
+            var has_optional_unchecked = false;
+            for (diags) |d| {
+                if (d.kind == .unchecked_result_value) has_result_unsafe = true;
+                if (d.kind == .unchecked_optional_use or d.kind == .unchecked_optional_access) has_optional_unchecked = true;
+            }
+            result_safe = !has_result_unsafe;
+            optional_safe = !has_optional_unchecked;
 
             std.debug.print("Verification passed\n", .{});
         } else {
@@ -1669,9 +1685,11 @@ fn compileHandler(
             &all_violations,
         );
 
-        // Inject state isolation result from verifier (Check 7)
+        // Inject verification-derived properties (Checks 2, 6, 7)
         if (contract.?.properties) |*props| {
             props.state_isolated = state_isolated;
+            props.result_safe = result_safe;
+            props.optional_safe = optional_safe;
         }
     }
 
@@ -2637,6 +2655,8 @@ fn printPropertiesReport(contract: *const HandlerContract) void {
         .{ .name = "injection_safe", .value = props.injection_safe, .desc = "no unvalidated input in sinks" },
         .{ .name = "idempotent", .value = props.idempotent, .desc = "safe for at-least-once delivery" },
         .{ .name = "state_isolated", .value = props.state_isolated, .desc = "no cross-request data leakage" },
+        .{ .name = "result_safe", .value = props.result_safe, .desc = "all result.ok accesses guarded (requires -Dverify)" },
+        .{ .name = "optional_safe", .value = props.optional_safe, .desc = "all optionals narrowed before use (requires -Dverify)" },
     };
 
     for (fields) |f| {
