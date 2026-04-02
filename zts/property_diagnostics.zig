@@ -543,3 +543,61 @@ test "fault violation with counterexample emits JSONL" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "jwtVerify") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"status\":200") != null);
 }
+
+test "fillVerifierCounterexamples synthetic fallback when no failure path exists" {
+    // Handler calls jwtVerify but never branches on result.ok - PathGenerator
+    // generates only a success-path test. Pass 2 must synthesize the failure.
+    const allocator = std.testing.allocator;
+
+    var stubs: std.ArrayList(path_gen.IoStub) = .empty;
+    defer stubs.deinit(allocator);
+    try stubs.append(allocator, .{
+        .seq = 0,
+        .module = "auth",
+        .func = "jwtVerify",
+        .result_json = "{\"ok\":true,\"value\":{}}",
+    });
+    const test_case = GeneratedTest{
+        .name = try allocator.dupe(u8, "path 1 GET /"),
+        .method = "GET",
+        .url = "/",
+        .has_auth_header = false,
+        .expected_status = 200,
+        .io_stubs = stubs,
+    };
+    defer allocator.free(test_case.name);
+
+    const tests = [_]GeneratedTest{test_case};
+
+    var violations: std.ArrayList(PropertyViolation) = .empty;
+    defer violations.deinit(allocator);
+    try violations.append(allocator, .{
+        .kind = .result_unsafe,
+        .message = "result.value accessed without checking result.ok first",
+        .help = null,
+        .loc_line = 5,
+        .loc_col = 10,
+        .counterexample_name = null,
+        .counterexample_index = null,
+        .source_module = "zigttp:auth",
+        .source_func = "jwtVerify",
+    });
+
+    fillVerifierCounterexamples(violations.items, &tests);
+
+    // Pass 2 should have matched via the success-path stub and set force_failure.
+    try std.testing.expectEqual(@as(?usize, 0), violations.items[0].counterexample_index);
+    try std.testing.expect(violations.items[0].counterexample_force_failure);
+
+    // writeViolationsJsonl must emit the stub with the overridden failure result.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeViolationsJsonl(&aw.writer, allocator, violations.items, &tests);
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "result-unsafe-0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":false") != null);
+    // Original success result must not appear
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"ok\":true") == null);
+}
