@@ -246,7 +246,6 @@ pub fn fillVerifierCounterexamples(
         const src_fn = v.source_func orelse continue;
 
         // Pass 1: find a test that already has the failure result.
-        var found = false;
         outer: for (tests, 0..) |t, i| {
             for (t.io_stubs.items) |stub| {
                 // PathGenerator stubs use short module names (e.g. "auth"),
@@ -259,12 +258,11 @@ pub fn fillVerifierCounterexamples(
                 {
                     v.counterexample_name = t.name;
                     v.counterexample_index = i;
-                    found = true;
                     break :outer;
                 }
             }
         }
-        if (found) continue;
+        if (v.counterexample_index != null) continue;
 
         // Pass 2: find any test that calls the function (even with success result).
         // The handler never branches on result.ok so PathGenerator produces no failure
