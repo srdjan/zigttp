@@ -542,6 +542,8 @@ test "safe_with_additions for new behavioral paths" {
 test "property severity classification" {
     try std.testing.expectEqual(Severity.critical, propertySeverity("retry_safe", false));
     try std.testing.expectEqual(Severity.critical, propertySeverity("injection_safe", false));
+    try std.testing.expectEqual(Severity.critical, propertySeverity("result_safe", false));
+    try std.testing.expectEqual(Severity.critical, propertySeverity("optional_safe", false));
     try std.testing.expectEqual(Severity.warning, propertySeverity("deterministic", false));
     try std.testing.expectEqual(Severity.info, propertySeverity("pure", false));
     // Gains are always info regardless of field
