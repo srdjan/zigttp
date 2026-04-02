@@ -84,6 +84,12 @@ pub const Diagnostic = struct {
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
+    /// For unchecked_result_value: the virtual module that produced the result.
+    /// Borrowed from the module binding registry - always valid.
+    source_module: ?[]const u8 = null,
+    /// For unchecked_result_value: the function that produced the result.
+    /// Borrowed from the module binding registry - always valid.
+    source_func: ?[]const u8 = null,
 };
 
 /// Return status for a statement or block - used by exhaustive return analysis.
@@ -102,6 +108,12 @@ const BindingState = struct {
     ref_count: u16,
     decl_node: NodeIndex,
     name_idx: u16, // string constant index for the name (0 = unknown)
+    /// For result bindings: the virtual module specifier (e.g. "zigttp:auth").
+    /// Borrowed from module binding registry string - always valid.
+    source_module: ?[]const u8 = null,
+    /// For result bindings: the function name (e.g. "jwtVerify").
+    /// Borrowed from module binding registry string - always valid.
+    source_func: ?[]const u8 = null,
 
     fn key(self: BindingState) u32 {
         return bindingKey(self.scope_id, self.slot);
@@ -165,6 +177,14 @@ const OptionalBindingState = struct {
     }
 };
 
+/// Associates a local binding slot with the virtual module function that produced it.
+/// Strings are borrowed from the module binding registry (program lifetime).
+const ResultFnSlot = struct {
+    slot: u16,
+    func_name: []const u8,
+    module_name: []const u8,
+};
+
 const NarrowingBranch = enum { then, then_returns_early };
 
 const NarrowingInfo = struct {
@@ -187,8 +207,8 @@ pub const HandlerVerifier = struct {
 
     // Result checking state
     result_bindings: std.ArrayList(BindingState),
-    // Import-to-module mapping: local binding slot -> is from result-producing module
-    result_function_slots: std.ArrayList(u16),
+    // Import-to-module mapping: local binding slot -> result-producing function identity
+    result_function_slots: std.ArrayList(ResultFnSlot),
 
     // Optional checking state (Check 6)
     optional_bindings: std.ArrayList(OptionalBindingState),
@@ -512,7 +532,11 @@ pub const HandlerVerifier = struct {
 
                 switch (produces) {
                     .result => {
-                        self.result_function_slots.append(self.allocator, spec.local_binding.slot) catch continue;
+                        self.result_function_slots.append(self.allocator, .{
+                            .slot = spec.local_binding.slot,
+                            .func_name = imported_name,
+                            .module_name = module_str,
+                        }) catch continue;
                     },
                     .optional_string, .optional_object => {
                         self.optional_function_slots.append(self.allocator, .{
@@ -556,7 +580,7 @@ pub const HandlerVerifier = struct {
                 if (decl.init != null_node) {
                     self.walkExprForRefs(decl.init);
 
-                    if (self.isResultProducingCall(decl.init)) {
+                    if (self.resultProducingCallSource(decl.init)) |rfs| {
                         self.result_bindings.append(self.allocator, .{
                             .scope_id = decl.binding.scope_id,
                             .slot = decl.binding.slot,
@@ -565,6 +589,8 @@ pub const HandlerVerifier = struct {
                             .ref_count = 0,
                             .decl_node = node,
                             .name_idx = 0,
+                            .source_func = rfs.func_name,
+                            .source_module = rfs.module_name,
                         }) catch {};
                     }
 
@@ -833,21 +859,25 @@ pub const HandlerVerifier = struct {
 
     /// Check if a call expression calls a result-producing function.
     fn isResultProducingCall(self: *HandlerVerifier, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        if (tag != .call and tag != .method_call) return false;
+        return self.resultProducingCallSource(node) != null;
+    }
 
-        const call = self.ir_view.getCall(node) orelse return false;
-        const callee_tag = self.ir_view.getTag(call.callee) orelse return false;
+    /// Return the ResultFnSlot for a result-producing call, or null if not one.
+    fn resultProducingCallSource(self: *HandlerVerifier, node: NodeIndex) ?ResultFnSlot {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .call and tag != .method_call) return null;
+
+        const call = self.ir_view.getCall(node) orelse return null;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
 
         if (callee_tag == .identifier) {
-            const binding = self.ir_view.getBinding(call.callee) orelse return false;
-            // Check if this binding slot is a known result-producing function
-            for (self.result_function_slots.items) |slot| {
-                if (slot == binding.slot) return true;
+            const binding = self.ir_view.getBinding(call.callee) orelse return null;
+            for (self.result_function_slots.items) |rfs| {
+                if (rfs.slot == binding.slot) return rfs;
             }
         }
 
-        return false;
+        return null;
     }
 
     /// Extract the binding slot from a `result.ok` condition check.
@@ -995,6 +1025,8 @@ pub const HandlerVerifier = struct {
                 .node = node,
                 .message = "result.value accessed without checking result.ok first",
                 .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
+                .source_module = rb.source_module,
+                .source_func = rb.source_func,
             });
         }
     }

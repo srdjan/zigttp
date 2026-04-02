@@ -61,6 +61,16 @@ pub const PropertyViolation = struct {
     counterexample_index: ?usize,
     /// When true, message and help were duped by the collector and must be freed.
     owns_strings: bool = false,
+    /// For result_unsafe: the virtual module specifier that produced the unchecked result.
+    /// Used to fill in counterexample_index in a second pass after PathGenerator runs.
+    /// Borrowed from module binding registry - always valid.
+    source_module: ?[]const u8 = null,
+    /// For result_unsafe: the function name that produced the unchecked result.
+    source_func: ?[]const u8 = null,
+    /// For result_unsafe: when true, the counterexample test's io_stub for source_func
+    /// should be overridden to the failure result. Set when PathGenerator has no explicit
+    /// failure path (code does not branch on result.ok), requiring a synthetic stub.
+    counterexample_force_failure: bool = false,
 };
 
 /// Free owned strings in violations that were allocated by collectors.
@@ -174,6 +184,10 @@ pub fn collectFlowViolations(
 
 /// Append violations derived from HandlerVerifier diagnostics.
 /// Only result_unsafe and optional_unchecked errors are included.
+///
+/// For result_unsafe violations where the HandlerVerifier recorded source_module/
+/// source_func, those are stored on the violation for a later counterexample fill
+/// pass. Call fillVerifierCounterexamples() once PathGenerator tests are available.
 pub fn collectVerifierViolations(
     allocator: std.mem.Allocator,
     violations: *std.ArrayList(PropertyViolation),
@@ -202,7 +216,72 @@ pub fn collectVerifierViolations(
             .loc_col = loc_col,
             .counterexample_name = null,
             .counterexample_index = null,
+            .source_module = if (kind == .result_unsafe) diag.source_module else null,
+            .source_func = if (kind == .result_unsafe) diag.source_func else null,
         }) catch {};
+    }
+}
+
+/// Second-pass counterexample fill for result_unsafe violations.
+/// Call after PathGenerator has run to match violations against io_stubs.
+/// Sets counterexample_name/index in place.
+///
+/// Two passes:
+///   1. Exact match: test has source_func io_stub with "ok":false.
+///   2. Synthetic fallback: test calls source_func with any result. Sets
+///      counterexample_force_failure so writeViolationsJsonl overrides the stub
+///      to the failure result. Handles handlers that access result.value directly
+///      without branching on result.ok.
+///
+/// Safe to call with an empty tests slice (no-op).
+pub fn fillVerifierCounterexamples(
+    violations: []PropertyViolation,
+    tests: []const GeneratedTest,
+) void {
+    if (tests.len == 0) return;
+    for (violations) |*v| {
+        if (v.kind != .result_unsafe) continue;
+        if (v.counterexample_index != null) continue; // already matched
+        const src_mod = v.source_module orelse continue;
+        const src_fn = v.source_func orelse continue;
+
+        // Pass 1: find a test that already has the failure result.
+        var found = false;
+        outer: for (tests, 0..) |t, i| {
+            for (t.io_stubs.items) |stub| {
+                // PathGenerator stubs use short module names (e.g. "auth"),
+                // while the verifier stores the full specifier ("zigttp:auth").
+                const mod_match = std.mem.eql(u8, stub.module, src_mod) or
+                    std.mem.endsWith(u8, src_mod, stub.module);
+                if (mod_match and
+                    std.mem.eql(u8, stub.func, src_fn) and
+                    std.mem.indexOf(u8, stub.result_json, "\"ok\":false") != null)
+                {
+                    v.counterexample_name = t.name;
+                    v.counterexample_index = i;
+                    found = true;
+                    break :outer;
+                }
+            }
+        }
+        if (found) continue;
+
+        // Pass 2: find any test that calls the function (even with success result).
+        // The handler never branches on result.ok so PathGenerator produces no failure
+        // path. We synthesize the failure by overriding the stub in the output.
+        for (tests, 0..) |t, i| {
+            for (t.io_stubs.items) |stub| {
+                const mod_match = std.mem.eql(u8, stub.module, src_mod) or
+                    std.mem.endsWith(u8, src_mod, stub.module);
+                if (mod_match and std.mem.eql(u8, stub.func, src_fn)) {
+                    v.counterexample_name = t.name;
+                    v.counterexample_index = i;
+                    v.counterexample_force_failure = true;
+                    break;
+                }
+            }
+            if (v.counterexample_index != null) break;
+        }
     }
 }
 
@@ -230,8 +309,12 @@ pub fn writeViolationsJsonl(
         const cx_idx = v.counterexample_index orelse continue;
         if (cx_idx >= tests.len) continue;
 
-        const gop = try emitted.getOrPut(allocator, cx_idx);
-        if (gop.found_existing) continue;
+        // Deduplicate exact matches. Synthetic failures (force_failure) are based on
+        // a success-path test but override one stub - they produce unique content.
+        if (!v.counterexample_force_failure) {
+            const gop = try emitted.getOrPut(allocator, cx_idx);
+            if (gop.found_existing) continue;
+        }
 
         const test_case = tests[cx_idx];
 
@@ -255,11 +338,22 @@ pub fn writeViolationsJsonl(
             try writer.writeAll(",\"headers\":{},\"body\":null}\n");
         }
 
-        // IO stubs
+        // IO stubs. For synthetic failure counterexamples, override the target
+        // function's result to the failure value so the test demonstrates the bug.
         for (test_case.io_stubs.items) |stub| {
+            const result_json = if (v.counterexample_force_failure)
+                if (v.source_func) |sf|
+                    if (std.mem.eql(u8, stub.func, sf))
+                        "{\"ok\":false,\"error\":\"test-error\"}"
+                    else
+                        stub.result_json
+                else
+                    stub.result_json
+            else
+                stub.result_json;
             try writer.print(
                 "{{\"type\":\"io\",\"seq\":{d},\"module\":\"{s}\",\"fn\":\"{s}\",\"result\":{s}}}\n",
-                .{ stub.seq, stub.module, stub.func, stub.result_json },
+                .{ stub.seq, stub.module, stub.func, result_json },
             );
         }
 
