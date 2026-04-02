@@ -4,6 +4,11 @@
 //! HandlerContract. Only routes and schemas that can be represented without
 //! guessing receive typed helpers; everything else is recorded in
 //! skippedOperations and remains accessible through requestRaw().
+//!
+//! Routes with a single response code emit Promise<TypedResponse<T>>.
+//! Routes with multiple response codes emit a discriminated union:
+//!   Promise<{ status: 200; data: T; response: Response } | { status: 404; data: E; response: Response }>
+//! allowing TypeScript callers to narrow on .status.
 
 const std = @import("std");
 const handler_contract = @import("zts").handler_contract;
