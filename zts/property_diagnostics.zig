@@ -345,6 +345,32 @@ test "empty violations - no output" {
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
+test "formatViolationsSummary includes path when provided" {
+    const allocator = std.testing.allocator;
+
+    const violation = PropertyViolation{
+        .kind = .fault_uncovered,
+        .message = "handler returns 2xx when auth fails",
+        .help = "return 401 on failure",
+        .loc_line = 0,
+        .loc_col = 0,
+        .counterexample_name = "path 1 !result.ok",
+        .counterexample_index = 0,
+    };
+    const violations = [_]PropertyViolation{violation};
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try formatViolationsSummary(&aw.writer, &violations, "handler.ts", "handler.violations.jsonl");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "FAULT COVERAGE GAP") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "(see handler.violations.jsonl)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "1 counterexample test(s) written to handler.violations.jsonl") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "PASS on the buggy handler") != null);
+}
+
 test "fault violation with counterexample emits JSONL" {
     const allocator = std.testing.allocator;
 
