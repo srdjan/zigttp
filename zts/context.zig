@@ -1722,8 +1722,10 @@ pub const AtomTable = struct {
     }
 
     pub fn deinit(self: *AtomTable) void {
-        // Free all interned string keys
-        var it = self.strings.keyIterator();
+        // Free owned key storage from the reverse map. The string-key map uses
+        // those same slices for lookup, but the reverse map is the canonical
+        // atom->name store we query during runtime.
+        var it = self.reverse.valueIterator();
         while (it.next()) |key| {
             self.allocator.free(key.*);
         }
@@ -1754,27 +1756,25 @@ pub const AtomTable = struct {
     /// Prune unused atoms during major GC
     /// Takes a set of atoms that are still in use (referenced by live objects)
     pub fn pruneUnused(self: *AtomTable, used_atoms: *const std.AutoHashMap(object.Atom, void)) void {
-        // Build list of keys to remove (can't remove during iteration)
-        var to_remove: std.ArrayList([]const u8) = .empty;
+        // Build list of atoms to remove (can't mutate maps during iteration).
         var atoms_to_remove: std.ArrayList(object.Atom) = .empty;
-        defer to_remove.deinit(self.allocator);
         defer atoms_to_remove.deinit(self.allocator);
 
-        var it = self.strings.iterator();
+        var it = self.reverse.iterator();
         while (it.next()) |entry| {
-            const atom = entry.value_ptr.*;
+            const atom = entry.key_ptr.*;
             // Keep predefined atoms (they're always in use)
             if (atom.isPredefined()) continue;
 
             // Check if this dynamic atom is still referenced
             if (!used_atoms.contains(atom)) {
-                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
                 atoms_to_remove.append(self.allocator, atom) catch continue;
             }
         }
 
         // Remove unreferenced atoms from both maps
-        for (to_remove.items, atoms_to_remove.items) |key, atom| {
+        for (atoms_to_remove.items) |atom| {
+            const key = self.reverse.get(atom) orelse continue;
             _ = self.strings.remove(key);
             _ = self.reverse.remove(atom);
             self.allocator.free(key);
@@ -1783,8 +1783,7 @@ pub const AtomTable = struct {
 
     /// Reset atom table to initial state (for request isolation)
     pub fn reset(self: *AtomTable) void {
-        // Free all interned string keys
-        var it = self.strings.keyIterator();
+        var it = self.reverse.valueIterator();
         while (it.next()) |key| {
             self.allocator.free(key.*);
         }

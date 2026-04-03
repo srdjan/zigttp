@@ -440,24 +440,14 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.strings.deinit();
-        self.consumed_body_objects.deinit(self.allocator);
-        if (self.outbound_io_backend) |*io_backend| {
-            io_backend.deinit();
-        }
-        // Clean up trace recorder
-        if (self.trace_recorder) |rec| {
-            rec.deinit();
-            self.allocator.destroy(rec);
-        }
-        if (self.active_durable_run) |*run| {
-            run.deinit(self.allocator);
-        }
-        // Only close owned resources (pool runtimes share the pool's trace file)
         if (self.owns_resources) {
-            if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
-            if (self.trace_mutex) |m| self.allocator.destroy(m);
-            // Clean up hybrid allocation state
+            // Context teardown walks builtin objects and bytecode constants that may
+            // still reference interned unique strings from this runtime.
+            self.ctx.deinit();
+            self.gc_state.deinit();
+            self.heap.deinit();
+            // Clean up hybrid allocation state after the context has released any
+            // arena-backed request allocations it still knows about.
             if (self.arena_state) |a| {
                 a.deinit();
                 self.allocator.destroy(a);
@@ -465,11 +455,26 @@ pub const Runtime = struct {
             if (self.hybrid_state) |h| {
                 self.allocator.destroy(h);
             }
-            self.ctx.deinit();
-            self.gc_state.deinit();
-            self.heap.deinit();
             self.allocator.destroy(self.gc_state);
             self.allocator.destroy(self.heap);
+            if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
+            if (self.trace_mutex) |m| self.allocator.destroy(m);
+        }
+        self.consumed_body_objects.deinit(self.allocator);
+        if (self.outbound_io_backend) |*io_backend| {
+            io_backend.deinit();
+        }
+        if (self.trace_recorder) |rec| {
+            rec.deinit();
+            self.allocator.destroy(rec);
+        }
+        if (self.active_durable_run) |*run| {
+            run.deinit(self.allocator);
+        }
+        if (self.owns_resources) {
+            self.strings.deinit();
+        } else {
+            self.strings.deinitMetadataOnly();
         }
         self.allocator.destroy(self);
     }
@@ -1183,7 +1188,7 @@ pub const Runtime = struct {
             tracked = true;
         }
         defer if (tracked) self.active_request_id.store(0, .release);
-        var reset_after = true;
+        var reset_after = self.owns_resources;
         defer if (reset_after) self.resetForNextRequest();
 
         // === TRACE RECORDING: Set up per-request recorder ===
@@ -2297,7 +2302,6 @@ pub const Runtime = struct {
 
     /// Reset runtime for next request (isolation)
     pub fn resetForNextRequest(self: *Self) void {
-        // Clear stack
         self.ctx.sp = 0;
         self.ctx.call_depth = 0;
         self.ctx.clearException();
@@ -2325,6 +2329,14 @@ pub const Runtime = struct {
         // once per runtime and must persist across requests. Request isolation
         // is achieved through the handler pool (each request gets a pooled runtime)
         // and stack/exception clearing above.
+    }
+
+    fn prepareForPoolRelease(self: *Self) void {
+        // Clear zruntime-layer request state that pool.zig's Runtime.reset()
+        // does not know about. The engine-level sp/call_depth/exception clear
+        // happens inside pool.release() -> Runtime.reset().
+        self.consumed_body_objects.clearRetainingCapacity();
+        self.last_request_body_len = 0;
     }
 
     // === GC Tuning Hooks ===
@@ -3936,25 +3948,32 @@ fn printValue(val: zq.JSValue, fd: std.c.fd_t) void {
 // Percentile Tracker for Latency Metrics
 // ============================================================================
 
-/// Lock-free ring buffer that records nanosecond-resolution latency samples.
-/// Provides approximate percentile calculations for diagnostic metrics.
-/// Writers (record) are lock-free via atomic index. Readers (getPercentile)
-/// copy and sort the buffer, tolerating slightly stale data.
+/// Mutex-protected ring buffer that records nanosecond-resolution latency samples.
+/// Used only for diagnostic metrics in debug builds, so we prefer correctness
+/// under contention over lock-free writes.
 pub const PercentileTracker = struct {
+    mutex: compat.Mutex = .{},
     samples: [SAMPLE_SIZE]u64 = [_]u64{0} ** SAMPLE_SIZE,
-    total: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    total: usize = 0,
 
     const SAMPLE_SIZE = 1024;
 
     pub fn record(self: *PercentileTracker, ns: u64) void {
-        const i = self.total.fetchAdd(1, .monotonic) % SAMPLE_SIZE;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const i = self.total % SAMPLE_SIZE;
         self.samples[i] = ns;
+        self.total += 1;
     }
 
     /// Returns the approximate p-th percentile (0-100) in nanoseconds.
     /// Copies the ring buffer to a stack array and sorts via insertion sort.
-    pub fn getPercentile(self: *const PercentileTracker, p: f64) u64 {
-        const n = self.total.load(.acquire);
+    pub fn getPercentile(self: *PercentileTracker, p: f64) u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const n = self.total;
         if (n == 0) return 0;
         const active = @min(n, SAMPLE_SIZE);
 
@@ -4004,6 +4023,7 @@ pub const HandlerPool = struct {
     pool: zq.LockFreePool,
     cache: bytecode_cache.BytecodeCache,
     cache_mutex: compat.Mutex,
+    runtime_init_mutex: compat.Mutex,
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
     /// Shared trace file handle (owned by pool, shared across runtimes)
@@ -4022,7 +4042,6 @@ pub const HandlerPool = struct {
 
         pub fn deinit(self: *ResponseHandle) void {
             self.response.deinit();
-            self.runtime.resetForNextRequest();
             self.pool.releaseForRequest(self.base_rt);
         }
     };
@@ -4033,7 +4052,6 @@ pub const HandlerPool = struct {
         pool: *HandlerPool,
 
         pub fn deinit(self: *WorkerRuntimeLease) void {
-            self.runtime.resetForNextRequest();
             self.pool.releaseForRequest(self.base_rt);
         }
     };
@@ -4085,6 +4103,7 @@ pub const HandlerPool = struct {
             .pool = pool,
             .cache = bytecode_cache.BytecodeCache.init(allocator),
             .cache_mutex = .{},
+            .runtime_init_mutex = .{},
             .embedded_bytecode = embedded_bytecode,
             .trace_file = null,
             .trace_mutex = null,
@@ -4165,6 +4184,9 @@ pub const HandlerPool = struct {
                 }
                 return err;
             };
+            if (!rt.owns_resources) {
+                result.assertDetachedFromRuntime();
+            }
             return result;
         }
         return last_err orelse error.HandlerNotCallable;
@@ -4208,7 +4230,8 @@ pub const HandlerPool = struct {
     }
 
     /// Execute handler on a worker-pinned runtime lease.
-    /// The caller must reset runtime state after response send.
+    /// The caller must keep the lease alive until any borrowed response data
+    /// has been sent, then release it with lease.deinit().
     pub fn executeHandlerBorrowedLeased(self: *Self, lease: *WorkerRuntimeLease, request: HttpRequestView) !HttpResponse {
         const request_id = self.nextRequestId();
         var exec_timer: ?compat.Timer = null;
@@ -4424,11 +4447,15 @@ pub const HandlerPool = struct {
     }
 
     fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
+        if (rt.user_data) |ptr| {
+            const runtime: *Runtime = @ptrCast(@alignCast(ptr));
+            runtime.prepareForPoolRelease();
+        }
         self.pool.release(rt);
         _ = self.in_use.fetchSub(1, .monotonic);
     }
 
-    pub fn getMetrics(self: *const Self) struct {
+    pub fn getMetrics(self: *Self) struct {
         requests: u64,
         exhausted: u64,
         avg_wait_ns: u64,
@@ -4492,6 +4519,13 @@ pub const HandlerPool = struct {
     }
 
     fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*Runtime {
+        if (base_rt.user_data) |ptr| {
+            return @ptrCast(@alignCast(ptr));
+        }
+
+        self.runtime_init_mutex.lock();
+        defer self.runtime_init_mutex.unlock();
+
         if (base_rt.user_data) |ptr| {
             return @ptrCast(@alignCast(ptr));
         }
@@ -6343,31 +6377,110 @@ test "HandlerPool exhaustion and recovery" {
     const allocator = std.heap.c_allocator;
 
     const handler_code = "function handler(req) { return Response.text('ok'); }";
-    // Small pool size (2) to easily trigger exhaustion
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 2, 0);
     defer pool.deinit();
-
-    // Override acquire timeout to 0 for immediate failure on exhaustion
     pool.acquire_timeout_ms = 0;
 
-    const method = try allocator.dupe(u8, "GET");
-    const url = try allocator.dupe(u8, "/");
     var request = HttpRequestOwned{
-        .method = method,
-        .url = url,
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
         .headers = .empty,
         .body = null,
     };
     defer request.deinit(allocator);
 
-    // Execute request 1 - should succeed
-    var response1 = try pool.executeHandler(request.asView());
-    defer response1.deinit();
-    try std.testing.expectEqualStrings("ok", response1.body);
+    var lease1 = try pool.acquireWorkerRuntime();
+    var lease1_active = true;
+    defer if (lease1_active) lease1.deinit();
+    var lease2 = try pool.acquireWorkerRuntime();
+    defer lease2.deinit();
 
-    // Verify pool metrics
+    try std.testing.expectError(error.PoolExhausted, pool.acquireWorkerRuntime());
     const metrics = pool.getMetrics();
-    try std.testing.expect(metrics.exhausted == 0);
+    try std.testing.expect(metrics.exhausted >= 1);
+
+    lease1.deinit();
+    lease1_active = false;
+
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.body);
+}
+
+test "HandlerPool owned response survives pooled reuse" {
+    const allocator = std.heap.c_allocator;
+
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.text(req.body ?? "");
+        \\}
+    ;
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 1, 0);
+    defer pool.deinit();
+
+    var first_request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = try allocator.dupe(u8, "first"),
+    };
+    defer first_request.deinit(allocator);
+
+    var second_request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = try allocator.dupe(u8, "second"),
+    };
+    defer second_request.deinit(allocator);
+
+    var first_response = try pool.executeHandler(first_request.asView());
+    defer first_response.deinit();
+
+    var second_response = try pool.executeHandler(second_request.asView());
+    defer second_response.deinit();
+
+    try std.testing.expectEqualStrings("first", first_response.body);
+    try std.testing.expectEqualStrings("second", second_response.body);
+}
+
+test "HandlerPool borrowed response pins runtime until release" {
+    const allocator = std.heap.c_allocator;
+
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.text(req.body ?? "");
+        \\}
+    ;
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 1, 0);
+    defer pool.deinit();
+    pool.acquire_timeout_ms = 0;
+
+    var first_request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = try allocator.dupe(u8, "first"),
+    };
+    defer first_request.deinit(allocator);
+
+    var second_request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "POST"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = try allocator.dupe(u8, "second"),
+    };
+    defer second_request.deinit(allocator);
+
+    var handle = try pool.executeHandlerBorrowed(first_request.asView());
+    try std.testing.expectEqualStrings("first", handle.response.body);
+    try std.testing.expectError(error.PoolExhausted, pool.executeHandler(second_request.asView()));
+
+    handle.deinit();
+
+    var response = try pool.executeHandler(second_request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("second", response.body);
 }
 
 test "JIT object literal overflow slots remain valid" {

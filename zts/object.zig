@@ -1594,7 +1594,9 @@ pub const JSObject = extern struct {
                 // Free string values (e.g., Fragment constant)
                 slot_ref.* = value.JSValue.undefined_val;
                 const str = val.toPtr(string.JSString);
-                string.freeString(allocator, str);
+                if (!str.flags.is_unique) {
+                    string.freeString(allocator, str);
+                }
             }
         }
         // Destroy the builtin object itself (use destroyFull to handle NativeFunctionData)

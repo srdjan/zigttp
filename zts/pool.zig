@@ -118,9 +118,9 @@ pub const LockFreePool = struct {
         }
 
         pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
-            if (self.user_deinit) |deinit_fn| {
-                deinit_fn(self, allocator);
-            }
+            // Destroy the shared runtime state first. Builtin teardown may still
+            // walk handler bytecode and interned unique strings owned by the
+            // wrapper runtime in user_data.
             self.ctx.deinit();
             self.gc_state.deinit();
             self.heap_state.deinit();
@@ -130,6 +130,9 @@ pub const LockFreePool = struct {
             }
             allocator.destroy(self.gc_state);
             allocator.destroy(self.heap_state);
+            if (self.user_deinit) |deinit_fn| {
+                deinit_fn(self, allocator);
+            }
             allocator.destroy(self);
         }
 
@@ -260,6 +263,14 @@ pub const LockFreePool = struct {
 
     /// Release a runtime back to pool
     pub fn release(self: *LockFreePool, runtime: *Runtime) void {
+        if (std.debug.runtime_safety) {
+            for (self.slots) |*slot| {
+                if (slot.load(.acquire) == runtime) {
+                    std.debug.panic("runtime released twice: 0x{x}", .{@intFromPtr(runtime)});
+                }
+            }
+        }
+
         runtime.reset();
         runtime.in_use = false;
 
@@ -301,9 +312,7 @@ pub const LockFreePool = struct {
     }
 };
 
-
 test "LockFreePool basic operations" {
-
     const allocator = std.testing.allocator;
 
     var pool = try LockFreePool.init(allocator, .{ .max_size = 4 });
@@ -323,7 +332,6 @@ test "LockFreePool basic operations" {
 }
 
 test "LockFreePool multiple runtimes" {
-
     const allocator = std.testing.allocator;
 
     var pool = try LockFreePool.init(allocator, .{ .max_size = 4 });
@@ -347,7 +355,6 @@ test "LockFreePool multiple runtimes" {
 }
 
 test "LockFreePool beyond pool size creates new runtimes" {
-
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();

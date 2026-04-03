@@ -118,6 +118,17 @@ pub const HttpResponse = struct {
         self.body_owner = null;
     }
 
+    /// Debug-only check that the response no longer borrows runtime-managed state.
+    pub fn assertDetachedFromRuntime(self: *const HttpResponse) void {
+        if (!std.debug.runtime_safety) return;
+        if (self.requires_runtime) {
+            std.debug.panic("owned response still requires runtime-managed state", .{});
+        }
+        if (self.body_owner != null) {
+            std.debug.panic("owned response retained a borrowed body owner", .{});
+        }
+    }
+
     /// Add or update a header, duplicating key/value strings (caller does not retain ownership)
     pub fn putHeader(self: *HttpResponse, key: []const u8, val: []const u8) !void {
         try self.putHeaderInternal(key, val, true);

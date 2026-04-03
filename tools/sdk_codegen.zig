@@ -28,15 +28,14 @@ const SchemaAlias = struct {
 const InlineAlias = struct {
     route_index: usize,
     type_name: []const u8, // owned
-    /// Non-null for union arm types. Owned dupe of the response's schema_json.
-    /// When null the emitter falls back to route.response_schema_json.
+    /// Non-null for union arm types. Borrowed from the source ApiResponseInfo.
     schema_json_override: ?[]const u8 = null,
 };
 
 /// One arm of a multi-response discriminated union.
 const UnionArm = struct {
     status: u16,
-    type_name: []const u8, // borrowed from schema_aliases or inline_aliases
+    type_name: []const u8,
 };
 
 const RoutePlan = struct {
@@ -413,15 +412,14 @@ fn buildRoutePlans(
                         try inline_aliases.append(allocator, .{
                             .route_index = idx,
                             .type_name = inline_name,
-                            .schema_json_override = try allocator.dupe(u8, schema_json),
+                            .schema_json_override = schema_json,
                         });
                         break :arm_blk inline_aliases.items[inline_aliases.items.len - 1].type_name;
                     }
                     skip_reason = "response schema is not proven";
                     break :arm_blk "";
                 };
-                if (skip_reason != null) break;
-                try arms.append(allocator, .{ .status = status, .type_name = arm_type_name });
+                if (skip_reason == null) try arms.append(allocator, .{ .status = status, .type_name = arm_type_name });
             }
 
             if (skip_reason) |reason| {
@@ -494,14 +492,10 @@ fn buildRoutePlans(
     }
 }
 
-fn baseInlineResponseName(allocator: std.mem.Allocator, route: ApiRouteInfo) ![]u8 {
+fn appendRouteNamePrefix(allocator: std.mem.Allocator, out: *std.ArrayList(u8), route: ApiRouteInfo) !void {
     const method = try titleCaseSegment(allocator, route.method);
-    errdefer allocator.free(method);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+    defer allocator.free(method);
     try out.appendSlice(allocator, method);
-    allocator.free(method);
 
     if (std.mem.eql(u8, route.path, "/")) {
         try out.appendSlice(allocator, "Root");
@@ -520,38 +514,21 @@ fn baseInlineResponseName(allocator: std.mem.Allocator, route: ApiRouteInfo) ![]
             start = end;
         }
     }
+}
+
+fn baseInlineResponseName(allocator: std.mem.Allocator, route: ApiRouteInfo) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendRouteNamePrefix(allocator, &out, route);
     try out.appendSlice(allocator, "Response");
     return out.toOwnedSlice(allocator);
 }
 
-/// Like baseInlineResponseName but appends the HTTP status code before "Response",
-/// e.g. "GetUsersId200Response" - used for per-arm types in discriminated unions.
+/// Appends the HTTP status code before "Response", e.g. "GetUsersId200Response".
 fn baseInlineResponseNameWithStatus(allocator: std.mem.Allocator, route: ApiRouteInfo, status: u16) ![]u8 {
-    const method = try titleCaseSegment(allocator, route.method);
-    errdefer allocator.free(method);
-
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.appendSlice(allocator, method);
-    allocator.free(method);
-
-    if (std.mem.eql(u8, route.path, "/")) {
-        try out.appendSlice(allocator, "Root");
-    } else {
-        var start: usize = 0;
-        while (start < route.path.len) {
-            while (start < route.path.len and route.path[start] == '/') : (start += 1) {}
-            if (start >= route.path.len) break;
-            var end = start;
-            while (end < route.path.len and route.path[end] != '/') : (end += 1) {}
-            const segment = route.path[start..end];
-            const cleaned = if (segment.len > 0 and segment[0] == ':') segment[1..] else segment;
-            const titled = try titleCaseSegment(allocator, cleaned);
-            defer allocator.free(titled);
-            try out.appendSlice(allocator, titled);
-            start = end;
-        }
-    }
+    try appendRouteNamePrefix(allocator, &out, route);
     var status_buf: [5]u8 = undefined;
     const status_str = std.fmt.bufPrint(&status_buf, "{d}", .{status}) catch "0";
     try out.appendSlice(allocator, status_str);
@@ -565,10 +542,7 @@ fn freeSchemaAliases(list: *std.ArrayList(SchemaAlias), allocator: std.mem.Alloc
 }
 
 fn freeInlineAliases(list: *std.ArrayList(InlineAlias), allocator: std.mem.Allocator) void {
-    for (list.items) |alias| {
-        allocator.free(alias.type_name);
-        if (alias.schema_json_override) |sj| allocator.free(sj);
-    }
+    for (list.items) |alias| allocator.free(alias.type_name);
     list.deinit(allocator);
 }
 

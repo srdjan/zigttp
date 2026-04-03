@@ -199,36 +199,32 @@ fn freeExecutableRegion(memory: []align(PAGE_SIZE) u8) void {
 }
 
 fn makeRegionExecutable(memory: []align(PAGE_SIZE) u8) !void {
-    const prot_rx: std.c.PROT = .{ .READ = true, .EXEC = true };
-    if (builtin.os.tag == .macos) {
-        // On macOS with MAP_JIT, we need to use pthread_jit_write_protect_np
-        // to toggle between write and execute permissions
-        if (builtin.cpu.arch == .aarch64) {
-            // Apple Silicon: use JIT write protection
-            pthread_jit_write_protect_np(true);
-        }
-        // Also update via mprotect for x86_64 or as fallback
-        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rx) != 0) return error.MprotectFailed;
+    if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64) {
+        // Apple Silicon MAP_JIT: toggle to execute mode, then flush icache.
+        // No mprotect needed - MAP_JIT with PROT_RWX handles permissions.
+        pthread_jit_write_protect_np(true);
+        flushIcache(memory.ptr, memory.len);
     } else {
+        if (builtin.cpu.arch == .aarch64) {
+            flushIcache(memory.ptr, memory.len);
+        }
+        const prot_rx: std.c.PROT = .{ .READ = true, .EXEC = true };
         if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rx) != 0) return error.MprotectFailed;
     }
 }
 
 fn makeRegionWritable(memory: []align(PAGE_SIZE) u8) !void {
-    const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
-    if (builtin.os.tag == .macos) {
-        if (builtin.cpu.arch == .aarch64) {
-            pthread_jit_write_protect_np(false);
-        }
-        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rw) != 0) return error.MprotectFailed;
+    if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64) {
+        pthread_jit_write_protect_np(false);
     } else {
+        const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
         if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rw) != 0) return error.MprotectFailed;
     }
 }
 
 fn allocExecutableRegionMacOS(size: usize) ![]align(PAGE_SIZE) u8 {
     // On macOS, we use MAP_JIT which allows JIT code to be written and executed
-    // with proper W^X handling via pthread_jit_write_protect_np
+    // with proper W^X handling via pthread_jit_write_protect_np.
     const flags: std.posix.MAP = .{
         .TYPE = .PRIVATE,
         .ANONYMOUS = true,
@@ -238,15 +234,24 @@ fn allocExecutableRegionMacOS(size: usize) ![]align(PAGE_SIZE) u8 {
     const MAP_JIT: u32 = 0x0800;
     const flags_with_jit = @as(u32, @bitCast(flags)) | MAP_JIT;
 
-    const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
+    // Allocate with RWX max permissions so pthread_jit_write_protect_np
+    // can toggle between W and X without needing mprotect calls.
+    const prot_rwx: std.c.PROT = .{ .READ = true, .WRITE = true, .EXEC = true };
     const result = std.posix.mmap(
         null,
         size,
-        prot_rw,
+        prot_rwx,
         @bitCast(flags_with_jit),
         -1,
         0,
     ) catch return error.MmapFailed;
+
+    // Ensure write mode is active for the current thread. After fork(),
+    // the child inherits the parent's pthread_jit_write_protect_np state
+    // which may be "execute" (true), making MAP_JIT pages non-writable.
+    if (builtin.cpu.arch == .aarch64) {
+        pthread_jit_write_protect_np(false);
+    }
 
     return @alignCast(result[0..size]);
 }
@@ -265,8 +270,36 @@ fn allocExecutableRegionLinux(size: usize) ![]align(PAGE_SIZE) u8 {
     return @alignCast(result[0..size]);
 }
 
-// External declaration for macOS JIT write protection
-extern "c" fn pthread_jit_write_protect_np(enabled: bool) void;
+// Platform-specific extern declarations (guarded to avoid dangling symbols)
+const pthread_jit_write_protect_np = if (builtin.os.tag == .macos)
+    struct {
+        extern "c" fn pthread_jit_write_protect_np(enabled: bool) void;
+    }.pthread_jit_write_protect_np
+else
+    @compileError("pthread_jit_write_protect_np is macOS-only");
+
+const sys_icache_invalidate = if (builtin.os.tag == .macos)
+    struct {
+        extern "c" fn sys_icache_invalidate(addr: *anyopaque, len: usize) void;
+    }.sys_icache_invalidate
+else
+    @compileError("sys_icache_invalidate is macOS-only");
+
+const __clear_cache = if (builtin.os.tag == .linux)
+    struct {
+        extern "c" fn __clear_cache(start: *anyopaque, end: *anyopaque) void;
+    }.__clear_cache
+else
+    @compileError("__clear_cache is Linux-only");
+
+/// Flush data cache and invalidate instruction cache for the given range.
+fn flushIcache(ptr: [*]u8, len: usize) void {
+    if (builtin.os.tag == .macos) {
+        sys_icache_invalidate(ptr, len);
+    } else if (builtin.os.tag == .linux) {
+        __clear_cache(@ptrCast(ptr), @ptrCast(ptr + len));
+    }
+}
 
 // ============================================================================
 // Compiled code structure
