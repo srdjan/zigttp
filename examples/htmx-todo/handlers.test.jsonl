@@ -6,8 +6,8 @@
 {"type":"request","method":"GET","url":"/","headers":{},"body":null}
 {"type":"expect","status":200,"bodyContains":"htmx.org"}
 
-{"type":"test","name":"GET /todos without query returns error"}
-{"type":"request","method":"GET","url":"/todos","headers":{},"body":null}
+{"type":"test","name":"POST /todos without form body returns error"}
+{"type":"request","method":"POST","url":"/todos","headers":{},"body":null}
 {"type":"expect","status":200,"bodyContains":"Text is required"}
 
 {"type":"test","name":"DELETE /todos/delete returns empty response"}

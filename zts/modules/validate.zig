@@ -135,7 +135,7 @@ const CompiledSchema = struct {
 // Schema Registry (per-runtime state)
 // ============================================================================
 
-const SchemaRegistry = struct {
+pub const SchemaRegistry = struct {
     schemas: std.StringHashMap(*CompiledSchema),
     allocator: std.mem.Allocator,
 
@@ -165,7 +165,7 @@ const SchemaRegistry = struct {
 };
 
 /// Get or create the per-runtime SchemaRegistry
-fn getOrCreateRegistry(ctx: *context.Context) !*SchemaRegistry {
+pub fn getOrCreateRegistry(ctx: *context.Context) !*SchemaRegistry {
     if (ctx.getModuleState(SchemaRegistry, MODULE_STATE_SLOT)) |reg| {
         return reg;
     }
@@ -220,6 +220,38 @@ fn schemaCompileNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const valu
     return value.JSValue.true_val;
 }
 
+pub fn decodeJson(
+    ctx: *context.Context,
+    name: []const u8,
+    json_str: []const u8,
+    coerce: bool,
+) !value.JSValue {
+    const parsed_val = builtins.parseJsonValue(ctx, json_str) catch
+        return util.createPlainResultErr(ctx, "invalid JSON");
+    return decodeValue(ctx, name, parsed_val, coerce);
+}
+
+pub fn decodeObject(
+    ctx: *context.Context,
+    name: []const u8,
+    input: value.JSValue,
+    coerce: bool,
+) !value.JSValue {
+    return decodeValue(ctx, name, input, coerce);
+}
+
+fn decodeValue(
+    ctx: *context.Context,
+    name: []const u8,
+    input: value.JSValue,
+    coerce: bool,
+) !value.JSValue {
+    const reg = getOrCreateRegistry(ctx) catch return util.createPlainResultErr(ctx, "internal error");
+    const schema = reg.schemas.get(name) orelse return util.createPlainResultErr(ctx, "schema not found");
+    const candidate = if (coerce) coerceValue(ctx, schema, input) else input;
+    return validateValueAgainstSchema(ctx, schema, candidate, "");
+}
+
 /// validateJson(name, json) -> { ok: true, value } | { ok: false, errors }
 fn validateJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const ctx = util.castContext(ctx_ptr);
@@ -228,15 +260,7 @@ fn validateJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     const name = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "name must be a string");
     const json_str = util.extractString(args[1]) orelse return util.createPlainResultErr(ctx, "json must be a string");
 
-    const reg = getOrCreateRegistry(ctx) catch return util.createPlainResultErr(ctx, "internal error");
-    const schema = reg.schemas.get(name) orelse return util.createPlainResultErr(ctx, "schema not found");
-
-    // Parse JSON to JSValue
-    const parsed_val = builtins.parseJsonValue(ctx, json_str) catch
-        return util.createPlainResultErr(ctx, "invalid JSON");
-
-    // Validate
-    return validateValueAgainstSchema(ctx, schema, parsed_val, "");
+    return decodeJson(ctx, name, json_str, false);
 }
 
 /// validateObject(name, obj) -> { ok: true, value } | { ok: false, errors }
@@ -246,10 +270,7 @@ fn validateObjectNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const val
     if (args.len < 2) return util.createPlainResultErr(ctx, "missing arguments");
     const name = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "name must be a string");
 
-    const reg = getOrCreateRegistry(ctx) catch return util.createPlainResultErr(ctx, "internal error");
-    const schema = reg.schemas.get(name) orelse return util.createPlainResultErr(ctx, "schema not found");
-
-    return validateValueAgainstSchema(ctx, schema, args[1], "");
+    return decodeObject(ctx, name, args[1], false);
 }
 
 /// coerceJson(name, json) -> { ok: true, value } | { ok: false, errors }
@@ -260,16 +281,7 @@ fn coerceJsonNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     const name = util.extractString(args[0]) orelse return util.createPlainResultErr(ctx, "name must be a string");
     const json_str = util.extractString(args[1]) orelse return util.createPlainResultErr(ctx, "json must be a string");
 
-    const reg = getOrCreateRegistry(ctx) catch return util.createPlainResultErr(ctx, "internal error");
-    const schema = reg.schemas.get(name) orelse return util.createPlainResultErr(ctx, "schema not found");
-
-    // Parse JSON to JSValue
-    const parsed_val = builtins.parseJsonValue(ctx, json_str) catch
-        return util.createPlainResultErr(ctx, "invalid JSON");
-
-    // Coerce then validate
-    const coerced = coerceValue(ctx, schema, parsed_val);
-    return validateValueAgainstSchema(ctx, schema, coerced, "");
+    return decodeJson(ctx, name, json_str, true);
 }
 
 /// schemaDrop(name) -> boolean
@@ -727,7 +739,7 @@ fn jsValueToEnumString(ctx: *context.Context, val: value.JSValue) ![]const u8 {
 // Coercion logic
 // ============================================================================
 
-fn coerceValue(ctx: *context.Context, schema: *const CompiledSchema, val: value.JSValue) value.JSValue {
+pub fn coerceValue(ctx: *context.Context, schema: *const CompiledSchema, val: value.JSValue) value.JSValue {
     const expected_type = schema.schema_type orelse return val;
 
     switch (expected_type) {
@@ -755,6 +767,35 @@ fn coerceValue(ctx: *context.Context, schema: *const CompiledSchema, val: value.
                 var buf: [32]u8 = undefined;
                 const s = std.fmt.bufPrint(&buf, "{d}", .{val.getFloat64()}) catch return val;
                 return ctx.createString(s) catch val;
+            }
+        },
+        .object_type => {
+            if (val.isObject() and !val.isArray()) {
+                const obj = val.toPtr(object.JSObject);
+                const pool = ctx.hidden_class_pool orelse return val;
+                if (schema.properties) |props| {
+                    var it = props.iterator();
+                    while (it.next()) |entry| {
+                        const atom = ctx.atoms.intern(entry.key_ptr.*) catch continue;
+                        if (obj.getProperty(pool, atom)) |prop_val| {
+                            const coerced = coerceValue(ctx, entry.value_ptr.*, prop_val);
+                            ctx.setPropertyChecked(obj, atom, coerced) catch {};
+                        }
+                    }
+                }
+            }
+        },
+        .array => {
+            if (val.isArray() and schema.items != null) {
+                const arr = val.toPtr(object.JSObject);
+                const item_schema = schema.items.?;
+                const len = arr.getArrayLength();
+                var i: u32 = 0;
+                while (i < len) : (i += 1) {
+                    if (arr.getIndex(i)) |elem| {
+                        ctx.setIndexChecked(arr, i, coerceValue(ctx, item_schema, elem)) catch {};
+                    }
+                }
             }
         },
         else => {},

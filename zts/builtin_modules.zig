@@ -14,6 +14,7 @@ const crypto_mod = @import("modules/crypto.zig");
 const router_mod = @import("modules/router.zig");
 const auth_mod = @import("modules/auth.zig");
 const validate_mod = @import("modules/validate.zig");
+const decode_mod = @import("modules/decode.zig");
 const cache_mod = @import("modules/cache.zig");
 const sql_mod = @import("modules/sql.zig");
 const io_mod = @import("modules/io.zig");
@@ -27,6 +28,7 @@ pub const all = [_]ModuleBinding{
     router_mod.binding,
     auth_mod.binding,
     validate_mod.binding,
+    decode_mod.binding,
     cache_mod.binding,
     sql_mod.binding,
     io_mod.binding,

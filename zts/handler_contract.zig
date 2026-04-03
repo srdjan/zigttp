@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const api_schema = @import("api_schema.zig");
+const json_utils = @import("json_utils.zig");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
@@ -1345,8 +1346,10 @@ pub const ContractBuilder = struct {
             const tag = self.ir_view.getTag(idx) orelse continue;
             switch (tag) {
                 .function_decl => {
-                    const func = self.ir_view.getFunction(idx) orelse continue;
-                    if (func.name_atom == slot) return idx;
+                    const decl = self.ir_view.getVarDecl(idx) orelse continue;
+                    if (decl.binding.slot != slot or decl.init == null_node) continue;
+                    const init_tag = self.ir_view.getTag(decl.init) orelse continue;
+                    if (init_tag == .function_expr or init_tag == .arrow_function) return decl.init;
                 },
                 .var_decl => {
                     const decl = self.ir_view.getVarDecl(idx) orelse continue;
@@ -1363,7 +1366,11 @@ pub const ContractBuilder = struct {
     fn resolveFunctionNode(self: *const ContractBuilder, node_idx: NodeIndex) ?NodeIndex {
         const tag = self.ir_view.getTag(node_idx) orelse return null;
         switch (tag) {
-            .function_decl, .function_expr, .arrow_function => return node_idx,
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node_idx) orelse return null;
+                return if (decl.init != null_node) decl.init else null;
+            },
+            .function_expr, .arrow_function => return node_idx,
             .identifier => {
                 const binding = self.ir_view.getBinding(node_idx) orelse return null;
                 return self.findFunctionNodeByBinding(binding.slot);
@@ -1567,7 +1574,21 @@ pub const ContractBuilder = struct {
                 if (callee_tag == .identifier) {
                     const binding = self.ir_view.getBinding(call.callee) orelse return;
                     if (self.isBindingCategory(binding.slot, .request_schema)) {
-                        try self.extractLiteralArg(call, &route.request_schema_refs, &route.request_schema_dynamic, null);
+                        const fn_name = self.resolveAtomName(binding.slot);
+                        const is_decode_query = fn_name != null and std.mem.eql(u8, fn_name.?, "decodeQuery");
+
+                        if (!is_decode_query) {
+                            try self.extractLiteralArg(call, &route.request_schema_refs, &route.request_schema_dynamic, null);
+                        }
+
+                        if (call.args_count > 0) {
+                            const schema_idx = self.ir_view.getListIndex(call.args_start, 0);
+                            if (self.getLiteralString(schema_idx)) |schema_ref| {
+                                try self.classifyRequestSchemaCall(route, fn_name, schema_ref);
+                            } else if (is_decode_query) {
+                                route.query_params_dynamic = true;
+                            }
+                        }
                     } else {
                         // Check for auth flags via generic bindings
                         for (self.generic_bindings.items) |gb| {
@@ -1839,9 +1860,8 @@ pub const ContractBuilder = struct {
     }
 
     fn syncRouteRequestBodies(self: *ContractBuilder, route: *ApiRouteInfo) !void {
-        for (route.request_bodies.items) |*body| body.deinit(self.allocator);
-        route.request_bodies.clearRetainingCapacity();
-        route.request_bodies_dynamic = route.request_schema_dynamic;
+        route.request_bodies_dynamic = route.request_bodies_dynamic or route.request_schema_dynamic;
+        if (route.request_bodies.items.len > 0) return;
 
         for (route.request_schema_refs.items) |schema_ref| {
             if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
@@ -1849,6 +1869,154 @@ pub const ContractBuilder = struct {
                 .content_type = try self.allocator.dupe(u8, "application/json"),
                 .schema_ref = try self.allocator.dupe(u8, schema_ref),
             });
+        }
+    }
+
+    fn classifyRequestSchemaCall(
+        self: *ContractBuilder,
+        route: *ApiRouteInfo,
+        fn_name: ?[]const u8,
+        schema_ref: []const u8,
+    ) !void {
+        const name = fn_name orelse return;
+        if (std.mem.eql(u8, name, "validateJson") or
+            std.mem.eql(u8, name, "coerceJson") or
+            std.mem.eql(u8, name, "decodeJson"))
+        {
+            try self.appendRequestBodySchemaRef(route, "application/json", schema_ref);
+        } else if (std.mem.eql(u8, name, "decodeForm")) {
+            try self.appendRequestBodySchemaRef(route, "application/x-www-form-urlencoded", schema_ref);
+        } else if (std.mem.eql(u8, name, "decodeQuery")) {
+            try self.appendQueryParamsFromSchema(route, schema_ref);
+        }
+    }
+
+    fn appendRequestBodySchemaRef(
+        self: *ContractBuilder,
+        route: *ApiRouteInfo,
+        content_type: []const u8,
+        schema_ref: []const u8,
+    ) !void {
+        for (route.request_bodies.items) |body| {
+            const body_content_type = body.content_type orelse continue;
+            const body_schema_ref = body.schema_ref orelse continue;
+            if (std.mem.eql(u8, body_content_type, content_type) and std.mem.eql(u8, body_schema_ref, schema_ref)) {
+                return;
+            }
+        }
+
+        try route.request_bodies.append(self.allocator, .{
+            .content_type = try self.allocator.dupe(u8, content_type),
+            .schema_ref = try self.allocator.dupe(u8, schema_ref),
+        });
+    }
+
+    fn appendQueryParamsFromSchema(self: *ContractBuilder, route: *ApiRouteInfo, schema_ref: []const u8) !void {
+        const schema_json = for (self.api_schemas.items) |schema| {
+            if (std.mem.eql(u8, schema.name, schema_ref)) break schema.schema_json;
+        } else return;
+
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+
+        const props = parsed.value.object.get("properties") orelse return;
+        if (props != .object) return;
+
+        var required_names: std.ArrayList([]const u8) = .empty;
+        defer required_names.deinit(self.allocator);
+        if (parsed.value.object.get("required")) |required_val| {
+            if (required_val == .array) {
+                for (required_val.array.items) |item| {
+                    if (item != .string) continue;
+                    required_names.append(self.allocator, item.string) catch {};
+                }
+            }
+        }
+
+        var it = props.object.iterator();
+        while (it.next()) |entry| {
+            if (!schemaValueSupportsQueryParam(entry.value_ptr.*)) {
+                route.query_params_dynamic = true;
+                return;
+            }
+
+            if (containsApiParam(route.query_params.items, entry.key_ptr.*)) continue;
+            const field_schema_json = serializeJsonValue(self.allocator, entry.value_ptr.*) catch {
+                route.query_params_dynamic = true;
+                return;
+            };
+            errdefer self.allocator.free(field_schema_json);
+
+            try route.query_params.append(self.allocator, .{
+                .name = try self.allocator.dupe(u8, entry.key_ptr.*),
+                .location = "query",
+                .required = containsString(required_names.items, entry.key_ptr.*),
+                .schema_json = field_schema_json,
+            });
+        }
+    }
+
+    fn schemaValueSupportsQueryParam(value_json: std.json.Value) bool {
+        if (value_json != .object) return false;
+        const obj = value_json.object;
+
+        if (obj.get("enum")) |enum_val| {
+            if (enum_val != .array or enum_val.array.items.len == 0) return false;
+            for (enum_val.array.items) |item| {
+                switch (item) {
+                    .string, .integer, .float, .bool => {},
+                    else => return false,
+                }
+            }
+            return true;
+        }
+
+        const type_val = obj.get("type") orelse return false;
+        if (type_val != .string) return false;
+        return std.mem.eql(u8, type_val.string, "string") or
+            std.mem.eql(u8, type_val.string, "number") or
+            std.mem.eql(u8, type_val.string, "integer") or
+            std.mem.eql(u8, type_val.string, "boolean");
+    }
+
+    fn serializeJsonValue(allocator: std.mem.Allocator, value_json: std.json.Value) ![]u8 {
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+        try writeJsonValue(value_json, &aw.writer);
+        output = aw.toArrayList();
+        return try output.toOwnedSlice(allocator);
+    }
+
+    fn writeJsonValue(value_json: std.json.Value, writer: anytype) !void {
+        switch (value_json) {
+            .null => try writer.writeAll("null"),
+            .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+            .integer => |i| try writer.print("{d}", .{i}),
+            .float => |f| try writer.print("{d}", .{f}),
+            .string => |s| try writeJsonString(writer, s),
+            .array => |arr| {
+                try writer.writeByte('[');
+                for (arr.items, 0..) |item, idx| {
+                    if (idx > 0) try writer.writeAll(",");
+                    try writeJsonValue(item, writer);
+                }
+                try writer.writeByte(']');
+            },
+            .object => |obj| {
+                try writer.writeByte('{');
+                var it = obj.iterator();
+                var idx: usize = 0;
+                while (it.next()) |entry| : (idx += 1) {
+                    if (idx > 0) try writer.writeAll(",");
+                    try writeJsonString(writer, entry.key_ptr.*);
+                    try writer.writeAll(":");
+                    try writeJsonValue(entry.value_ptr.*, writer);
+                }
+                try writer.writeByte('}');
+            },
+            else => return error.UnsupportedJsonValue,
         }
     }
 
@@ -2092,12 +2260,7 @@ pub const ContractBuilder = struct {
     }
 };
 
-pub fn containsString(items: []const []const u8, needle: []const u8) bool {
-    for (items) |item| {
-        if (std.mem.eql(u8, item, needle)) return true;
-    }
-    return false;
-}
+pub const containsString = json_utils.containsString;
 
 fn containsApiParam(items: []const ApiParamInfo, needle: []const u8) bool {
     for (items) |item| {
@@ -3990,27 +4153,8 @@ pub fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]cons
     return if (s) |v| try allocator.dupe(u8, v) else null;
 }
 
-pub fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
-                try writer.print("\\u{x:0>4}", .{@as(u16, c)});
-            },
-            else => try writer.writeByte(c),
-        }
-    }
-}
-
-pub fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
-    try writeJsonStringContent(writer, s);
-    try writer.writeByte('"');
-}
+pub const writeJsonStringContent = json_utils.writeJsonStringContent;
+pub const writeJsonString = json_utils.writeJsonString;
 
 fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {
     try writer.writeAll("\n          {\n");

@@ -285,7 +285,9 @@ fn writeContentSchema(
     schema_ref: ?[]const u8,
     schema_json: ?[]const u8,
 ) !void {
-    if (std.mem.startsWith(u8, content_type, "application/json")) {
+    if (std.mem.startsWith(u8, content_type, "application/json") or
+        std.mem.startsWith(u8, content_type, "application/x-www-form-urlencoded"))
+    {
         if (schema_ref) |value| {
             if (!hasSchema(contract, value)) {
                 try writer.writeAll("{}");

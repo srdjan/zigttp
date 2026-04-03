@@ -3782,6 +3782,58 @@ fn buildTestContractForSource(
     );
 }
 
+test "buildTestContractForSource keeps decodeQuery schemas out of request bodies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\import { routerMatch } from "zigttp:router";
+        \\import { schemaCompile } from "zigttp:validate";
+        \\import { decodeQuery } from "zigttp:decode";
+        \\
+        \\schemaCompile("search.query", JSON.stringify({
+        \\  type: "object",
+        \\  properties: {
+        \\    verbose: { type: "boolean" },
+        \\  },
+        \\}));
+        \\
+        \\function search(req) {
+        \\  const query = decodeQuery("search.query", req.query ?? {});
+        \\  return Response.json(true);
+        \\}
+        \\
+        \\const routes = {
+        \\  "GET /search": search,
+        \\};
+        \\
+        \\export function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) return found.handler(req);
+        \\  return Response.json({ error: "not found" }, { status: 404 });
+        \\}
+    ;
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.js", .data = source });
+
+    const allocator = std.testing.allocator;
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.js", allocator);
+    defer allocator.free(entry_path);
+
+    var contract = try buildTestContractForSource(allocator, source, entry_path, null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+    const route = contract.api.routes.items[0];
+    try std.testing.expectEqualStrings("GET", route.method);
+    try std.testing.expectEqualStrings("/search", route.path);
+    try std.testing.expectEqual(@as(usize, 1), route.query_params.items.len);
+    try std.testing.expectEqualStrings("verbose", route.query_params.items[0].name);
+    try std.testing.expectEqualStrings("{\"type\":\"boolean\"}", route.query_params.items[0].schema_json);
+    try std.testing.expectEqual(@as(usize, 0), route.request_bodies.items.len);
+    try std.testing.expectEqual(@as(usize, 0), route.request_schema_refs.items.len);
+}
+
 test "buildContractWithPolicy validates zigttp:sql queries against schema" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

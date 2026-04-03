@@ -42,6 +42,7 @@ const RoutePlan = struct {
     route_index: usize,
     method_name: []const u8,
     request_type_name: ?[]const u8,
+    request_content_type: ?[]const u8 = null,
     /// Null when response_union is set.
     response_type_name: ?[]const u8,
     /// Non-null for routes with multiple response codes; owned slice.
@@ -148,11 +149,11 @@ pub fn writeTypeScriptClient(
     try writer.writeAll("  }\n");
     try writer.writeAll("  return headers;\n");
     try writer.writeAll("}\n\n");
-    try writer.writeAll("function appendQueryString(path: string, query?: Record<string, string | undefined>): string {\n");
+    try writer.writeAll("function appendQueryString(path: string, query?: Record<string, string | number | boolean | undefined>): string {\n");
     try writer.writeAll("  if (!query) return path;\n");
     try writer.writeAll("  const params = new URLSearchParams();\n");
     try writer.writeAll("  for (const [key, value] of Object.entries(query)) {\n");
-    try writer.writeAll("    if (value !== undefined) params.append(key, value);\n");
+    try writer.writeAll("    if (value !== undefined) params.append(key, String(value));\n");
     try writer.writeAll("  }\n");
     try writer.writeAll("  const search = params.toString();\n");
     try writer.writeAll("  return search.length > 0 ? `${path}?${search}` : path;\n");
@@ -203,8 +204,10 @@ pub fn writeTypeScriptClient(
         }
         try writer.writeAll("      const input = args ?? {};\n");
         try writer.writeAll("      const headers = mergeHeaders(undefined, input.headers);\n");
-        if (plan.request_type_name != null) {
-            try writer.writeAll("      if (!headers.has(\"content-type\")) headers.set(\"content-type\", \"application/json\");\n");
+        if (plan.request_content_type) |content_type| {
+            try writer.writeAll("      if (!headers.has(\"content-type\")) headers.set(\"content-type\", ");
+            try writeTsString(writer, content_type);
+            try writer.writeAll(");\n");
         }
         try writer.writeAll("      const response = await requestRaw(");
         try writeTsString(writer, route.method);
@@ -212,8 +215,12 @@ pub fn writeTypeScriptClient(
         try writeRequestPath(writer, route);
         try writer.writeAll(", {\n");
         try writer.writeAll("        headers,\n");
-        if (plan.request_type_name != null) {
-            try writer.writeAll("        body: JSON.stringify(input.body),\n");
+        if (plan.request_content_type) |content_type| {
+            if (std.mem.eql(u8, content_type, "application/x-www-form-urlencoded")) {
+                try writer.writeAll("        body: new URLSearchParams(Object.entries(input.body).flatMap(([key, value]) => value === undefined ? [] : [[key, String(value)]] as [string, string][])).toString(),\n");
+            } else {
+                try writer.writeAll("        body: JSON.stringify(input.body),\n");
+            }
         } else {
             try writer.writeAll("        body: undefined,\n");
         }
@@ -265,6 +272,11 @@ fn buildRoutePlans(
     route_plans: *std.ArrayList(RoutePlan),
     skipped: *std.ArrayList(SkippedOperation),
 ) !void {
+    const RequestInfo = struct {
+        type_name: ?[]const u8 = null,
+        content_type: ?[]const u8 = null,
+    };
+
     var used_method_names: std.ArrayList([]const u8) = .empty;
     defer freeStringList(&used_method_names, allocator);
 
@@ -285,7 +297,7 @@ fn buildRoutePlans(
             continue;
         }
 
-        const request_type_name = blk: {
+        const request_info = blk: {
             if (route.request_bodies_dynamic or route.request_schema_dynamic) {
                 try appendSkipped(skipped, allocator, idx, "request schema is dynamic");
                 continue;
@@ -295,12 +307,14 @@ fn buildRoutePlans(
                     try appendSkipped(skipped, allocator, idx, "multiple request schemas are not supported");
                     continue;
                 }
-                if (route.request_schema_refs.items.len == 0) break :blk null;
+                if (route.request_schema_refs.items.len == 0) {
+                    break :blk RequestInfo{};
+                }
                 const alias = findSchemaAlias(schema_aliases.items, route.request_schema_refs.items[0]) orelse {
                     try appendSkipped(skipped, allocator, idx, "request schema is not representable as TypeScript");
                     continue;
                 };
-                break :blk alias.type_name;
+                break :blk RequestInfo{ .type_name = alias.type_name };
             }
             if (route.request_bodies.items.len > 1) {
                 try appendSkipped(skipped, allocator, idx, "multiple request bodies are not supported");
@@ -315,8 +329,10 @@ fn buildRoutePlans(
                 try appendSkipped(skipped, allocator, idx, "request body content type is not proven");
                 continue;
             };
-            if (!std.mem.eql(u8, content_type, "application/json")) {
-                try appendSkipped(skipped, allocator, idx, "request body is not proven JSON");
+            if (!std.mem.eql(u8, content_type, "application/json") and
+                !std.mem.eql(u8, content_type, "application/x-www-form-urlencoded"))
+            {
+                try appendSkipped(skipped, allocator, idx, "request body content type is not supported");
                 continue;
             }
             if (body.schema_ref) |schema_ref| {
@@ -324,7 +340,7 @@ fn buildRoutePlans(
                     try appendSkipped(skipped, allocator, idx, "request schema is not representable as TypeScript");
                     continue;
                 };
-                break :blk alias.type_name;
+                break :blk RequestInfo{ .type_name = alias.type_name, .content_type = body.content_type };
             }
             try appendSkipped(skipped, allocator, idx, "request schema is not proven");
             continue;
@@ -375,7 +391,8 @@ fn buildRoutePlans(
             try route_plans.append(allocator, .{
                 .route_index = idx,
                 .method_name = method_name,
-                .request_type_name = request_type_name,
+                .request_type_name = request_info.type_name,
+                .request_content_type = request_info.content_type,
                 .response_type_name = response_type_name,
             });
             continue;
@@ -387,9 +404,18 @@ fn buildRoutePlans(
 
             for (route.responses.items) |response| {
                 if (skip_reason != null) break;
-                if (response.dynamic) { skip_reason = "response schema is dynamic"; break; }
-                const ct = response.content_type orelse { skip_reason = "response is not proven JSON"; break; };
-                if (!std.mem.eql(u8, ct, "application/json")) { skip_reason = "response is not proven JSON"; break; }
+                if (response.dynamic) {
+                    skip_reason = "response schema is dynamic";
+                    break;
+                }
+                const ct = response.content_type orelse {
+                    skip_reason = "response is not proven JSON";
+                    break;
+                };
+                if (!std.mem.eql(u8, ct, "application/json")) {
+                    skip_reason = "response is not proven JSON";
+                    break;
+                }
                 const status = response.status orelse 200;
                 const arm_type_name: []const u8 = arm_blk: {
                     if (response.schema_ref) |schema_ref| {
@@ -435,7 +461,8 @@ fn buildRoutePlans(
             try route_plans.append(allocator, .{
                 .route_index = idx,
                 .method_name = method_name,
-                .request_type_name = request_type_name,
+                .request_type_name = request_info.type_name,
+                .request_content_type = request_info.content_type,
                 .response_type_name = null,
                 .response_union = arms_slice,
             });
@@ -486,7 +513,8 @@ fn buildRoutePlans(
         try route_plans.append(allocator, .{
             .route_index = idx,
             .method_name = method_name,
-            .request_type_name = request_type_name,
+            .request_type_name = request_info.type_name,
+            .request_content_type = request_info.content_type,
             .response_type_name = response_type_name,
         });
     }
@@ -878,9 +906,21 @@ fn writeQueryType(writer: anytype, params: []const ApiParamInfo) !void {
         if (idx > 0) try writer.writeAll("; ");
         try writePropertyName(writer, param.name);
         if (!param.required) try writer.writeByte('?');
-        try writer.writeAll(": string");
+        try writer.writeAll(": ");
+        try writer.writeAll(tsTypeForParamSchema(param.schema_json));
     }
     try writer.writeAll(" }");
+}
+
+fn tsTypeForParamSchema(schema_json: []const u8) []const u8 {
+    var parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, schema_json, .{}) catch return "string";
+    defer parsed.deinit();
+    if (parsed.value != .object) return "string";
+    const type_val = parsed.value.object.get("type") orelse return "string";
+    if (type_val != .string) return "string";
+    if (std.mem.eql(u8, type_val.string, "number") or std.mem.eql(u8, type_val.string, "integer")) return "number";
+    if (std.mem.eql(u8, type_val.string, "boolean")) return "boolean";
+    return "string";
 }
 
 fn writeRequestPath(writer: anytype, route: ApiRouteInfo) !void {

@@ -153,6 +153,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:router` | `routerMatch` | Pattern-matching HTTP router |
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation with format validators (email, uuid, iso-date, iso-datetime) |
+| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | Schema-backed typed ingress for JSON, URL-encoded forms, and query strings |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
@@ -180,7 +181,8 @@ function handler(req: Request): Response {
 ### Validation Example
 
 ```typescript
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile } from "zigttp:validate";
+import { decodeJson } from "zigttp:decode";
 
 schemaCompile("user", JSON.stringify({
     type: "object",
@@ -194,13 +196,15 @@ schemaCompile("user", JSON.stringify({
 
 function handler(req: Request): Response {
     if (req.method === "POST") {
-        const result = validateJson("user", req.body);
+        const result = decodeJson("user", req.body ?? "{}");
         if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
         return Response.json({ user: result.value }, { status: 201 });
     }
     return Response.json({ ok: true });
 }
 ```
+
+Use `decodeJson`, `decodeForm`, and `decodeQuery` as the default request-ingress helpers when the payload shape is schema-backed. `validateJson` and `coerceJson` remain available for lower-level validation flows.
 
 ### Cache Example
 
@@ -509,7 +513,9 @@ The current API emitters include facts the compiler can prove without guessing:
 
 - route method and path
 - path, query, and header params reached through literal access
-- proven JSON request bodies from `validateJson(...)` / `coerceJson(...)`
+- proven JSON request bodies from `validateJson(...)`, `coerceJson(...)`, and `decodeJson(...)`
+- proven form request bodies from `decodeForm(...)`
+- typed query params from `decodeQuery(...)`
 - proven response variants, including multiple status codes when statically visible
 - bearer auth metadata
 - `x-zigttp-*` hints whenever part of the surface stays dynamic

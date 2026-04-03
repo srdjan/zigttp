@@ -1,5 +1,6 @@
 import { routerMatch } from "zigttp:router";
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile } from "zigttp:validate";
+import { decodeJson, decodeQuery } from "zigttp:decode";
 
 schemaCompile("profile.update", JSON.stringify({
     type: "object",
@@ -9,10 +10,18 @@ schemaCompile("profile.update", JSON.stringify({
     required: ["displayName"],
 }));
 
+schemaCompile("profile.query", JSON.stringify({
+    type: "object",
+    properties: {
+        verbose: { type: "boolean" },
+    },
+}));
+
 function updateProfile(req) {
-    const parsed = validateJson("profile.update", req.body ?? "{}");
+    const parsed = decodeJson("profile.update", req.body ?? "{}");
     const body = parsed.ok ? parsed.value : { displayName: "anonymous" };
-    const verbose = req.query.verbose === "true";
+    const query = decodeQuery("profile.query", req.query ?? {});
+    const verbose = query.ok ? (query.value.verbose ?? false) : false;
     const clientId = req.headers.get("x-client-id") ?? "anonymous";
 
     return Response.json({

@@ -287,6 +287,21 @@ const coerced = coerceJson("user", '{"name":"Alice","age":"30"}');
 
 Schemas are compiled once and stored in a per-runtime SchemaRegistry. The registry persists across requests within a pool slot, so schema compilation is a one-time cost. Supported JSON Schema keywords: `type`, `required`, `properties`, `minLength`, `maxLength`, `minimum`, `maximum`, `enum`, `items`.
 
+### zigttp:decode
+
+```typescript
+import { decodeJson, decodeForm, decodeQuery } from "zigttp:decode";
+
+// Preferred schema-backed ingress helpers
+const json = decodeJson("user", req.body ?? "{}");
+const form = decodeForm("user", req.body ?? "");
+const query = decodeQuery("user.filters", req.query ?? {});
+```
+
+These helpers reuse the same compiled schemas as `zigttp:validate`, but make
+request ingress the primary typed surface: JSON bodies, URL-encoded forms, and
+query strings all come back as validated Result values.
+
 ### zigttp:cache
 
 ```typescript

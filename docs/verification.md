@@ -54,7 +54,7 @@ verify error: not all code paths return a Response
 
 ### 2. Result Checking
 
-Values from Result-producing virtual module calls (`jwtVerify`, `validateJson`, `validateObject`, `coerceJson`) must have `.ok` checked before `.value` or `.unwrap()` is accessed.
+Values from Result-producing virtual module calls (`jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`) must have `.ok` checked before `.value` or `.unwrap()` is accessed.
 
 The verifier tracks result bindings through the control flow tree:
 
@@ -205,7 +205,7 @@ The `-Dgenerate-tests=true` build option enables compile-time exhaustive path en
 
 The `PathGenerator` (`zts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
 
-For Result-producing calls (`jwtVerify`, `validateJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths.
+For Result-producing calls (`jwtVerify`, `validateJson`, `decodeJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths.
 
 ### Fault Coverage Analysis
 
@@ -213,7 +213,7 @@ The `FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes the generated pat
 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|
-| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson` | Auth/validation failures must not produce 2xx |
+| `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery` | Auth/validation failures must not produce 2xx |
 | `expected` | `cacheGet`, `env` | Cache misses and missing env vars are normal degradation |
 | `upstream` | `fetchSync` | Upstream failures should be surfaced, not swallowed |
 

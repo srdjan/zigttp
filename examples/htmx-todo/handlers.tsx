@@ -2,12 +2,23 @@
 // Open: http://localhost:3000
 
 import { guard } from "zigttp:compose";
+import { decodeForm } from "zigttp:decode";
+import { schemaCompile } from "zigttp:validate";
 
 type TodoTuple = [string, string, boolean];
 
 const TODO_ID = 0;
 const TODO_TEXT = 1;
 const TODO_DONE = 2;
+
+schemaCompile("todo.create", JSON.stringify({
+    type: "object",
+    required: ["text"],
+    properties: {
+        id: { type: "string" },
+        text: { type: "string", minLength: 1 },
+    },
+}));
 
 function renderLayout(children: JSX.Element): JSX.Element {
     return (
@@ -30,7 +41,7 @@ function renderLayout(children: JSX.Element): JSX.Element {
 function renderTodoForm(): JSX.Element {
     return (
         <form
-            hx-get="/todos"
+            hx-post="/todos"
             hx-target="#todo-list"
             hx-swap="beforeend"
             hx-on--before-request="this.querySelector('input[name=id]').value = 'todo-' + ((window.__todoSeq = (window.__todoSeq || 0) + 1));"
@@ -139,12 +150,15 @@ function index(): Response {
 }
 
 function addTodo(req: Request): Response {
-    let id = "";
-    let text = "";
-    if (req.query !== undefined) {
-        id = normalizeQueryValue(req.query.id);
-        text = normalizeQueryValue(req.query.text);
+    if (!req.body) {
+        return Response.html(renderToString(<div class="error">Text is required</div>));
     }
+    const parsed = decodeForm("todo.create", req.body);
+    if (!parsed.ok) {
+        return Response.html(renderToString(<div class="error">Text is required</div>));
+    }
+    let id = parsed.value.id ?? "";
+    const text = parsed.value.text;
     if (text.length === 0) {
         return Response.html(renderToString(<div class="error">Text is required</div>));
     }
@@ -200,7 +214,7 @@ function routeHandler(req: Request): Response {
     const path = getPath(req.path ?? req.url);
 
     if (method === "GET" && path === "/") return index();
-    if ((method === "POST" || method === "GET") && path === "/todos") return addTodo(req);
+    if (method === "POST" && path === "/todos") return addTodo(req);
     if (method === "POST" && path === "/todos/toggle") return toggleTodo(req);
     if (method === "DELETE" && path === "/todos/delete") return deleteTodo();
 

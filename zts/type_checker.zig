@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const ir = @import("parser/ir.zig");
+const json_utils = @import("json_utils.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");
@@ -32,6 +33,9 @@ const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
 const TypeEnv = type_env_mod.TypeEnv;
+
+/// Max fields/enum members tracked per schema type. Schemas with more are silently truncated.
+const MAX_SCHEMA_FIELDS = 32;
 
 // ---------------------------------------------------------------------------
 // Diagnostic types
@@ -73,11 +77,17 @@ pub const Diagnostic = struct {
 // ---------------------------------------------------------------------------
 
 pub const TypeChecker = struct {
+    const CompiledSchemaType = struct {
+        name: []const u8,
+        type_idx: TypeIndex,
+    };
+
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*context.AtomTable,
     env: *TypeEnv,
     diagnostics: std.ArrayListUnmanaged(Diagnostic),
+    compiled_schemas: std.ArrayListUnmanaged(CompiledSchemaType),
 
     /// Inferred types for const/let bindings: packed(scope_id, slot) -> TypeIndex
     binding_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
@@ -93,6 +103,7 @@ pub const TypeChecker = struct {
             .atoms = atoms,
             .env = env,
             .diagnostics = .empty,
+            .compiled_schemas = .empty,
             .binding_types = .empty,
             .narrowed = .empty,
         };
@@ -105,6 +116,10 @@ pub const TypeChecker = struct {
             }
         }
         self.diagnostics.deinit(self.allocator);
+        for (self.compiled_schemas.items) |entry| {
+            self.allocator.free(entry.name);
+        }
+        self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
     }
@@ -344,6 +359,7 @@ pub const TypeChecker = struct {
         switch (tag) {
             .call => {
                 const c = self.ir_view.getCall(node) orelse return;
+                self.collectSchemaCompileCall(c) catch {};
                 self.walkExpr(c.callee);
                 // Check argument types against function signature
                 self.checkCallArgs(node, c);
@@ -451,6 +467,277 @@ pub const TypeChecker = struct {
 
             else => {},
         }
+    }
+
+    fn collectSchemaCompileCall(self: *TypeChecker, call: Node.CallExpr) !void {
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag != .identifier or call.args_count < 2) return;
+
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        const name = self.resolveAtomName(binding.slot) orelse return;
+        if (!std.mem.eql(u8, name, "schemaCompile")) return;
+
+        const schema_name_node = self.ir_view.getListIndex(call.args_start, 0);
+        const schema_name = self.getLiteralString(schema_name_node) orelse return;
+        const schema_json_node = self.ir_view.getListIndex(call.args_start, 1);
+        const schema_json = (try self.extractSchemaJson(schema_json_node)) orelse return;
+        defer self.allocator.free(schema_json);
+
+        const type_idx = try self.schemaJsonToType(schema_json);
+        if (type_idx == null_type_idx) return;
+
+        for (self.compiled_schemas.items) |*entry| {
+            if (!std.mem.eql(u8, entry.name, schema_name)) continue;
+            entry.type_idx = type_idx;
+            return;
+        }
+
+        try self.compiled_schemas.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, schema_name),
+            .type_idx = type_idx,
+        });
+    }
+
+    fn schemaJsonToType(self: *TypeChecker, schema_json: []const u8) !TypeIndex {
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch return null_type_idx;
+        defer parsed.deinit();
+        return self.schemaValueToType(parsed.value);
+    }
+
+    fn schemaValueToType(self: *TypeChecker, value_json: std.json.Value) TypeIndex {
+        const pool = self.env.pool;
+        const obj = switch (value_json) {
+            .object => |o| o,
+            else => return pool.idx_unknown,
+        };
+
+        if (obj.get("enum")) |enum_val| {
+            if (enum_val == .array and enum_val.array.items.len > 0) {
+                var members: [MAX_SCHEMA_FIELDS]TypeIndex = undefined;
+                var count: usize = 0;
+                for (enum_val.array.items) |item| {
+                    if (count >= members.len) break;
+                    const member = switch (item) {
+                        .string => |s| pool.addLiteralString(self.allocator, s),
+                        .integer => |i| blk: {
+                            const lit = std.math.cast(i16, i) orelse break :blk pool.idx_number;
+                            break :blk pool.addLiteralNumber(self.allocator, lit);
+                        },
+                        .float => pool.idx_number,
+                        .bool => |b| pool.addLiteralBool(self.allocator, b),
+                        else => pool.idx_unknown,
+                    };
+                    members[count] = member;
+                    count += 1;
+                }
+                if (count > 0) return pool.addUnion(self.allocator, members[0..count]);
+            }
+        }
+
+        const type_name = if (obj.get("type")) |type_val|
+            switch (type_val) {
+                .string => |s| s,
+                else => "",
+            }
+        else
+            "";
+
+        if (std.mem.eql(u8, type_name, "string")) return pool.idx_string;
+        if (std.mem.eql(u8, type_name, "number")) return pool.idx_number;
+        if (std.mem.eql(u8, type_name, "integer")) return pool.idx_number;
+        if (std.mem.eql(u8, type_name, "boolean")) return pool.idx_boolean;
+        if (std.mem.eql(u8, type_name, "array")) {
+            if (obj.get("items")) |items| {
+                const elem = self.schemaValueToType(items);
+                return pool.addArray(self.allocator, if (elem == null_type_idx) pool.idx_unknown else elem);
+            }
+            return pool.addArray(self.allocator, pool.idx_unknown);
+        }
+
+        if (std.mem.eql(u8, type_name, "object") or obj.get("properties") != null) {
+            const props = obj.get("properties") orelse return pool.idx_unknown;
+            if (props != .object) return pool.idx_unknown;
+
+            var required: std.ArrayList([]const u8) = .empty;
+            defer required.deinit(self.allocator);
+            if (obj.get("required")) |required_val| {
+                if (required_val == .array) {
+                    for (required_val.array.items) |item| {
+                        if (item != .string) continue;
+                        required.append(self.allocator, item.string) catch {};
+                    }
+                }
+            }
+
+            var fields: [MAX_SCHEMA_FIELDS]type_pool_mod.RecordField = undefined;
+            var count: usize = 0;
+            var it = props.object.iterator();
+            while (it.next()) |entry| {
+                if (count >= fields.len) break;
+                const prop_type = self.schemaValueToType(entry.value_ptr.*);
+                const name = pool.addName(self.allocator, entry.key_ptr.*);
+                fields[count] = .{
+                    .name_start = name.start,
+                    .name_len = name.len,
+                    .type_idx = if (prop_type == null_type_idx) pool.idx_unknown else prop_type,
+                    .optional = !json_utils.containsString(required.items, entry.key_ptr.*),
+                };
+                count += 1;
+            }
+            if (count == 0) return pool.idx_unknown;
+            return pool.addRecord(self.allocator, fields[0..count]);
+        }
+
+        return pool.idx_unknown;
+    }
+
+    fn getLiteralString(self: *const TypeChecker, node_idx: NodeIndex) ?[]const u8 {
+        const str_idx = self.ir_view.getStringIdx(node_idx) orelse return null;
+        return self.ir_view.getString(str_idx);
+    }
+
+    fn getJsonStringifyArg(self: *const TypeChecker, node_idx: NodeIndex) ?NodeIndex {
+        const call = self.ir_view.getCall(node_idx) orelse return null;
+        if (call.args_count != 1) return null;
+
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+        if (callee_tag != .member_access) return null;
+
+        const member = self.ir_view.getMember(call.callee) orelse return null;
+        if (member.property != @intFromEnum(object.Atom.stringify)) return null;
+
+        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
+        if (binding.slot != @intFromEnum(object.Atom.JSON)) return null;
+
+        return self.ir_view.getListIndex(call.args_start, 0);
+    }
+
+    fn extractSchemaJson(self: *TypeChecker, node_idx: NodeIndex) !?[]u8 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        return switch (tag) {
+            .lit_string => blk: {
+                const raw = self.getLiteralString(node_idx) orelse break :blk null;
+                break :blk try self.allocator.dupe(u8, raw);
+            },
+            .call => blk: {
+                const json_arg = self.getJsonStringifyArg(node_idx) orelse break :blk null;
+                break :blk try self.serializeJsonLiteral(json_arg);
+            },
+            else => null,
+        };
+    }
+
+    fn serializeJsonLiteral(self: *TypeChecker, node_idx: NodeIndex) !?[]u8 {
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(self.allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
+        const ok = try self.writeJsonLiteralNode(node_idx, &aw.writer);
+        if (!ok) {
+            output.deinit(self.allocator);
+            return null;
+        }
+        output = aw.toArrayList();
+        return try output.toOwnedSlice(self.allocator);
+    }
+
+    fn writeJsonLiteralNode(self: *TypeChecker, node_idx: NodeIndex, writer: anytype) !bool {
+        const tag = self.ir_view.getTag(node_idx) orelse return false;
+        switch (tag) {
+            .lit_int => {
+                const value_int = self.ir_view.getIntValue(node_idx) orelse return false;
+                try writer.print("{d}", .{value_int});
+                return true;
+            },
+            .lit_float => {
+                const float_idx = self.ir_view.getFloatIdx(node_idx) orelse return false;
+                const value_float = self.ir_view.getFloat(float_idx) orelse return false;
+                try writer.print("{d}", .{value_float});
+                return true;
+            },
+            .lit_string => {
+                const str = self.getLiteralString(node_idx) orelse return false;
+                try writeJsonString(writer, str);
+                return true;
+            },
+            .lit_bool => {
+                const value_bool = self.ir_view.getBoolValue(node_idx) orelse return false;
+                try writer.writeAll(if (value_bool) "true" else "false");
+                return true;
+            },
+            .lit_null => {
+                try writer.writeAll("null");
+                return true;
+            },
+            .unary_op => {
+                const unary = self.ir_view.getUnary(node_idx) orelse return false;
+                if (unary.op != .neg) return false;
+                try writer.writeByte('-');
+                return self.writeJsonLiteralNode(unary.operand, writer);
+            },
+            .array_literal => {
+                const arr = self.ir_view.getArray(node_idx) orelse return false;
+                try writer.writeByte('[');
+                for (0..arr.elements_count) |i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    if (!try self.writeJsonLiteralNode(self.ir_view.getListIndex(arr.elements_start, @intCast(i)), writer)) return false;
+                }
+                try writer.writeByte(']');
+                return true;
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node_idx) orelse return false;
+                try writer.writeByte('{');
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse return false;
+                    const key = self.getObjectPropertyKey(prop.key) orelse return false;
+                    if (i > 0) try writer.writeAll(", ");
+                    try writeJsonString(writer, key);
+                    try writer.writeAll(": ");
+                    if (!try self.writeJsonLiteralNode(prop.value, writer)) return false;
+                }
+                try writer.writeByte('}');
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn getObjectPropertyKey(self: *const TypeChecker, node_idx: NodeIndex) ?[]const u8 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        return switch (tag) {
+            .lit_string => self.getLiteralString(node_idx),
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node_idx) orelse break :blk null;
+                break :blk self.resolveAtomName(binding.slot);
+            },
+            else => null,
+        };
+    }
+
+    fn schemaTypeByName(self: *const TypeChecker, name: []const u8) ?TypeIndex {
+        for (self.compiled_schemas.items) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry.type_idx;
+        }
+        return null;
+    }
+
+    fn typedResultType(self: *const TypeChecker, inner: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const ok_name = pool.addName(self.allocator, "ok");
+        const val_name = pool.addName(self.allocator, "value");
+        const err_name = pool.addName(self.allocator, "error");
+        const errs_name = pool.addName(self.allocator, "errors");
+        return pool.addRecord(self.allocator, &.{
+            .{ .name_start = ok_name.start, .name_len = ok_name.len, .type_idx = pool.idx_boolean, .optional = false },
+            .{ .name_start = val_name.start, .name_len = val_name.len, .type_idx = inner, .optional = true },
+            .{ .name_start = err_name.start, .name_len = err_name.len, .type_idx = pool.idx_string, .optional = true },
+            .{ .name_start = errs_name.start, .name_len = errs_name.len, .type_idx = pool.idx_unknown, .optional = true },
+        });
     }
 
     // -------------------------------------------------------------------
@@ -754,6 +1041,22 @@ pub const TypeChecker = struct {
 
         const binding = self.ir_view.getBinding(call.callee) orelse return null_type_idx;
         const name = self.resolveAtomName(binding.slot) orelse return null_type_idx;
+        if (std.mem.eql(u8, name, "validateJson") or
+            std.mem.eql(u8, name, "validateObject") or
+            std.mem.eql(u8, name, "coerceJson") or
+            std.mem.eql(u8, name, "decodeJson") or
+            std.mem.eql(u8, name, "decodeForm") or
+            std.mem.eql(u8, name, "decodeQuery"))
+        {
+            if (call.args_count > 0) {
+                const schema_node = self.ir_view.getListIndex(call.args_start, 0);
+                if (self.getLiteralString(schema_node)) |schema_name| {
+                    if (self.schemaTypeByName(schema_name)) |schema_type| {
+                        return self.typedResultType(schema_type);
+                    }
+                }
+            }
+        }
         const sig = self.env.getFnSigByName(name) orelse return null_type_idx;
         return sig.return_type;
     }
@@ -913,6 +1216,8 @@ pub const TypeChecker = struct {
 
 const packBindingKey = bool_checker_mod.packBindingKey;
 const getSourceLine = bool_checker_mod.getSourceLine;
+
+const writeJsonString = json_utils.writeJsonString;
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     const allocator = std.testing.allocator;

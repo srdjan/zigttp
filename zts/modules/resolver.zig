@@ -21,6 +21,7 @@ const crypto_mod = @import("crypto.zig");
 const router_mod = @import("router.zig");
 const auth_mod = @import("auth.zig");
 const validate_mod = @import("validate.zig");
+const decode_mod = @import("decode.zig");
 const cache_mod = @import("cache.zig");
 const sql_mod = @import("sql.zig");
 const io_mod = @import("io.zig");
@@ -62,6 +63,7 @@ pub const VirtualModule = enum {
     router,
     auth,
     validate,
+    decode,
     cache,
     sql,
     io,
@@ -74,6 +76,7 @@ pub const VirtualModule = enum {
         if (std.mem.eql(u8, specifier, "zigttp:router")) return .router;
         if (std.mem.eql(u8, specifier, "zigttp:auth")) return .auth;
         if (std.mem.eql(u8, specifier, "zigttp:validate")) return .validate;
+        if (std.mem.eql(u8, specifier, "zigttp:decode")) return .decode;
         if (std.mem.eql(u8, specifier, "zigttp:cache")) return .cache;
         if (std.mem.eql(u8, specifier, "zigttp:sql")) return .sql;
         if (std.mem.eql(u8, specifier, "zigttp:io")) return .io;
@@ -89,6 +92,7 @@ pub const VirtualModule = enum {
             .router => &router_mod.exports,
             .auth => &auth_mod.exports,
             .validate => &validate_mod.exports,
+            .decode => &decode_mod.exports,
             .cache => &cache_mod.exports,
             .sql => &sql_mod.exports,
             .io => &io_mod.exports,
@@ -187,6 +191,7 @@ fn moduleEnumName(comptime module: VirtualModule) []const u8 {
         .router => "router",
         .auth => "auth",
         .validate => "validate",
+        .decode => "decode",
         .cache => "cache",
         .sql => "sql",
         .io => "io",
@@ -258,6 +263,7 @@ pub fn registerVirtualModuleDurable(comptime module: VirtualModule, ctx: *contex
 fn shouldWrapExport(comptime module: VirtualModule, comptime export_name: []const u8) bool {
     return switch (module) {
         .validate => !std.mem.eql(u8, export_name, "schemaCompile") and !std.mem.eql(u8, export_name, "schemaDrop"),
+        .decode => true,
         .sql => !std.mem.eql(u8, export_name, "sql"),
         // routerMatch is a pure pattern matcher with no I/O - run it directly
         .router => false,

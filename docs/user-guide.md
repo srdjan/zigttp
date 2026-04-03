@@ -967,6 +967,50 @@ when the schema expects a different type.
 
 **schemaDrop(name)** - Remove a compiled schema. Returns boolean.
 
+### zigttp:decode
+
+Schema-backed request ingress helpers. Use these when you want the schema to
+define the typed shape of `req.body` or `req.query` directly.
+
+```typescript
+import { decodeJson, decodeForm, decodeQuery } from "zigttp:decode";
+```
+
+**decodeJson(name, json_string)** - Parse JSON, validate against a compiled
+schema, and return `{ ok: true, value }` or `{ ok: false, errors }`.
+
+**decodeForm(name, form_body)** - Parse `application/x-www-form-urlencoded`
+payloads, coerce scalar fields to the schema’s target types, validate, and
+return the same Result shape.
+
+**decodeQuery(name, query_object)** - Coerce scalar query-string values from
+`req.query`, validate against the schema, and return the same Result shape.
+
+```typescript
+import { schemaCompile } from "zigttp:validate";
+import { decodeForm, decodeQuery } from "zigttp:decode";
+
+schemaCompile("todo.create", JSON.stringify({
+    type: "object",
+    properties: {
+        title: { type: "string" },
+        pinned: { type: "boolean" }
+    },
+    required: ["title"]
+}));
+
+schemaCompile("todo.list", JSON.stringify({
+    type: "object",
+    properties: {
+        limit: { type: "integer" },
+        archived: { type: "boolean" }
+    }
+}));
+
+const body = decodeForm("todo.create", req.body ?? "");
+const query = decodeQuery("todo.list", req.query ?? {});
+```
+
 ### zigttp:cache
 
 In-memory key-value cache with namespace isolation, LRU eviction, and lazy TTL
@@ -2124,7 +2168,9 @@ zig build -Dhandler=handler.ts -Dopenapi
 The current emitter only includes facts the compiler can prove:
 
 - `schemaCompile("name", JSON.stringify({...}))` schemas become component schemas
-- `validateJson("name", ...)` and `coerceJson("name", ...)` become JSON request bodies
+- `validateJson("name", ...)`, `coerceJson("name", ...)`, and `decodeJson("name", ...)` become JSON request bodies
+- `decodeForm("name", ...)` becomes an `application/x-www-form-urlencoded` request body
+- `decodeQuery("name", ...)` contributes typed query parameters
 - `parseBearer()` / `jwtVerify()` enable bearer auth metadata
 - `routerMatch()` route tables with literal `"METHOD /path"` keys become OpenAPI paths
 - literal request access becomes path, query, and header parameters
@@ -2164,7 +2210,7 @@ zts compile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
 Typed helpers are generated only for routes the compiler can prove end to end:
 
 - non-dynamic path/query params
-- zero or one proven JSON request body
+- zero or one proven JSON or form request body
 - one proven JSON response shape
 
 Routes that do not meet those constraints are still accessible through

@@ -5,7 +5,8 @@
 // Test:  zig build run -- examples/shopping-cart/shopping-cart.tsx --test examples/shopping-cart/shopping-cart.test.jsonl
 
 import { cacheGet, cacheSet, cacheDelete } from "zigttp:cache";
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile } from "zigttp:validate";
+import { decodeJson } from "zigttp:decode";
 import { sha256 } from "zigttp:crypto";
 
 // Product data returned per-call to avoid arena escape on cross-function arrays.
@@ -287,13 +288,9 @@ function apiAdd(req: Request): Response {
 
     if (!productId) {
         if (!req.body) return Response.json({ error: "Missing productId" }, { status: 400 });
-        const result = validateJson("addItem", req.body);
+        const result = decodeJson("addItem", req.body);
         if (!result.ok) return Response.json({ error: "Invalid input" }, { status: 400 });
-        const pidIdx = req.body.indexOf('"productId"');
-        if (pidIdx === -1) return Response.json({ error: "Missing productId" }, { status: 400 });
-        const pidStart = req.body.indexOf('"', pidIdx + 12) + 1;
-        const pidEnd = req.body.indexOf('"', pidStart);
-        productId = req.body.substring(pidStart, pidEnd);
+        productId = result.value.productId;
     }
 
     const name = productName(productId);

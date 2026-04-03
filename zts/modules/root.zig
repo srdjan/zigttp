@@ -12,6 +12,7 @@ pub const crypto = @import("crypto.zig");
 pub const router = @import("router.zig");
 pub const auth = @import("auth.zig");
 pub const validate = @import("validate.zig");
+pub const decode = @import("decode.zig");
 pub const cache = @import("cache.zig");
 pub const sql = @import("sql.zig");
 pub const io = @import("io.zig");
