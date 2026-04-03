@@ -882,14 +882,6 @@ pub const StringTable = struct {
         self.strings.deinit(self.allocator);
     }
 
-    /// Drop table metadata without freeing interned strings. This is used by
-    /// pooled runtimes whose loaded handler bytecode shares shutdown ownership
-    /// with the underlying context teardown path.
-    pub fn deinitMetadataOnly(self: *StringTable) void {
-        self.deinitBuckets();
-        self.strings.deinit(self.allocator);
-    }
-
     fn deinitBuckets(self: *StringTable) void {
         // Free all bucket lists
         var it = self.buckets.valueIterator();

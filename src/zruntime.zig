@@ -199,7 +199,8 @@ pub const Runtime = struct {
     gc_state: *zq.GC,
     heap: *zq.heap.Heap,
     interpreter: zq.Interpreter,
-    strings: zq.StringTable,
+    strings: *zq.StringTable,
+    owned_strings: ?zq.StringTable,
     handler_atom: ?zq.Atom,
     cached_handler_obj: ?*zq.JSObject,
     cached_handler_arg_count: u8,
@@ -338,7 +339,8 @@ pub const Runtime = struct {
             .gc_state = gc_state,
             .heap = heap_state,
             .interpreter = interp,
-            .strings = zq.StringTable.init(allocator),
+            .strings = undefined,
+            .owned_strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,
             .cached_handler_arg_count = 1,
@@ -364,7 +366,8 @@ pub const Runtime = struct {
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
         };
-        errdefer self.strings.deinit();
+        self.strings = &self.owned_strings.?;
+        errdefer self.owned_strings.?.deinit();
 
         // Open trace file if configured
         if (config.trace_file_path) |trace_path| {
@@ -398,7 +401,8 @@ pub const Runtime = struct {
             .gc_state = pool_rt.gc_state,
             .heap = pool_rt.heap_state,
             .interpreter = interp,
-            .strings = zq.StringTable.init(allocator),
+            .strings = &pool_rt.strings,
+            .owned_strings = null,
             .handler_atom = null,
             .cached_handler_obj = null,
             .cached_handler_arg_count = 1,
@@ -425,7 +429,6 @@ pub const Runtime = struct {
             .arena_state = null,
             .hybrid_state = null,
         };
-        errdefer self.strings.deinit();
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
         applyEmbeddedCapabilityPolicy(pool_rt.ctx);
@@ -471,10 +474,8 @@ pub const Runtime = struct {
         if (self.active_durable_run) |*run| {
             run.deinit(self.allocator);
         }
-        if (self.owns_resources) {
-            self.strings.deinit();
-        } else {
-            self.strings.deinitMetadataOnly();
+        if (self.owned_strings) |*owned_strings| {
+            owned_strings.deinit();
         }
         self.allocator.destroy(self);
     }
@@ -785,7 +786,7 @@ pub const Runtime = struct {
         var module_compiler = zq.modules.ModuleCompiler.init(
             self.allocator,
             &self.ctx.atoms,
-            &self.strings,
+            self.strings,
         );
         var compile_result = module_compiler.compileAll(&graph) catch |err| {
             std.log.err("Multi-module compilation failed: {}", .{err});
@@ -904,7 +905,7 @@ pub const Runtime = struct {
         }
 
         // Parse the source code
-        var p = zq.Parser.init(self.allocator, source_to_parse, &self.strings, &self.ctx.atoms);
+        var p = zq.Parser.init(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
         defer p.deinit();
 
         // Enable JSX mode for .jsx and .tsx files
@@ -1108,7 +1109,7 @@ pub const Runtime = struct {
             &reader,
             &self.ctx.atoms,
             self.allocator,
-            &self.strings,
+            self.strings,
         );
         // Note: We don't defer result.deinit() because the function and constants
         // need to stay alive. Shapes can be freed after materialization.
@@ -4540,6 +4541,7 @@ pub const HandlerPool = struct {
         }
 
         try self.loadHandlerCached(rt);
+        base_rt.assertPersistentStringsOutsideArena();
 
         base_rt.user_data = rt;
         base_rt.user_deinit = runtimeUserDeinit;
@@ -6481,6 +6483,85 @@ test "HandlerPool borrowed response pins runtime until release" {
     var response = try pool.executeHandler(second_request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("second", response.body);
+}
+
+test "HandlerPool pooled teardown survives repeated pool lifecycles" {
+    const allocator = std.heap.c_allocator;
+    const handler_code =
+        \\function handler(req) {
+        \\  return Response.text(req.body ?? "ok");
+        \\}
+    ;
+
+    const Cycle = struct {
+        fn run(test_allocator: std.mem.Allocator, handler_source: []const u8, cycle: usize) !void {
+            var pool = try HandlerPool.init(test_allocator, .{}, handler_source, "<handler>", 2, 0);
+            defer pool.deinit();
+            pool.acquire_timeout_ms = 0;
+
+            var first_request = HttpRequestOwned{
+                .method = try test_allocator.dupe(u8, "POST"),
+                .url = try test_allocator.dupe(u8, "/"),
+                .headers = .empty,
+                .body = try std.fmt.allocPrint(test_allocator, "first-{d}", .{cycle}),
+            };
+            defer first_request.deinit(test_allocator);
+
+            var second_request = HttpRequestOwned{
+                .method = try test_allocator.dupe(u8, "POST"),
+                .url = try test_allocator.dupe(u8, "/"),
+                .headers = .empty,
+                .body = try std.fmt.allocPrint(test_allocator, "second-{d}", .{cycle}),
+            };
+            defer second_request.deinit(test_allocator);
+
+            var lease1 = try pool.acquireWorkerRuntime();
+            var lease1_active = true;
+            defer if (lease1_active) lease1.deinit();
+            var lease2 = try pool.acquireWorkerRuntime();
+            var lease2_active = true;
+            defer if (lease2_active) lease2.deinit();
+
+            const hits = pool.cache.hits.load(.acquire);
+            const misses = pool.cache.misses.load(.acquire);
+            try std.testing.expect(hits >= 1);
+            try std.testing.expect(misses >= 1);
+
+            try std.testing.expectError(error.PoolExhausted, pool.acquireWorkerRuntime());
+
+            lease2.deinit();
+            lease2_active = false;
+
+            var first_response = try pool.executeHandler(first_request.asView());
+            defer first_response.deinit();
+
+            var second_response = try pool.executeHandler(second_request.asView());
+            defer second_response.deinit();
+
+            try std.testing.expectEqualStrings(first_request.body.?, first_response.body);
+            try std.testing.expectEqualStrings(second_request.body.?, second_response.body);
+
+            var handle = try pool.executeHandlerBorrowed(first_request.asView());
+            try std.testing.expectEqualStrings(first_request.body.?, handle.response.body);
+            try std.testing.expectError(error.PoolExhausted, pool.executeHandler(second_request.asView()));
+
+            handle.deinit();
+            lease1.deinit();
+            lease1_active = false;
+
+            var recovered = try pool.executeHandler(second_request.asView());
+            defer recovered.deinit();
+            try std.testing.expectEqualStrings(second_request.body.?, recovered.body);
+
+            const metrics = pool.getMetrics();
+            try std.testing.expect(metrics.exhausted >= 2);
+        }
+    };
+
+    var cycle: usize = 0;
+    while (cycle < 32) : (cycle += 1) {
+        try Cycle.run(allocator, handler_code, cycle);
+    }
 }
 
 test "JIT object literal overflow slots remain valid" {

@@ -8,6 +8,7 @@ const builtins = @import("builtins/root.zig");
 const gc = @import("gc.zig");
 const heap = @import("heap.zig");
 const arena_mod = @import("arena.zig");
+const string = @import("string.zig");
 
 /// Pool configuration
 pub const PoolConfig = struct {
@@ -40,6 +41,7 @@ pub const LockFreePool = struct {
         ctx: *context.Context,
         gc_state: *gc.GC,
         heap_state: *heap.Heap,
+        strings: string.StringTable,
 
         // Request-scoped state (reset per request)
         request_arena: ?*arena_mod.Arena,
@@ -98,6 +100,7 @@ pub const LockFreePool = struct {
                 .ctx = ctx,
                 .gc_state = gc_state,
                 .heap_state = heap_state,
+                .strings = string.StringTable.init(allocator),
                 .request_arena = request_arena,
                 .hybrid = hybrid,
                 .in_use = false,
@@ -118,9 +121,8 @@ pub const LockFreePool = struct {
         }
 
         pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
-            // Destroy the shared runtime state first. Builtin teardown may still
-            // walk handler bytecode and interned unique strings owned by the
-            // wrapper runtime in user_data.
+            // Destroy the shared runtime state first. Builtin and bytecode teardown
+            // may still walk persistent strings owned by this pooled runtime.
             self.ctx.deinit();
             self.gc_state.deinit();
             self.heap_state.deinit();
@@ -133,6 +135,7 @@ pub const LockFreePool = struct {
             if (self.user_deinit) |deinit_fn| {
                 deinit_fn(self, allocator);
             }
+            self.strings.deinit();
             allocator.destroy(self);
         }
 
@@ -182,6 +185,16 @@ pub const LockFreePool = struct {
                 .overflow_count = self.overflow_count,
                 .current_arena_stats = self.getArenaStats(),
             };
+        }
+
+        pub fn assertPersistentStringsOutsideArena(self: *const Runtime) void {
+            if (!std.debug.runtime_safety) return;
+            const arena = self.request_arena orelse return;
+            for (self.strings.strings.items) |str| {
+                if (arena.contains(str)) {
+                    std.debug.panic("pooled persistent string escaped into request arena: 0x{x}", .{@intFromPtr(str)});
+                }
+            }
         }
     };
 

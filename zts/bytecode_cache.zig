@@ -1441,7 +1441,10 @@ pub const DeserializedBytecode = struct {
             if (c.isFloat64()) {
                 self.allocator.destroy(c.toPtr(value.JSValue.Float64Box));
             } else if (c.isString()) {
-                string.freeString(self.allocator, c.toPtr(string.JSString));
+                const js_str = c.toPtr(string.JSString);
+                if (!js_str.flags.is_unique) {
+                    string.freeString(self.allocator, js_str);
+                }
             }
         }
         self.allocator.free(self.func.constants);
