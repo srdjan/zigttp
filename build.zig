@@ -76,8 +76,23 @@ pub fn build(b: *std.Build) void {
     const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
     prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
 
-    // Precompile tool (build-time compiler with full zts)
-    // Build for host since it runs at build time
+    const zts_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/zts_cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    zts_cli_mod.addImport("zts", zts_mod);
+    const project_config_mod = b.createModule(.{
+        .root_source_file = b.path("src/project_config.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    project_config_mod.addImport("zts", zts_mod);
+    zts_cli_mod.addImport("project_config", project_config_mod);
+
+    // Internal precompile tool used by build steps and the zts CLI.
     const precompile_exe = b.addExecutable(.{
         .name = "precompile",
         .root_module = b.createModule(.{
@@ -88,14 +103,9 @@ pub fn build(b: *std.Build) void {
     });
     precompile_exe.root_module.addImport("zts", zts_mod);
 
-    // Install precompile tool (optional, for manual use)
-    const install_precompile = b.addInstallArtifact(precompile_exe, .{});
-    const precompile_step = b.step("precompile", "Build the precompile tool");
-    precompile_step.dependOn(&install_precompile.step);
-
-    // Main server executable
+    // Runtime/project CLI
     const exe = b.addExecutable(.{
-        .name = "zigttp-server",
+        .name = "zigttp",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -106,6 +116,8 @@ pub fn build(b: *std.Build) void {
 
     // Add zts module to main executable
     exe.root_module.addImport("zts", zts_mod);
+    exe.root_module.addImport("zts_cli", zts_cli_mod);
+    exe.root_module.addImport("project_config", project_config_mod);
 
     // If handler is specified, precompile it and add as dependency
     if (handler_path) |path| {
@@ -212,6 +224,13 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // Compiler/analyzer CLI
+    const zts_exe = b.addExecutable(.{
+        .name = "zts",
+        .root_module = zts_cli_mod,
+    });
+    b.installArtifact(zts_exe);
+
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -234,6 +253,8 @@ pub fn build(b: *std.Build) void {
 
     // Add zts module to tests
     unit_tests.root_module.addImport("zts", zts_mod);
+    unit_tests.root_module.addImport("zts_cli", zts_cli_mod);
+    unit_tests.root_module.addImport("project_config", project_config_mod);
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),
         .imports = &.{
@@ -293,60 +314,24 @@ pub fn build(b: *std.Build) void {
     }
 
     // Release build step (with handler precompilation if provided)
-    const release_step = b.step("release", "Build optimized release binary (use -Dhandler=<path> for embedded bytecode)");
+    const release_step = b.step("release", "Build optimized release binaries (zigttp, zts)");
     release_step.dependOn(b.getInstallStep());
     if (handler_path) |_| {
         const release_note = b.addSystemCommand(if (aot_enabled) &.{
             "echo",
-            "Release build with embedded bytecode + AOT: zig-out/bin/zigttp-server",
+            "Release build with embedded bytecode + AOT: zig-out/bin/zigttp",
         } else &.{
             "echo",
-            "Release build with embedded bytecode: zig-out/bin/zigttp-server",
+            "Release build with embedded bytecode: zig-out/bin/zigttp",
         });
         release_note.step.dependOn(release_step);
     } else {
         const release_note = b.addSystemCommand(&.{
             "echo",
-            "Release build: zig-out/bin/zigttp-server (use -Dhandler=<path> for 16% faster cold starts)",
+            "Release build: zig-out/bin/zigttp and zig-out/bin/zts",
         });
         release_note.step.dependOn(release_step);
     }
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
-
-    // Mock server (serves responses from generated test JSONL)
-    const mock_exe = b.addExecutable(.{
-        .name = "mock",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/mock_server.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    mock_exe.root_module.addImport("zts", zts_mod);
-    const mock_cmd = b.addRunArtifact(mock_exe);
-    if (b.args) |run_args| {
-        mock_cmd.addArgs(run_args);
-    }
-    const mock_step = b.step("mock", "Serve mock responses from generated tests (mock <tests.jsonl> [--port PORT])");
-    mock_step.dependOn(&mock_cmd.step);
-
-    // Standalone prove tool (contract diff + classification)
-    const prove_exe = b.addExecutable(.{
-        .name = "prove",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/prove.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    prove_exe.root_module.addImport("zts", zts_mod);
-    const prove_cmd = b.addRunArtifact(prove_exe);
-    if (b.args) |run_args| {
-        prove_cmd.addArgs(run_args);
-    }
-    const prove_step = b.step("prove", "Compare two handler contracts (prove <old.json> <new.json> [output-dir/])");
-    prove_step.dependOn(&prove_cmd.step);
 }

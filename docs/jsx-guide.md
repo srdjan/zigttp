@@ -1,6 +1,6 @@
 # JSX Guide
 
-zigttp-server includes native JSX/TSX support for server-side rendering. JSX is parsed directly by the zts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions). No separate transformer is required.
+zigttp includes native JSX/TSX support for server-side rendering. JSX is parsed directly by the zts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions). No separate transformer is required.
 
 ## Quick Start
 
@@ -17,7 +17,7 @@ function handler(req: Request): Response {
 Run it:
 
 ```bash
-./zig-out/bin/zigttp-server handler.tsx
+./zig-out/bin/zigttp serve handler.tsx
 ```
 
 ## JSX Runtime API

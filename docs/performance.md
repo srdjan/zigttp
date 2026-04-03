@@ -1,6 +1,6 @@
 # Performance Guide
 
-Performance characteristics, benchmarks, optimizations, and deployment patterns for zigttp-server.
+Performance characteristics, benchmarks, optimizations, and deployment patterns for zigttp.
 
 ## Benchmarks
 
@@ -37,7 +37,7 @@ JIT compilation is enabled by default for hot functions (after `JIT_THRESHOLD` e
 
 ```bash
 zig build -Doptimize=ReleaseFast
-./zig-out/bin/zigttp-server handler.js
+./zig-out/bin/zigttp serve handler.js
 ```
 
 Cold start: ~83ms (process spawn to first HTTP response)
@@ -56,7 +56,7 @@ Breakdown:
 
 ```bash
 zig build -Doptimize=ReleaseFast -Dhandler=handler.js
-./zig-out/bin/zigttp-server  # No handler file argument needed
+./zig-out/bin/zigttp serve  # No handler file argument needed
 ```
 
 Cold start: ~71ms (16% improvement). Parsing, compilation, and caching steps are eliminated entirely - bytecode loads from memory.
@@ -204,13 +204,13 @@ For request-scoped workloads, zts uses a hybrid memory model:
 
 ```bash
 # Default (0 = no limit)
-./zig-out/bin/zigttp-server handler.js
+./zig-out/bin/zigttp serve handler.js
 
 # Set explicit limit (1MB)
-./zig-out/bin/zigttp-server -m 1m handler.js
+./zig-out/bin/zigttp serve -m 1m handler.js
 
 # Smaller limit (64KB)
-./zig-out/bin/zigttp-server -m 64k handler.js
+./zig-out/bin/zigttp serve -m 64k handler.js
 ```
 
 ## Deployment Patterns
@@ -218,7 +218,7 @@ For request-scoped workloads, zts uses a hybrid memory model:
 ### Single Instance (Lambda-style)
 
 ```bash
-./zigttp-server handler.js
+./zigttp serve handler.js
 ```
 
 Each instance handles one request at a time for isolation.
@@ -227,10 +227,10 @@ Each instance handles one request at a time for isolation.
 
 ```dockerfile
 FROM scratch
-COPY zig-out/bin/zigttp-server /zigttp-server
+COPY zig-out/bin/zigttp /zigttp
 COPY handler.js /handler.js
 EXPOSE 8080
-ENTRYPOINT ["/zigttp-server", "-q", "-h", "0.0.0.0", "/handler.js"]
+ENTRYPOINT ["/zigttp", "serve", "-q", "-h", "0.0.0.0", "/handler.js"]
 ```
 
 Container size: ~1.2MB with embedded handler (single binary, no handler file needed).

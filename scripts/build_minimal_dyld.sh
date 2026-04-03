@@ -17,13 +17,13 @@ grep -o "\-[a-z_]*" build_link.log | sort | uniq
 
 echo ""
 echo "Stripping with dead code elimination..."
-strip -x zig-out/bin/zigttp-server
+strip -x zig-out/bin/zigttp
 
 echo ""
 echo "Binary analysis:"
-ls -lh zig-out/bin/zigttp-server
-otool -L zig-out/bin/zigttp-server
+ls -lh zig-out/bin/zigttp
+otool -L zig-out/bin/zigttp
 
 echo ""
 echo "Checking for unused dylibs..."
-dyld_info -dependents zig-out/bin/zigttp-server 2>/dev/null || echo "dyld_info not available"
+dyld_info -dependents zig-out/bin/zigttp 2>/dev/null || echo "dyld_info not available"

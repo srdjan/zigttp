@@ -142,15 +142,23 @@ const PrecompileOptions = struct {
 };
 
 fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
-    var args = std.process.Args.Iterator.init(args_vector);
-    defer args.deinit();
-    _ = args.skip();
+    const allocator = std.heap.smp_allocator;
+    const argv = try collectArgs(allocator, args_vector);
+    defer {
+        for (argv) |arg| allocator.free(arg);
+        allocator.free(argv);
+    }
+    return try parsePrecompileArgSlice(argv[1..]);
+}
 
+fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
     var opts = PrecompileOptions{ .handler_path = "", .output_path = "" };
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
 
-    while (args.next()) |arg| {
+    var index: usize = 0;
+    while (index < argv.len) : (index += 1) {
+        const arg = argv[index];
         if (std.mem.eql(u8, arg, "--aot")) {
             opts.emit_aot = true;
             continue;
@@ -172,91 +180,104 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
             continue;
         }
         if (std.mem.eql(u8, arg, "--sdk")) {
-            opts.sdk_target = args.next() orelse {
+            index += 1;
+            opts.sdk_target = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing target after --sdk (values: ts)\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
-            opts.sql_schema_path = args.next() orelse {
+            index += 1;
+            opts.sql_schema_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --sql-schema\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--policy")) {
-            opts.policy_path = args.next() orelse {
+            index += 1;
+            opts.policy_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --policy\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--deploy")) {
-            opts.deploy_target_str = args.next() orelse {
+            index += 1;
+            opts.deploy_target_str = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing target after --deploy\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--replay")) {
-            opts.replay_trace_path = args.next() orelse {
+            index += 1;
+            opts.replay_trace_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --replay\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--test-file")) {
-            opts.test_file_path = args.next() orelse {
+            index += 1;
+            opts.test_file_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --test-file\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--prove")) {
-            opts.prove_spec = args.next() orelse {
+            index += 1;
+            opts.prove_spec = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--manifest")) {
-            opts.manifest_path = args.next() orelse {
+            index += 1;
+            opts.manifest_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --manifest\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--expect-properties")) {
-            opts.expect_properties_path = args.next() orelse {
+            index += 1;
+            opts.expect_properties_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --expect-properties\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--data-labels")) {
-            opts.data_labels_path = args.next() orelse {
+            index += 1;
+            opts.data_labels_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --data-labels\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--fault-severity")) {
-            opts.fault_severity_path = args.next() orelse {
+            index += 1;
+            opts.fault_severity_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --fault-severity\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--generator-pack")) {
-            opts.generator_pack_path = args.next() orelse {
+            index += 1;
+            opts.generator_pack_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --generator-pack\n", .{});
                 return error.MissingArgument;
             };
             continue;
         }
         if (std.mem.eql(u8, arg, "--report")) {
-            opts.report_format = args.next() orelse {
+            index += 1;
+            opts.report_format = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing format after --report (values: json)\n", .{});
                 return error.MissingArgument;
             };
@@ -287,6 +308,19 @@ fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
     };
 
     return opts;
+}
+
+fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
+    var args_iter = std.process.Args.Iterator.init(args_vector);
+    defer args_iter.deinit();
+
+    var args = std.ArrayList([]const u8).empty;
+    errdefer args.deinit(allocator);
+
+    while (args_iter.next()) |arg| {
+        try args.append(allocator, try allocator.dupe(u8, arg));
+    }
+    return args.toOwnedSlice(allocator);
 }
 
 const ResolvedGeneratorPack = struct {
@@ -366,7 +400,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
-    var opts = parsePrecompileArgs(init.args) catch |err| {
+    const argv = try collectArgs(allocator, init.args);
+    defer {
+        for (argv) |arg| allocator.free(arg);
+        allocator.free(argv);
+    }
+
+    try runCompileWithArgs(allocator, argv[1..]);
+}
+
+pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var opts = parsePrecompileArgSlice(argv) catch |err| {
         if (err == error.MissingArgument) return;
         return err;
     };
@@ -893,6 +937,86 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.debug.print("Unknown report format: {s} (supported: json)\n", .{fmt});
             }
         }
+    }
+}
+
+pub fn runCheck(allocator: std.mem.Allocator, handler_path: []const u8, sql_schema_path: ?[]const u8) !void {
+    const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+        return err;
+    };
+    defer allocator.free(source);
+
+    var compiled = try compileHandler(
+        allocator,
+        source,
+        handler_path,
+        false,
+        false,
+        true,
+        null,
+        sql_schema_path,
+        false,
+    );
+    defer compiled.deinit(allocator);
+
+    const contract = compiled.contract orelse return error.ContractMissing;
+    defer compiled.contract = null;
+    defer @constCast(&contract).deinit(allocator);
+
+    std.debug.print("Check passed: {s}\n", .{handler_path});
+    printContractSummary(&contract);
+}
+
+fn printContractSummary(contract: *const HandlerContract) void {
+    std.debug.print("Routes: {d}\n", .{contract.routes.items.len});
+    for (contract.routes.items) |route| {
+        std.debug.print("  {s} [{s}] -> {d}\n", .{ route.pattern, route.route_type, route.status });
+    }
+    if (contract.api.routes.items.len > 0) {
+        std.debug.print("API routes: {d}\n", .{contract.api.routes.items.len});
+        for (contract.api.routes.items) |route| {
+            std.debug.print("  {s} {s}\n", .{ route.method, route.path });
+        }
+    }
+    if (contract.env.literal.items.len > 0 or contract.env.dynamic) {
+        std.debug.print("Env: {d} literal, dynamic={s}\n", .{
+            contract.env.literal.items.len,
+            if (contract.env.dynamic) "true" else "false",
+        });
+        for (contract.env.literal.items) |name| {
+            std.debug.print("  {s}\n", .{name});
+        }
+    }
+    if (contract.egress.hosts.items.len > 0 or contract.egress.dynamic) {
+        std.debug.print("Egress: {d} host(s), dynamic={s}\n", .{
+            contract.egress.hosts.items.len,
+            if (contract.egress.dynamic) "true" else "false",
+        });
+        for (contract.egress.hosts.items) |host| {
+            std.debug.print("  {s}\n", .{host});
+        }
+    }
+    if (contract.cache.namespaces.items.len > 0 or contract.cache.dynamic) {
+        std.debug.print("Cache: {d} namespace(s), dynamic={s}\n", .{
+            contract.cache.namespaces.items.len,
+            if (contract.cache.dynamic) "true" else "false",
+        });
+        for (contract.cache.namespaces.items) |name| {
+            std.debug.print("  {s}\n", .{name});
+        }
+    }
+    if (contract.sql.queries.items.len > 0 or contract.sql.dynamic) {
+        std.debug.print("SQL: {d} query(ies), dynamic={s}\n", .{
+            contract.sql.queries.items.len,
+            if (contract.sql.dynamic) "true" else "false",
+        });
+        for (contract.sql.queries.items) |query| {
+            std.debug.print("  {s}\n", .{query.name});
+        }
+    }
+    if (contract.durable.used) {
+        std.debug.print("Durable: enabled\n", .{});
     }
 }
 
@@ -3473,10 +3597,10 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
         source,
         "handler.ts",
         false, // emit_aot
-        true,  // emit_verify
+        true, // emit_verify
         false, // emit_contract
-        null,  // policy
-        null,  // sql_schema_path
+        null, // policy
+        null, // sql_schema_path
         false, // generate_tests
     );
     defer compiled.deinit(allocator);
@@ -3515,10 +3639,10 @@ test "compileHandler sets result_safe and optional_safe when verification passes
         source,
         "handler.ts",
         false, // emit_aot
-        true,  // emit_verify
-        true,  // emit_contract
-        null,  // policy
-        null,  // sql_schema_path
+        true, // emit_verify
+        true, // emit_contract
+        null, // policy
+        null, // sql_schema_path
         false, // generate_tests
     );
     defer compiled.deinit(allocator);

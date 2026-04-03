@@ -143,9 +143,9 @@ JSX is a first-class syntax in zts. The parser handles `.jsx` and `.tsx` files d
 function HomePage() {
     return (
         <html>
-            <head><title>zigttp-server</title></head>
+            <head><title>zigttp</title></head>
             <body>
-                <h1>zigttp-server</h1>
+                <h1>zigttp</h1>
                 <p>A tiny JavaScript runtime for HTTP handlers.</p>
             </body>
         </html>
@@ -620,8 +620,8 @@ This produces `src/generated/deploy/template.json` (AWS SAM template) and `src/g
 The deploy report includes: PROVEN/NEEDS MANUAL REVIEW sections, FLOW ANALYSIS (secret/credential leakage, input validation), FAULT COVERAGE, HANDLER PROPERTIES, OWASP TOP 10 COVERAGE (A01-A07 mapped to proven properties), VPC EGRESS (when egress hosts exist), and COST ESTIMATE (AWS Lambda pricing derived from proven I/O depth).
 
 Two standalone tools support the deployment workflow:
-- `zig build prove -- old.json new.json` compares two contracts and classifies the change (exit 0 for safe, 1 for breaking)
-- `zig build mock -- tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases
+- `zts prove old.json new.json` compares two contracts and classifies the change (exit 0 for safe, 1 for breaking)
+- `zts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases
 
 ### Fault Coverage
 
@@ -929,8 +929,8 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 
 | Command | Description |
 |---------|-------------|
-| `zig build prove -- old.json new.json [dir/]` | Compare two contracts, classify as equivalent/additive/breaking |
-| `zig build mock -- tests.jsonl [--port PORT]` | Serve mock HTTP responses from generated tests |
+| `zts prove old.json new.json [dir/]` | Compare two contracts, classify as equivalent/additive/breaking |
+| `zts mock tests.jsonl [--port PORT]` | Serve mock HTTP responses from generated tests |
 | `zig build bench` | Run performance benchmarks |
 
 ### Virtual Module Exports

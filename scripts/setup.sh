@@ -1,12 +1,12 @@
 #!/bin/bash
-# Setup script for zigttp-server
+# Setup script for zigttp
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-echo "=== zigttp-server Setup ==="
+echo "=== zigttp Setup ==="
 echo
 
 # Check for Zig
@@ -19,17 +19,17 @@ fi
 echo "Zig version: $(zig version)"
 echo
 
-echo "Building zigttp-server..."
+echo "Building zigttp..."
 zig build -Doptimize=ReleaseFast
 
 echo
 echo "=== Setup Complete ==="
 echo
 echo "Run the server with:"
-echo "  ./zig-out/bin/zigttp-server examples/handler/handler.js"
+echo "  ./zig-out/bin/zigttp serve examples/handler/handler.js"
 echo
 echo "Or with inline code:"
-echo "  ./zig-out/bin/zigttp-server -e \"function handler(r) { return Response.json({ok:true}) }\""
+echo "  ./zig-out/bin/zigttp serve -e \"function handler(r) { return Response.json({ok:true}) }\""
 echo
 echo "Test with:"
 echo "  curl http://localhost:8080/"

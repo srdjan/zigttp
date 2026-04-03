@@ -25,17 +25,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
 
     var args_iter = std.process.Args.Iterator.init(init.args);
+    defer args_iter.deinit();
     _ = args_iter.next(); // skip program name
 
-    const test_path = args_iter.next() orelse {
+    var args = std.ArrayList([]const u8).empty;
+    defer args.deinit(allocator);
+    while (args_iter.next()) |arg| try args.append(allocator, arg);
+
+    try runWithArgs(allocator, args.items);
+}
+
+pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const test_path = if (argv.len > 0) argv[0] else {
         std.debug.print("Usage: mock <tests.jsonl> [--port PORT]\n", .{});
         std.process.exit(2);
     };
 
     var port: u16 = 3001;
-    while (args_iter.next()) |arg| {
+    var index: usize = 1;
+    while (index < argv.len) : (index += 1) {
+        const arg = argv[index];
         if (std.mem.eql(u8, arg, "--port")) {
-            const port_str = args_iter.next() orelse {
+            index += 1;
+            const port_str = if (index < argv.len) argv[index] else {
                 std.debug.print("--port requires a value\n", .{});
                 std.process.exit(2);
             };

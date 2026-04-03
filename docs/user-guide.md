@@ -1,4 +1,4 @@
-# zigttp-server User Guide
+# zigttp User Guide
 
 A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure
 Functions, Cloudflare Workers), powered by Zig and zts.
@@ -52,7 +52,7 @@ zig build -Doptimize=ReleaseFast
 zig build
 
 # Verify installation
-./zig-out/bin/zigttp-server --help
+./zig-out/bin/zigttp --help
 ```
 
 ### Deployment Package
@@ -67,7 +67,7 @@ directly to FaaS platforms or container environments.
 ### Hello World (Inline)
 
 ```bash
-./zig-out/bin/zigttp-server -e "function handler(req) { return Response.text('Hello World!') }"
+./zig-out/bin/zigttp serve -e "function handler(req) { return Response.text('Hello World!') }"
 ```
 
 Test it:
@@ -90,13 +90,13 @@ function handler(request) {
 Run:
 
 ```bash
-./zig-out/bin/zigttp-server hello.js
+./zig-out/bin/zigttp serve hello.js
 ```
 
 ### JSON API
 
 ```bash
-./zig-out/bin/zigttp-server -e "function handler(req) { return Response.json({message: 'Hello', url: req.url}) }"
+./zig-out/bin/zigttp serve -e "function handler(req) { return Response.json({message: 'Hello', url: req.url}) }"
 ```
 
 Test:
@@ -111,8 +111,8 @@ curl http://localhost:8080/api/test
 ## Command Line Reference
 
 ```
-zigttp-server [OPTIONS] <handler.js>
-zigttp-server -e "<inline-code>"
+zigttp serve [OPTIONS] <handler.js>
+zigttp serve -e "<inline-code>"
 
 OPTIONS:
   -p, --port <PORT>     Port to listen on
@@ -162,28 +162,28 @@ OPTIONS:
 
 ```bash
 # Custom port
-./zig-out/bin/zigttp-server -p 3000 handler.js
+./zig-out/bin/zigttp serve -p 3000 handler.js
 
 # Bind to all interfaces (accessible from network)
-./zig-out/bin/zigttp-server -h 0.0.0.0 handler.js
+./zig-out/bin/zigttp serve -h 0.0.0.0 handler.js
 
 # Increased memory for complex handlers
-./zig-out/bin/zigttp-server -m 1m handler.js
+./zig-out/bin/zigttp serve -m 1m handler.js
 
 # Quiet mode with custom port
-./zig-out/bin/zigttp-server -q -p 8000 handler.js
+./zig-out/bin/zigttp serve -q -p 8000 handler.js
 
 # Record traces for replay
-./zig-out/bin/zigttp-server --trace traces.jsonl handler.js
+./zig-out/bin/zigttp serve --trace traces.jsonl handler.js
 
 # Durable execution with persisted oplogs
-./zig-out/bin/zigttp-server --durable .zigttp-durable handler.js
+./zig-out/bin/zigttp serve --durable .zigttp-durable handler.js
 
 # Run declarative handler tests
-./zig-out/bin/zigttp-server --test tests.jsonl handler.js
+./zig-out/bin/zigttp serve --test tests.jsonl handler.js
 
 # Inline with all options
-./zig-out/bin/zigttp-server -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
+./zig-out/bin/zigttp serve -p 3000 -m 512k -e "function handler(r) { return Response.json({ok:true}) }"
 ```
 
 ---
@@ -1735,7 +1735,7 @@ function HomePage() {
     return (
         <Layout title="Home">
             <h1>Welcome to My Site</h1>
-            <p>This is a simple web application powered by zigttp-server.</p>
+            <p>This is a simple web application powered by zigttp.</p>
             <p>Built with Zig and zts for serverless deployments.</p>
         </Layout>
     );
@@ -1745,7 +1745,7 @@ function AboutPage() {
     return (
         <Layout title="About">
             <h1>About</h1>
-            <p>zigttp-server is a serverless JavaScript runtime powered by zts.</p>
+            <p>zigttp is a serverless JavaScript runtime powered by zts.</p>
             <h2>Features</h2>
             <ul>
                 <li>Instant cold starts</li>
@@ -1886,18 +1886,18 @@ in `zts/` but are not enabled by default.
 
 ```bash
 # Default (256KB) - typical API handlers
-./zig-out/bin/zigttp-server handler.js
+./zig-out/bin/zigttp serve handler.js
 
 # Larger (1MB) - complex processing, large JSON
-./zig-out/bin/zigttp-server -m 1m handler.js
+./zig-out/bin/zigttp serve -m 1m handler.js
 
 # Smaller (64KB) - minimal functions
-./zig-out/bin/zigttp-server -m 64k handler.js
+./zig-out/bin/zigttp serve -m 64k handler.js
 ```
 
 ### Cold Start Optimization
 
-zigttp-server is optimized for FaaS cold starts:
+zigttp is optimized for FaaS cold starts:
 
 - Binary initialization: < 1ms
 - Handler loading: typically < 5ms
@@ -1948,7 +1948,7 @@ function handler(request) {
 CLI options for the standalone server:
 
 ```bash
-zigttp-server -p 8080 -h 127.0.0.1 -n 8 --cors --static ./public handler.js
+zigttp serve -p 8080 -h 127.0.0.1 -n 8 --cors --static ./public handler.js
 ```
 
 Advanced options are available through `ServerConfig` when embedding `Server`
@@ -1967,17 +1967,17 @@ const config = ServerConfig{
 
 ```bash
 # Quiet mode, bind to all interfaces
-./zig-out/bin/zigttp-server -q -h 0.0.0.0 -p 8080 handler.js
+./zig-out/bin/zigttp serve -q -h 0.0.0.0 -p 8080 handler.js
 ```
 
 #### Docker Container
 
 ```dockerfile
 FROM scratch
-COPY zig-out/bin/zigttp-server /zigttp-server
+COPY zig-out/bin/zigttp /zigttp
 COPY handler.js /handler.js
 EXPOSE 8080
-ENTRYPOINT ["/zigttp-server", "-q", "-h", "0.0.0.0", "/handler.js"]
+ENTRYPOINT ["/zigttp", "serve", "-q", "-h", "0.0.0.0", "/handler.js"]
 ```
 
 #### AWS Lambda (Custom Runtime)
@@ -2155,10 +2155,10 @@ zig build -Dhandler=examples/routing/api-surface.ts -Dsdk=ts
 ```
 
 The generated file is written to `src/generated/client.ts`.
-The standalone precompile tool accepts the matching flag:
+The standalone compiler CLI accepts the matching flag:
 
 ```bash
-precompile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
+zts compile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
 ```
 
 Typed helpers are generated only for routes the compiler can prove end to end:
@@ -2326,7 +2326,7 @@ Handler tests use a JSONL format with four entry types. Because handlers are pur
 
 ```bash
 # Runtime mode
-./zig-out/bin/zigttp-server --test tests.jsonl handler.ts
+./zig-out/bin/zigttp serve --test tests.jsonl handler.ts
 
 # Build-time mode (fails the build on test failure)
 zig build -Dhandler=handler.ts -Dtest-file=tests.jsonl
@@ -2363,10 +2363,10 @@ Record handler I/O traces during live traffic, then replay them for regression t
 
 ```bash
 # Record traces
-./zig-out/bin/zigttp-server --trace traces.jsonl handler.ts
+./zig-out/bin/zigttp serve --trace traces.jsonl handler.ts
 
 # Replay against a handler (offline verification)
-./zig-out/bin/zigttp-server --replay traces.jsonl handler.ts
+./zig-out/bin/zigttp serve --replay traces.jsonl handler.ts
 
 # Build-time replay (fails on regressions)
 zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
@@ -2384,12 +2384,12 @@ Tracing captures every virtual module call (with args and return values), `fetch
 
 ```bash
 # Wrong:
-./zig-out/bin/zigttp-server
+./zig-out/bin/zigttp serve
 
 # Right:
-./zig-out/bin/zigttp-server handler.js
+./zig-out/bin/zigttp serve handler.js
 # or
-./zig-out/bin/zigttp-server -e "function handler(r) { return Response.text('OK') }"
+./zig-out/bin/zigttp serve -e "function handler(r) { return Response.text('OK') }"
 ```
 
 **"No 'handler' function defined"**
@@ -2464,11 +2464,11 @@ If you see out-of-memory errors:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    zigttp-server Quick Reference                  │
+│                      zigttp Quick Reference                      │
 ├─────────────────────────────────────────────────────────────────┤
 │ START SERVER                                                    │
-│   zigttp-server handler.ts                                       │
-│   zigttp-server -p 3000 -e "function handler(r) {...}"           │
+│   zigttp serve handler.ts                                        │
+│   zigttp serve -p 3000 -e "function handler(r) {...}"            │
 ├─────────────────────────────────────────────────────────────────┤
 │ REQUEST OBJECT                                                  │
 │   req.method   → "GET", "POST", "PUT", "DELETE"                │

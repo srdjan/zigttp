@@ -40,9 +40,9 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Behavioral contract.** `-Dcontract` enumerates every execution path through the handler and embeds them in contract.json as structured `behaviors`. Each path records the route, branching conditions (which I/O calls succeed or fail), the I/O sequence, and the resulting HTTP status. The restricted JS subset has no back-edges and no exceptions, so path enumeration is finite and exhaustive. Comparing two behavioral contracts shows which paths were preserved, which changed response codes, which were removed, and which are new.
 
-**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zig build prove -- old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
+**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zts prove old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
 
-**Contract-driven mock server.** `zig build mock -- tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
+**Contract-driven mock server.** `zts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 
@@ -58,10 +58,10 @@ Build with Zig 0.16.0 or later:
 zig build -Doptimize=ReleaseFast
 
 # Run with inline handler
-./zig-out/bin/zigttp-server -e "function handler(r) { return Response.json({hello:'world'}) }"
+./zig-out/bin/zigttp serve -e "function handler(r) { return Response.json({hello:'world'}) }"
 
 # Or with a handler file
-./zig-out/bin/zigttp-server examples/handler/handler.ts
+./zig-out/bin/zigttp serve examples/handler/handler.ts
 ```
 
 Test it:
@@ -81,7 +81,7 @@ function HomePage() {
             </head>
             <body>
                 <h1>Hello World</h1>
-                <p>Welcome to zigttp-server!</p>
+                <p>Welcome to zigttp!</p>
             </body>
         </html>
     );
@@ -268,7 +268,7 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 ## CLI Options
 
 ```bash
-zigttp-server [options] <handler.js>
+zigttp serve [options] <handler.js>
 
 Options:
   -p, --port <PORT>     Port (default: 8080)
@@ -583,7 +583,7 @@ zigttp's restricted JS subset (no async, no exceptions, no side-effecting builti
 **Record** traces during normal operation:
 
 ```bash
-zigttp-server handler.ts --trace traces.jsonl
+zigttp serve handler.ts --trace traces.jsonl
 ```
 
 Every virtual module call, `fetchSync` response, `Date.now()` timestamp, and `Math.random()` value is recorded alongside the request and response.
@@ -591,7 +591,7 @@ Every virtual module call, `fetchSync` response, `Date.now()` timestamp, and `Ma
 **Replay** traces against a modified handler to detect regressions:
 
 ```bash
-zigttp-server --replay traces.jsonl handler-v2.ts
+zigttp serve --replay traces.jsonl handler-v2.ts
 ```
 
 Reports identical, status-changed, and body-changed results with structured diffs.
@@ -607,7 +607,7 @@ zig build -Dhandler=handler-v2.ts -Dreplay=traces.jsonl
 Enable crash recovery with a write-ahead oplog:
 
 ```bash
-zigttp-server handler.ts --durable ./oplogs
+zigttp serve handler.ts --durable ./oplogs
 ```
 
 Handlers opt into durability via the `zigttp:durable` virtual module:

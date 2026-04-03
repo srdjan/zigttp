@@ -1,6 +1,6 @@
 # zigttp Architecture
 
-This document describes the architecture of zigttp-server, a serverless JavaScript runtime powered by the zts JavaScript engine.
+This document describes the architecture of zigttp, a serverless JavaScript runtime powered by the zts JavaScript engine.
 
 ## Design Philosophy
 
@@ -12,7 +12,7 @@ This document describes the architecture of zigttp-server, a serverless JavaScri
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     zigttp-server (Zig)                       │
+│                        zigttp (Zig)                         │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ HTTP Server │──│ HandlerPool │──│  Builtins/HTTP     │  │
@@ -214,7 +214,7 @@ The Result<T> pattern throughout makes error handling explicit and prevents sile
 ## Project Structure
 
 ```
-zigttp-server/
+zigttp/
 ├── build.zig              # Zig build configuration
 ├── zts/                   # Pure Zig JavaScript engine
 │   ├── parser/            # Two-pass parser with IR
@@ -404,7 +404,7 @@ Each enumerated path becomes a `BehaviorPath` (`zts/handler_contract.zig`) in th
 
 The behavioral diff (`contract_diff.diffBehaviors`) matches paths by (method, pattern, conditions) tuple. Two paths match when they have the same route and I/O success/failure conditions. A matched path with a different response status is `response_changed` (breaking).
 
-Output: `upgrade-manifest.json` with verdict, justification, surface summary, behavioral summary, property regressions/gains with severity, and coverage gap metrics. Both `zig build prove` and `-Dprove` produce this artifact.
+Output: `upgrade-manifest.json` with verdict, justification, surface summary, behavioral summary, property regressions/gains with severity, and coverage gap metrics. Both `zts prove` and `-Dprove` produce this artifact.
 
 ### Guard Composition
 
@@ -419,7 +419,7 @@ The `-Ddeploy=<target>` build option generates platform-specific deployment conf
 ### Single Instance (Lambda-style)
 
 ```bash
-./zigttp-server handler.js
+./zigttp serve handler.js
 ```
 
 Each instance handles one request at a time for isolation.
@@ -432,10 +432,10 @@ For high-throughput scenarios, deploy multiple instances. The small binary size 
 
 ```dockerfile
 FROM scratch
-COPY zig-out/bin/zigttp-server /zigttp-server
+COPY zig-out/bin/zigttp /zigttp
 COPY handler.js /handler.js
 EXPOSE 8080
-ENTRYPOINT ["/zigttp-server", "-q", "-h", "0.0.0.0", "/handler.js"]
+ENTRYPOINT ["/zigttp", "serve", "-q", "-h", "0.0.0.0", "/handler.js"]
 ```
 
 ### FaaS Deployment

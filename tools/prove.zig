@@ -16,19 +16,27 @@ const upgrade_verifier = @import("upgrade_verifier.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
-
     var args_iter = std.process.Args.Iterator.init(init.args);
-    _ = args_iter.next(); // skip program name
+    defer args_iter.deinit();
+    _ = args_iter.next();
 
-    const old_path = args_iter.next() orelse {
+    var args = std.ArrayList([]const u8).empty;
+    defer args.deinit(allocator);
+    while (args_iter.next()) |arg| try args.append(allocator, arg);
+
+    try runWithArgs(allocator, args.items);
+}
+
+pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const old_path = if (argv.len > 0) argv[0] else {
         std.debug.print("Usage: prove <old-contract.json> <new-contract.json> [output-dir/]\n", .{});
         std.process.exit(2);
     };
-    const new_path = args_iter.next() orelse {
+    const new_path = if (argv.len > 1) argv[1] else {
         std.debug.print("Usage: prove <old-contract.json> <new-contract.json> [output-dir/]\n", .{});
         std.process.exit(2);
     };
-    const output_dir: []const u8 = args_iter.next() orelse "./";
+    const output_dir: []const u8 = if (argv.len > 2) argv[2] else "./";
 
     // Read both contract files
     const old_json = readFilePosix(allocator, old_path, 1024 * 1024) catch |err| {
@@ -129,4 +137,3 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.process.exit(2);
     }
 }
-
