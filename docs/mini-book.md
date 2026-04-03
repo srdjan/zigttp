@@ -498,7 +498,7 @@ function handler(req: Request): Response {
 
 ### Check 2: Result Values Checked Before Access
 
-Virtual module functions like `jwtVerify` and `validateJson` return Result types with an `.ok` property. The verifier tracks these bindings and ensures you check `.ok` before accessing `.value` or `.error`:
+Virtual module functions like `jwtVerify`, `decodeJson`, and `decodeQuery` return Result types with an `.ok` property. The verifier tracks these bindings and ensures you check `.ok` before accessing `.value` or `.error`:
 
 ```typescript
 // BUILD ERROR: result used without checking .ok
@@ -957,6 +957,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `zigttp:router` | `routerMatch` | read |
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | read |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | read/write |
+| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | read |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | read/write |
 | `zigttp:sql` | `sqlQuery`, `sqlExecute` | read/write |
 | `zigttp:io` | `parallel`, `race` | read |

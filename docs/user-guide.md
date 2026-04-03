@@ -739,9 +739,9 @@ zts has no try/catch. All errors flow through two patterns: Result types and opt
 
 ### Result Types
 
-Functions like `jwtVerify`, `validateJson`, `validateObject`, and `coerceJson` return
-`{ ok: true, value: T } | { ok: false, error: string }`. The handler verifier enforces
-that `.ok` is checked before `.value` is accessed.
+Functions like `jwtVerify`, `decodeJson`, `decodeForm`, `decodeQuery`,
+`validateJson`, `validateObject`, and `coerceJson` return Result-shaped values.
+The handler verifier enforces that `.ok` is checked before `.value` is accessed.
 
 You can define a generic `Result<T>` alias for your own annotations:
 
@@ -753,16 +753,25 @@ The type checker instantiates this when used - `Result<object>` becomes `{ ok: b
 
 ```typescript
 import { jwtVerify } from "zigttp:auth";
-import { validateJson } from "zigttp:validate";
+import { schemaCompile } from "zigttp:validate";
+import { decodeJson } from "zigttp:decode";
 
 type Result<T> = { ok: boolean; value: T; error: string };
+
+schemaCompile("user", JSON.stringify({
+    type: "object",
+    properties: {
+        name: { type: "string" }
+    },
+    required: ["name"]
+}));
 
 function handler(req: Request): Response {
     const token = req.headers["authorization"];
     const auth: Result<object> = jwtVerify(token, "secret");
     if (!auth.ok) return Response.json({ error: auth.error }, { status: 401 });
 
-    const body = validateJson("user", req.body);
+    const body = decodeJson("user", req.body ?? "{}");
     if (!body.ok) return Response.json({ errors: body.errors }, { status: 400 });
 
     return Response.json({ user: body.value, claims: auth.value });
@@ -1062,6 +1071,7 @@ Registered SQLite queries with build-time schema validation. Build with
 `-Dsql-schema=<schema.sql|schema.sqlite>` and run with `--sqlite <FILE>`.
 
 ```typescript
+import { decodeJson } from "zigttp:decode";
 import { sql, sqlOne, sqlMany, sqlExec } from "zigttp:sql";
 ```
 
@@ -1094,7 +1104,8 @@ Current constraints:
 
 ```typescript
 import { routerMatch } from "zigttp:router";
-import { schemaCompile, validateJson } from "zigttp:validate";
+import { schemaCompile } from "zigttp:validate";
+import { decodeJson } from "zigttp:decode";
 import { sql, sqlExec, sqlMany, sqlOne } from "zigttp:sql";
 
 schemaCompile("todo.create", JSON.stringify({
@@ -1116,7 +1127,7 @@ const routes = {
         return todo ? Response.json(todo) : Response.json({ error: "not_found" }, { status: 404 });
     },
     "POST /todos": function(req) {
-        const parsed = validateJson("todo.create", req.body);
+        const parsed = decodeJson("todo.create", req.body ?? "{}");
         if (!parsed.ok) return Response.json({ errors: parsed.errors }, { status: 400 });
         return Response.json(sqlExec("createTodo", { title: parsed.value.title }), { status: 201 });
     },
@@ -1302,7 +1313,7 @@ function handler(req: Request): Response {
         return Response.json({ items: sqlMany("listTodos") });
     }
 
-    const parsed = validateJson("todo.create", req.body);
+    const parsed = decodeJson("todo.create", req.body ?? "{}");
     if (!parsed.ok) return Response.json({ errors: parsed.errors }, { status: 400 });
 
     return Response.json(sqlExec("createTodo", { title: parsed.value.title }), { status: 201 });
@@ -2054,7 +2065,7 @@ zig build -Dhandler=handler.ts -Dverify
 The verifier checks six properties:
 
 1. **Exhaustive returns** - every code path through the handler returns a Response
-2. **Result safety** - Result values from `jwtVerify`, `validateJson`, etc. have `.ok` checked before `.value` is accessed
+2. **Result safety** - Result values from `jwtVerify`, `decodeJson`, `decodeForm`, `decodeQuery`, etc. have `.ok` checked before `.value` is accessed
 3. **Unreachable code** - statements after unconditional returns are flagged (warning)
 4. **Unused variables** - declared variables that are never referenced (warning, suppress with `_` prefix)
 5. **Non-exhaustive match** - match expressions without a default arm (warning)
@@ -2233,7 +2244,7 @@ const api = createClient({
 
 const result = await api.postProfilesId({
     params: { id: "user_123" },
-    query: { verbose: "true" },
+    query: { verbose: true },
     body: { displayName: "Ada" },
     headers: { "x-client-id": "cli-42" },
 });
@@ -2282,8 +2293,8 @@ OpenAPI specs as the `x-zigttp-properties` extension.
 Read-effect functions: `env`, `sha256`, `hmacSha256`, `base64Encode`,
 `base64Decode`, `routerMatch`, `parseBearer`, `jwtVerify`, `jwtSign`,
 `verifyWebhookSignature`, `timingSafeEqual`, `schemaCompile`, `validateJson`,
-`validateObject`, `coerceJson`, `schemaDrop`, `cacheGet`, `cacheStats`, `sql`,
-`sqlOne`, `sqlMany`.
+`validateObject`, `coerceJson`, `schemaDrop`, `decodeJson`, `decodeForm`,
+`decodeQuery`, `cacheGet`, `cacheStats`, `sql`, `sqlOne`, `sqlMany`.
 
 Write-effect functions: `cacheSet`, `cacheDelete`, `cacheIncr`, `sqlExec`,
 `parallel`, `race`, `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`,
@@ -2464,13 +2475,14 @@ Common causes: using banned syntax. Check the error message for the suggestion:
 **JSON validation**
 
 ```typescript
-// Use zigttp:validate instead of try-catch (which is banned)
-import { schemaCompile, validateJson } from "zigttp:validate";
+// Use schema-backed Result helpers instead of try-catch (which is banned)
+import { schemaCompile } from "zigttp:validate";
+import { decodeJson } from "zigttp:decode";
 
 schemaCompile("input", JSON.stringify({ type: "object" }));
 
 function handler(req: Request): Response {
-    const result = validateJson("input", req.body);
+    const result = decodeJson("input", req.body ?? "{}");
     if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
     return Response.json(result.value);
 }
@@ -2533,6 +2545,7 @@ If you see out-of-memory errors:
 │   import { env } from "zigttp:env"                             │
 │   import { jwtVerify } from "zigttp:auth"                      │
 │   import { validateJson } from "zigttp:validate"               │
+│   import { decodeJson } from "zigttp:decode"                   │
 │   import { routerMatch } from "zigttp:router"                  │
 │   import { parallel } from "zigttp:io"                         │
 │   import { guard } from "zigttp:compose"                       │

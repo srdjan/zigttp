@@ -308,7 +308,7 @@ Options:
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
@@ -397,7 +397,7 @@ zig build -Dhandler=handler.ts -Dreport=json
 The verifier statically proves six properties of your handler at compile time:
 
 1. **Every code path returns a Response.** Missing `else` branches, `switch` cases without `default`, and paths that fall through without returning are all caught.
-2. **Result values are checked before access.** Calls like `jwtVerify` and `validateJson` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
+2. **Result values are checked before access.** Calls like `jwtVerify`, `decodeJson`, and `decodeQuery` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
 3. **No unreachable code.** Statements after an unconditional return produce a warning.
 4. **No unused variables.** Declared variables that are never referenced produce a warning. Suppress with an underscore prefix (`_unused`).
 5. **Match expressions have default arms.** A `match` without a default arm produces a warning.
@@ -530,7 +530,7 @@ const api = createClient({ baseUrl: "https://api.example.com" });
 
 const result = await api.postProfilesId({
     params: { id: "user_123" },
-    query: { verbose: "true" },
+    query: { verbose: true },
     body: { displayName: "Ada" },
     headers: { "x-client-id": "cli-42" },
 });
