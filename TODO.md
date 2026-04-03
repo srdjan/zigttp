@@ -50,6 +50,9 @@
   - Root cause: `destroyFull` frees `FunctionBytecode` arrays but never walks `constants` to free heap payloads.
   - Fix: add recursive constant cleanup (strings, float boxes, nested `FunctionBytecode`) or ref-counted constant pools.
   - Impact: memory growth in long-lived runtimes.
+- [ ] **HandlerPool test still flakes under Zig build runner** — `src/zruntime.zig:6380-6565`, `zts/pool.zig`, `zts/bytecode_cache.zig`.
+  - Current state: direct test-binary reruns pass, but long `zig build test-zruntime` soak loops still intermittently hit a build-runner-side `TRAP` in pooled owned-response / teardown paths.
+  - Follow-up: keep the new pooled teardown regression, then isolate any remaining `--listen`-specific lifetime differences in pooled response extraction and cached-bytecode teardown.
 - [x] **NaN treated as non-number in arithmetic** — `zts/value.zig:147-155`, `zts/interpreter.zig:2602-2638`.
   - Root cause: `JSValue.toNumber()` returns null for `nan_val`; arithmetic paths treat null as TypeError.
   - Fix: return `std.math.nan(f64)` for `nan_val` or treat it as a float number.
