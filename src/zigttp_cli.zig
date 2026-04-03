@@ -489,19 +489,7 @@ fn foldPathIntoHash(io: std.Io, hash: *std.hash.Wyhash, path: []const u8) !void 
     }
 }
 
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
-    var args_iter = std.process.Args.Iterator.init(args_vector);
-    defer args_iter.deinit();
-
-    var args = std.ArrayList([]const u8).empty;
-    errdefer args.deinit(allocator);
-
-    while (args_iter.next()) |arg| {
-        try args.append(allocator, try allocator.dupe(u8, arg));
-    }
-
-    return args.toOwnedSlice(allocator);
-}
+const collectArgs = @import("zts_cli").collectArgs;
 
 fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
     var skip_next = false;

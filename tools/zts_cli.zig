@@ -4,6 +4,9 @@ const precompile = @import("precompile.zig");
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const project_config_mod = @import("project_config");
+const zts = @import("zts");
+const zts_file_io = zts.file_io;
+const writeContractJson = zts.handler_contract.writeContractJson;
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
@@ -46,6 +49,8 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var sql_schema_path: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
+    var emit_contract = false;
+    var emit_types = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -55,6 +60,18 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
             if (i >= argv.len) return error.MissingArgument;
             sql_schema_path = argv[i];
             continue;
+        }
+        if (std.mem.eql(u8, arg, "--contract")) {
+            emit_contract = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--types")) {
+            emit_types = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--help")) {
+            printCheckHelp();
+            return;
         }
         if (!std.mem.startsWith(u8, arg, "-") and handler_path == null) {
             handler_path = arg;
@@ -69,7 +86,53 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try defaultProjectEntry(allocator);
     defer if (handler_path == null) allocator.free(target);
 
-    try precompile.runCheck(allocator, target, sql_schema_path);
+    var result = try precompile.runCheckOnly(allocator, target, sql_schema_path);
+    defer result.deinit(allocator);
+
+    {
+        var card_buf: std.ArrayList(u8) = .empty;
+        defer card_buf.deinit(allocator);
+        var card_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &card_buf);
+        precompile.formatProofCard(&card_aw.writer, &result, target);
+        card_buf = card_aw.toArrayList();
+        if (card_buf.items.len > 0) {
+            _ = std.c.write(std.c.STDERR_FILENO, card_buf.items.ptr, card_buf.items.len);
+        }
+    }
+
+    if (emit_contract) {
+        if (result.contract) |contract| {
+            var json_output: std.ArrayList(u8) = .empty;
+            defer json_output.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
+            writeContractJson(&contract, &aw.writer) catch |err| {
+                std.debug.print("Error serializing contract: {}\n", .{err});
+                return err;
+            };
+            json_output = aw.toArrayList();
+            zts_file_io.writeFile(allocator, "contract.json", json_output.items) catch |err| {
+                std.debug.print("Error writing contract.json: {}\n", .{err});
+                return err;
+            };
+            std.debug.print("Wrote contract.json\n", .{});
+        }
+    }
+
+    if (emit_types) {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        precompile.generateTypeDefs(&aw.writer);
+        buf = aw.toArrayList();
+        zts_file_io.writeFile(allocator, "zigttp.d.ts", buf.items) catch |err| {
+            std.debug.print("Error writing zigttp.d.ts: {}\n", .{err});
+            return err;
+        };
+        std.debug.print("Wrote zigttp.d.ts\n", .{});
+    }
+
+    if (result.totalErrors() > 0) std.process.exit(1);
+    if (result.totalWarnings() > 0) std.process.exit(2);
 }
 
 fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
@@ -86,7 +149,7 @@ fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
     return error.NoProjectConfig;
 }
 
-fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
+pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
     var args_iter = std.process.Args.Iterator.init(args_vector);
     defer args_iter.deinit();
 
@@ -103,10 +166,27 @@ fn printHelp() void {
         \\zts - compiler and analysis tools for zigttp handlers
         \\
         \\Usage:
-        \\  zts check [handler.ts] [--sql-schema path]
+        \\  zts check [handler.ts] [--contract] [--types] [--sql-schema path]
         \\  zts compile [precompile flags] <handler.ts> <output.zig>
         \\  zts prove <old-contract.json> <new-contract.json> [output-dir/]
         \\  zts mock <tests.jsonl> [--port PORT]
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printCheckHelp() void {
+    const help =
+        \\zts check - verify handler and show proof card
+        \\
+        \\Usage: zts check [handler.ts] [options]
+        \\
+        \\Options:
+        \\  --contract       Emit contract.json in current directory
+        \\  --types          Emit zigttp.d.ts type definitions for IDE autocomplete
+        \\  --sql-schema P   SQLite schema file for query validation
+        \\
+        \\If no handler is specified, uses the entry from zigttp.json.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

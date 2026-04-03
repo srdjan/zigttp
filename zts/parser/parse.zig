@@ -3732,21 +3732,15 @@ pub const Parser = struct {
     fn addAtom(self: *Parser, name: []const u8) !u16 {
         // Check predefined atoms first (e.g., "handler" -> 159)
         if (object.lookupPredefinedAtom(name)) |atom| {
-            const result = @intFromEnum(atom);
-            std.log.debug("addAtom('{s}') -> predefined {}", .{ name, result });
-            return @truncate(result);
+            return @truncate(@intFromEnum(atom));
         }
         // Intern dynamic atoms if atom table is available
         if (self.atoms) |atoms| {
             const atom = try atoms.intern(name);
-            const result = @intFromEnum(atom);
-            std.log.debug("addAtom('{s}') -> interned {}", .{ name, result });
-            return @truncate(result);
+            return @truncate(@intFromEnum(atom));
         }
         // Fall back to string constant pool for dynamic atoms (standalone parser)
-        const result = try self.constants.addString(name);
-        std.log.debug("addAtom('{s}') -> constant {}", .{ name, result });
-        return result;
+        return try self.constants.addString(name);
     }
 
     // ============ Public API ============

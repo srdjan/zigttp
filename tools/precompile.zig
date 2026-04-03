@@ -940,84 +940,479 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     }
 }
 
-pub fn runCheck(allocator: std.mem.Allocator, handler_path: []const u8, sql_schema_path: ?[]const u8) !void {
+pub const CheckResult = struct {
+    line_count: u32 = 0,
+    parse_errors: u32 = 0,
+    bool_specializations: u32 = 0,
+    bool_errors: u32 = 0,
+    bool_warnings: u32 = 0,
+    type_errors: u32 = 0,
+    is_typescript: bool = false,
+    verify_ran: bool = false,
+    verify_errors: u32 = 0,
+    verify_warnings: u32 = 0,
+    exhaustive_returns: bool = false,
+    results_safe: bool = false,
+    optionals_safe: bool = false,
+    state_isolated: bool = true,
+    no_unreachable: bool = true,
+    paths_enumerated: u32 = 0,
+    paths_exhaustive: bool = false,
+    max_io_depth: ?u32 = null,
+    fault_total: u32 = 0,
+    fault_covered: u32 = 0,
+    properties: ?handler_contract.HandlerProperties = null,
+    contract: ?HandlerContract = null,
+
+    pub fn totalErrors(self: *const CheckResult) u32 {
+        return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors;
+    }
+
+    pub fn totalWarnings(self: *const CheckResult) u32 {
+        return self.bool_warnings + self.verify_warnings;
+    }
+
+    pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
+        if (self.contract) |*c| c.deinit(allocator);
+    }
+};
+
+/// Run the full analysis pipeline without generating bytecode.
+/// Returns a CheckResult with all verification, contract, and coverage data.
+pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_schema_path: ?[]const u8) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
         return err;
     };
     defer allocator.free(source);
 
-    var compiled = try compileHandler(
-        allocator,
-        source,
+    var result = CheckResult{};
+    result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
+
+    var source_to_parse: []const u8 = source;
+    var strip_result: ?zts.StripResult = null;
+    defer if (strip_result) |*sr| sr.deinit();
+
+    const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
+    const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
+    result.is_typescript = is_ts or is_tsx;
+
+    // Stage 1: TypeScript strip
+    if (is_ts or is_tsx) {
+        strip_result = zts.strip(allocator, source, .{
+            .tsx_mode = is_tsx,
+            .enable_comptime = true,
+            .comptime_env = .{},
+        }) catch |err| {
+            std.debug.print("TypeScript strip error: {}\n", .{err});
+            result.parse_errors = 1;
+            return result;
+        };
+        source_to_parse = strip_result.?.code;
+    }
+
+    // Stage 2: Parse
+    var atoms = zts.context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
+        js_parser.tokenizer.enableJsx();
+    }
+
+    const root = js_parser.parse() catch {
+        const errors = js_parser.errors.getErrors();
+        for (errors) |parse_error| {
+            std.debug.print("{s}:{}:{}: {s}\n", .{
+                handler_path,
+                parse_error.location.line,
+                parse_error.location.column,
+                parse_error.message,
+            });
+        }
+        result.parse_errors = @intCast(errors.len);
+        return result;
+    };
+
+    // Stage 3: Import validation
+    validateVirtualModuleImports(
+        ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        &atoms,
         handler_path,
-        false,
-        false,
-        true,
+    ) catch {
+        result.parse_errors = 1;
+        return result;
+    };
+
+    // Stage 4: IR optimization
+    _ = zts.parser.optimizeIR(
+        allocator,
+        &js_parser.nodes,
+        &js_parser.constants,
+        root,
+    ) catch {};
+
+    // Stage 5: Bool checker (sound mode)
+    {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        var checker = zts.BoolChecker.init(allocator, ir_view, &atoms);
+        defer checker.deinit();
+
+        result.bool_errors = @intCast(try checker.check(root));
+        const bool_diags = checker.getDiagnostics();
+        result.bool_warnings = @intCast(bool_diags.len -| result.bool_errors);
+
+        if (bool_diags.len > 0) {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            checker.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+            buf = aw.toArrayList();
+            if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+        }
+
+        if (result.bool_errors > 0) {
+            return result;
+        }
+
+        result.bool_specializations = checker.node_types.count();
+    }
+
+    // Stage 6: Type checker (TS only)
+    if (strip_result) |sr| {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const tm = sr.type_map;
+        var type_pool = zts.TypePool.init(allocator);
+        defer type_pool.deinit(allocator);
+        var type_env = zts.TypeEnv.init(allocator, &type_pool);
+        defer type_env.deinit();
+        zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+        type_env.populateFromTypeMap(&tm);
+
+        var tc = zts.type_checker.TypeChecker.init(allocator, ir_view, &atoms, &type_env);
+        defer tc.deinit();
+        result.type_errors = @intCast(try tc.check(root));
+        const tc_diags = tc.getDiagnostics();
+        if (tc_diags.len > 0) {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            tc.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+            buf = aw.toArrayList();
+            if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+        }
+        if (result.type_errors > 0) {
+            return result;
+        }
+    }
+
+    // Stage 7: Handler verification (7 checks)
+    var verify_info: ?VerificationInfo = null;
+    {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
+
+        var verify_type_pool: ?zts.TypePool = null;
+        var verify_type_env: ?zts.TypeEnv = null;
+        var verify_type_checker: ?zts.TypeChecker = null;
+        defer if (verify_type_checker) |*c| c.deinit();
+        defer if (verify_type_env) |*e| e.deinit();
+        defer if (verify_type_pool) |*p| p.deinit(allocator);
+
+        const verifier_env: ?*const zts.TypeEnv = if (strip_result) |sr| blk: {
+            verify_type_pool = zts.TypePool.init(allocator);
+            verify_type_env = zts.TypeEnv.init(allocator, &verify_type_pool.?);
+            zts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
+            verify_type_env.?.populateFromTypeMap(&sr.type_map);
+            verify_type_checker = zts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
+            _ = verify_type_checker.?.check(root) catch 0;
+            break :blk &verify_type_env.?;
+        } else null;
+
+        const verifier_tc: ?*const zts.TypeChecker = if (verify_type_checker) |*c| c else null;
+
+        if (handler_fn) |hf| {
+            result.verify_ran = true;
+            var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_tc);
+            defer verifier.deinit();
+
+            result.verify_errors = @intCast(try verifier.verify(hf));
+            const diags = verifier.getDiagnostics();
+            result.verify_warnings = @intCast(diags.len -| result.verify_errors);
+
+            if (diags.len > 0) {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+            }
+
+            if (result.verify_errors == 0) {
+                result.exhaustive_returns = true;
+                result.results_safe = true;
+                result.optionals_safe = true;
+                result.state_isolated = !verifier.has_module_mutation;
+                verify_info = .{
+                    .exhaustive_returns = true,
+                    .results_safe = true,
+                    .unreachable_code = false,
+                    .bytecode_verified = false,
+                };
+                // Check for unreachable code warnings
+                for (diags) |d| {
+                    if (d.kind == .unreachable_after_return) {
+                        result.no_unreachable = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Stage 8: Contract + flow analysis
+    result.contract = try buildContractWithPolicy(
+        allocator,
+        &js_parser,
+        &atoms,
+        handler_path,
+        root,
+        null,
+        verify_info,
+        if (strip_result) |*sr| &sr.type_map else null,
         null,
         sql_schema_path,
-        false,
+        null,
     );
-    defer compiled.deinit(allocator);
 
-    const contract = compiled.contract orelse return error.ContractMissing;
-    defer compiled.contract = null;
-    defer @constCast(&contract).deinit(allocator);
+    if (result.contract) |*c| {
+        if (c.properties) |*props| {
+            props.state_isolated = result.state_isolated;
+            props.result_safe = result.results_safe;
+            props.optional_safe = result.optionals_safe;
+        }
+        result.properties = c.properties;
+    }
 
-    std.debug.print("Check passed: {s}\n", .{handler_path});
-    printContractSummary(&contract);
+    // Stage 9: Path generation + Stage 10: Fault coverage
+    {
+        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const handler_fn = findHandlerFunction(ir_view, root);
+        if (handler_fn) |hf| {
+            var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
+            defer gen.deinit();
+            try gen.generate(hf);
+
+            const tests = gen.getTests();
+            result.paths_enumerated = @intCast(tests.len);
+            result.paths_exhaustive = tests.len < zts.PathGenerator.MAX_PATHS;
+
+            // Max I/O depth
+            var max_depth: u32 = 0;
+            for (tests) |t| {
+                const depth: u32 = @intCast(t.io_stubs.items.len);
+                if (depth > max_depth) max_depth = depth;
+            }
+            result.max_io_depth = if (tests.len > 0) max_depth else null;
+
+            // Populate behavioral contract
+            if (result.contract) |*c| {
+                if (c.properties) |*props| {
+                    props.max_io_depth = result.max_io_depth;
+                }
+                c.behaviors = try gen.toBehaviorPaths(allocator);
+                c.behaviors_exhaustive = result.paths_exhaustive;
+            }
+
+            // Fault coverage
+            var fc = zts.fault_coverage.FaultCoverageChecker.init(allocator, tests);
+            defer fc.deinit();
+            try fc.analyze();
+            const fc_report = fc.getReport();
+            result.fault_total = fc_report.total_failable;
+            result.fault_covered = fc_report.covered;
+
+            if (result.contract) |*c| {
+                c.fault_coverage = .{
+                    .total_failable = fc_report.total_failable,
+                    .covered = fc_report.covered,
+                    .warnings = fc_report.warning_count,
+                };
+                if (c.properties) |*props| {
+                    props.fault_covered = fc_report.isClean();
+                }
+            }
+        }
+    }
+
+    return result;
 }
 
-fn printContractSummary(contract: *const HandlerContract) void {
-    std.debug.print("Routes: {d}\n", .{contract.routes.items.len});
-    for (contract.routes.items) |route| {
-        std.debug.print("  {s} [{s}] -> {d}\n", .{ route.pattern, route.route_type, route.status });
+/// Format a structured proof card showing what the compiler proved.
+pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const u8) void {
+    writer.print("\nzts check: {s}\n\n", .{filename}) catch return;
+
+    // Parse
+    writeDotted(writer, "Parse", 24);
+    if (r.parse_errors > 0) {
+        writer.print("FAIL ({d} errors)\n", .{r.parse_errors}) catch return;
+    } else {
+        writer.print("OK ({d} lines)\n", .{r.line_count}) catch return;
     }
-    if (contract.api.routes.items.len > 0) {
-        std.debug.print("API routes: {d}\n", .{contract.api.routes.items.len});
-        for (contract.api.routes.items) |route| {
-            std.debug.print("  {s} {s}\n", .{ route.method, route.path });
+
+    // Types
+    if (r.is_typescript) {
+        writeDotted(writer, "Types", 24);
+        if (r.type_errors > 0) {
+            writer.print("FAIL ({d} errors)\n", .{r.type_errors}) catch return;
+        } else {
+            writer.print("OK\n", .{}) catch return;
         }
     }
-    if (contract.env.literal.items.len > 0 or contract.env.dynamic) {
-        std.debug.print("Env: {d} literal, dynamic={s}\n", .{
-            contract.env.literal.items.len,
-            if (contract.env.dynamic) "true" else "false",
-        });
-        for (contract.env.literal.items) |name| {
-            std.debug.print("  {s}\n", .{name});
+
+    // Sound mode
+    writeDotted(writer, "Sound mode", 24);
+    if (r.bool_errors > 0) {
+        writer.print("FAIL ({d} errors)\n", .{r.bool_errors}) catch return;
+    } else if (r.bool_specializations > 0) {
+        writer.print("OK ({d} specializations)\n", .{r.bool_specializations}) catch return;
+    } else {
+        writer.print("OK\n", .{}) catch return;
+    }
+
+    // Verification
+    if (r.verify_ran) {
+        writer.print("\n  Verification:\n", .{}) catch return;
+        writeProven(writer, "exhaustive_returns", r.verify_errors == 0 and r.exhaustive_returns);
+        writeProven(writer, "results_safe", r.results_safe);
+        writeProven(writer, "optionals_safe", r.optionals_safe);
+        writeProven(writer, "state_isolated", r.state_isolated);
+        writeProven(writer, "no_unreachable", r.no_unreachable);
+    }
+
+    // Properties
+    if (r.properties) |props| {
+        writer.print("\n  Properties:\n", .{}) catch return;
+        writeProven(writer, "retry_safe", props.retry_safe);
+        writeProven(writer, "idempotent", props.idempotent);
+        writeProven(writer, "injection_safe", props.injection_safe);
+        writeProven(writer, "deterministic", props.deterministic);
+        writeProven(writer, "read_only", props.read_only);
+
+        writer.print("\n  Security:\n", .{}) catch return;
+        writeProven(writer, "no_secret_leakage", props.no_secret_leakage);
+        writeProven(writer, "no_credential_leak", props.no_credential_leakage);
+        writeProven(writer, "input_validated", props.input_validated);
+    }
+
+    // Summary stats
+    writer.print("\n", .{}) catch return;
+    if (r.fault_total > 0) {
+        writer.print("  Fault coverage: {d}/{d} paths covered\n", .{ r.fault_covered, r.fault_total }) catch return;
+    }
+    if (r.paths_enumerated > 0) {
+        writer.print("  Execution paths: {d}", .{r.paths_enumerated}) catch return;
+        if (r.paths_exhaustive) {
+            writer.print(" (exhaustive)\n", .{}) catch return;
+        } else {
+            writer.print(" (limit reached)\n", .{}) catch return;
         }
     }
-    if (contract.egress.hosts.items.len > 0 or contract.egress.dynamic) {
-        std.debug.print("Egress: {d} host(s), dynamic={s}\n", .{
-            contract.egress.hosts.items.len,
-            if (contract.egress.dynamic) "true" else "false",
-        });
-        for (contract.egress.hosts.items) |host| {
-            std.debug.print("  {s}\n", .{host});
+    if (r.max_io_depth) |depth| {
+        writer.print("  Max I/O depth: {d}\n", .{depth}) catch return;
+    }
+
+    writer.print("\n  {d} errors, {d} warnings\n", .{ r.totalErrors(), r.totalWarnings() }) catch return;
+}
+
+const dots = "." ** 32;
+
+fn writeDotted(writer: anytype, label: []const u8, width: usize) void {
+    writer.print("  {s} ", .{label}) catch return;
+    const pad = @min(width -| (label.len + 1), dots.len);
+    writer.writeAll(dots[0..pad]) catch return;
+    writer.writeAll(" ") catch return;
+}
+
+fn writeProven(writer: anytype, label: []const u8, proven: bool) void {
+    writer.print("    {s} ", .{label}) catch return;
+    const pad = @min(20 -| label.len, dots.len);
+    writer.writeAll(dots[0..pad]) catch return;
+    writer.writeAll(if (proven) " PROVEN\n" else " ---\n") catch return;
+}
+
+/// Generate TypeScript type definitions for all virtual modules.
+pub fn generateTypeDefs(writer: anytype) void {
+    writer.print("// Generated by: zts check --types\n// Do not edit manually.\n\n", .{}) catch return;
+
+    // Request and Response globals
+    writer.print(
+        \\interface RequestInit {{
+        \\  method?: string;
+        \\  headers?: Record<string, string>;
+        \\  body?: string;
+        \\}}
+        \\
+        \\interface ResponseInit {{
+        \\  status?: number;
+        \\  statusText?: string;
+        \\  headers?: Record<string, string>;
+        \\}}
+        \\
+        \\declare class Request {{
+        \\  readonly method: string;
+        \\  readonly url: string;
+        \\  readonly path: string;
+        \\  readonly query: string;
+        \\  readonly body: string | undefined;
+        \\  readonly headers: Record<string, string>;
+        \\}}
+        \\
+        \\declare class Response {{
+        \\  readonly body: string;
+        \\  readonly status: number;
+        \\  readonly statusText: string;
+        \\  readonly ok: boolean;
+        \\  readonly headers: Record<string, string>;
+        \\  static json(data: unknown, init?: ResponseInit): Response;
+        \\  static text(text: string, init?: ResponseInit): Response;
+        \\  static html(html: string, init?: ResponseInit): Response;
+        \\  static redirect(url: string, status?: number): Response;
+        \\}}
+        \\
+        \\
+    , .{}) catch return;
+
+    const modules = @import("zts").builtin_modules;
+    for (modules.all) |binding| {
+        writer.print("declare module \"{s}\" {{\n", .{binding.specifier}) catch return;
+        for (binding.exports) |func| {
+            writer.print("  export function {s}(", .{func.name}) catch return;
+            for (func.param_types, 0..) |pt, i| {
+                if (i > 0) writer.print(", ", .{}) catch return;
+                writer.print("arg{d}: {s}", .{ i, returnKindToTs(pt) }) catch return;
+            }
+            writer.print("): {s};\n", .{returnKindToTs(func.returns)}) catch return;
         }
+        writer.print("}}\n\n", .{}) catch return;
     }
-    if (contract.cache.namespaces.items.len > 0 or contract.cache.dynamic) {
-        std.debug.print("Cache: {d} namespace(s), dynamic={s}\n", .{
-            contract.cache.namespaces.items.len,
-            if (contract.cache.dynamic) "true" else "false",
-        });
-        for (contract.cache.namespaces.items) |name| {
-            std.debug.print("  {s}\n", .{name});
-        }
-    }
-    if (contract.sql.queries.items.len > 0 or contract.sql.dynamic) {
-        std.debug.print("SQL: {d} query(ies), dynamic={s}\n", .{
-            contract.sql.queries.items.len,
-            if (contract.sql.dynamic) "true" else "false",
-        });
-        for (contract.sql.queries.items) |query| {
-            std.debug.print("  {s}\n", .{query.name});
-        }
-    }
-    if (contract.durable.used) {
-        std.debug.print("Durable: enabled\n", .{});
-    }
+}
+
+fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
+    return switch (kind) {
+        .boolean => "boolean",
+        .number => "number",
+        .string => "string",
+        .object => "Record<string, unknown>",
+        .undefined => "void",
+        .unknown => "unknown",
+        .optional_string => "string | undefined",
+        .optional_object => "Record<string, unknown> | undefined",
+        .result => "{ ok: boolean; value?: unknown; error?: string; errors?: unknown }",
+    };
 }
 
 // ============================================================================
@@ -1396,7 +1791,7 @@ fn compileHandler(
             return err;
         };
         source_to_parse = strip_result.?.code;
-        std.debug.print("TypeScript stripped successfully\n", .{});
+        if (!builtin.is_test) std.debug.print("TypeScript stripped successfully\n", .{});
     }
 
     // Initialize string table and atom table for parsing
@@ -1479,7 +1874,7 @@ fn compileHandler(
         const bool_error_count = try checker.check(root);
         const bool_diags = checker.getDiagnostics();
 
-        if (bool_diags.len > 0) {
+        if (bool_diags.len > 0 and !builtin.is_test) {
             std.debug.print("\n", .{});
             var bool_output: std.ArrayList(u8) = .empty;
             defer bool_output.deinit(allocator);
@@ -1496,11 +1891,11 @@ fn compileHandler(
         }
 
         if (bool_error_count > 0) {
-            std.debug.print("\nBoolean check failed for {s}\n", .{filename});
+            if (!builtin.is_test) std.debug.print("\nBoolean check failed for {s}\n", .{filename});
             return error.SoundModeViolation;
         }
 
-        std.debug.print("Boolean check passed\n", .{});
+        if (!builtin.is_test) std.debug.print("Boolean check passed\n", .{});
 
         // Extract node type map for codegen specialization (move ownership out of checker)
         node_type_map = checker.node_types;
@@ -1524,7 +1919,7 @@ fn compileHandler(
             const tc_errors = try tc.check(root);
             const tc_diags = tc.getDiagnostics();
 
-            if (tc_diags.len > 0) {
+            if (tc_diags.len > 0 and !builtin.is_test) {
                 var tc_output: std.ArrayList(u8) = .empty;
                 defer tc_output.deinit(allocator);
                 var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
@@ -1536,10 +1931,10 @@ fn compileHandler(
             }
 
             if (tc_errors > 0) {
-                std.debug.print("\nType check failed for {s}\n", .{filename});
+                if (!builtin.is_test) std.debug.print("\nType check failed for {s}\n", .{filename});
                 return error.SoundModeViolation;
             }
-            std.debug.print("Type check passed\n", .{});
+            if (!builtin.is_test) std.debug.print("Type check passed\n", .{});
         }
     }
 
@@ -1588,7 +1983,7 @@ fn compileHandler(
             const error_count = try verifier.verify(hf);
             const diags = verifier.getDiagnostics();
 
-            if (diags.len > 0) {
+            if (diags.len > 0 and !builtin.is_test) {
                 std.debug.print("\n", .{});
                 // Format diagnostics to a buffer and print via debug.print
                 var diag_output: std.ArrayList(u8) = .empty;
@@ -1640,7 +2035,7 @@ fn compileHandler(
                     }
                 }
 
-                std.debug.print("\nVerification failed for {s}\n", .{filename});
+                if (!builtin.is_test) std.debug.print("\nVerification failed for {s}\n", .{filename});
                 return .{
                     .verify_failed = true,
                     .violations_jsonl = viol_jsonl_result,
@@ -1669,9 +2064,9 @@ fn compileHandler(
             result_safe = true;
             optional_safe = true;
 
-            std.debug.print("Verification passed\n", .{});
+            if (!builtin.is_test) std.debug.print("Verification passed\n", .{});
         } else {
-            std.debug.print("Warning: no handler function found for verification\n", .{});
+            if (!builtin.is_test) std.debug.print("Warning: no handler function found for verification\n", .{});
         }
     }
 
@@ -1693,7 +2088,7 @@ fn compileHandler(
     const func = try code_gen.generate(root);
     defer code_gen.freeOwnedConstantPayloads();
 
-    std.debug.print("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
+    if (!builtin.is_test) std.debug.print("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
 
     // Bytecode verification: reject malformed bytecode before serialization
     const verify_bc = zts.BytecodeVerifier.verify(&func);
@@ -1707,7 +2102,7 @@ fn compileHandler(
 
     // Get object literal shapes from parser
     const shapes = code_gen.shapes.items;
-    std.debug.print("Collected {d} object literal shapes\n", .{shapes.len});
+    if (!builtin.is_test) std.debug.print("Collected {d} object literal shapes\n", .{shapes.len});
 
     // Serialize bytecode with atoms AND shapes for complete cache format
     var buffer: [256 * 1024]u8 = undefined; // 256KB buffer
@@ -1999,7 +2394,7 @@ fn validateVirtualModuleImports(
         }
 
         if (zts.modules.validateImports(virtual_module, name_buf[0..name_count])) |missing| {
-            std.debug.print(
+            if (!builtin.is_test) std.debug.print(
                 "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
                 .{ module_str, missing, filename },
             );
@@ -2868,7 +3263,7 @@ fn writeSdkArtifact(
         return err;
     };
 
-    std.debug.print("Wrote TypeScript SDK to: {s}\n", .{sdk_path});
+    if (!builtin.is_test) std.debug.print("Wrote TypeScript SDK to: {s}\n", .{sdk_path});
 }
 
 fn writeZigFile(
