@@ -334,4 +334,17 @@ pub fn build(b: *std.Build) void {
     }
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
+
+    // System linking step (cross-handler contract verification)
+    const system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking");
+    if (system_path) |sys_path| {
+        const run_system = b.addRunArtifact(zts_exe);
+        run_system.addArg("link");
+        run_system.addArg(sys_path);
+        if (b.args) |args| {
+            run_system.addArgs(args);
+        }
+        const system_step = b.step("system", "Cross-handler contract linking");
+        system_step.dependOn(&run_system.step);
+    }
 }

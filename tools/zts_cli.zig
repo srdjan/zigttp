@@ -3,6 +3,7 @@ const std = @import("std");
 const precompile = @import("precompile.zig");
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
+const system_build = @import("system_build.zig");
 const project_config_mod = @import("project_config");
 const zts = @import("zts");
 const zts_file_io = zts.file_io;
@@ -39,6 +40,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "mock")) {
         try mock.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "link")) {
+        try system_build.runWithArgs(allocator, argv[1..]);
         return;
     }
 
@@ -170,6 +175,7 @@ fn printHelp() void {
         \\  zts compile [precompile flags] <handler.ts> <output.zig>
         \\  zts prove <old-contract.json> <new-contract.json> [output-dir/]
         \\  zts mock <tests.jsonl> [--port PORT]
+        \\  zts link <system.json> [--output-dir <dir>]
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

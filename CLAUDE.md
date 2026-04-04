@@ -48,6 +48,9 @@ zig build bench                     # Build and run benchmarks (src/benchmark.zi
 # Tools
 zig build prove -- old.json new.json          # Compare two contracts (exit 0=safe, 1=breaking)
 zig build mock -- tests.jsonl --port 3001     # Serve mock responses from generated tests
+zts link system.json                          # Cross-handler contract linking
+zts link system.json --output-dir build/      # Output to custom directory
+zig build system -Dsystem=system.json         # Same via build system
 ```
 
 ## Architecture
@@ -165,6 +168,8 @@ Currently supported targets:
 Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). The deploy report includes: PROVEN/NEEDS MANUAL REVIEW sections, FLOW ANALYSIS (secret/credential leakage, input validation, PII containment), FAULT COVERAGE, HANDLER PROPERTIES (retry_safe, read_only, injection_safe, idempotent, state_isolated, max_io_depth), OWASP TOP 10 COVERAGE (A01-A07 mapped to proven properties), VPC EGRESS (when egress hosts exist), and COST ESTIMATE (AWS Lambda pricing from proven I/O depth).
 
 **Standalone Proof CLI** (`tools/prove.zig`): `zig build prove -- <old.json> <new.json> [output-dir/]` compares two contract.json files without rebuilding handlers. Outputs proof.json, proof-report.txt, and upgrade-manifest.json with classification (equivalent/additive/breaking) and upgrade verdict (safe/safe_with_additions/breaking/needs_review). Exit code 0 for safe, 1 for breaking, 2 for needs_review. CI-ready.
+
+**Cross-Handler Contract Linking** (`zts/system_linker.zig`, `tools/system_build.zig`): `zts link <system.json>` proves that a system of handlers communicates correctly at compile time. Given N handler source files and a `system.json` mapping handlers to base URLs, the linker: (1) resolves every fetchSync URL to a target handler's route via `pathsMatch`, classifying links as linked/external/unlinked, (2) checks response coverage - whether the caller handles all status codes the target can produce, (3) analyzes cross-boundary data flow using property composition (injection_safe, no_secret_leakage), (4) detects failure cascades where durable handlers call non-retry-safe targets, (5) composes system-level properties from individual handler properties using AND/MAX rules. Dynamic fetchSync URLs (string concatenation) are counted but cannot be linked statically. Outputs `system-contract.json` (machine-readable) and `system-report.txt` (human-readable with PROVEN/--- labels). Exit code 1 if any unlinked routes detected. The linker operates entirely on `HandlerContract` values, not IR. Contract version bumped to v10 with `egress.urls` field storing full fetchSync URL strings alongside extracted hosts.
 
 **Contract-Driven Mock Server** (`tools/mock_server.zig`): `zig build mock -- <tests.jsonl> [--port PORT]` serves mock HTTP responses from PathGenerator test cases. Parses JSONL into a route table and returns expected status codes with JSON bodies and CORS headers. Frontend teams get a mock API provably consistent with the handler contract.
 

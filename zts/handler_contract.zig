@@ -63,6 +63,7 @@ pub const EnvInfo = struct {
 
 pub const EgressInfo = struct {
     hosts: std.ArrayList([]const u8), // each entry owned
+    urls: std.ArrayList([]const u8) = .empty, // full fetchSync URLs, each entry owned
     dynamic: bool,
 };
 
@@ -319,6 +320,28 @@ pub fn emptySqlInfo() SqlInfo {
     };
 }
 
+/// Create a minimal empty contract with the given handler path (owned by caller).
+pub fn emptyContract(path: []const u8) HandlerContract {
+    return .{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+    };
+}
+
 pub const VerificationInfo = struct {
     exhaustive_returns: bool,
     results_safe: bool,
@@ -460,7 +483,7 @@ pub const BehaviorPath = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 9,
+    version: u32 = 10,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -510,6 +533,10 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.egress.hosts.deinit(allocator);
+        for (self.egress.urls.items) |s| {
+            allocator.free(s);
+        }
+        self.egress.urls.deinit(allocator);
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }
@@ -548,6 +575,7 @@ pub const ContractBuilder = struct {
     env_literals: std.ArrayList([]const u8),
     env_dynamic: bool,
     egress_hosts: std.ArrayList([]const u8),
+    egress_urls: std.ArrayList([]const u8),
     egress_dynamic: bool,
     cache_namespaces: std.ArrayList([]const u8),
     cache_dynamic: bool,
@@ -602,6 +630,7 @@ pub const ContractBuilder = struct {
             .env_literals = .empty,
             .env_dynamic = false,
             .egress_hosts = .empty,
+            .egress_urls = .empty,
             .egress_dynamic = false,
             .cache_namespaces = .empty,
             .cache_dynamic = false,
@@ -631,6 +660,8 @@ pub const ContractBuilder = struct {
         self.env_literals.deinit(self.allocator);
         for (self.egress_hosts.items) |s| self.allocator.free(s);
         self.egress_hosts.deinit(self.allocator);
+        for (self.egress_urls.items) |s| self.allocator.free(s);
+        self.egress_urls.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
         self.cache_namespaces.deinit(self.allocator);
         for (self.sql_queries.items) |*query| query.deinit(self.allocator);
@@ -758,6 +789,7 @@ pub const ContractBuilder = struct {
             },
             .egress = .{
                 .hosts = self.egress_hosts,
+                .urls = self.egress_urls,
                 .dynamic = self.egress_dynamic,
             },
             .cache = .{
@@ -811,6 +843,7 @@ pub const ContractBuilder = struct {
         self.functions_map = .empty;
         self.env_literals = .empty;
         self.egress_hosts = .empty;
+        self.egress_urls = .empty;
         self.cache_namespaces = .empty;
         self.sql_queries = .empty;
         self.durable_key_literals = .empty;
@@ -936,6 +969,7 @@ pub const ContractBuilder = struct {
                     const name = self.resolveAtomName(binding.slot) orelse continue;
                     if (std.mem.eql(u8, name, "fetchSync")) {
                         try self.extractLiteralArg(call, &self.egress_hosts, &self.egress_dynamic, &extractHost);
+                        try self.extractLiteralArg(call, &self.egress_urls, &self.egress_dynamic, null);
                         continue;
                     }
                 }
@@ -2324,7 +2358,7 @@ fn parseRouteKey(raw: []const u8) ?ParsedRouteKey {
 // -------------------------------------------------------------------------
 
 /// Extract hostname from a URL string (e.g. "https://api.example.com/path" -> "api.example.com")
-fn extractHost(url: []const u8) []const u8 {
+pub fn extractHost(url: []const u8) []const u8 {
     // Skip scheme
     var start: usize = 0;
     if (std.mem.indexOf(u8, url, "://")) |scheme_end| {
@@ -2407,7 +2441,7 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
         } else if (std.mem.eql(u8, key, "env")) {
             try parseDynamicSection(&parser, allocator, "literal", &contract.env.literal, &contract.env.dynamic);
         } else if (std.mem.eql(u8, key, "egress")) {
-            try parseDynamicSection(&parser, allocator, "hosts", &contract.egress.hosts, &contract.egress.dynamic);
+            try parseEgressSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "cache")) {
             try parseDynamicSection(&parser, allocator, "namespaces", &contract.cache.namespaces, &contract.cache.dynamic);
         } else if (std.mem.eql(u8, key, "sql")) {
@@ -2442,27 +2476,27 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
     return contract;
 }
 
-const JsonParser = struct {
+pub const JsonParser = struct {
     data: []const u8,
     pos: usize = 0,
 
-    fn init(data: []const u8) JsonParser {
+    pub fn init(data: []const u8) JsonParser {
         return .{ .data = data };
     }
 
-    fn peek(self: *JsonParser) u8 {
+    pub fn peek(self: *JsonParser) u8 {
         if (self.pos >= self.data.len) return 0;
         return self.data[self.pos];
     }
 
-    fn advance(self: *JsonParser) u8 {
+    pub fn advance(self: *JsonParser) u8 {
         if (self.pos >= self.data.len) return 0;
         const c = self.data[self.pos];
         self.pos += 1;
         return c;
     }
 
-    fn consume(self: *JsonParser, expected: u8) bool {
+    pub fn consume(self: *JsonParser, expected: u8) bool {
         self.skipWhitespace();
         if (self.pos < self.data.len and self.data[self.pos] == expected) {
             self.pos += 1;
@@ -2471,7 +2505,7 @@ const JsonParser = struct {
         return false;
     }
 
-    fn skipWhitespace(self: *JsonParser) void {
+    pub fn skipWhitespace(self: *JsonParser) void {
         while (self.pos < self.data.len) {
             switch (self.data[self.pos]) {
                 ' ', '\t', '\n', '\r' => self.pos += 1,
@@ -2482,7 +2516,7 @@ const JsonParser = struct {
 
     /// Read a JSON string value (including quotes). Returns the unquoted content.
     /// The returned slice points into the source data (zero-copy for non-escaped strings).
-    fn readString(self: *JsonParser) ?[]const u8 {
+    pub fn readString(self: *JsonParser) ?[]const u8 {
         self.skipWhitespace();
         if (self.pos >= self.data.len or self.data[self.pos] != '"') return null;
         self.pos += 1; // skip opening quote
@@ -2499,7 +2533,7 @@ const JsonParser = struct {
     }
 
     /// Read a JSON number as u32.
-    fn readU32(self: *JsonParser) ?u32 {
+    pub fn readU32(self: *JsonParser) ?u32 {
         self.skipWhitespace();
         var val: u32 = 0;
         var found = false;
@@ -2544,7 +2578,7 @@ const JsonParser = struct {
     }
 
     /// Skip any JSON value (string, number, bool, null, object, array).
-    fn skipValue(self: *JsonParser) void {
+    pub fn skipValue(self: *JsonParser) void {
         self.skipWhitespace();
         if (self.pos >= self.data.len) return;
         switch (self.data[self.pos]) {
@@ -2723,6 +2757,37 @@ fn parseDynamicSection(
             try parseStringArray(parser, allocator, list);
         } else if (std.mem.eql(u8, key, "dynamic")) {
             dynamic.* = parser.readBool() orelse false;
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseEgressSection(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "hosts")) {
+            try parseStringArray(parser, allocator, &contract.egress.hosts);
+        } else if (std.mem.eql(u8, key, "urls")) {
+            try parseStringArray(parser, allocator, &contract.egress.urls);
+        } else if (std.mem.eql(u8, key, "dynamic")) {
+            contract.egress.dynamic = parser.readBool() orelse false;
         } else {
             parser.skipValue();
         }
@@ -3792,6 +3857,14 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, host);
     }
     try writer.writeAll("],\n");
+    if (contract.egress.urls.items.len > 0) {
+        try writer.writeAll("    \"urls\": [");
+        for (contract.egress.urls.items, 0..) |url, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, url);
+        }
+        try writer.writeAll("],\n");
+    }
     try writer.print("    \"dynamic\": {s}\n", .{if (contract.egress.dynamic) "true" else "false"});
     try writer.writeAll("  },\n");
 
@@ -4534,7 +4607,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 10") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);

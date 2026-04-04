@@ -65,6 +65,7 @@ pub const trace = @import("trace.zig");
 pub const file_io = @import("file_io.zig");
 pub const module_slots = @import("module_slots.zig");
 pub const contract_diff = @import("contract_diff.zig");
+pub const system_linker = @import("system_linker.zig");
 pub const module_binding = @import("module_binding.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
 pub const sqlite = @import("sqlite.zig");

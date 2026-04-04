@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "handlers": [
+    { "path": "examples/system/gateway.ts", "baseUrl": "https://gateway.internal" },
+    { "path": "examples/system/users.ts", "baseUrl": "https://users.internal" },
+    { "path": "examples/system/orders.ts", "baseUrl": "https://orders.internal" }
+  ]
+}
