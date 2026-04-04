@@ -419,14 +419,16 @@ pub const ModuleBinding = struct {
 ///   - duplicate specifiers
 ///   - duplicate function names across modules
 ///   - state lifecycle inconsistency (stateful without init/deinit)
-///   - specifier format (must start with "zigttp:")
+///   - specifier format (must start with "zigttp:" or "zigttp-ext:")
 ///   - function bindings missing both func and module_func
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
     @setEvalBranchQuota(5000);
     // Check specifier format and state consistency per module
     for (bindings) |b| {
-        if (b.specifier.len < 7 or !std.mem.eql(u8, b.specifier[0..7], "zigttp:")) {
-            @compileError("module specifier must start with 'zigttp:': " ++ b.specifier);
+        const builtin_prefix = std.mem.startsWith(u8, b.specifier, "zigttp:");
+        const extension_prefix = std.mem.startsWith(u8, b.specifier, "zigttp-ext:");
+        if (!builtin_prefix and !extension_prefix) {
+            @compileError("module specifier must start with 'zigttp:' or 'zigttp-ext:': " ++ b.specifier);
         }
         // state_init and state_deinit must be set together or not at all
         if (b.state_init != null and b.state_deinit == null) {

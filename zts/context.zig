@@ -183,7 +183,7 @@ pub const CatchHandler = struct {
 };
 
 /// Maximum number of virtual module state slots.
-/// Sized to accommodate all VirtualModule enum variants with room for growth.
+/// Sized to accommodate all built-in and extension module state slots.
 pub const MAX_MODULE_STATE_SLOTS = 8;
 
 /// Per-runtime state entry for a virtual module.
@@ -268,7 +268,7 @@ pub const Context = struct {
     /// Indexed by shape_idx from bytecode, populated via materializeShapes().
     literal_shapes: std.ArrayList(object.HiddenClassIndex),
     /// Per-module persistent state (caches, registries).
-    /// Indexed by VirtualModule enum ordinal. Null when module has no state.
+    /// Indexed by module_slots.Slot ordinal. Null when module has no state.
     module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,

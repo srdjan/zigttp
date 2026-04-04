@@ -36,16 +36,11 @@ pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:router",
     .name = "router",
     .exports = &.{
-        .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2,
-           .returns = .optional_object, .param_types = &.{ .object, .object },
-           .failure_severity = .expected,
-           .contract_extractions = &.{.{ .category = .route_pattern }},
-           .return_labels = .{ .user_input = true } },
+        .{ .name = "routerMatch", .func = routerMatchNative, .arg_count = 2, .returns = .optional_object, .param_types = &.{ .object, .object }, .traceable = false, .failure_severity = .expected, .contract_extractions = &.{.{ .category = .route_pattern }}, .return_labels = .{ .user_input = true } },
     },
 };
 
 pub const exports = binding.toModuleExports();
-
 
 /// routerMatch(routes, req) -> { handler, params } | null
 fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {

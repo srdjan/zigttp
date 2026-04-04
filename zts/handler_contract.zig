@@ -18,7 +18,6 @@ const json_utils = @import("json_utils.zig");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
-const modules_resolver = @import("modules/resolver.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const bytecode = @import("bytecode.zig");
@@ -2214,14 +2213,14 @@ pub const ContractBuilder = struct {
         const has_egress = self.egress_hosts.items.len > 0 or self.egress_dynamic;
 
         for (self.functions_map.items) |entry| {
-            const vm = modules_resolver.VirtualModule.fromSpecifier(entry.module) orelse continue;
-            const mod_exports = vm.getExports();
-            const is_durable = vm == .durable;
+            const binding = builtin_modules.fromSpecifier(entry.module) orelse continue;
+            const is_durable = std.mem.eql(u8, binding.specifier, "zigttp:durable");
+            const is_cache = std.mem.eql(u8, binding.specifier, "zigttp:cache");
 
             for (entry.names.items) |func_name| {
                 has_any_call = true;
 
-                for (mod_exports) |exp| {
+                for (binding.exports) |exp| {
                     if (std.mem.eql(u8, exp.name, func_name)) {
                         if (exp.effect == .write) {
                             has_write = true;
@@ -2231,7 +2230,7 @@ pub const ContractBuilder = struct {
                     }
                 }
 
-                if (vm == .cache and std.mem.eql(u8, func_name, "cacheGet")) {
+                if (is_cache and std.mem.eql(u8, func_name, "cacheGet")) {
                     has_cache_read = true;
                 }
             }

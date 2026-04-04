@@ -1474,9 +1474,8 @@ fn executeBuildTimeHandler(
     defer zts.destroyContext(ctx);
     try zts.builtins.initBuiltins(ctx);
 
-    inline for (std.meta.fields(zts.modules.VirtualModule)) |field| {
-        const module: zts.modules.VirtualModule = @enumFromInt(field.value);
-        try zts.modules.registerVirtualModuleReplay(module, ctx, allocator);
+    inline for (zts.builtin_modules.all) |binding| {
+        try zts.modules.registerVirtualModuleReplay(binding, ctx, allocator);
     }
 
     var replay_state = zts.trace.ReplayState{
@@ -2378,7 +2377,7 @@ fn validateVirtualModuleImports(
 
         const import_decl = view.getImportDecl(node_idx) orelse continue;
         const module_str = view.getString(import_decl.module_idx) orelse continue;
-        const virtual_module = zts.modules.VirtualModule.fromSpecifier(module_str) orelse continue;
+        const binding = zts.builtin_modules.fromSpecifier(module_str) orelse continue;
 
         var name_buf: [32][]const u8 = undefined;
         var name_count: usize = 0;
@@ -2393,7 +2392,7 @@ fn validateVirtualModuleImports(
             }
         }
 
-        if (zts.modules.validateImports(virtual_module, name_buf[0..name_count])) |missing| {
+        if (zts.modules.validateImports(binding, name_buf[0..name_count])) |missing| {
             if (!builtin.is_test) std.debug.print(
                 "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
                 .{ module_str, missing, filename },

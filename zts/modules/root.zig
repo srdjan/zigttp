@@ -24,7 +24,6 @@ pub const module_graph = @import("module_graph.zig");
 pub const compiler = @import("compiler.zig");
 pub const types = @import("types.zig");
 
-pub const VirtualModule = resolver.VirtualModule;
 pub const ModuleExport = resolver.ModuleExport;
 pub const ResolveResult = resolver.ResolveResult;
 

@@ -8,6 +8,7 @@
 
 const mb = @import("module_binding.zig");
 const ModuleBinding = mb.ModuleBinding;
+const extension_bindings = @import("generated/extension_bindings.zig");
 
 const env_mod = @import("modules/env.zig");
 const crypto_mod = @import("modules/crypto.zig");
@@ -21,8 +22,8 @@ const io_mod = @import("modules/io.zig");
 const compose_mod = @import("modules/compose.zig");
 const durable_mod = @import("modules/durable.zig");
 
-/// All built-in virtual module bindings, in registration order.
-pub const all = [_]ModuleBinding{
+/// All in-tree virtual module bindings, in registration order.
+pub const builtins = [_]ModuleBinding{
     env_mod.binding,
     crypto_mod.binding,
     router_mod.binding,
@@ -35,6 +36,9 @@ pub const all = [_]ModuleBinding{
     compose_mod.binding,
     durable_mod.binding,
 };
+
+/// Unified module registry: core built-ins plus explicitly registered extensions.
+pub const all = builtins ++ extension_bindings.all;
 
 /// Number of built-in modules.
 pub const count = all.len;
@@ -78,6 +82,7 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zigttp:env") != null);
     try std.testing.expect(fromSpecifier("zigttp:crypto") != null);
     try std.testing.expect(fromSpecifier("zigttp:cache") != null);
+    try std.testing.expect(fromSpecifier("zigttp-ext:math") != null);
     try std.testing.expect(fromSpecifier("zigttp:unknown") == null);
 }
 
@@ -86,6 +91,13 @@ test "findFunction finds known functions" {
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("zigttp:crypto", result.?.binding.specifier);
     try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
+}
+
+test "findFunction finds extension functions" {
+    const result = findFunction("double");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("zigttp-ext:math", result.?.binding.specifier);
+    try std.testing.expectEqual(mb.ReturnKind.number, result.?.func.returns);
 }
 
 test "findFunction finds result-producing functions" {

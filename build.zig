@@ -3,6 +3,16 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const zigttp_sdk_dep = b.dependency("zigttp_sdk", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zigttp_sdk_mod = zigttp_sdk_dep.module("zigttp-sdk");
+    const ext_demo_dep = b.dependency("zigttp_ext_demo", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ext_demo_mod = ext_demo_dep.module("zigttp-ext-demo");
 
     // Handler path option (required for main build)
     const handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)");
@@ -35,15 +45,20 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     zts_mod.linkSystemLibrary("sqlite3", .{});
+    zts_mod.addImport("zigttp-sdk", zigttp_sdk_mod);
+    zts_mod.addImport("zigttp-ext-demo", ext_demo_mod);
 
     // zts tests
+    const zts_tests_root = b.createModule(.{
+        .root_source_file = b.path("zts/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    zts_tests_root.addImport("zigttp-sdk", zigttp_sdk_mod);
+    zts_tests_root.addImport("zigttp-ext-demo", ext_demo_mod);
     const zts_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("zts/root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = zts_tests_root,
     });
     zts_tests.root_module.linkSystemLibrary("sqlite3", .{});
     const run_zts_tests = b.addRunArtifact(zts_tests);

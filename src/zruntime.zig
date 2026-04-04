@@ -737,9 +737,9 @@ pub const Runtime = struct {
         for (imports) |import_info| {
             const result = zq.modules.resolve(import_info.module_specifier);
             switch (result) {
-                .virtual => |module| {
+                .virtual => |binding| {
                     // Validate that all imported names exist in the module
-                    if (zq.modules.validateImports(module, import_info.specifier_names)) |missing| {
+                    if (zq.modules.validateImports(binding, import_info.specifier_names)) |missing| {
                         std.log.err("Module '{s}' has no export '{s}'", .{ import_info.module_specifier, missing });
                         return error.ModuleExportNotFound;
                     }
@@ -817,26 +817,22 @@ pub const Runtime = struct {
     fn installVirtualModules(self: *Self) !void {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
-            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
-                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
-                try zq.modules.registerVirtualModuleReplay(module, self.ctx, self.allocator);
+            inline for (zq.builtin_modules.all) |binding| {
+                try zq.modules.registerVirtualModuleReplay(binding, self.ctx, self.allocator);
             }
         } else if (self.config.durable_oplog_dir != null) {
             // Durable mode: hybrid replay/record wrappers
-            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
-                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
-                try zq.modules.registerVirtualModuleDurable(module, self.ctx, self.allocator);
+            inline for (zq.builtin_modules.all) |binding| {
+                try zq.modules.registerVirtualModuleDurable(binding, self.ctx, self.allocator);
             }
         } else if (self.config.trace_file_path != null) {
             // Use traced wrappers that record I/O to TraceRecorder
-            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
-                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
-                try zq.modules.registerVirtualModuleTraced(module, self.ctx, self.allocator);
+            inline for (zq.builtin_modules.all) |binding| {
+                try zq.modules.registerVirtualModuleTraced(binding, self.ctx, self.allocator);
             }
         } else {
-            inline for (std.meta.fields(zq.modules.VirtualModule)) |field| {
-                const module: zq.modules.VirtualModule = @enumFromInt(field.value);
-                try zq.modules.registerVirtualModule(self.ctx, module, self.allocator);
+            inline for (zq.builtin_modules.all) |binding| {
+                try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
             }
         }
     }
@@ -5050,6 +5046,37 @@ test "virtual module import alias resolves to callable binding" {
     var response = try rt.executeHandler(request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("function", response.body);
+}
+
+test "packaged extension module import resolves to callable binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { double, isEven } from "zigttp-ext:math";
+        \\function handler(req) {
+        \\  return Response.json({
+        \\    doubled: double(21),
+        \\    even: isEven(42)
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<extension-import>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("{\"doubled\":42,\"even\":true}", response.body);
 }
 
 test "durable run reuses completed response for duplicate key" {
