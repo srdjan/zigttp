@@ -38,6 +38,7 @@ pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:durable",
     .name = "durable",
     .stateful = true,
+    .self_managed_io = true,
     .contract_section = "durable",
     .exports = &.{
         .{ .name = "run", .func = runNative, .arg_count = 2,

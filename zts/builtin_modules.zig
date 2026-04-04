@@ -8,7 +8,7 @@
 
 const mb = @import("module_binding.zig");
 const ModuleBinding = mb.ModuleBinding;
-const extension_bindings = @import("generated/extension_bindings.zig");
+const extension_bindings = @import("extension_bindings.zig");
 
 const env_mod = @import("modules/env.zig");
 const crypto_mod = @import("modules/crypto.zig");

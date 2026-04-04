@@ -400,6 +400,10 @@ pub const ModuleBinding = struct {
     /// Whether this module is compile-time only (skip trace/replay/durable).
     comptime_only: bool = false,
 
+    /// Whether this module manages its own I/O wrapping (skip trace/replay/durable).
+    /// Used by modules like durable that implement their own write-ahead logging.
+    self_managed_io: bool = false,
+
     /// Generate a legacy exports array from this binding.
     pub fn toModuleExports(comptime self: ModuleBinding) [self.exports.len]resolver.ModuleExport {
         var result: [self.exports.len]resolver.ModuleExport = undefined;

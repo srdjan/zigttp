@@ -7,22 +7,15 @@ pub const ModuleHandle = opaque {};
 pub const JSValue = packed struct(u64) {
     raw: u64,
 
-    pub const PTR_PREFIX: u64 = 0xFFFC_0000_0000_0000;
-    pub const INT_PREFIX: u64 = 0xFFFD_0000_0000_0000;
-    pub const SPECIAL_PREFIX: u64 = 0xFFFE_0000_0000_0000;
-    pub const EXTERN_PREFIX: u64 = 0xFFFF_0000_0000_0000;
-    pub const PREFIX_MASK: u64 = 0xFFFF_0000_0000_0000;
-    pub const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-
+    const INT_PREFIX: u64 = 0xFFFD_0000_0000_0000;
+    const SPECIAL_PREFIX: u64 = 0xFFFE_0000_0000_0000;
+    const PREFIX_MASK: u64 = 0xFFFF_0000_0000_0000;
     const MIN_TAG_PREFIX: u64 = 0xFFFC;
     const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
 
-    pub const null_val: JSValue = .{ .raw = SPECIAL_PREFIX | 0 };
     pub const undefined_val: JSValue = .{ .raw = SPECIAL_PREFIX | 1 };
     pub const true_val: JSValue = .{ .raw = SPECIAL_PREFIX | 2 };
     pub const false_val: JSValue = .{ .raw = SPECIAL_PREFIX | 3 };
-    pub const exception_val: JSValue = .{ .raw = SPECIAL_PREFIX | 4 };
-    pub const nan_val: JSValue = .{ .raw = CANONICAL_NAN_BITS };
 
     pub inline fn isInt(self: JSValue) bool {
         return (self.raw & PREFIX_MASK) == INT_PREFIX;

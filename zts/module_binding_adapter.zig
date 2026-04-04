@@ -1,17 +1,23 @@
 const std = @import("std");
 const sdk = @import("zigttp-sdk");
 const internal = @import("module_binding.zig");
+const object = @import("object.zig");
 const value = @import("value.zig");
 
 pub const ModuleBinding = internal.ModuleBinding;
 
 comptime {
-    if (@sizeOf(sdk.JSValue) != @sizeOf(value.JSValue)) {
+    if (@sizeOf(sdk.JSValue) != @sizeOf(value.JSValue))
         @compileError("zigttp-sdk.JSValue must match runtime JSValue size");
-    }
-    if (@bitSizeOf(sdk.JSValue) != @bitSizeOf(value.JSValue)) {
+    if (@bitSizeOf(sdk.JSValue) != @bitSizeOf(value.JSValue))
         @compileError("zigttp-sdk.JSValue must match runtime JSValue bit size");
-    }
+    // Enum ordinal alignment: last variant of each enum must match.
+    if (@intFromEnum(sdk.EffectClass.none) != @intFromEnum(internal.EffectClass.none))
+        @compileError("sdk.EffectClass ordinals diverge from internal");
+    if (@intFromEnum(sdk.ReturnKind.result) != @intFromEnum(internal.ReturnKind.result))
+        @compileError("sdk.ReturnKind ordinals diverge from internal");
+    if (@intFromEnum(sdk.FailureSeverity.none) != @intFromEnum(internal.FailureSeverity.none))
+        @compileError("sdk.FailureSeverity ordinals diverge from internal");
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
@@ -46,10 +52,10 @@ fn adaptFunctionBinding(comptime binding: sdk.FunctionBinding) internal.Function
     const contract_extractions = comptime adaptContractExtractions(binding.contract_extractions);
     return .{
         .name = binding.name,
-        .module_func = wrapModuleFn(binding.module_func, binding.arg_count),
+        .func = wrapToNativeFn(binding.module_func),
         .arg_count = binding.arg_count,
-        .effect = mapEffectClass(binding.effect),
-        .returns = mapReturnKind(binding.returns),
+        .effect = @enumFromInt(@intFromEnum(binding.effect)),
+        .returns = @enumFromInt(@intFromEnum(binding.returns)),
         .param_types = &param_types,
         .traceable = binding.traceable,
         .contract_extractions = &contract_extractions,
@@ -60,14 +66,14 @@ fn adaptFunctionBinding(comptime binding: sdk.FunctionBinding) internal.Function
             .sets_jwt_auth = binding.contract_flags.sets_jwt_auth,
         },
         .return_labels = @bitCast(binding.return_labels),
-        .failure_severity = mapFailureSeverity(binding.failure_severity),
+        .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
     };
 }
 
 fn adaptReturnKinds(comptime kinds: []const sdk.ReturnKind) [kinds.len]internal.ReturnKind {
     var out: [kinds.len]internal.ReturnKind = undefined;
     for (kinds, 0..) |kind, i| {
-        out[i] = mapReturnKind(kind);
+        out[i] = @enumFromInt(@intFromEnum(kind));
     }
     return out;
 }
@@ -88,42 +94,19 @@ fn adaptContractExtractions(comptime extractions: []const sdk.ContractExtraction
     return out;
 }
 
-fn mapEffectClass(effect: sdk.EffectClass) internal.EffectClass {
-    return @enumFromInt(@intFromEnum(effect));
-}
-
-fn mapReturnKind(kind: sdk.ReturnKind) internal.ReturnKind {
-    return @enumFromInt(@intFromEnum(kind));
-}
-
-fn mapFailureSeverity(severity: sdk.FailureSeverity) internal.FailureSeverity {
-    return @enumFromInt(@intFromEnum(severity));
-}
-
-fn wrapModuleFn(comptime module_fn: sdk.ModuleFn, comptime arg_count: u8) internal.ModuleFn {
+/// Produce a NativeFn directly from a sdk.ModuleFn, avoiding double-wrapping.
+/// Both JSValue types are bit-identical packed structs, so args are aliased
+/// via @ptrCast with zero per-element copy.
+fn wrapToNativeFn(comptime module_fn: sdk.ModuleFn) object.NativeFn {
     return struct {
-        fn call(handle: *internal.ModuleHandle, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-            std.debug.assert(args.len <= arg_count);
-
-            var converted_args: [arg_count]sdk.JSValue = undefined;
-            for (args, 0..) |arg, i| {
-                converted_args[i] = toSdkValue(arg);
-            }
-
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const sdk_args: []const sdk.JSValue = @ptrCast(args);
             const result = try module_fn(
-                @ptrCast(handle),
-                toSdkValue(this),
-                converted_args[0..args.len],
+                @ptrCast(ctx_ptr),
+                @bitCast(this),
+                sdk_args,
             );
-            return toInternalValue(result);
+            return @bitCast(result);
         }
     }.call;
-}
-
-fn toSdkValue(v: value.JSValue) sdk.JSValue {
-    return .{ .raw = v.raw };
-}
-
-fn toInternalValue(v: sdk.JSValue) value.JSValue {
-    return .{ .raw = v.raw };
 }
