@@ -1900,15 +1900,16 @@ fn initIoBackend(io: anytype, allocator: std.mem.Allocator) !void {
 }
 
 fn useEventedBackend() bool {
-    // Last checked: 0.16.0-dev.2682+02142a54d (2026-03-01)
+    // Last checked: 0.16.0-dev.3073+28ae5d415 (2026-04-04)
     //
     // Evented backends lack networking support:
-    // - macOS Dispatch: all net* functions return error.NetworkDown (only netClose works)
-    // - macOS/BSD Kqueue: netAccept is @panic("TODO"), netListenIp delegates to Threaded
+    // - macOS Dispatch: all net* functions return error.NetworkDown
+    // - macOS/BSD Kqueue: netAccept/netListenIp are @panic("TODO")
     // - Linux Uring: all net* functions return error.NetworkDown
     //
-    // When netAccept/netRead/netWrite are implemented in Kqueue and Uring,
-    // flip this to check builtin.os.tag and delete ConnectionPool (~470 lines).
+    // Zig devlog (2026-02-13) still describes Evented as experimental.
+    // Revisit only after a dedicated probe confirms netListenIp, netAccept,
+    // netRead, and netWrite work on supported OSes.
     _ = builtin.os.tag;
     return false;
 }
@@ -2154,9 +2155,10 @@ test "findHeaderEnd handles short buffers" {
 }
 
 test "parseRequest rejects long header lines (streaming)" {
-    // Threaded std.Io backend currently has unstable long-line behavior on this Zig nightly.
-    // Skip to avoid a non-terminating test while keeping the buffer-based parser covered.
-    if (!useEventedBackend()) return error.SkipZigTest;
+    // Io.Threaded does not terminate for long header lines on unix socket pairs.
+    // Last checked: 0.16.0-dev.3073+28ae5d415 (2026-04-04). Hangs after 30s.
+    // Run explicitly with: ZTS_RUN_FLAKY_NIGHTLY_TESTS=1 zig build test
+    if (std.c.getenv("ZTS_RUN_FLAKY_NIGHTLY_TESTS") == null) return error.SkipZigTest;
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

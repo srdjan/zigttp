@@ -6068,8 +6068,7 @@ test "AOT override fallback and success" {
 }
 
 test "HandlerPool concurrent stress" {
-    // This stress test is intentionally opt-in because it is expensive and currently
-    // exhibits non-deterministic crashes on Zig nightly in CI-like environments.
+    // Expensive opt-in stress test. Stable on 0.16.0-dev.3073+28ae5d415 (5/5 runs).
     // Run explicitly with: ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
     if (std.c.getenv("ZTS_RUN_STRESS_TESTS") == null) return error.SkipZigTest;
 

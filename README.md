@@ -52,7 +52,7 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 ## Quick Start
 
-Build with Zig 0.16.0 or later:
+Validated on Zig `0.16.0-dev.3073+28ae5d415`. Newer nightlies are best-effort until revalidated.
 
 ```bash
 zig build -Doptimize=ReleaseFast
@@ -741,6 +741,23 @@ Benefits:
 - **Pre-fork/daemon**: Alternative for sub-millisecond response times
 
 See [Performance](docs/performance.md) for detailed profiling analysis and deployment patterns.
+
+## Nightly Revalidation
+
+When updating to a new Zig nightly, run:
+
+```bash
+zig version
+zig build
+zig build test
+zig build test-zts
+zig build test-zruntime
+bash scripts/test-examples.sh
+ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
+ZTS_RUN_FLAKY_NIGHTLY_TESTS=1 zig build test -- --test-filter "parseRequest rejects long header"
+```
+
+Then update the pinned version in this README and `docs/user-guide.md`.
 
 ## Documentation
 

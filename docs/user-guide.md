@@ -35,8 +35,8 @@ Functions, Cloudflare Workers), powered by Zig and zts.
 
 ### Prerequisites
 
-- **Zig 0.16.0+** (nightly): Download from
-  [ziglang.org](https://ziglang.org/download/)
+- **Zig 0.16.0-dev.3073+28ae5d415** (nightly): Download from
+  [ziglang.org](https://ziglang.org/download/). Newer nightlies are best-effort until revalidated.
 
 ### Build
 
