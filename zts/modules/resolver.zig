@@ -152,7 +152,9 @@ pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *co
 }
 
 fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
-    return !binding.comptime_only and func_binding.traceable;
+    return !binding.comptime_only and
+        !std.mem.eql(u8, binding.specifier, "zigttp:durable") and
+        func_binding.traceable;
 }
 
 /// Validate that all import specifiers from a module are actually exported.
