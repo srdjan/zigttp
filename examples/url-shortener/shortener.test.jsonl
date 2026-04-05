@@ -1,0 +1,48 @@
+{"type":"test","name":"GET /health returns 200"}
+{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"ok"}
+
+{"type":"test","name":"GET /:code redirects on cache hit"}
+{"type":"request","method":"GET","url":"/abc123","headers":{},"body":null}
+{"type":"io","seq":0,"module":"cache","fn":"cacheGet","args":["links","abc123"],"result":"https://example.com"}
+{"type":"io","seq":1,"module":"sql","fn":"sqlExec","args":["increment_hits",{"code":"abc123"}],"result":{"rowsAffected":1}}
+{"type":"expect","status":302}
+
+{"type":"test","name":"GET /:code returns 404 on miss"}
+{"type":"request","method":"GET","url":"/nope","headers":{},"body":null}
+{"type":"io","seq":0,"module":"cache","fn":"cacheGet","args":["links","nope"],"result":null}
+{"type":"io","seq":1,"module":"sql","fn":"sqlOne","args":["get_link",{"code":"nope"}],"result":null}
+{"type":"expect","status":404,"bodyContains":"not found"}
+
+{"type":"test","name":"POST /links without auth returns 401"}
+{"type":"request","method":"POST","url":"/links","headers":{},"body":"{\"url\":\"https://example.com\"}"}
+{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":[""],"result":null}
+{"type":"expect","status":401,"bodyContains":"missing token"}
+
+{"type":"test","name":"POST /links with invalid body returns 400"}
+{"type":"request","method":"POST","url":"/links","headers":{"authorization":"Bearer tok"},"body":"{}"}
+{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":["Bearer tok"],"result":"tok"}
+{"type":"io","seq":1,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-secret"}
+{"type":"io","seq":2,"module":"auth","fn":"jwtVerify","args":["tok","test-secret"],"result":{"ok":true,"value":{"sub":"user-1"}}}
+{"type":"io","seq":3,"module":"decode","fn":"decodeJson","args":["createLink","{}"],"result":{"ok":false,"errors":["url is required"]}}
+{"type":"expect","status":400,"bodyContains":"url is required"}
+
+{"type":"test","name":"POST /links creates a short link"}
+{"type":"request","method":"POST","url":"/links","headers":{"authorization":"Bearer tok"},"body":"{\"url\":\"https://example.com/long-path\"}"}
+{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":["Bearer tok"],"result":"tok"}
+{"type":"io","seq":1,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-secret"}
+{"type":"io","seq":2,"module":"auth","fn":"jwtVerify","args":["tok","test-secret"],"result":{"ok":true,"value":{"sub":"user-1"}}}
+{"type":"io","seq":3,"module":"decode","fn":"decodeJson","args":["createLink","{\"url\":\"https://example.com/long-path\"}"],"result":{"ok":true,"value":{"url":"https://example.com/long-path"}}}
+{"type":"io","seq":4,"module":"crypto","fn":"sha256","args":["https://example.com/long-path"],"result":"a1b2c3d4e5f6a7b8"}
+{"type":"io","seq":5,"module":"sql","fn":"sqlOne","args":["get_link",{"code":"a1b2c3d4"}],"result":null}
+{"type":"io","seq":6,"module":"sql","fn":"sqlExec","args":["create_link",{"code":"a1b2c3d4","url":"https://example.com/long-path","created_at":"1700000000000"}],"result":{"rowsAffected":1}}
+{"type":"io","seq":7,"module":"env","fn":"env","args":["BASE_URL"],"result":"https://sho.rt"}
+{"type":"expect","status":201,"bodyContains":"a1b2c3d4"}
+
+{"type":"test","name":"GET /links/:code returns stats"}
+{"type":"request","method":"GET","url":"/links/abc123","headers":{"authorization":"Bearer tok"},"body":null}
+{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":["Bearer tok"],"result":"tok"}
+{"type":"io","seq":1,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-secret"}
+{"type":"io","seq":2,"module":"auth","fn":"jwtVerify","args":["tok","test-secret"],"result":{"ok":true,"value":{"sub":"user-1"}}}
+{"type":"io","seq":3,"module":"sql","fn":"sqlOne","args":["get_link",{"code":"abc123"}],"result":{"code":"abc123","url":"https://example.com","hits":42,"created_at":"1700000000000"}}
+{"type":"expect","status":200,"bodyContains":"42"}

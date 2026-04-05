@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS links (
+    code TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    hits INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
