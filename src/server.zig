@@ -675,6 +675,14 @@ pub const HandlerSource = union(enum) {
 
     /// Pre-compiled bytecode embedded at build time (via -Dhandler)
     embedded_bytecode: []const u8,
+
+    /// Pre-compiled bytecode extracted from self-extracting binary at runtime
+    appended_payload: AppendedPayload,
+};
+
+pub const AppendedPayload = struct {
+    bytecode: []const u8,
+    dep_bytecodes: []const []const u8,
 };
 
 // ============================================================================
@@ -691,6 +699,7 @@ pub const Server = struct {
     handler_code: []const u8,
     handler_filename: []const u8,
     embedded_bytecode: ?[]const u8,
+    runtime_dep_bytecodes: ?[]const []const u8,
     static_cache: StaticFileCache,
     running: bool,
     request_count: std.atomic.Value(u64),
@@ -708,6 +717,7 @@ pub const Server = struct {
 
         // Load handler code (or use embedded bytecode)
         var embedded_bytecode: ?[]const u8 = null;
+        var runtime_dep_bytecodes: ?[]const []const u8 = null;
         const handler_code, const handler_filename = switch (cfg.handler) {
             .inline_code => |code| .{ code, "<inline>" },
             .file_path => |path| blk: {
@@ -722,6 +732,12 @@ pub const Server = struct {
                 // but we provide a placeholder for API compatibility
                 break :blk .{ "", "<embedded>" };
             },
+            .appended_payload => |payload| blk: {
+                // Bytecode extracted from self-extracting binary at runtime
+                embedded_bytecode = payload.bytecode;
+                runtime_dep_bytecodes = payload.dep_bytecodes;
+                break :blk .{ "", "<appended>" };
+            },
         };
 
         return Self{
@@ -734,6 +750,7 @@ pub const Server = struct {
             .handler_code = handler_code,
             .handler_filename = handler_filename,
             .embedded_bytecode = embedded_bytecode,
+            .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .static_cache = StaticFileCache.init(
                 allocator,
                 cfg.static_cache_max_bytes,
@@ -770,7 +787,7 @@ pub const Server = struct {
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         var pool_timer = compat.Timer.start() catch null;
-        self.pool = try HandlerPool.initWithEmbedded(
+        self.pool = try HandlerPool.initWithEmbeddedAndDeps(
             self.allocator,
             self.config.runtime_config,
             self.handler_code,
@@ -778,6 +795,7 @@ pub const Server = struct {
             self.config.pool_size,
             self.config.pool_wait_timeout_ms,
             self.embedded_bytecode,
+            self.runtime_dep_bytecodes,
         );
         if (pool_timer) |*t| {
             const elapsed_ms = t.read() / std.time.ns_per_ms;

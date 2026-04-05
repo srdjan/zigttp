@@ -12,6 +12,8 @@ const durable_scheduler = @import("durable_scheduler.zig");
 const project_config_mod = @import("project_config");
 const ProjectConfig = project_config_mod.ProjectConfig;
 const zts = @import("zts");
+const self_extract = @import("self_extract.zig");
+const zts_cli = @import("zts_cli");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -23,6 +25,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
+    // Check for self-extracting binary payload before anything else
+    const self_payload = self_extract.detect(allocator) catch null;
+
     const args = try collectArgs(allocator, init.args);
     defer {
         for (args) |arg| allocator.free(arg);
@@ -31,6 +36,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const user_args = args[1..];
     const command = if (user_args.len == 0) "" else user_args[0];
+
+    // Self-extracting binary: serve the appended handler
+    if (self_payload) |payload| {
+        defer payload.deinit(allocator);
+        try serveAppended(allocator, &payload, user_args);
+        return;
+    }
 
     if (user_args.len == 0) {
         if (embedded_handler.bytecode.len > 0) {
@@ -55,6 +67,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "doctor")) {
         try doctorCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "check")) {
+        try zts_cli.run(allocator, user_args);
+        return;
+    }
+    if (std.mem.eql(u8, command, "prove")) {
+        try zts_cli.run(allocator, user_args);
+        return;
+    }
+    if (std.mem.eql(u8, command, "mock")) {
+        try zts_cli.run(allocator, user_args);
+        return;
+    }
+    if (std.mem.eql(u8, command, "link")) {
+        try zts_cli.run(allocator, user_args);
+        return;
+    }
+    if (std.mem.eql(u8, command, "compile")) {
+        try compileCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
+        printVersion();
         return;
     }
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "help")) {
@@ -180,7 +216,7 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     std.debug.print("Next steps:\n", .{});
     std.debug.print("  cd {s}\n", .{name});
     std.debug.print("  zigttp dev\n", .{});
-    std.debug.print("  zts check\n", .{});
+    std.debug.print("  zigttp check\n", .{});
 }
 
 fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
@@ -395,8 +431,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
 }
 
 fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const zts_cli = @import("zts_cli");
-
     var check_args = std.ArrayList([]const u8).empty;
     defer check_args.deinit(allocator);
     try check_args.append(allocator, "check");
@@ -563,23 +597,236 @@ fn parseSize(str: []const u8) !usize {
     return std.math.mul(usize, num, multiplier) catch return error.InvalidSize;
 }
 
+fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payload, argv: []const []const u8) !void {
+    // Start with default config, handler comes from the appended payload
+    var config = ServerConfig{
+        .handler = .{ .appended_payload = .{
+            .bytecode = payload.bytecode,
+            .dep_bytecodes = payload.dep_bytecodes,
+        } },
+    };
+
+    // Parse serve-compatible flags (port, host, cors, etc.) but ignore handler path args
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--port")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingPort;
+            config.port = std.fmt.parseInt(u16, argv[i], 10) catch return error.InvalidPort;
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--host")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingHost;
+            config.host = argv[i];
+        } else if (std.mem.eql(u8, arg, "--cors")) {
+            config.enable_cors = true;
+        } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
+            config.log_requests = false;
+        } else if (std.mem.eql(u8, arg, "--help")) {
+            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q]\n";
+            _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+            return;
+        }
+        // Silently ignore unknown flags for forward compatibility
+    }
+
+    var server = Server.init(allocator, config) catch |err| {
+        std.log.err("Failed to initialize server: {}", .{err});
+        return;
+    };
+    defer server.deinit();
+
+    server.run() catch |err| {
+        std.log.err("Server error: {}", .{err});
+        return;
+    };
+}
+
+fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const precompile = zts_cli.precompile;
+
+    var handler_path: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.log.err("-o requires an output path", .{});
+                return error.MissingArgument;
+            }
+            output_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--help")) {
+            printCompileHelp();
+            return;
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            handler_path = arg;
+        }
+    }
+
+    if (handler_path == null) {
+        std.log.err("handler file path required", .{});
+        printCompileHelp();
+        return error.MissingArgument;
+    }
+    if (output_path == null) {
+        std.log.err("-o <output> required", .{});
+        printCompileHelp();
+        return error.MissingArgument;
+    }
+
+    // Read handler source
+    const source = zts.file_io.readFile(allocator, handler_path.?, 10 * 1024 * 1024) catch |err| {
+        std.log.err("Failed to read handler '{s}': {}", .{ handler_path.?, err });
+        return err;
+    };
+    defer allocator.free(source);
+
+    std.log.info("Compiling {s}...", .{handler_path.?});
+
+    // Compile handler with mandatory verification and contract extraction
+    var compiled = precompile.compileHandler(
+        allocator,
+        source,
+        handler_path.?,
+        false, // no AOT
+        true, // verify (mandatory)
+        true, // contract (for policy derivation)
+        null, // no explicit policy
+        null, // no sql schema
+        false, // no test generation
+    ) catch |err| {
+        std.log.err("Compilation failed: {}", .{err});
+        return err;
+    };
+    defer compiled.deinit(allocator);
+
+    if (compiled.verify_failed) {
+        std.log.err("Verification failed - binary not created", .{});
+        if (compiled.violations_summary) |summary| {
+            _ = std.c.write(std.c.STDERR_FILENO, summary.ptr, summary.len);
+        }
+        return error.VerificationFailed;
+    }
+
+    if (compiled.bytecode.len == 0) {
+        std.log.err("No bytecode generated", .{});
+        return error.NoBytecode;
+    }
+
+    // Get own executable path for the base binary
+    const self_path = self_extract.getSelfExePath(allocator) catch |err| {
+        std.log.err("Failed to determine own executable path: {}", .{err});
+        return err;
+    };
+    defer allocator.free(self_path);
+
+    // Derive contract JSON if available
+    var contract_json: ?[]const u8 = null;
+    if (compiled.contract) |*contract| {
+        var json_output: std.ArrayList(u8) = .empty;
+        defer json_output.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
+        zts.writeContractJson(contract, &aw.writer) catch {};
+        json_output = aw.toArrayList();
+        if (json_output.items.len > 0) {
+            contract_json = try json_output.toOwnedSlice(allocator);
+        }
+    }
+    defer if (contract_json) |cj| allocator.free(cj);
+
+    // Build dep bytecodes slice
+    const dep_bytecodes: []const []const u8 = compiled.dep_bytecodes orelse &.{};
+
+    // Create self-extracting binary with permissive policy (MVP)
+    const policy = zts.handler_policy.RuntimePolicy{};
+    self_extract.create(
+        allocator,
+        self_path,
+        output_path.?,
+        compiled.bytecode,
+        dep_bytecodes,
+        contract_json,
+        &policy,
+    ) catch |err| {
+        std.log.err("Failed to create output binary: {}", .{err});
+        return err;
+    };
+
+    // Ad-hoc code sign on macOS
+    if (builtin.os.tag == .macos) {
+        codesignAdHoc(allocator, output_path.?);
+    }
+
+    std.log.info("Compiled: {s} -> {s} (bytecode {d} bytes)", .{
+        handler_path.?, output_path.?, compiled.bytecode.len,
+    });
+}
+
+fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
+    const path_z = allocator.dupeZ(u8, path) catch return;
+    defer allocator.free(path_z);
+
+    const pid = std.c.fork();
+    if (pid == 0) {
+        const codesign: [*:0]const u8 = "/usr/bin/codesign";
+        const argv = [_:null]?[*:0]const u8{
+            codesign,
+            "--force",
+            "--sign",
+            "-",
+            path_z,
+            null,
+        };
+        _ = std.c.execve(codesign, &argv, std.c.environ);
+        std.c._exit(1);
+    } else if (pid > 0) {
+        var status: i32 = 0;
+        _ = std.c.waitpid(pid, &status, 0);
+        if (status != 0) {
+            std.log.warn("Ad-hoc code signing returned non-zero status", .{});
+        }
+    }
+    // pid == -1 (fork failed): silently skip signing
+}
+
+fn printVersion() void {
+    const version = "zigttp " ++ zts.version.string ++ "\n";
+    _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
+}
+
+fn printCompileHelp() void {
+    const help =
+        \\zigttp compile <handler.ts> -o <output>
+        \\
+        \\Compile a handler into a self-contained binary.
+        \\Verification is mandatory: the handler must pass all checks.
+        \\
+        \\Options:
+        \\  -o, --output <PATH>   Output binary path (required)
+        \\  --help                Show this help
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
 fn printHelp() void {
     const help =
-        \\zigttp - runtime and project workflow for zigttp handlers
+        \\zigttp - serverless TypeScript runtime
         \\
         \\Usage:
-        \\  zigttp init <name> [--template basic|api|htmx]
-        \\  zigttp dev [handler-or-project]
-        \\  zigttp serve [options] [handler.js]
-        \\  zigttp doctor [path]
-        \\
-        \\Commands:
-        \\  init    Create a starter zigttp project
-        \\  dev     Run with restart-on-change
-        \\  serve   Run the HTTP server
-        \\  doctor  Validate project files and resolved paths
-        \\
-        \\Use `zts check` to run compiler checks and capability summaries.
+        \\  zigttp serve [options] [handler.ts]    Run handler
+        \\  zigttp init <name> [--template ...]    Create project
+        \\  zigttp dev [handler-or-project]         Watch mode
+        \\  zigttp check [handler.ts] [--contract]  Verify handler
+        \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
+        \\  zigttp prove <old.json> <new.json>      Upgrade safety check
+        \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
+        \\  zigttp link <system.json>               Cross-handler linking
+        \\  zigttp doctor [path]                    Validate project
+        \\  zigttp version                          Show version
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -728,7 +975,7 @@ const basicReadme =
     \\## Commands
     \\- `zigttp dev`
     \\- `zigttp serve`
-    \\- `zts check`
+    \\- `zigttp check`
 ;
 
 const apiReadme = basicReadme;

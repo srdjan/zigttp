@@ -295,6 +295,10 @@ fn resolveHandlerSource(allocator: std.mem.Allocator, config: ServerConfig) !Han
             std.log.err("Replay with embedded bytecode not yet supported", .{});
             return error.UnsupportedReplaySource;
         },
+        .appended_payload => {
+            std.log.err("Replay with appended payload not yet supported", .{});
+            return error.UnsupportedReplaySource;
+        },
     };
 }
 

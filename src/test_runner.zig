@@ -70,6 +70,10 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
             std.log.err("Testing with embedded bytecode not yet supported", .{});
             return error.UnsupportedTestSource;
         },
+        .appended_payload => {
+            std.log.err("Testing with appended payload not yet supported", .{});
+            return error.UnsupportedTestSource;
+        },
     };
     defer allocator.free(handler_code);
 

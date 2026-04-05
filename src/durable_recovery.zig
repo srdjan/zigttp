@@ -131,6 +131,10 @@ fn recoverOne(
             std.log.err("Durable recovery with embedded bytecode not yet supported", .{});
             return error.UnsupportedRecoverySource;
         },
+        .appended_payload => {
+            std.log.err("Durable recovery with appended payload not yet supported", .{});
+            return error.UnsupportedRecoverySource;
+        },
     };
     defer allocator.free(handler_code);
 

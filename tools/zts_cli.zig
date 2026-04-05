@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const precompile = @import("precompile.zig");
+pub const precompile = @import("precompile.zig");
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");

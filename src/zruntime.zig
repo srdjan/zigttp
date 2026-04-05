@@ -4023,6 +4023,8 @@ pub const HandlerPool = struct {
     runtime_init_mutex: compat.Mutex,
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
+    /// Runtime-provided dependency bytecodes (from self-extracting binary)
+    runtime_dep_bytecodes: ?[]const []const u8,
     /// Shared trace file handle (owned by pool, shared across runtimes)
     trace_file: ?std.c.fd_t,
     /// Mutex protecting concurrent trace file writes
@@ -4074,6 +4076,20 @@ pub const HandlerPool = struct {
         acquire_timeout_ms: u32,
         embedded_bytecode: ?[]const u8,
     ) !Self {
+        return initWithEmbeddedAndDeps(allocator, config, handler_code, handler_filename, max_size, acquire_timeout_ms, embedded_bytecode, null);
+    }
+
+    /// Initialize with optional embedded bytecode and runtime-provided dependency bytecodes
+    pub fn initWithEmbeddedAndDeps(
+        allocator: std.mem.Allocator,
+        config: RuntimeConfig,
+        handler_code: []const u8,
+        handler_filename: []const u8,
+        max_size: usize,
+        acquire_timeout_ms: u32,
+        embedded_bytecode: ?[]const u8,
+        runtime_dep_bytecodes: ?[]const []const u8,
+    ) !Self {
         const pool = try zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
             .gc_config = .{ .nursery_size = config.nursery_size },
@@ -4102,6 +4118,7 @@ pub const HandlerPool = struct {
             .cache_mutex = .{},
             .runtime_init_mutex = .{},
             .embedded_bytecode = embedded_bytecode,
+            .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .trace_file = null,
             .trace_mutex = null,
         };
@@ -4560,8 +4577,14 @@ pub const HandlerPool = struct {
 
         // Fast path: use embedded bytecode if available (precompiled at build time)
         if (self.embedded_bytecode) |entry_bytecode| {
-            // Load dependency modules first (if any were precompiled)
-            if (embedded_handler.dep_count > 0) {
+            // Load dependency modules first
+            if (self.runtime_dep_bytecodes) |deps| {
+                // Runtime-provided deps (self-extracting binary)
+                for (deps) |dep_data| {
+                    try rt.loadFromCachedBytecodeNoHandler(dep_data);
+                }
+            } else if (embedded_handler.dep_count > 0) {
+                // Compile-time embedded deps
                 for (embedded_handler.dep_bytecodes[0..embedded_handler.dep_count]) |dep_data| {
                     try rt.loadFromCachedBytecodeNoHandler(dep_data);
                 }

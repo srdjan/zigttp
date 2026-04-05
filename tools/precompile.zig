@@ -46,7 +46,7 @@ const AotAnalysis = struct {
     }
 };
 
-const CompiledHandler = struct {
+pub const CompiledHandler = struct {
     bytecode: []const u8 = &.{},
     /// Set when handler verification fails. violations_jsonl/summary are populated
     /// with counterexample tests. No bytecode is generated.
@@ -65,7 +65,7 @@ const CompiledHandler = struct {
     /// Pre-formatted violations summary for build output (when violations exist)
     violations_summary: ?[]const u8 = null,
 
-    fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.aot) |*analysis| {
             analysis.deinit(allocator);
         }
@@ -1753,7 +1753,7 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
     return try tests.toOwnedSlice(allocator);
 }
 
-fn compileHandler(
+pub fn compileHandler(
     allocator: std.mem.Allocator,
     source: []const u8,
     filename: []const u8,
