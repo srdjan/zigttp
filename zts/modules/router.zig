@@ -111,12 +111,7 @@ fn routerMatchNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
 }
 
 /// Get the string name for an atom (predefined or dynamic)
-fn atomToString(atom: object.Atom, atoms: *context.AtomTable) ?[]const u8 {
-    if (atom.isPredefined()) {
-        return atom.toPredefinedName();
-    }
-    return atoms.getName(atom);
-}
+const atomToString = util.atomToString;
 
 /// Parsed path parameter
 const Param = struct {

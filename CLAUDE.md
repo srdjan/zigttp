@@ -58,6 +58,13 @@ Import via `import { fn } from "zigttp:module"`. Implementations in `zts/modules
 | `zigttp:io` | `parallel`, `race` |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
 | `zigttp:compose` | `guard` |
+| `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` |
+| `zigttp:id` | `uuid`, `ulid`, `nanoid` |
+| `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` |
+| `zigttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` |
+| `zigttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` |
+| `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` |
+| `zigttp:ratelimit` | `rateCheck`, `rateReset` |
 
 ## JavaScript Subset
 

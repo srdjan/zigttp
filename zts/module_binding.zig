@@ -269,6 +269,9 @@ pub const ContractCategory = enum {
     schema_compile,
     request_schema,
     route_pattern,
+    cookie_name,
+    cors_origin,
+    rate_limit_key,
 };
 
 /// Transform applied to extracted literal before storing.
@@ -426,7 +429,7 @@ pub const ModuleBinding = struct {
 ///   - specifier format (must start with "zigttp:" or "zigttp-ext:")
 ///   - function bindings missing both func and module_func
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
-    @setEvalBranchQuota(5000);
+    @setEvalBranchQuota(10000);
     // Check specifier format and state consistency per module
     for (bindings) |b| {
         const builtin_prefix = std.mem.startsWith(u8, b.specifier, "zigttp:");

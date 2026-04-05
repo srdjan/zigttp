@@ -1103,7 +1103,7 @@ pub const ContractBuilder = struct {
             .durable_producer_key => .{ .list = &self.durable_producer_key_literals, .dynamic = &self.durable_producer_key_dynamic },
             .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
             // Custom categories are dispatched directly, not via generic target
-            .sql_registration, .schema_compile, .route_pattern => null,
+            .sql_registration, .schema_compile, .route_pattern, .cookie_name, .cors_origin, .rate_limit_key => null,
         };
     }
 

@@ -113,6 +113,12 @@ pub fn throwError(ctx: *context.Context, name: []const u8, message: []const u8) 
     return value.JSValue.exception_val;
 }
 
+/// Get the string name for an atom (predefined or dynamic).
+pub fn atomToString(atom: object.Atom, atoms: *context.AtomTable) ?[]const u8 {
+    if (atom.isPredefined()) return atom.toPredefinedName();
+    return atoms.getName(atom);
+}
+
 pub fn throwCapabilityPolicyError(
     ctx: *context.Context,
     category: []const u8,

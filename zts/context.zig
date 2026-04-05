@@ -184,7 +184,7 @@ pub const CatchHandler = struct {
 
 /// Maximum number of virtual module state slots.
 /// Sized to accommodate all built-in and extension module state slots.
-pub const MAX_MODULE_STATE_SLOTS = 8;
+pub const MAX_MODULE_STATE_SLOTS = 16;
 
 /// Per-runtime state entry for a virtual module.
 /// Modules that need persistent state (caches, registries) store an opaque

@@ -21,6 +21,13 @@ const sql_mod = @import("modules/sql.zig");
 const io_mod = @import("modules/io.zig");
 const compose_mod = @import("modules/compose.zig");
 const durable_mod = @import("modules/durable.zig");
+const url_mod = @import("modules/url.zig");
+const id_mod = @import("modules/id.zig");
+const http_mod = @import("modules/http_mod.zig");
+const log_mod = @import("modules/log.zig");
+const text_mod = @import("modules/text.zig");
+const time_mod = @import("modules/time.zig");
+const ratelimit_mod = @import("modules/ratelimit.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -35,6 +42,13 @@ pub const builtins = [_]ModuleBinding{
     io_mod.binding,
     compose_mod.binding,
     durable_mod.binding,
+    url_mod.binding,
+    id_mod.binding,
+    http_mod.binding,
+    log_mod.binding,
+    text_mod.binding,
+    time_mod.binding,
+    ratelimit_mod.binding,
 };
 
 /// Unified module registry: core built-ins plus explicitly registered extensions.
@@ -82,6 +96,8 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zigttp:env") != null);
     try std.testing.expect(fromSpecifier("zigttp:crypto") != null);
     try std.testing.expect(fromSpecifier("zigttp:cache") != null);
+    try std.testing.expect(fromSpecifier("zigttp:url") != null);
+    try std.testing.expect(fromSpecifier("zigttp:id") != null);
     try std.testing.expect(fromSpecifier("zigttp-ext:math") != null);
     try std.testing.expect(fromSpecifier("zigttp:unknown") == null);
 }
@@ -137,4 +153,6 @@ test "failure_severity annotations on failable functions" {
     // None: functions that always succeed
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("sha256").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("cacheSet").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlParse").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlEncode").?.func.failure_severity);
 }
