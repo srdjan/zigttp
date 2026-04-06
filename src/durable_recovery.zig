@@ -10,7 +10,7 @@
 //! response.
 
 const std = @import("std");
-const zq = @import("zts");
+const zq = @import("zigts");
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;

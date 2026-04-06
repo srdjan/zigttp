@@ -6,7 +6,7 @@
 //! `DurableStore` surface so a non-filesystem backend can replace it later.
 
 const std = @import("std");
-const zq = @import("zts");
+const zq = @import("zigts");
 const trace = zq.trace;
 
 const c = @cImport({

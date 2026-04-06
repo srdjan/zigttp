@@ -11,10 +11,10 @@
 //! Called by precompile.zig when --prove is passed.
 
 const std = @import("std");
-const zts = @import("zts");
-const handler_contract = zts.handler_contract;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
-const contract_diff = zts.contract_diff;
+const contract_diff = zigts.contract_diff;
 const ContractDiff = contract_diff.ContractDiff;
 const ProofCertificate = contract_diff.ProofCertificate;
 pub const ReplaySummary = contract_diff.ReplaySummary;

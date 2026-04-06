@@ -9,7 +9,7 @@ const compat = @import("compat.zig");
 const ascii = std.ascii;
 
 // Import zts module
-const zq = @import("zts");
+const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const http_parser = @import("http_parser.zig");
@@ -3999,7 +3999,7 @@ pub const PercentileTracker = struct {
 // Handler Pool (Lock-Free)
 // ============================================================================
 
-/// Lock-free pool of pre-initialized JavaScript runtimes, backed by zts.LockFreePool.
+/// Lock-free pool of pre-initialized JavaScript runtimes, backed by zigts.LockFreePool.
 /// Uses per-runtime wrappers to install builtins and load handler code once.
 pub const HandlerPool = struct {
     allocator: std.mem.Allocator,

@@ -8,15 +8,15 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zts = @import("zts");
-const ir = zts.parser;
+const zigts = @import("zigts");
+const ir = zigts.parser;
 const IrTranspiler = @import("transpiler.zig").IrTranspiler;
-const handler_contract = zts.handler_contract;
+const handler_contract = zigts.handler_contract;
 const ContractBuilder = handler_contract.ContractBuilder;
 const writeContractJson = handler_contract.writeContractJson;
 const HandlerContract = handler_contract.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
-const handler_policy = zts.handler_policy;
+const handler_policy = zigts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
 const manifest_alignment = @import("manifest_alignment.zig");
@@ -26,13 +26,13 @@ const property_expectations = @import("property_expectations.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
 const build_report = @import("report.zig");
 pub const json_diag = @import("json_diagnostics.zig");
-const sqlite = zts.sqlite;
-const sql_analysis = zts.sql_analysis;
+const sqlite = zigts.sqlite;
+const sql_analysis = zigts.sql_analysis;
 
 const AotAnalysis = struct {
-    dispatch: ?*zts.PatternDispatchTable = null,
-    default_response: ?zts.HandlerAnalyzer.StaticResponseInfo = null,
-    handler_loc: ?zts.parser.SourceLocation = null,
+    dispatch: ?*zigts.PatternDispatchTable = null,
+    default_response: ?zigts.HandlerAnalyzer.StaticResponseInfo = null,
+    handler_loc: ?zigts.parser.SourceLocation = null,
 
     fn deinit(self: *AotAnalysis, allocator: std.mem.Allocator) void {
         if (self.dispatch) |dispatch| {
@@ -95,7 +95,7 @@ pub const CompiledHandler = struct {
     }
 };
 
-const readFilePosix = zts.file_io.readFile;
+const readFilePosix = zigts.file_io.readFile;
 
 /// Write a file synchronously using posix operations
 pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
@@ -524,7 +524,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         };
         defer allocator.free(trace_source);
 
-        const groups = zts.trace.parseTraceFile(allocator, trace_source) catch |err| {
+        const groups = zigts.trace.parseTraceFile(allocator, trace_source) catch |err| {
             std.debug.print("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
             return err;
         };
@@ -796,7 +796,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
                 };
                 defer allocator.free(prove_trace_source);
 
-                const groups = zts.trace.parseTraceFile(allocator, prove_trace_source) catch |err| {
+                const groups = zigts.trace.parseTraceFile(allocator, prove_trace_source) catch |err| {
                     std.debug.print("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
                     return err;
                 };
@@ -994,7 +994,7 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
 
     var source_to_parse: []const u8 = source;
-    var strip_result: ?zts.StripResult = null;
+    var strip_result: ?zigts.StripResult = null;
     defer if (strip_result) |*sr| sr.deinit();
 
     const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
@@ -1003,7 +1003,7 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
 
     // Stage 1: TypeScript strip
     if (is_ts or is_tsx) {
-        strip_result = zts.strip(allocator, source, .{
+        strip_result = zigts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = .{},
@@ -1016,10 +1016,10 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     }
 
     // Stage 2: Parse
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zigts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = zigts.parser.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
@@ -1057,7 +1057,7 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     };
 
     // Stage 4: IR optimization
-    _ = zts.parser.optimizeIR(
+    _ = zigts.parser.optimizeIR(
         allocator,
         &js_parser.nodes,
         &js_parser.constants,
@@ -1067,7 +1067,7 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     // Stage 5: Bool checker (sound mode)
     {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var checker = zts.BoolChecker.init(allocator, ir_view, &atoms);
+        var checker = zigts.BoolChecker.init(allocator, ir_view, &atoms);
         defer checker.deinit();
 
         result.bool_errors = @intCast(try checker.check(root));
@@ -1102,14 +1102,14 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     if (strip_result) |sr| {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const tm = sr.type_map;
-        var type_pool = zts.TypePool.init(allocator);
+        var type_pool = zigts.TypePool.init(allocator);
         defer type_pool.deinit(allocator);
-        var type_env = zts.TypeEnv.init(allocator, &type_pool);
+        var type_env = zigts.TypeEnv.init(allocator, &type_pool);
         defer type_env.deinit();
-        zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+        zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
         type_env.populateFromTypeMap(&tm);
 
-        var tc = zts.type_checker.TypeChecker.init(allocator, ir_view, &atoms, &type_env);
+        var tc = zigts.type_checker.TypeChecker.init(allocator, ir_view, &atoms, &type_env);
         defer tc.deinit();
         result.type_errors = @intCast(try tc.check(root));
         const tc_diags = tc.getDiagnostics();
@@ -1138,30 +1138,30 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     var verify_info: ?VerificationInfo = null;
     {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
+        const handler_fn = zigts.handler_verifier.findHandlerFunction(ir_view, root);
 
-        var verify_type_pool: ?zts.TypePool = null;
-        var verify_type_env: ?zts.TypeEnv = null;
-        var verify_type_checker: ?zts.TypeChecker = null;
+        var verify_type_pool: ?zigts.TypePool = null;
+        var verify_type_env: ?zigts.TypeEnv = null;
+        var verify_type_checker: ?zigts.TypeChecker = null;
         defer if (verify_type_checker) |*c| c.deinit();
         defer if (verify_type_env) |*e| e.deinit();
         defer if (verify_type_pool) |*p| p.deinit(allocator);
 
-        const verifier_env: ?*const zts.TypeEnv = if (strip_result) |sr| blk: {
-            verify_type_pool = zts.TypePool.init(allocator);
-            verify_type_env = zts.TypeEnv.init(allocator, &verify_type_pool.?);
-            zts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
+        const verifier_env: ?*const zigts.TypeEnv = if (strip_result) |sr| blk: {
+            verify_type_pool = zigts.TypePool.init(allocator);
+            verify_type_env = zigts.TypeEnv.init(allocator, &verify_type_pool.?);
+            zigts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
             verify_type_env.?.populateFromTypeMap(&sr.type_map);
-            verify_type_checker = zts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
+            verify_type_checker = zigts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
             _ = verify_type_checker.?.check(root) catch 0;
             break :blk &verify_type_env.?;
         } else null;
 
-        const verifier_tc: ?*const zts.TypeChecker = if (verify_type_checker) |*c| c else null;
+        const verifier_tc: ?*const zigts.TypeChecker = if (verify_type_checker) |*c| c else null;
 
         if (handler_fn) |hf| {
             result.verify_ran = true;
-            var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_tc);
+            var verifier = zigts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_tc);
             defer verifier.deinit();
 
             result.verify_errors = @intCast(try verifier.verify(hf));
@@ -1236,13 +1236,13 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
-            var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
+            var gen = zigts.PathGenerator.init(allocator, ir_view, &atoms);
             defer gen.deinit();
             try gen.generate(hf);
 
             const tests = gen.getTests();
             result.paths_enumerated = @intCast(tests.len);
-            result.paths_exhaustive = tests.len < zts.PathGenerator.MAX_PATHS;
+            result.paths_exhaustive = tests.len < zigts.PathGenerator.MAX_PATHS;
 
             // Max I/O depth
             var max_depth: u32 = 0;
@@ -1262,7 +1262,7 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
             }
 
             // Fault coverage
-            var fc = zts.fault_coverage.FaultCoverageChecker.init(allocator, tests);
+            var fc = zigts.fault_coverage.FaultCoverageChecker.init(allocator, tests);
             defer fc.deinit();
             try fc.analyze();
             const fc_report = fc.getReport();
@@ -1380,7 +1380,7 @@ fn writeProven(writer: anytype, label: []const u8, proven: bool) void {
 
 /// Generate TypeScript type definitions for all virtual modules.
 pub fn generateTypeDefs(writer: anytype) void {
-    writer.print("// Generated by: zts check --types\n// Do not edit manually.\n\n", .{}) catch return;
+    writer.print("// Generated by: zigts check --types\n// Do not edit manually.\n\n", .{}) catch return;
 
     // Request and Response globals
     writer.print(
@@ -1420,7 +1420,7 @@ pub fn generateTypeDefs(writer: anytype) void {
         \\
     , .{}) catch return;
 
-    const modules = @import("zts").builtin_modules;
+    const modules = @import("zigts").builtin_modules;
     for (modules.all) |binding| {
         writer.print("declare module \"{s}\" {{\n", .{binding.specifier}) catch return;
         for (binding.exports) |func| {
@@ -1435,7 +1435,7 @@ pub fn generateTypeDefs(writer: anytype) void {
     }
 }
 
-fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
+fn returnKindToTs(kind: @import("zigts").module_binding.ReturnKind) []const u8 {
     return switch (kind) {
         .boolean => "boolean",
         .number => "number",
@@ -1460,14 +1460,14 @@ const BuildReplayResult = struct {
 };
 
 /// Run replay verification at build time.
-/// Creates a fresh zts context per trace for isolation (the interpreter mutates
+/// Creates a fresh zigts context per trace for isolation (the interpreter mutates
 /// context state during execution). This is O(N*parse) but acceptable at build
 /// time since trace counts are typically small.
 fn runBuildTimeReplay(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    groups: []const zts.trace.RequestTraceGroup,
+    groups: []const zigts.trace.RequestTraceGroup,
 ) !BuildReplayResult {
     var pass: u32 = 0;
     var fail: u32 = 0;
@@ -1501,44 +1501,44 @@ fn executeBuildTimeHandler(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    request: zts.trace.RequestTrace,
-    io_calls: []const zts.trace.IoEntry,
+    request: zigts.trace.RequestTrace,
+    io_calls: []const zigts.trace.IoEntry,
 ) !HandlerExecResult {
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 64 * 1024 });
-    defer zts.destroyContext(ctx);
-    try zts.builtins.initBuiltins(ctx);
+    const ctx = try zigts.createContext(allocator, .{ .nursery_size = 64 * 1024 });
+    defer zigts.destroyContext(ctx);
+    try zigts.builtins.initBuiltins(ctx);
 
-    inline for (zts.builtin_modules.all) |binding| {
-        try zts.modules.registerVirtualModuleReplay(binding, ctx, allocator);
+    inline for (zigts.builtin_modules.all) |binding| {
+        try zigts.modules.registerVirtualModuleReplay(binding, ctx, allocator);
     }
 
-    var replay_state = zts.trace.ReplayState{
+    var replay_state = zigts.trace.ReplayState{
         .io_calls = io_calls,
         .cursor = 0,
         .divergences = 0,
     };
     ctx.setModuleState(
-        zts.trace.REPLAY_STATE_SLOT,
+        zigts.trace.REPLAY_STATE_SLOT,
         @ptrCast(&replay_state),
-        &zts.trace.ReplayState.deinitOpaque,
+        &zigts.trace.ReplayState.deinitOpaque,
     );
-    defer ctx.module_state[zts.trace.REPLAY_STATE_SLOT] = null;
+    defer ctx.module_state[zigts.trace.REPLAY_STATE_SLOT] = null;
 
-    var strings = zts.StringTable.init(allocator);
+    var strings = zigts.StringTable.init(allocator);
     defer strings.deinit();
 
     var source_to_parse: []const u8 = handler_source;
-    var strip_result: ?zts.StripResult = null;
+    var strip_result: ?zigts.StripResult = null;
     defer if (strip_result) |*sr| sr.deinit();
 
     const is_ts = std.mem.endsWith(u8, handler_filename, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_filename, ".tsx");
     if (is_ts or is_tsx) {
-        strip_result = zts.strip(allocator, handler_source, .{ .tsx_mode = is_tsx }) catch return error.StripFailed;
+        strip_result = zigts.strip(allocator, handler_source, .{ .tsx_mode = is_tsx }) catch return error.StripFailed;
         source_to_parse = strip_result.?.code;
     }
 
-    var p = zts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
+    var p = zigts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
     defer p.deinit();
     if (std.mem.endsWith(u8, handler_filename, ".jsx") or is_tsx) {
         p.enableJsx();
@@ -1551,7 +1551,7 @@ fn executeBuildTimeHandler(
         try ctx.materializeShapes(shapes);
     }
 
-    const func = zts.bytecode.FunctionBytecode{
+    const func = zigts.bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,
@@ -1563,52 +1563,52 @@ fn executeBuildTimeHandler(
         .source_map = null,
     };
 
-    var interp = zts.Interpreter.init(ctx);
+    var interp = zigts.Interpreter.init(ctx);
     _ = try interp.run(&func);
 
-    const handler_val = ctx.getGlobal(zts.Atom.handler) orelse return error.NoHandler;
+    const handler_val = ctx.getGlobal(zigts.Atom.handler) orelse return error.NoHandler;
     if (!handler_val.isObject()) return error.NoHandler;
-    const handler_obj = zts.JSObject.fromValue(handler_val);
+    const handler_obj = zigts.JSObject.fromValue(handler_val);
     if (handler_obj.class_id != .function or !handler_obj.flags.is_callable) return error.NoHandler;
 
     const hc_pool_req = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const req_obj = try ctx.createObject(null);
 
     const method_val = try ctx.createString(request.method);
-    try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.method, method_val);
+    try req_obj.setProperty(allocator, hc_pool_req, zigts.Atom.method, method_val);
 
     const url_val = try ctx.createString(request.url);
-    try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.url, url_val);
+    try req_obj.setProperty(allocator, hc_pool_req, zigts.Atom.url, url_val);
 
     if (request.body) |body| {
         const body_val = try ctx.createString(body);
-        try req_obj.setProperty(allocator, hc_pool_req, zts.Atom.body, body_val);
+        try req_obj.setProperty(allocator, hc_pool_req, zigts.Atom.body, body_val);
     }
 
-    const args = [_]zts.JSValue{req_obj.toValue()};
+    const args = [_]zigts.JSValue{req_obj.toValue()};
     const bc_data = handler_obj.getBytecodeFunctionData() orelse return error.NotCallable;
     const result = interp.callBytecodeFunction(
         handler_obj.toValue(),
         bc_data.bytecode,
-        zts.JSValue.undefined_val,
+        zigts.JSValue.undefined_val,
         &args,
     ) catch return error.HandlerError;
 
     if (!result.isObject()) return error.InvalidResponse;
-    const result_obj = zts.JSObject.fromValue(result);
+    const result_obj = zigts.JSObject.fromValue(result);
     const hc_pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
-    const status_val = result_obj.getProperty(hc_pool, zts.Atom.status) orelse zts.JSValue.fromInt(200);
+    const status_val = result_obj.getProperty(hc_pool, zigts.Atom.status) orelse zigts.JSValue.fromInt(200);
     const actual_status: u16 = if (status_val.isInt())
         @intCast(@max(0, @min(999, status_val.getInt())))
     else
         200;
 
-    const body_val = result_obj.getProperty(hc_pool, zts.Atom.body) orelse zts.JSValue.undefined_val;
+    const body_val = result_obj.getProperty(hc_pool, zigts.Atom.body) orelse zigts.JSValue.undefined_val;
 
     return .{
         .status = actual_status,
-        .body = zts.trace.extractStringData(body_val) orelse "",
+        .body = zigts.trace.extractStringData(body_val) orelse "",
         .divergences = replay_state.divergences,
     };
 }
@@ -1618,7 +1618,7 @@ fn replayOneBuildTime(
     allocator: std.mem.Allocator,
     handler_source: []const u8,
     handler_filename: []const u8,
-    group: *const zts.trace.RequestTraceGroup,
+    group: *const zigts.trace.RequestTraceGroup,
 ) !bool {
     const r = try executeBuildTimeHandler(allocator, handler_source, handler_filename, group.request, group.io_calls);
 
@@ -1626,7 +1626,7 @@ fn replayOneBuildTime(
     const status_ok = r.status == expected.status;
 
     // Unescape before comparing (trace stores JSON-escaped body strings).
-    const expected_body = zts.trace.unescapeJson(allocator, expected.body) catch expected.body;
+    const expected_body = zigts.trace.unescapeJson(allocator, expected.body) catch expected.body;
     defer if (expected_body.ptr != expected.body.ptr) allocator.free(expected_body);
 
     return status_ok and std.mem.eql(u8, r.body, expected_body) and r.divergences == 0;
@@ -1638,8 +1638,8 @@ fn replayOneBuildTime(
 
 const BuildTestCase = struct {
     name: []const u8,
-    request: ?zts.trace.RequestTrace = null,
-    io_calls: []const zts.trace.IoEntry = &.{},
+    request: ?zigts.trace.RequestTrace = null,
+    io_calls: []const zigts.trace.IoEntry = &.{},
     expected_status: ?u16 = null,
     expected_body: ?[]const u8 = null,
     expected_body_contains: ?[]const u8 = null,
@@ -1683,7 +1683,7 @@ fn runBuildTimeTests(
             }
         }
         if (tc.expected_body) |expected| {
-            const unescaped = zts.trace.unescapeJson(allocator, expected) catch expected;
+            const unescaped = zigts.trace.unescapeJson(allocator, expected) catch expected;
             defer if (unescaped.ptr != expected.ptr) allocator.free(unescaped);
             if (!std.mem.eql(u8, r.body, unescaped)) {
                 std.debug.print("  FAIL  {s}\n        body mismatch\n        expected: {s}\n        actual:   {s}\n", .{
@@ -1693,7 +1693,7 @@ fn runBuildTimeTests(
             }
         }
         if (tc.expected_body_contains) |needle| {
-            const unescaped = zts.trace.unescapeJson(allocator, needle) catch needle;
+            const unescaped = zigts.trace.unescapeJson(allocator, needle) catch needle;
             defer if (unescaped.ptr != needle.ptr) allocator.free(unescaped);
             if (std.mem.indexOf(u8, r.body, unescaped) == null) {
                 std.debug.print("  FAIL  {s}\n        body does not contain: {s}\n", .{ tc.name, unescaped });
@@ -1721,8 +1721,8 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
     errdefer tests.deinit(allocator);
 
     var current_name: ?[]const u8 = null;
-    var current_request: ?zts.trace.RequestTrace = null;
-    var current_io: std.ArrayList(zts.trace.IoEntry) = .empty;
+    var current_request: ?zigts.trace.RequestTrace = null;
+    var current_io: std.ArrayList(zigts.trace.IoEntry) = .empty;
     defer current_io.deinit(allocator);
     var current_status: ?u16 = null;
     var current_body: ?[]const u8 = null;
@@ -1732,7 +1732,7 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
     while (lines.next()) |line| {
         if (line.len == 0) continue;
 
-        const type_str = zts.trace.findJsonStringValue(line, "\"type\"") orelse continue;
+        const type_str = zigts.trace.findJsonStringValue(line, "\"type\"") orelse continue;
 
         if (std.mem.eql(u8, type_str, "test")) {
             if (current_name != null) {
@@ -1749,27 +1749,27 @@ fn parseBuildTestFile(allocator: std.mem.Allocator, source: []const u8) ![]Build
                 current_body = null;
                 current_body_contains = null;
             }
-            current_name = zts.trace.findJsonStringValue(line, "\"name\"") orelse "unnamed";
+            current_name = zigts.trace.findJsonStringValue(line, "\"name\"") orelse "unnamed";
         } else if (std.mem.eql(u8, type_str, "request")) {
             current_request = .{
-                .method = zts.trace.findJsonStringValue(line, "\"method\"") orelse "GET",
-                .url = zts.trace.findJsonStringValue(line, "\"url\"") orelse "/",
-                .headers_json = zts.trace.findJsonObjectValue(line, "\"headers\"") orelse "{}",
-                .body = zts.trace.findJsonStringValue(line, "\"body\""),
+                .method = zigts.trace.findJsonStringValue(line, "\"method\"") orelse "GET",
+                .url = zigts.trace.findJsonStringValue(line, "\"url\"") orelse "/",
+                .headers_json = zigts.trace.findJsonObjectValue(line, "\"headers\"") orelse "{}",
+                .body = zigts.trace.findJsonStringValue(line, "\"body\""),
             };
         } else if (std.mem.eql(u8, type_str, "io")) {
             try current_io.append(allocator, .{
-                .seq = @intCast(zts.trace.findJsonIntValue(line, "\"seq\"") orelse 0),
-                .module = zts.trace.findJsonStringValue(line, "\"module\"") orelse "",
-                .func = zts.trace.findJsonStringValue(line, "\"fn\"") orelse "",
-                .args_json = zts.trace.findJsonArrayValue(line, "\"args\"") orelse "[]",
-                .result_json = zts.trace.findJsonAnyValue(line, "\"result\"") orelse "null",
+                .seq = @intCast(zigts.trace.findJsonIntValue(line, "\"seq\"") orelse 0),
+                .module = zigts.trace.findJsonStringValue(line, "\"module\"") orelse "",
+                .func = zigts.trace.findJsonStringValue(line, "\"fn\"") orelse "",
+                .args_json = zigts.trace.findJsonArrayValue(line, "\"args\"") orelse "[]",
+                .result_json = zigts.trace.findJsonAnyValue(line, "\"result\"") orelse "null",
             });
         } else if (std.mem.eql(u8, type_str, "expect")) {
-            const status_val = zts.trace.findJsonIntValue(line, "\"status\"");
+            const status_val = zigts.trace.findJsonIntValue(line, "\"status\"");
             current_status = if (status_val) |s| @intCast(@max(0, @min(999, s))) else null;
-            current_body = zts.trace.findJsonStringValue(line, "\"body\"");
-            current_body_contains = zts.trace.findJsonStringValue(line, "\"bodyContains\"");
+            current_body = zigts.trace.findJsonStringValue(line, "\"body\"");
+            current_body_contains = zigts.trace.findJsonStringValue(line, "\"bodyContains\"");
         }
     }
 
@@ -1799,7 +1799,7 @@ pub fn compileHandler(
     generate_tests: bool,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
-    var strip_result: ?zts.StripResult = null;
+    var strip_result: ?zigts.StripResult = null;
     defer if (strip_result) |*sr| sr.deinit();
 
     // Type strip for .ts/.tsx files
@@ -1808,14 +1808,14 @@ pub fn compileHandler(
 
     if (is_ts or is_tsx) {
         // Build comptime environment with build metadata
-        const comptime_env = zts.ComptimeEnv{
+        const comptime_env = zigts.ComptimeEnv{
             .build_time = null, // TODO: pass actual build time
             .git_commit = null, // TODO: pass git commit
-            .version = zts.version.string,
+            .version = zigts.version.string,
             .env_vars = null,
         };
 
-        strip_result = zts.strip(allocator, source, .{
+        strip_result = zigts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = comptime_env,
@@ -1828,14 +1828,14 @@ pub fn compileHandler(
     }
 
     // Initialize string table and atom table for parsing
-    var strings = zts.StringTable.init(allocator);
+    var strings = zigts.StringTable.init(allocator);
     defer strings.deinit();
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zigts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
     // Parse the source code (single pass for IR + bytecode)
-    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = zigts.parser.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -1887,7 +1887,7 @@ pub fn compileHandler(
     }
 
     // Optimize IR (cold-start-friendly single pass)
-    _ = zts.parser.optimizeIR(
+    _ = zigts.parser.optimizeIR(
         allocator,
         &js_parser.nodes,
         &js_parser.constants,
@@ -1895,13 +1895,13 @@ pub fn compileHandler(
     ) catch {};
 
     // Node type map for type-directed codegen (populated by BoolChecker, consumed by CodeGen)
-    var node_type_map: zts.bool_checker.NodeTypeMap = .empty;
+    var node_type_map: zigts.bool_checker.NodeTypeMap = .empty;
     defer node_type_map.deinit(allocator);
 
     // Run bool checker and type checker
     {
         const ir_view_check = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var checker = zts.BoolChecker.init(allocator, ir_view_check, &atoms);
+        var checker = zigts.BoolChecker.init(allocator, ir_view_check, &atoms);
         defer checker.deinit();
 
         const bool_error_count = try checker.check(root);
@@ -1937,16 +1937,16 @@ pub fn compileHandler(
         // TypeChecker: full type annotation checking (when TypeMap available from .ts/.tsx)
         if (strip_result) |sr| {
             const tm = sr.type_map;
-            var type_pool = zts.TypePool.init(allocator);
+            var type_pool = zigts.TypePool.init(allocator);
             defer type_pool.deinit(allocator);
 
-            var type_env = zts.TypeEnv.init(allocator, &type_pool);
+            var type_env = zigts.TypeEnv.init(allocator, &type_pool);
             defer type_env.deinit();
 
-            zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+            zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
             type_env.populateFromTypeMap(&tm);
 
-            var tc = zts.type_checker.TypeChecker.init(allocator, ir_view_check, &atoms, &type_env);
+            var tc = zigts.type_checker.TypeChecker.init(allocator, ir_view_check, &atoms, &type_env);
             defer tc.deinit();
 
             const tc_errors = try tc.check(root);
@@ -1974,9 +1974,9 @@ pub fn compileHandler(
     // Unified violations list: collects from FlowChecker, HandlerVerifier, and
     // FaultCoverageChecker. Declared here so it spans the verifier block,
     // buildContractWithPolicy (flow violations), and the PathGenerator block (fault violations).
-    var all_violations: std.ArrayList(zts.property_diagnostics.PropertyViolation) = .empty;
+    var all_violations: std.ArrayList(zigts.property_diagnostics.PropertyViolation) = .empty;
     defer {
-        zts.property_diagnostics.deinitViolations(allocator, all_violations.items);
+        zigts.property_diagnostics.deinitViolations(allocator, all_violations.items);
         all_violations.deinit(allocator);
     }
 
@@ -1988,29 +1988,29 @@ pub fn compileHandler(
     var optional_safe: bool = false;
     if (emit_verify) {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
+        const handler_fn = zigts.handler_verifier.findHandlerFunction(ir_view, root);
 
-        var verify_type_pool: ?zts.TypePool = null;
-        var verify_type_env: ?zts.TypeEnv = null;
-        var verify_type_checker: ?zts.TypeChecker = null;
+        var verify_type_pool: ?zigts.TypePool = null;
+        var verify_type_env: ?zigts.TypeEnv = null;
+        var verify_type_checker: ?zigts.TypeChecker = null;
         defer if (verify_type_checker) |*checker| checker.deinit();
         defer if (verify_type_env) |*env| env.deinit();
         defer if (verify_type_pool) |*pool| pool.deinit(allocator);
 
-        const verifier_env: ?*const zts.TypeEnv = if (strip_result) |sr| blk: {
-            verify_type_pool = zts.TypePool.init(allocator);
-            verify_type_env = zts.TypeEnv.init(allocator, &verify_type_pool.?);
-            zts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
+        const verifier_env: ?*const zigts.TypeEnv = if (strip_result) |sr| blk: {
+            verify_type_pool = zigts.TypePool.init(allocator);
+            verify_type_env = zigts.TypeEnv.init(allocator, &verify_type_pool.?);
+            zigts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
             verify_type_env.?.populateFromTypeMap(&sr.type_map);
-            verify_type_checker = zts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
+            verify_type_checker = zigts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
             _ = verify_type_checker.?.check(root) catch 0;
             break :blk &verify_type_env.?;
         } else null;
 
-        const verifier_type_checker: ?*const zts.TypeChecker = if (verify_type_checker) |*checker| checker else null;
+        const verifier_type_checker: ?*const zigts.TypeChecker = if (verify_type_checker) |*checker| checker else null;
 
         if (handler_fn) |hf| {
-            var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_type_checker);
+            var verifier = zigts.HandlerVerifier.init(allocator, ir_view, &atoms, verifier_env, verifier_type_checker);
             defer verifier.deinit();
 
             const error_count = try verifier.verify(hf);
@@ -2035,22 +2035,22 @@ pub fn compileHandler(
 
             // Collect violations before deciding to fail so counterexample tests can be
             // generated and returned even when verification fails.
-            zts.property_diagnostics.collectVerifierViolations(allocator, &all_violations, diags, ir_view);
+            zigts.property_diagnostics.collectVerifierViolations(allocator, &all_violations, diags, ir_view);
 
             if (error_count > 0) {
                 // Run PathGenerator to fill counterexample refs for result_unsafe violations
                 // before returning the failure result.
-                var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
+                var gen = zigts.PathGenerator.init(allocator, ir_view, &atoms);
                 defer gen.deinit();
                 gen.generate(hf) catch {};
-                zts.property_diagnostics.fillVerifierCounterexamples(all_violations.items, gen.getTests());
+                zigts.property_diagnostics.fillVerifierCounterexamples(all_violations.items, gen.getTests());
 
                 var viol_jsonl_result: ?[]const u8 = null;
                 var viol_summary_result: ?[]const u8 = null;
                 if (all_violations.items.len > 0) {
                     var vj_buf: std.ArrayList(u8) = .empty;
                     var vj_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &vj_buf);
-                    zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, gen.getTests()) catch {};
+                    zigts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, gen.getTests()) catch {};
                     vj_buf = vj_aw.toArrayList();
                     if (vj_buf.items.len > 0) {
                         viol_jsonl_result = try vj_buf.toOwnedSlice(allocator);
@@ -2059,7 +2059,7 @@ pub fn compileHandler(
                     }
                     var vs_buf: std.ArrayList(u8) = .empty;
                     var vs_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &vs_buf);
-                    zts.property_diagnostics.formatViolationsSummary(&vs_aw.writer, all_violations.items, filename, null) catch {};
+                    zigts.property_diagnostics.formatViolationsSummary(&vs_aw.writer, all_violations.items, filename, null) catch {};
                     vs_buf = vs_aw.toArrayList();
                     if (vs_buf.items.len > 0) {
                         viol_summary_result = try vs_buf.toOwnedSlice(allocator);
@@ -2103,7 +2103,7 @@ pub fn compileHandler(
         }
     }
 
-    var code_gen = zts.parser.CodeGen.initWithIRStore(
+    var code_gen = zigts.parser.CodeGen.initWithIRStore(
         allocator,
         &js_parser.nodes,
         &js_parser.constants,
@@ -2124,7 +2124,7 @@ pub fn compileHandler(
     if (!builtin.is_test) std.debug.print("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
 
     // Bytecode verification: reject malformed bytecode before serialization
-    const verify_bc = zts.BytecodeVerifier.verify(&func);
+    const verify_bc = zigts.BytecodeVerifier.verify(&func);
     if (!verify_bc.valid) {
         std.debug.print("Bytecode verification failed at offset {d}: {s}\n", .{
             verify_bc.offset,
@@ -2139,9 +2139,9 @@ pub fn compileHandler(
 
     // Serialize bytecode with atoms AND shapes for complete cache format
     var buffer: [256 * 1024]u8 = undefined; // 256KB buffer
-    var writer = zts.bytecode_cache.SliceWriter{ .buffer = &buffer };
+    var writer = zigts.bytecode_cache.SliceWriter{ .buffer = &buffer };
 
-    zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(&func, &atoms, shapes, &writer, allocator) catch |err| {
+    zigts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(&func, &atoms, shapes, &writer, allocator) catch |err| {
         std.debug.print("Serialization error: {}\n", .{err});
         return err;
     };
@@ -2246,7 +2246,7 @@ pub fn compileHandler(
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
-            var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
+            var gen = zigts.PathGenerator.init(allocator, ir_view, &atoms);
             defer gen.deinit();
 
             try gen.generate(hf);
@@ -2274,11 +2274,11 @@ pub fn compileHandler(
 
                 // Populate behavioral contract from exhaustive paths
                 contract.?.behaviors = try gen.toBehaviorPaths(allocator);
-                contract.?.behaviors_exhaustive = gen.getTests().len < zts.PathGenerator.MAX_PATHS;
+                contract.?.behaviors_exhaustive = gen.getTests().len < zigts.PathGenerator.MAX_PATHS;
             }
 
             // Fault coverage analysis on generated paths
-            var fc = zts.fault_coverage.FaultCoverageChecker.init(allocator, gen.getTests());
+            var fc = zigts.fault_coverage.FaultCoverageChecker.init(allocator, gen.getTests());
             defer fc.deinit();
             try fc.analyze();
             const fc_report = fc.getReport();
@@ -2321,7 +2321,7 @@ pub fn compileHandler(
             // Collect fault coverage violations into the unified all_violations list.
             // Flow and verifier violations were already collected earlier.
             if (fc_report.warning_count > 0) {
-                zts.property_diagnostics.collectFaultViolations(
+                zigts.property_diagnostics.collectFaultViolations(
                     allocator,
                     &all_violations,
                     fc_report.diagnostics,
@@ -2330,7 +2330,7 @@ pub fn compileHandler(
             }
 
             // Fill counterexample refs for result_unsafe violations now that tests exist.
-            zts.property_diagnostics.fillVerifierCounterexamples(
+            zigts.property_diagnostics.fillVerifierCounterexamples(
                 all_violations.items,
                 gen.getTests(),
             );
@@ -2340,7 +2340,7 @@ pub fn compileHandler(
             if (all_violations.items.len > 0) {
                 var viol_buf: std.ArrayList(u8) = .empty;
                 var viol_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &viol_buf);
-                zts.property_diagnostics.writeViolationsJsonl(
+                zigts.property_diagnostics.writeViolationsJsonl(
                     &viol_aw.writer,
                     allocator,
                     all_violations.items,
@@ -2357,7 +2357,7 @@ pub fn compileHandler(
                 // the emit section in main() appends the file path separately.
                 var sum_buf: std.ArrayList(u8) = .empty;
                 var sum_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sum_buf);
-                zts.property_diagnostics.formatViolationsSummary(
+                zigts.property_diagnostics.formatViolationsSummary(
                     &sum_aw.writer,
                     all_violations.items,
                     filename,
@@ -2390,9 +2390,9 @@ pub fn compileHandler(
 
 fn resolveImportedAtomName(
     atom_value: u32,
-    atoms: ?*zts.context.AtomTable,
+    atoms: ?*zigts.context.AtomTable,
 ) ?[]const u8 {
-    const atom: zts.object.Atom = @enumFromInt(atom_value);
+    const atom: zigts.object.Atom = @enumFromInt(atom_value);
     if (atom.isPredefined()) return atom.toPredefinedName();
     if (atoms) |table| return table.getName(atom);
     return null;
@@ -2400,7 +2400,7 @@ fn resolveImportedAtomName(
 
 fn validateVirtualModuleImports(
     view: ir.IrView,
-    atoms: ?*zts.context.AtomTable,
+    atoms: ?*zigts.context.AtomTable,
     filename: []const u8,
 ) !void {
     const node_count = view.nodeCount();
@@ -2411,7 +2411,7 @@ fn validateVirtualModuleImports(
 
         const import_decl = view.getImportDecl(node_idx) orelse continue;
         const module_str = view.getString(import_decl.module_idx) orelse continue;
-        const binding = zts.builtin_modules.fromSpecifier(module_str) orelse continue;
+        const binding = zigts.builtin_modules.fromSpecifier(module_str) orelse continue;
 
         var name_buf: [32][]const u8 = undefined;
         var name_count: usize = 0;
@@ -2426,7 +2426,7 @@ fn validateVirtualModuleImports(
             }
         }
 
-        if (zts.modules.validateImports(binding, name_buf[0..name_count])) |missing| {
+        if (zigts.modules.validateImports(binding, name_buf[0..name_count])) |missing| {
             if (!builtin.is_test) std.debug.print(
                 "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
                 .{ module_str, missing, filename },
@@ -2437,7 +2437,7 @@ fn validateVirtualModuleImports(
 }
 
 /// Scan parsed IR for file import declarations
-fn hasFileImports(js_parser: *zts.parser.JsParser, _: ir.NodeIndex) bool {
+fn hasFileImports(js_parser: *zigts.parser.JsParser, _: ir.NodeIndex) bool {
     const view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const node_count = view.nodeCount();
 
@@ -2448,7 +2448,7 @@ fn hasFileImports(js_parser: *zts.parser.JsParser, _: ir.NodeIndex) bool {
         const import_decl = view.getImportDecl(@intCast(idx)) orelse continue;
         const module_str = view.getString(import_decl.module_idx) orelse continue;
 
-        const result = zts.modules.resolver.resolve(module_str);
+        const result = zigts.modules.resolver.resolve(module_str);
         switch (result) {
             .file => return true,
             .virtual, .unknown => {},
@@ -2463,15 +2463,15 @@ fn compileMultiModule(
     allocator: std.mem.Allocator,
     entry_source: []const u8,
     filename: []const u8,
-    strings: *zts.string.StringTable,
-    atoms: *zts.context.AtomTable,
+    strings: *zigts.string.StringTable,
+    atoms: *zigts.context.AtomTable,
     needs_contract: bool,
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
 ) !CompiledHandler {
     // Build module graph
-    var graph = zts.modules.ModuleGraph.init(allocator);
+    var graph = zigts.modules.ModuleGraph.init(allocator);
     defer graph.deinit();
 
     graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
@@ -2485,7 +2485,7 @@ fn compileMultiModule(
     });
 
     // Compile all modules with shared atoms
-    var module_compiler = zts.modules.ModuleCompiler.init(allocator, atoms, strings);
+    var module_compiler = zigts.modules.ModuleCompiler.init(allocator, atoms, strings);
     var compile_result = module_compiler.compileAll(&graph) catch |err| {
         std.debug.print("Multi-module compilation error: {}\n", .{err});
         return err;
@@ -2506,9 +2506,9 @@ fn compileMultiModule(
     // Serialize dependency modules (all except last, which is the entry)
     for (compile_result.modules[0 .. mod_count - 1], 0..) |*compiled_mod, i| {
         var buffer: [256 * 1024]u8 = undefined;
-        var writer = zts.bytecode_cache.SliceWriter{ .buffer = &buffer };
+        var writer = zigts.bytecode_cache.SliceWriter{ .buffer = &buffer };
 
-        zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+        zigts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
             &compiled_mod.func,
             atoms,
             compiled_mod.shapes,
@@ -2525,9 +2525,9 @@ fn compileMultiModule(
     // Serialize entry module (last in execution order)
     const entry_mod = &compile_result.modules[mod_count - 1];
     var entry_buffer: [256 * 1024]u8 = undefined;
-    var entry_writer = zts.bytecode_cache.SliceWriter{ .buffer = &entry_buffer };
+    var entry_writer = zigts.bytecode_cache.SliceWriter{ .buffer = &entry_buffer };
 
-    zts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
+    zigts.bytecode_cache.serializeBytecodeWithAtomsAndShapes(
         &entry_mod.func,
         atoms,
         entry_mod.shapes,
@@ -2564,18 +2564,18 @@ fn compileMultiModule(
     };
 }
 
-const readFilePosixForGraph = zts.file_io.readFileForModuleGraph;
+const readFilePosixForGraph = zigts.file_io.readFileForModuleGraph;
 
 fn analyzeAot(
     allocator: std.mem.Allocator,
-    js_parser: *zts.parser.JsParser,
-    atoms: *zts.context.AtomTable,
+    js_parser: *zigts.parser.JsParser,
+    atoms: *zigts.context.AtomTable,
     root: ir.NodeIndex,
 ) !?AotAnalysis {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = findHandlerFunction(ir_view, root) orelse return null;
 
-    var analyzer = zts.HandlerAnalyzer.init(allocator, ir_view, atoms);
+    var analyzer = zigts.HandlerAnalyzer.init(allocator, ir_view, atoms);
     defer analyzer.deinit();
     analyzer.enableJsonBodyParsePatterns();
 
@@ -2595,7 +2595,7 @@ fn analyzeAot(
         return null;
     }
 
-    var handler_loc: ?zts.parser.SourceLocation = null;
+    var handler_loc: ?zigts.parser.SourceLocation = null;
     if (handler_fn < js_parser.nodes.locs.items.len) {
         handler_loc = js_parser.nodes.locs.items[handler_fn];
     }
@@ -2607,7 +2607,7 @@ fn analyzeAot(
     };
 }
 
-fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
+fn countAotPatterns(dispatch: *const zigts.PatternDispatchTable) usize {
     var count: usize = 0;
     for (dispatch.patterns) |pattern| {
         switch (pattern.pattern_type) {
@@ -2621,19 +2621,19 @@ fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
     return count;
 }
 
-// findHandlerFunction is defined in handler_verifier.zig and exported via zts.
-const findHandlerFunction = zts.handler_verifier.findHandlerFunction;
+// findHandlerFunction is defined in handler_verifier.zig and exported via zigts.
+const findHandlerFunction = zigts.handler_verifier.findHandlerFunction;
 
 /// Build a contract manifest from the parsed IR.
 fn buildContract(
     allocator: std.mem.Allocator,
-    js_parser: *zts.parser.JsParser,
-    atoms: *zts.context.AtomTable,
+    js_parser: *zigts.parser.JsParser,
+    atoms: *zigts.context.AtomTable,
     filename: []const u8,
     root: ir.NodeIndex,
     aot: ?AotAnalysis,
     verify_info: ?VerificationInfo,
-    type_map: ?*const zts.TypeMap,
+    type_map: ?*const zigts.TypeMap,
 ) !HandlerContract {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
@@ -2646,17 +2646,17 @@ fn buildContract(
         }
     }
 
-    var type_pool = zts.TypePool.init(allocator);
+    var type_pool = zigts.TypePool.init(allocator);
     defer type_pool.deinit(allocator);
 
-    var type_env = zts.TypeEnv.init(allocator, &type_pool);
+    var type_env = zigts.TypeEnv.init(allocator, &type_pool);
     defer type_env.deinit();
-    zts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
+    zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
     if (type_map) |tm| {
         type_env.populateFromTypeMap(tm);
     }
 
-    var type_checker = zts.TypeChecker.init(allocator, ir_view, atoms, &type_env);
+    var type_checker = zigts.TypeChecker.init(allocator, ir_view, atoms, &type_env);
     defer type_checker.deinit();
     _ = type_checker.check(root) catch 0;
 
@@ -2677,16 +2677,16 @@ fn buildContract(
 
 fn buildContractWithPolicy(
     allocator: std.mem.Allocator,
-    js_parser: *zts.parser.JsParser,
-    atoms: *zts.context.AtomTable,
+    js_parser: *zigts.parser.JsParser,
+    atoms: *zigts.context.AtomTable,
     filename: []const u8,
     root: ir.NodeIndex,
     aot: ?AotAnalysis,
     verify_info: ?VerificationInfo,
-    type_map: ?*const zts.TypeMap,
+    type_map: ?*const zigts.TypeMap,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
-    violations_out: ?*std.ArrayList(zts.property_diagnostics.PropertyViolation),
+    violations_out: ?*std.ArrayList(zigts.property_diagnostics.PropertyViolation),
 ) !HandlerContract {
     var contract = try buildContract(
         allocator,
@@ -2705,7 +2705,7 @@ fn buildContractWithPolicy(
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
-            var flow = zts.FlowChecker.init(allocator, ir_view, atoms);
+            var flow = zigts.FlowChecker.init(allocator, ir_view, atoms);
             defer flow.deinit();
 
             const flow_errors = try flow.check(hf);
@@ -2742,7 +2742,7 @@ fn buildContractWithPolicy(
             // Collect flow violations while flow is still alive (strings are duped).
             if (violations_out) |vout| {
                 const ir_view_flow = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-                zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view_flow);
+                zigts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view_flow);
             }
 
             if (!builtin.is_test and flow_errors == 0) {
@@ -2762,9 +2762,9 @@ fn buildContractWithPolicy(
 
 fn buildMultiModuleContract(
     allocator: std.mem.Allocator,
-    graph: *const zts.modules.ModuleGraph,
-    compile_result: *const zts.modules.CompileResult,
-    atoms: *zts.context.AtomTable,
+    graph: *const zigts.modules.ModuleGraph,
+    compile_result: *const zigts.modules.CompileResult,
+    atoms: *zigts.context.AtomTable,
     entry_filename: []const u8,
     emit_contract: bool,
     policy: ?HandlerPolicy,
@@ -3354,7 +3354,7 @@ fn writeZigFile(
     }
 
     try writer.writeAll("const std = @import(\"std\");\n");
-    try writer.writeAll("const zq = @import(\"zts\");\n\n");
+    try writer.writeAll("const zq = @import(\"zigts\");\n\n");
 
     if (has_aot) {
         try writer.writeAll("pub const has_aot = true;\n");
@@ -3555,7 +3555,7 @@ fn writeZigFile(
 }
 
 fn writeCapabilityPolicy(writer: anytype, policy: ?HandlerPolicy, contract: ?*const HandlerContract) !void {
-    try writer.writeAll("\npub const capability_policy = @import(\"zts\").handler_policy.RuntimePolicy{\n");
+    try writer.writeAll("\npub const capability_policy = @import(\"zigts\").handler_policy.RuntimePolicy{\n");
     if (policy) |p| {
         // Explicit policy takes precedence
         try writePolicySectionFromAllowList(writer, "env", p.env);
@@ -3789,13 +3789,13 @@ fn buildTestContractForSource(
     filename: []const u8,
     sql_schema_path: ?[]const u8,
 ) !HandlerContract {
-    var strings = zts.StringTable.init(allocator);
+    var strings = zigts.StringTable.init(allocator);
     defer strings.deinit();
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zigts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = zts.parser.JsParser.init(allocator, source);
+    var js_parser = zigts.parser.JsParser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 

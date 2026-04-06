@@ -10,9 +10,9 @@
 //! Called by precompile.zig when --manifest is passed alongside --contract.
 
 const std = @import("std");
-const zts = @import("zts");
-const routePatternsMatch = zts.route_match.pathsMatch;
-const handler_contract = zts.handler_contract;
+const zigts = @import("zigts");
+const routePatternsMatch = zigts.route_match.pathsMatch;
+const handler_contract = zigts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
 
 // -------------------------------------------------------------------------
@@ -467,7 +467,7 @@ pub fn writeAlignmentJson(
     try w.writeAll("}\n");
 
     output = aw.toArrayList();
-    try zts.file_io.writeFile(allocator, output_path, output.items);
+    try zigts.file_io.writeFile(allocator, output_path, output.items);
 }
 
 // -------------------------------------------------------------------------

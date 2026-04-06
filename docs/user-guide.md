@@ -1,7 +1,7 @@
 # zigttp User Guide
 
 A serverless JavaScript runtime for FaaS deployments (AWS Lambda, Azure
-Functions, Cloudflare Workers), powered by Zig and zts.
+Functions, Cloudflare Workers), powered by Zig and zigts.
 
 ---
 
@@ -735,7 +735,7 @@ function handler(request) {
 
 ## Error Handling
 
-zts has no try/catch. All errors flow through two patterns: Result types and optional narrowing.
+zigts has no try/catch. All errors flow through two patterns: Result types and optional narrowing.
 
 ### Result Types
 
@@ -1326,7 +1326,7 @@ All query names must be registered via `sql()` at module scope. The contract ext
 
 ## JavaScript Subset Reference
 
-zts implements a restricted JavaScript subset optimized for FaaS workloads. The restrictions enable compile-time verification, deterministic replay, and contract extraction.
+zigts implements a restricted JavaScript subset optimized for FaaS workloads. The restrictions enable compile-time verification, deterministic replay, and contract extraction.
 
 ### Supported Features
 
@@ -1407,13 +1407,13 @@ See [feature-detection.md](feature-detection.md) for the full 54-feature detecti
 
 ### Strict Mode
 
-zts always runs in strict mode. Implicit globals and `with` are errors.
+zigts always runs in strict mode. Implicit globals and `with` are errors.
 
 ---
 
 ## TypeScript Support
 
-zts includes a native TypeScript/TSX stripper that removes type annotations at
+zigts includes a native TypeScript/TSX stripper that removes type annotations at
 load time. Use `.ts` or `.tsx` files directly without a separate build step.
 
 ### How It Works
@@ -1791,7 +1791,7 @@ function HomePage() {
         <Layout title="Home">
             <h1>Welcome to My Site</h1>
             <p>This is a simple web application powered by zigttp.</p>
-            <p>Built with Zig and zts for serverless deployments.</p>
+            <p>Built with Zig and zigts for serverless deployments.</p>
         </Layout>
     );
 }
@@ -1800,7 +1800,7 @@ function AboutPage() {
     return (
         <Layout title="About">
             <h1>About</h1>
-            <p>zigttp is a serverless JavaScript runtime powered by zts.</p>
+            <p>zigttp is a serverless JavaScript runtime powered by zigts.</p>
             <h2>Features</h2>
             <ul>
                 <li>Instant cold starts</li>
@@ -1899,7 +1899,7 @@ function handler(request) {
             uptime_ms: uptime,
             uptime_seconds: Math.floor(uptime / 1000),
             total_requests: requestCount,
-            runtime: "zts",
+            runtime: "zigts",
         });
     }
 
@@ -1921,10 +1921,10 @@ function handler(request) {
 
 ### Benchmarks
 
-zts outperforms QuickJS in our historical benchmark runs (QuickJS is used only
+zigts outperforms QuickJS in our historical benchmark runs (QuickJS is used only
 as an external baseline). See `benchmarks/*.json` for raw results.
 
-| Operation      | zts         | QuickJS    | Improvement |
+| Operation      | zigts         | QuickJS    | Improvement |
 | -------------- | ----------- | ---------- | ----------- |
 | stringOps      | 16.3M ops/s | 258K ops/s | 63x faster  |
 | objectCreate   | 8.1M ops/s  | 1.7M ops/s | 4.8x faster |
@@ -1935,7 +1935,7 @@ as an external baseline). See `benchmarks/*.json` for raw results.
 Run benchmarks: `./zig-out/bin/zigttp-bench`
 
 Note: Optional instrumentation (perf), parallel compiler, and JIT modules exist
-in `zts/` but are not enabled by default.
+in `zigts/` but are not enabled by default.
 
 ### Memory Configuration
 
@@ -1960,7 +1960,7 @@ zigttp is optimized for FaaS cold starts:
 
 ### Hybrid Arena Allocation
 
-For request-scoped workloads, zts uses a hybrid memory model that eliminates GC
+For request-scoped workloads, zigts uses a hybrid memory model that eliminates GC
 latency spikes:
 
 - **Arena allocator**: All request-scoped objects are allocated from a
@@ -2215,7 +2215,7 @@ The generated file is written to `src/generated/client.ts`.
 The standalone compiler CLI accepts the matching flag:
 
 ```bash
-zts compile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
+zigts compile --sdk ts examples/routing/api-surface.ts /tmp/embedded_handler.zig
 ```
 
 Typed helpers are generated only for routes the compiler can prove end to end:

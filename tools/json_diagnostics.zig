@@ -8,12 +8,12 @@
 //! Architecture: each checker's Diagnostic -> JsonDiagnostic -> JSON on stdout
 
 const std = @import("std");
-const zts = @import("zts");
-const parser = zts.parser;
-const bool_checker = zts.bool_checker;
-const type_checker = zts.type_checker;
-const handler_verifier = zts.handler_verifier;
-const handler_contract = zts.handler_contract;
+const zigts = @import("zigts");
+const parser = zigts.parser;
+const bool_checker = zigts.bool_checker;
+const type_checker = zigts.type_checker;
+const handler_verifier = zigts.handler_verifier;
+const handler_contract = zigts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
 
 pub const IrView = parser.IrView;
@@ -315,7 +315,7 @@ pub fn writeErrorJson(writer: anytype, diagnostics: []const JsonDiagnostic) !voi
 // -------------------------------------------------------------------------
 
 pub fn writeModulesJson(writer: anytype) !void {
-    const builtin_modules = zts.builtin_modules;
+    const builtin_modules = zigts.builtin_modules;
     try writer.writeByte('[');
     for (builtin_modules.all, 0..) |binding, i| {
         if (i > 0) try writer.writeByte(',');
@@ -332,7 +332,7 @@ pub fn writeModulesJson(writer: anytype) !void {
 }
 
 pub fn writeModulesText(writer: anytype) !void {
-    const builtin_modules = zts.builtin_modules;
+    const builtin_modules = zigts.builtin_modules;
     for (builtin_modules.all) |binding| {
         try writer.print("{s}\n", .{binding.specifier});
         for (binding.exports) |func| {

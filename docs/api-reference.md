@@ -75,20 +75,20 @@ pub const NativeFn = *const fn(ctx: *Context, this: JSValue, args: []const JSVal
 ### Example: Custom Math Function
 
 ```zig
-const zts = @import("zts");
+const zigts = @import("zigts");
 
-fn mySquare(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
+fn mySquare(ctx: *zigts.Context, this: zigts.JSValue, args: []const zigts.JSValue) !zigts.JSValue {
     if (args.len < 1) {
-        return zts.JSValue.fromInt(0);
+        return zigts.JSValue.fromInt(0);
     }
 
     const num = try args[0].toNumber(ctx);
     const result = num * num;
 
-    return zts.JSValue.fromFloat(result);
+    return zigts.JSValue.fromFloat(result);
 }
 
-pub fn registerCustomFunctions(ctx: *zts.Context) !void {
+pub fn registerCustomFunctions(ctx: *zigts.Context) !void {
     const fn_value = try ctx.createNativeFunction("square", mySquare);
     try ctx.setGlobal("square", fn_value);
 }
@@ -112,27 +112,27 @@ const num: f64 = try value.toNumber(ctx);
 const int: i32 = try value.toInt32(ctx);
 const str: []const u8 = try value.toString(ctx);
 const bool_val: bool = try value.toBoolean(ctx);
-const obj: *zts.Object = try value.toObject(ctx);
+const obj: *zigts.Object = try value.toObject(ctx);
 ```
 
 #### From Zig to JavaScript
 
 ```zig
-const num = zts.JSValue.fromInt(42);
-const float = zts.JSValue.fromFloat(3.14);
-const str = try zts.JSValue.fromString(ctx, "hello");
-const true_val = zts.JSValue.fromBool(true);
-const null_val = zts.JSValue.null();
-const undef_val = zts.JSValue.undefined();
+const num = zigts.JSValue.fromInt(42);
+const float = zigts.JSValue.fromFloat(3.14);
+const str = try zigts.JSValue.fromString(ctx, "hello");
+const true_val = zigts.JSValue.fromBool(true);
+const null_val = zigts.JSValue.null();
+const undef_val = zigts.JSValue.undefined();
 
 const obj = try ctx.createObject();
-try obj.setProperty(ctx, "key", zts.JSValue.fromInt(123));
+try obj.setProperty(ctx, "key", zigts.JSValue.fromInt(123));
 ```
 
 ### Error Handling
 
 ```zig
-fn mayFailFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
+fn mayFailFunction(ctx: *zigts.Context, this: zigts.JSValue, args: []const zigts.JSValue) !zigts.JSValue {
     if (args.len < 1) {
         return ctx.throwError("Missing required argument");
     }
@@ -143,7 +143,7 @@ fn mayFailFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSVal
         return ctx.throwError("Value must be non-negative");
     }
 
-    return zts.JSValue.fromFloat(@sqrt(value));
+    return zigts.JSValue.fromFloat(@sqrt(value));
 }
 ```
 

@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zts");
+const zq = @import("zigts");
 const compat = @import("compat.zig");
 const Io = std.Io;
 const net = std.Io.net;

@@ -1,6 +1,6 @@
 # JSX Guide
 
-zigttp includes native JSX/TSX support for server-side rendering. JSX is parsed directly by the zts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions). No separate transformer is required.
+zigttp includes native JSX/TSX support for server-side rendering. JSX is parsed directly by the zigts parser when JSX mode is enabled (based on `.jsx`/`.tsx` file extensions). No separate transformer is required.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Run it:
 
 ## JSX Runtime API
 
-The JSX runtime is provided by `zts/http.zig` and includes:
+The JSX runtime is provided by `zigts/http.zig` and includes:
 
 ### `h(tag, props, ...children)`
 
@@ -376,7 +376,7 @@ function handler(request: Request): Response {
 
 ## Supported Language Features in JSX
 
-zts supports ES5 plus these ES6+ extensions in JSX/TSX files:
+zigts supports ES5 plus these ES6+ extensions in JSX/TSX files:
 
 **Supported**:
 - Arrow functions: `const MyComponent = (props) => <div>{props.title}</div>`

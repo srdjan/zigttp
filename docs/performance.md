@@ -6,9 +6,9 @@ Performance characteristics, benchmarks, optimizations, and deployment patterns 
 
 ### JavaScript Engine Performance (QuickJS baseline)
 
-zts outperforms QuickJS in historical benchmark runs (QuickJS as external baseline). See the [zigttp-bench](https://github.com/srdjan/zigttp-bench) repository for raw results and scripts.
+zigts outperforms QuickJS in historical benchmark runs (QuickJS as external baseline). See the [zigttp-bench](https://github.com/srdjan/zigttp-bench) repository for raw results and scripts.
 
-| Benchmark      | zts         | QuickJS    | Ratio           |
+| Benchmark      | zigts         | QuickJS    | Ratio           |
 | -------------- | ----------- | ---------- | --------------- |
 | stringOps      | 16.3M ops/s | 258K ops/s | **63x faster**  |
 | objectCreate   | 8.1M ops/s  | 1.7M ops/s | **4.8x faster** |
@@ -100,7 +100,7 @@ HandlerPool reuses pre-warmed contexts for subsequent requests:
 
 ### Property Access Optimizations
 
-**Shape Preallocation** (`zts/context.zig:352-434`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating transitions. Direct slot writes via `setSlot()` bypass property lookup.
+**Shape Preallocation** (`zigts/context.zig:352-434`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating transitions. Direct slot writes via `setSlot()` bypass property lookup.
 
 Shapes:
 - Request: method, url, path, query, body, headers (6 props)
@@ -108,27 +108,27 @@ Shapes:
 - Response headers: content-type, content-length, cache-control (3 props)
 - Request headers: authorization, content-type, accept, host, user-agent, accept-encoding, connection (7 props)
 
-**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization. O(1) monomorphic lookups, megamorphic transition after 9th distinct shape.
+**Polymorphic Inline Cache (PIC)** (`zigts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization. O(1) monomorphic lookups, megamorphic transition after 9th distinct shape.
 
-**Binary Search for Large Objects** (`zts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays (`BINARY_SEARCH_THRESHOLD = 8`).
+**Binary Search for Large Objects** (`zigts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays (`BINARY_SEARCH_THRESHOLD = 8`).
 
-**JIT Baseline IC Integration** (`zts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 fast paths check PIC entry[0] inline, falling back to helper on miss.
+**JIT Baseline IC Integration** (`zigts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 fast paths check PIC entry[0] inline, falling back to helper on miss.
 
-**JIT Object Literal Shapes** (`zts/context.zig:746-779`, `zts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. `new_object_literal` creates objects with the final hidden class directly, and `set_slot` writes inline without lookup. Fast path uses arena bump allocation.
+**JIT Object Literal Shapes** (`zigts/context.zig:746-779`, `zigts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. `new_object_literal` creates objects with the final hidden class directly, and `set_slot` writes inline without lookup. Fast path uses arena bump allocation.
 
-**Type Feedback** (`zts/type_feedback.zig`): Call site and value type profiling for JIT decisions. Inlining threshold lowered to 5 calls (from 10) for faster FaaS warmup.
+**Type Feedback** (`zigts/type_feedback.zig`): Call site and value type profiling for JIT decisions. Inlining threshold lowered to 5 calls (from 10) for faster FaaS warmup.
 
 ### String Optimizations
 
-**Lazy String Hashing** (`zts/string.zig:18-24, 44-54`): Hash deferred until needed via `hash_computed` flag. Reduces overhead for strings never used as hash keys.
+**Lazy String Hashing** (`zigts/string.zig:18-24, 44-54`): Hash deferred until needed via `hash_computed` flag. Reduces overhead for strings never used as hash keys.
 
-**Pre-interned HTTP Atoms** (`zts/object.zig:237-264`): 27 common headers with O(1) lookup: content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, connection, accept-encoding, cookie, x-forwarded-for, x-request-id, content-encoding, transfer-encoding, vary.
+**Pre-interned HTTP Atoms** (`zigts/object.zig:237-264`): 27 common headers with O(1) lookup: content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, connection, accept-encoding, cookie, x-forwarded-for, x-request-id, content-encoding, transfer-encoding, vary.
 
-**HTTP String Cache** (`zts/context.zig:111-135, 462+`): Pre-allocated status texts, content-type strings, and HTTP method strings.
+**HTTP String Cache** (`zigts/context.zig:111-135, 462+`): Pre-allocated status texts, content-type strings, and HTTP method strings.
 
 ### Pool and Request Optimizations
 
-**Pool Slot Hint** (`zts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) to O(1).
+**Pool Slot Hint** (`zigts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) to O(1).
 
 **Relaxed Atomic Ordering** (`src/zruntime.zig`): `in_use` counter uses `.monotonic` ordering (metrics only, not synchronization).
 
@@ -172,7 +172,7 @@ The precompile pipeline also supports:
 
 ### Concurrent I/O
 
-**Structured concurrency** (`zts/modules/io.zig`, `src/zruntime.zig`):
+**Structured concurrency** (`zigts/modules/io.zig`, `src/zruntime.zig`):
 `parallel()` and `race()` overlap outbound HTTP without async/await overhead.
 The three-phase model (collect descriptors, dispatch to OS threads, join results)
 avoids event loop machinery entirely.
@@ -194,7 +194,7 @@ at 50ms each, `parallel()` reduces total I/O time from ~150ms to ~50ms.
 
 ### Hybrid Arena Allocation
 
-For request-scoped workloads, zts uses a hybrid memory model:
+For request-scoped workloads, zigts uses a hybrid memory model:
 
 - **Arena allocator**: O(1) bulk reset between requests, zero per-object overhead
 - **Escape detection**: Write barriers prevent arena objects from leaking to persistent storage

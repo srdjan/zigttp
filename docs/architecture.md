@@ -1,6 +1,6 @@
 # zigttp Architecture
 
-This document describes the architecture of zigttp, a serverless JavaScript runtime powered by the zts JavaScript engine.
+This document describes the architecture of zigttp, a serverless JavaScript runtime powered by the zigts JavaScript engine.
 
 ## Design Philosophy
 
@@ -19,7 +19,7 @@ This document describes the architecture of zigttp, a serverless JavaScript runt
 │  │  (std.net)  │  │  (contexts) │  │  (Response, h())   │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
-│                    zts (Pure Zig)                      │
+│                    zigts (Pure Zig)                      │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │   Parser    │──│  Bytecode   │──│  Generational GC    │  │
 │  │             │  │     VM      │  │ (Nursery + Tenured) │  │
@@ -38,13 +38,13 @@ HTTP listener, CLI, request routing, static file serving.
 - `server.zig` - HTTP request/response handling, static file cache
 - `zruntime.zig` - HandlerPool management, JS context lifecycle
 
-### Engine Layer (zts/)
+### Engine Layer (zigts/)
 
 Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode).
 
 **Key Components**:
 
-#### Parser (`zts/parser/`)
+#### Parser (`zigts/parser/`)
 - `parse.zig` - Pratt parser for JavaScript/TypeScript
 - `tokenizer.zig` - Lexical analysis
 - `codegen.zig` - Bytecode generation from IR
@@ -127,9 +127,9 @@ Quiet NaN patterns with prefix >= 0xFFFC are canonicalized to 0x7FF8 on storage.
 
 ### Hidden Classes
 
-V8-style hidden class transitions for inline caching. The index-based `HiddenClassPool` (`zts/object.zig`) stores shapes as compact u32 indices with Structure-of-Arrays (SoA) layout for cache-friendly property lookups. Transitions use a hash map keyed on `(from_class << 32 | atom)` for O(1) lookup.
+V8-style hidden class transitions for inline caching. The index-based `HiddenClassPool` (`zigts/object.zig`) stores shapes as compact u32 indices with Structure-of-Arrays (SoA) layout for cache-friendly property lookups. Transitions use a hash map keyed on `(from_class << 32 | atom)` for O(1) lookup.
 
-**Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`zts/context.zig:352-434`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
+**Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`zigts/context.zig:352-434`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
 
 ### Hybrid Arena Allocation
 
@@ -148,7 +148,7 @@ synchronous and linear. When a handler needs concurrent outbound HTTP, it uses
 `parallel()` or `race()` from `zigttp:io`. Concurrency happens entirely in the
 I/O layer, invisible to the JavaScript execution model.
 
-**Three-phase collect-execute-join model** (`zts/modules/io.zig`,
+**Three-phase collect-execute-join model** (`zigts/modules/io.zig`,
 `src/zruntime.zig`):
 
 1. **Collect**: Each thunk is called sequentially on the main thread. A
@@ -202,7 +202,7 @@ for crash recovery.
 
 ## Runtime Model
 
-zts uses a **generational garbage collector** with:
+zigts uses a **generational garbage collector** with:
 
 1. **Type-prefix NaN-boxing** for efficient value representation (single-instruction type checks)
 2. **Hidden classes** for inline caching (index-based `HiddenClassPool` with SoA layout)
@@ -216,7 +216,7 @@ The Result<T> pattern throughout makes error handling explicit and prevents sile
 ```
 zigttp/
 ├── build.zig              # Zig build configuration
-├── zts/                   # Pure Zig JavaScript engine
+├── zigts/                   # Pure Zig JavaScript engine
 │   ├── parser/            # Two-pass parser with IR
 │   │   ├── parse.zig      # Main parser (Pratt parser)
 │   │   ├── tokenizer.zig  # Tokenizer
@@ -298,25 +298,25 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 ### Property Access Optimizations
 
-**Polymorphic Inline Cache (PIC)** (`zts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
+**Polymorphic Inline Cache (PIC)** (`zigts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
 
-**Binary Search for Large Objects** (`zts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
+**Binary Search for Large Objects** (`zigts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
 
-**JIT Baseline IC Integration** (`zts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
+**JIT Baseline IC Integration** (`zigts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
 
-**JIT Object Literal Shapes** (`zts/context.zig:746-779`, `zts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead.
+**JIT Object Literal Shapes** (`zigts/context.zig:746-779`, `zigts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead.
 
 ### String Optimizations
 
-**Lazy String Hashing** (`zts/string.zig:18-24, 44-54`): Hash computation deferred until needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access.
+**Lazy String Hashing** (`zigts/string.zig:18-24, 44-54`): Hash computation deferred until needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access.
 
-**Pre-interned HTTP Atoms** (`zts/object.zig:237-264`): 27 common headers with O(1) lookup (content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, etc.).
+**Pre-interned HTTP Atoms** (`zigts/object.zig:237-264`): 27 common headers with O(1) lookup (content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, etc.).
 
-**HTTP String Cache** (`zts/context.zig:111-135, 462+`): Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
+**HTTP String Cache** (`zigts/context.zig:111-135, 462+`): Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
 
 ### Pool and Request Optimizations
 
-**Pool Slot Hint** (`zts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
+**Pool Slot Hint** (`zigts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
 
 **Relaxed Atomic Ordering** (`src/zruntime.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
 
@@ -333,7 +333,7 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 **Handler Precompilation** (`tools/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely.
 
-Build flow: `precompile.zig` uses full zts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
+Build flow: `precompile.zig` uses full zigts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
 
 ### Compiler-Derived Sandboxing
 
@@ -342,15 +342,15 @@ Every precompilation extracts a handler contract by walking the IR for virtual m
 When no explicit `--policy` file is provided, the precompiler auto-derives a `RuntimePolicy` from the contract and embeds it in the generated code. Static sections are restricted to exactly the proven literals. Dynamic sections remain permissive. The result is zero-configuration least-privilege sandboxing for every precompiled handler.
 
 **Key files**:
-- `zts/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
-- `zts/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
+- `zigts/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
+- `zigts/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
 - `tools/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
-- `zts/modules/sql.zig` / `zts/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
+- `zigts/modules/sql.zig` / `zigts/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
 
 **Enforcement points** (existing, activated by the embedded policy):
-- `zts/modules/env.zig` - `allowsEnv()` check on env var access
-- `zts/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
-- `zts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
+- `zigts/modules/env.zig` - `allowsEnv()` check on env var access
+- `zigts/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
+- `zigts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
 - `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
 
 ### Module Binding System
@@ -379,19 +379,19 @@ Each `FunctionBinding` carries an `effect` annotation (read, write, or none). Du
 Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension).
 
 **Key files**:
-- `zts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `validateBindings()`
-- `zts/builtin_modules.zig` - registry of all 10 built-in bindings with comptime validation
-- `zts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
+- `zigts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `validateBindings()`
+- `zigts/builtin_modules.zig` - registry of all 10 built-in bindings with comptime validation
+- `zigts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
 
 ### Compile-Time Path Analysis and Behavioral Contract
 
-`PathGenerator` (`zts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
+`PathGenerator` (`zigts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
 
-Each enumerated path becomes a `BehaviorPath` (`zts/handler_contract.zig`) in the contract's `behaviors` section. A `BehaviorPath` records route method/pattern, branching conditions (which I/O calls succeed or fail), the I/O call sequence, response status, I/O depth, and whether it represents a failure path. `behaviors_exhaustive` is true when PathGenerator did not hit the 1024-path cap.
+Each enumerated path becomes a `BehaviorPath` (`zigts/handler_contract.zig`) in the contract's `behaviors` section. A `BehaviorPath` records route method/pattern, branching conditions (which I/O calls succeed or fail), the I/O call sequence, response status, I/O depth, and whether it represents a failure path. `behaviors_exhaustive` is true when PathGenerator did not hit the 1024-path cap.
 
-`FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response. Results flow into `contract.json`, `HandlerProperties.fault_covered`, and deployment manifest tags.
+`FaultCoverageChecker` (`zigts/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response. Results flow into `contract.json`, `HandlerProperties.fault_covered`, and deployment manifest tags.
 
 ### Upgrade Verification
 
@@ -404,11 +404,11 @@ Each enumerated path becomes a `BehaviorPath` (`zts/handler_contract.zig`) in th
 
 The behavioral diff (`contract_diff.diffBehaviors`) matches paths by (method, pattern, conditions) tuple. Two paths match when they have the same route and I/O success/failure conditions. A matched path with a different response status is `response_changed` (breaking).
 
-Output: `upgrade-manifest.json` with verdict, justification, surface summary, behavioral summary, property regressions/gains with severity, and coverage gap metrics. Both `zts prove` and `-Dprove` produce this artifact.
+Output: `upgrade-manifest.json` with verdict, justification, surface summary, behavioral summary, property regressions/gains with severity, and coverage gap metrics. Both `zigts prove` and `-Dprove` produce this artifact.
 
 ### Guard Composition
 
-The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `zts/parser/parse.zig` (pipe chain collection), `zts/modules/compose.zig` (guard marker).
+The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `zigts/parser/parse.zig` (pipe chain collection), `zigts/modules/compose.zig` (guard marker).
 
 ### Proven Deployment Manifests
 

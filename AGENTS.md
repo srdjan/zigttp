@@ -3,10 +3,10 @@
 ## Project Structure & Module Organization
 - `build.zig` defines the build graph, executables, and test steps.
 - `src/` contains the runtime and server implementation (`main.zig`, `server.zig`, `zruntime.zig`).
-- `zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
-- `zts/modules/` implements virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`).
-- `zts/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
-- `zts/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
+- `zigts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
+- `zigts/modules/` implements virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`).
+- `zigts/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
+- `zigts/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
 - `tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding).
 - `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `shopping-cart/`, `htmx-todo/`, `sql/`).
 - `scripts/` contains shell scripts for build and setup.
@@ -31,8 +31,8 @@
 - `zig build -Doptimize=ReleaseFast -Dhandler=handler.jsx` - production build with embedded bytecode.
 - `zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"` - run with inline handler.
 - `zig build run -- examples/handler/handler.ts -p 3000` - run a file-based handler.
-- `zig build test` - all src/ and zts/ tests.
-- `zig build test-zts` - JS engine tests only.
+- `zig build test` - all src/ and zigts/ tests.
+- `zig build test-zigts` - JS engine tests only.
 - `zig build test-zruntime` - runtime tests only (`src/zruntime.zig`).
 - `zig build bench` - Zig-native benchmark suite (`src/benchmark.zig`).
 
@@ -45,7 +45,7 @@
 ## Testing Guidelines
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
-- Add tests near the feature you touched in `src/` or `zts/` and run the relevant `zig build test*` step.
+- Add tests near the feature you touched in `src/` or `zigts/` and run the relevant `zig build test*` step.
 
 ## Commit & Pull Request Guidelines
 - Commit history is informal; keep subjects short and descriptive (lowercase is common). Use `WIP-#:` only for intentional multi-step series.

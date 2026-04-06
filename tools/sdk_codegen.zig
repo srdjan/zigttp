@@ -11,7 +11,7 @@
 //! allowing TypeScript callers to narrow on .status.
 
 const std = @import("std");
-const handler_contract = @import("zts").handler_contract;
+const handler_contract = @import("zigts").handler_contract;
 
 const HandlerContract = handler_contract.HandlerContract;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;

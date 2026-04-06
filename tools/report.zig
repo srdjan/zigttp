@@ -9,12 +9,12 @@
 //! Usage: called by precompile.zig when --report json is passed.
 
 const std = @import("std");
-const zts = @import("zts");
-const handler_contract = zts.handler_contract;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
 const HandlerProperties = handler_contract.HandlerProperties;
 const FaultCoverageInfo = handler_contract.FaultCoverageInfo;
-const contract_diff = zts.contract_diff;
+const contract_diff = zigts.contract_diff;
 const ProofLevel = contract_diff.ProofLevel;
 const manifest_alignment = @import("manifest_alignment.zig");
 const ManifestAlignment = manifest_alignment.ManifestAlignment;

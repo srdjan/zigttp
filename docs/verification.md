@@ -203,13 +203,13 @@ The `-Dgenerate-tests=true` build option enables compile-time exhaustive path en
 
 ### Path Generator
 
-The `PathGenerator` (`zts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
+The `PathGenerator` (`zigts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. Each fork produces a test case representing one complete execution path through the handler. This exploits the same property that makes verification tractable: the IR tree IS the control flow graph (no back-edges).
 
 For Result-producing calls (`jwtVerify`, `validateJson`, `decodeJson`, etc.), the generator forks into both the `ok: true` and `ok: false` paths. For optional-producing calls (`env`, `cacheGet`, etc.), it forks into defined and `undefined` paths.
 
 ### Fault Coverage Analysis
 
-The `FaultCoverageChecker` (`zts/fault_coverage.zig`) analyzes the generated paths against `FailureSeverity` annotations on each virtual module function:
+The `FaultCoverageChecker` (`zigts/fault_coverage.zig`) analyzes the generated paths against `FailureSeverity` annotations on each virtual module function:
 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|

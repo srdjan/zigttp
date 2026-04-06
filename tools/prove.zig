@@ -8,10 +8,10 @@
 //! Exit codes: 0 = equivalent or additive, 1 = breaking, 2 = error.
 
 const std = @import("std");
-const zts = @import("zts");
-const handler_contract = zts.handler_contract;
-const contract_diff = zts.contract_diff;
-const readFilePosix = zts.file_io.readFile;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
+const contract_diff = zigts.contract_diff;
+const readFilePosix = zigts.file_io.readFile;
 const upgrade_verifier = @import("upgrade_verifier.zig");
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -92,7 +92,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         const path = try std.fmt.allocPrint(allocator, "{s}proof.json", .{output_dir});
         defer allocator.free(path);
-        try zts.file_io.writeFile(allocator, path, buf.items);
+        try zigts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 
@@ -106,7 +106,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         const path = try std.fmt.allocPrint(allocator, "{s}proof-report.txt", .{output_dir});
         defer allocator.free(path);
-        try zts.file_io.writeFile(allocator, path, buf.items);
+        try zigts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 
@@ -122,7 +122,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
         const path = try std.fmt.allocPrint(allocator, "{s}upgrade-manifest.json", .{output_dir});
         defer allocator.free(path);
-        try zts.file_io.writeFile(allocator, path, buf.items);
+        try zigts.file_io.writeFile(allocator, path, buf.items);
         std.debug.print("Wrote {s}\n", .{path});
     }
 

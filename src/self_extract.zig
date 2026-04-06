@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const zts = @import("zts");
-const handler_policy = zts.handler_policy;
+const zigts = @import("zigts");
+const handler_policy = zigts.handler_policy;
 
 // -- Trailer format (32 bytes, little-endian, at end of file) --
 //
@@ -410,7 +410,7 @@ fn getFileSize(fd: std.c.fd_t) ?u64 {
     return @intCast(stat.size);
 }
 
-const readFile = zts.file_io.readFile;
+const readFile = zigts.file_io.readFile;
 
 fn writeAll(fd: std.c.fd_t, data: []const u8) !void {
     var total: usize = 0;

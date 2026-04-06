@@ -1,7 +1,7 @@
 ---
 title: A URL Shortener in 133 Lines of TypeScript (With Compile-Time Proofs)
 date: 2026-04-05
-tags: [zigttp, zts, serverless, zig, TypeScript]
+tags: [zigttp, zigts, serverless, zig, TypeScript]
 excerpt: Building a complete URL shortener with auth, caching, SQL, and input validation - where the compiler proves your handler can't leak data or miss an error check.
 ---
 
@@ -171,7 +171,7 @@ Every virtual module call is deterministic and stubbed. This is what makes repla
 
 This approach works well for the kind of handlers FaaS is meant for: request in, response out, with some I/O in between. I explored the verification system for months before I got comfortable that the proofs catch real bugs and not just noise.
 
-Where it falls short: the zts subset is restrictive. No classes, no async/await, no try/catch, no while loops. If you're coming from Express or Fastify, this feels like coding with one hand tied behind your back. That's the point - the restrictions are what make verification possible - but it still takes getting used to.
+Where it falls short: the zigts subset is restrictive. No classes, no async/await, no try/catch, no while loops. If you're coming from Express or Fastify, this feels like coding with one hand tied behind your back. That's the point - the restrictions are what make verification possible - but it still takes getting used to.
 
 The SQL module requires registering queries by name at module scope. No dynamic query building. For a URL shortener this is fine, maybe even preferable. For an app that builds complex queries based on filter combinations, you'd need a different approach.
 

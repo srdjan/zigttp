@@ -1827,12 +1827,12 @@ test "parseTraceFile groups by request" {
 }
 
 test "jsonToJSValue primitives" {
-    const zts = @import("root.zig");
+    const zigts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try zigts.createContext(allocator, .{ .nursery_size = 4096 });
+    defer zigts.destroyContext(ctx);
 
     // null -> undefined
     try std.testing.expect(jsonToJSValue(ctx, "null").isUndefined());
@@ -1861,24 +1861,24 @@ test "jsonToJSValue primitives" {
 }
 
 test "jsonToJSValue object" {
-    const zts = @import("root.zig");
+    const zigts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try zigts.createContext(allocator, .{ .nursery_size = 4096 });
+    defer zigts.destroyContext(ctx);
 
     const obj_val = jsonToJSValue(ctx, "{\"ok\":true,\"value\":42}");
     try std.testing.expect(obj_val.isObject());
 }
 
 test "jsonToJSValue array" {
-    const zts = @import("root.zig");
+    const zigts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try zigts.createContext(allocator, .{ .nursery_size = 4096 });
+    defer zigts.destroyContext(ctx);
 
     const arr_val = jsonToJSValue(ctx, "[1,2,3]");
     try std.testing.expect(arr_val.isObject());

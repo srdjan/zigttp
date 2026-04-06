@@ -18,11 +18,11 @@
 //!   }
 
 const std = @import("std");
-const zts = @import("zts");
-const handler_contract = zts.handler_contract;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
 const HandlerProperties = handler_contract.HandlerProperties;
-const readFilePosix = zts.file_io.readFile;
+const readFilePosix = zigts.file_io.readFile;
 
 // -------------------------------------------------------------------------
 // Result types

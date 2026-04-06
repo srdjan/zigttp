@@ -11,9 +11,9 @@ const durable_recovery = @import("durable_recovery.zig");
 const durable_scheduler = @import("durable_scheduler.zig");
 const project_config_mod = @import("project_config");
 const ProjectConfig = project_config_mod.ProjectConfig;
-const zts = @import("zts");
+const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
-const zts_cli = @import("zts_cli");
+const zigts_cli = @import("zigts_cli");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -70,19 +70,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "check")) {
-        try zts_cli.run(allocator, user_args);
+        try zigts_cli.run(allocator, user_args);
         return;
     }
     if (std.mem.eql(u8, command, "prove")) {
-        try zts_cli.run(allocator, user_args);
+        try zigts_cli.run(allocator, user_args);
         return;
     }
     if (std.mem.eql(u8, command, "mock")) {
-        try zts_cli.run(allocator, user_args);
+        try zigts_cli.run(allocator, user_args);
         return;
     }
     if (std.mem.eql(u8, command, "link")) {
-        try zts_cli.run(allocator, user_args);
+        try zigts_cli.run(allocator, user_args);
         return;
     }
     if (std.mem.eql(u8, command, "compile")) {
@@ -440,7 +440,7 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try check_args.append(allocator, p);
     }
 
-    try zts_cli.run(allocator, check_args.items);
+    try zigts_cli.run(allocator, check_args.items);
 }
 
 const WatchSet = struct {
@@ -523,7 +523,7 @@ fn foldPathIntoHash(io: std.Io, hash: *std.hash.Wyhash, path: []const u8) !void 
     }
 }
 
-const collectArgs = @import("zts_cli").collectArgs;
+const collectArgs = @import("zigts_cli").collectArgs;
 
 fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
     var skip_next = false;
@@ -643,7 +643,7 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
 }
 
 fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const precompile = zts_cli.precompile;
+    const precompile = zigts_cli.precompile;
 
     var handler_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
@@ -678,7 +678,7 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
     }
 
     // Read handler source
-    const source = zts.file_io.readFile(allocator, handler_path.?, 10 * 1024 * 1024) catch |err| {
+    const source = zigts.file_io.readFile(allocator, handler_path.?, 10 * 1024 * 1024) catch |err| {
         std.log.err("Failed to read handler '{s}': {}", .{ handler_path.?, err });
         return err;
     };
@@ -729,7 +729,7 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
         var json_output: std.ArrayList(u8) = .empty;
         defer json_output.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
-        zts.writeContractJson(contract, &aw.writer) catch {};
+        zigts.writeContractJson(contract, &aw.writer) catch {};
         json_output = aw.toArrayList();
         if (json_output.items.len > 0) {
             contract_json = try json_output.toOwnedSlice(allocator);
@@ -741,7 +741,7 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
     const dep_bytecodes: []const []const u8 = compiled.dep_bytecodes orelse &.{};
 
     // Create self-extracting binary with permissive policy (MVP)
-    const policy = zts.handler_policy.RuntimePolicy{};
+    const policy = zigts.handler_policy.RuntimePolicy{};
     self_extract.create(
         allocator,
         self_path,
@@ -793,7 +793,7 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
 }
 
 fn printVersion() void {
-    const version = "zigttp " ++ zts.version.string ++ "\n";
+    const version = "zigttp " ++ zigts.version.string ++ "\n";
     _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
 }
 
@@ -872,7 +872,7 @@ fn parseTemplate(name: []const u8) ?Template {
 fn writeProjectFile(allocator: std.mem.Allocator, project_name: []const u8, relative_path: []const u8, data: []const u8) !void {
     const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ project_name, relative_path });
     defer allocator.free(full_path);
-    try zts.file_io.writeFile(allocator, full_path, data);
+    try zigts.file_io.writeFile(allocator, full_path, data);
 }
 
 const defaultManifest =

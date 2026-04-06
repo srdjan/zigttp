@@ -11,9 +11,9 @@
 //! Called by prove_upgrade.zig when behavioral data is available.
 
 const std = @import("std");
-const zts = @import("zts");
-const handler_contract = zts.handler_contract;
-const contract_diff = zts.contract_diff;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
+const contract_diff = zigts.contract_diff;
 const HandlerContract = handler_contract.HandlerContract;
 const ContractDiff = contract_diff.ContractDiff;
 const BehaviorDiff = contract_diff.BehaviorDiff;

@@ -7,50 +7,50 @@
 ## Hot-Path Code Analysis
 
 ### Interpreter Dispatch and Property Access
-- [ ] **JIT PIC coverage is narrower than interpreter PIC state** — `zts/interpreter.zig:259-337`, `zts/jit/baseline.zig:82-91`.
+- [ ] **JIT PIC coverage is narrower than interpreter PIC state** — `zigts/interpreter.zig:259-337`, `zigts/jit/baseline.zig:82-91`.
   - Current state: interpreter PIC tracks 8 entries with `last_hit`; baseline JIT probes only 4 entries via `PIC_CHECK_COUNT`.
   - Risk: moderately polymorphic shapes can miss the generated fast path earlier than the runtime cache design suggests.
   - Follow-up: benchmark 4 vs 8 entry probe depth, or make probe depth adaptive by code size budget.
 
 ### JIT Tiering and Call Path
-- [ ] **Whole-function type specialization is still missing** — `zts/type_feedback.zig:156-168`, `zts/interpreter.zig:405-415`, `zts/jit/root.zig:1-28`, `zts/jit/optimized.zig:1-13`.
+- [ ] **Whole-function type specialization is still missing** — `zigts/type_feedback.zig:156-168`, `zigts/interpreter.zig:405-415`, `zigts/jit/root.zig:1-28`, `zigts/jit/optimized.zig:1-13`.
   - Current state: type feedback tracks value sites and call sites, but not function-entry argument profiles.
   - Current optimized tier is loop-scoped; there is no compiler path for function-wide argument guards and unboxed locals.
   - Priority: P0.
-- [ ] **Generic call overhead still dominates non-inlined hot call sites** — `zts/interpreter.zig:3760-3825`, `zts/jit/baseline.zig:3277-3575`.
+- [ ] **Generic call overhead still dominates non-inlined hot call sites** — `zigts/interpreter.zig:3760-3825`, `zigts/jit/baseline.zig:3277-3575`.
   - Current state: monomorphic guarded calls and inlining exist, but broader user-call traffic still falls back to generic helper-heavy paths.
   - Target benchmarks: `functionCalls`, JIT `call.js`.
 
 ### String Path
-- [ ] **Rope hashing still flattens concat ropes** — `zts/string.zig:330-344`.
+- [ ] **Rope hashing still flattens concat ropes** — `zigts/string.zig:330-344`.
   - Current state: repeated concat is O(1), but `RopeNode.getHash()` flattens the rope to compute hash.
   - Risk: handlers that build strings and then use them as property keys / map keys / cache keys still pay flatten cost.
-- [ ] **String access helpers eagerly flatten ropes on content reads** — `zts/builtins/helpers.zig:133-167`.
+- [ ] **String access helpers eagerly flatten ropes on content reads** — `zigts/builtins/helpers.zig:133-167`.
   - Current state: flattening is cached, but hot builtin paths can still force flattening earlier than necessary.
   - Follow-up: preserve rope form through more builtin operations or add piecewise implementations where it pays off.
-- [ ] **`concat_n` in JIT still routes through a helper** — `zts/jit/baseline.zig:3932-3952`.
+- [ ] **`concat_n` in JIT still routes through a helper** — `zigts/jit/baseline.zig:3932-3952`.
   - Current state: correctness is good and helper already does single-allocation concat, but the JIT side still pays call overhead.
   - Target benchmarks: `stringBuild`, `httpHandler`, `httpHandlerHeavy`.
 
 ### Builtins and Numeric Paths
-- [ ] **Builtin fast dispatch is narrow compared to the remaining benchmark gap** — `zts/object.zig:783-809`, `zts/interpreter.zig`, `zts/builtins/number.zig:340-430`.
+- [ ] **Builtin fast dispatch is narrow compared to the remaining benchmark gap** — `zigts/object.zig:783-809`, `zigts/interpreter.zig`, `zigts/builtins/number.zig:340-430`.
   - Current state: hot builtin IDs exist for `Math.*`, string methods, and `parseInt`, but non-trivial builtin traffic still goes through generic dispatch/marshaling.
   - Target benchmarks: `mathOps`, `parseInt`, `functionCalls`.
 
 ### Runtime / Pool / Server Hot Path
-- [ ] **Pool contention path must stay regression-free while JIT work lands** — `zts/pool.zig:222-291`, `src/zruntime.zig:4300-4365`.
+- [ ] **Pool contention path must stay regression-free while JIT work lands** — `zigts/pool.zig:222-291`, `src/zruntime.zig:4300-4365`.
   - Current state: `free_hint`, spin-first retries, and jittered backoff already keep the request path lean.
   - Constraint: any perf work touching runtime scheduling, pool reuse, or request setup needs explicit HTTP and cold-start regression checks.
 
 ### Architecture Asymmetry
-- [ ] **Some JIT fast paths remain ARM64-biased** — `zts/jit/baseline.zig:4983-5095`.
+- [ ] **Some JIT fast paths remain ARM64-biased** — `zigts/jit/baseline.zig:4983-5095`.
   - Current state: range-iterator `for...of` fast path is ARM64-focused; x86-64 still falls back to helper code there.
   - Follow-up: review x86-64 parity for every helper-backed hot path before declaring JIT perf work complete.
 
 ## Priority Backlog
 
 ## P0
-- [ ] **3.2: JIT whole-function type specialization, SMI-first** — `zts/type_feedback.zig`, `zts/interpreter.zig`, `zts/jit/root.zig`, new `zts/jit/whole_function.zig`.
+- [ ] **3.2: JIT whole-function type specialization, SMI-first** — `zigts/type_feedback.zig`, `zigts/interpreter.zig`, `zigts/jit/root.zig`, new `zigts/jit/whole_function.zig`.
   - Goal: add a new optimized-tier compiler path for monomorphic integer-heavy functions, not a rewrite of baseline JIT.
   - Scope: functions whose bodies stay within a supported integer-safe subset and whose formal arguments are monomorphic `.smi`.
   - Supported v1 subset: local loads/stores, integer constants, integer arithmetic, bitwise ops, integer comparisons, simple branches, `ret`, and trivial stack movement around them.
@@ -82,7 +82,7 @@
     - dedicated JIT and filtered microbench runs stay stable for repeated runs.
 
 ## P1
-- [ ] **String hot-path follow-up after rope introduction** — `zts/string.zig`, `zts/builtins/helpers.zig`, `zts/jit/baseline.zig`.
+- [ ] **String hot-path follow-up after rope introduction** — `zigts/string.zig`, `zigts/builtins/helpers.zig`, `zigts/jit/baseline.zig`.
   - Problem: `stringBuild` and `stringOps` are still well behind Deno in the isolated benchmark suite.
   - Focus:
     - incremental rope hashing instead of flatten-for-hash,
@@ -91,7 +91,7 @@
     - validate rope depth heuristics against real microbench workloads.
   - Done when: median improvement is visible on `stringBuild` and `stringOps` without regressing `httpHandler*`.
 
-- [ ] **Builtin and call dispatch overhead reduction** — `zts/object.zig`, `zts/interpreter.zig`, `zts/builtins/number.zig`, `zts/jit/baseline.zig`.
+- [ ] **Builtin and call dispatch overhead reduction** — `zigts/object.zig`, `zigts/interpreter.zig`, `zigts/builtins/number.zig`, `zigts/jit/baseline.zig`.
   - Problem: `functionCalls`, `mathOps`, and `parseInt` still show a large throughput gap despite targeted fast paths.
   - Focus:
     - widen direct builtin dispatch coverage,
@@ -100,7 +100,7 @@
     - let whole-function specialization pick up integer-heavy helper-free leaf functions.
   - Done when: those three benchmarks improve together rather than one-off synthetic wins.
 
-- [ ] **Property access and dynamic access follow-up** — `zts/interpreter.zig`, `zts/jit/baseline.zig`, `zts/object.zig`, `../zigttp-bench/zigttp-work-items.md`.
+- [ ] **Property access and dynamic access follow-up** — `zigts/interpreter.zig`, `zigts/jit/baseline.zig`, `zigts/object.zig`, `../zigttp-bench/zigttp-work-items.md`.
   - Problem: property-heavy benchmarks are better than before, but dynamic object access is still constrained by missing `obj[key]` support and JIT/polymorphism limits.
   - Focus:
     - evaluate widening PIC probe depth or making it adaptive,
@@ -110,12 +110,12 @@
   - Done when: `dynamicProps` becomes idiomatic again and polymorphic property access does not regress monomorphic fast paths.
 
 ## P2
-- [ ] **Dev-mode type-directed codegen parity** — `docs/performance.md:146-157`, `tools/precompile.zig:1056-1165`, `zts/parser/codegen.zig`.
+- [ ] **Dev-mode type-directed codegen parity** — `docs/performance.md:146-157`, `tools/precompile.zig:1056-1165`, `zigts/parser/codegen.zig`.
   - Problem: type-directed specialized opcodes are wired for precompiled handlers, but dev mode still uses more generic bytecode.
   - Focus: thread BoolChecker-derived type maps through the dev-mode codegen path so local `zig build run` behavior is closer to precompiled behavior.
   - Done when: numeric-heavy dev-mode scripts emit the same specialized opcode family where semantics allow.
 
-- [ ] **x86-64 JIT fast-path parity** — `zts/jit/baseline.zig`.
+- [ ] **x86-64 JIT fast-path parity** — `zigts/jit/baseline.zig`.
   - Problem: some hot paths still have ARM64-only inline fast paths with x86-64 helper fallbacks.
   - Focus: parity-review helper-backed JIT paths and implement x86-64 equivalents when code size and maintenance cost are justified.
   - Done when: architecture-specific perf gaps are explained by hardware, not missing compiler paths.
@@ -142,7 +142,7 @@
 ## Verification / Benchmark Gates
 
 ### Repo Checks
-- [ ] `zig build test-zts`
+- [ ] `zig build test-zigts`
 - [ ] `zig build test`
 
 ### Dedicated JIT Runs
