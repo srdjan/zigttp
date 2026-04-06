@@ -21,11 +21,7 @@ Run every gate on macOS (native) before tagging. All must pass.
 
 ## 2. Cross-compile verification
 
-Currently blocked: sqlite3 is linked as a dynamic system library (`linkSystemLibrary`),
-which prevents cross-compilation from macOS to Linux targets. Linux builds require a
-Linux host or a sysroot with Linux sqlite3 headers and libraries.
-
-When unblocked, the commands are:
+SQLite3 is vendored as a static amalgamation (`deps/sqlite/`), enabling cross-compilation.
 
 - [ ] `zig build -Doptimize=ReleaseFast -Dtarget=x86_64-linux-gnu` -- Linux x86_64
 - [ ] `zig build -Doptimize=ReleaseFast -Dtarget=aarch64-linux-gnu` -- Linux ARM64
@@ -67,9 +63,17 @@ If any were fixed since the last release, check the box and note the commit.
 - [ ] Smoke-test server from tagged build
 - [ ] Update any external docs or site that reference the version number
 
+## 7. GitHub Release (automated)
+
+Pushing a tag triggers `.github/workflows/release.yml`, which runs tests on macOS and
+Linux, cross-compiles release binaries for all four targets, and creates a GitHub Release
+with tarballs and SHA-256 checksums. Verify the workflow completes and the release page
+has all expected assets.
+
 ## Notes
 
-- No CI workflows exist yet. All gates are manual.
+- CI runs on tag push via `.github/workflows/release.yml`.
 - macOS and Linux are the supported platforms. No Windows target.
 - The `release` build step produces both `zigttp` (server) and `zigts` (compiler/analyzer CLI).
 - Cross-compilation uses Zig's built-in `-Dtarget` flag. No Docker or remote build needed.
+- SQLite3 is vendored as a static amalgamation in `deps/sqlite/`.

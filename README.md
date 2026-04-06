@@ -49,12 +49,26 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 3ms runtime init. 1.2MB binary. 4MB memory baseline. Pre-warmed handler pool with per-request isolation. See [performance docs](docs/performance.md) for cold start breakdowns and deployment patterns.
 
-## Quick Start
+## Install
 
-Validated on Zig `0.16.0-dev.3073+28ae5d415`. Newer nightlies are best-effort until revalidated.
+Pre-built binaries for macOS and Linux (x86_64, aarch64):
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+```
+
+Or download a tarball from [GitHub Releases](https://github.com/srdjan/zigttp/releases).
+
+To build from source (requires Zig `0.16.0-dev.3073+28ae5d415`):
+
+```bash
+git clone https://github.com/srdjan/zigttp.git && cd zigttp
 zig build -Doptimize=ReleaseFast
+```
+
+## Quick Start
+
+```bash
 
 # Run with inline handler
 ./zig-out/bin/zigttp serve -e "function handler(r) { return Response.json({hello:'world'}) }"

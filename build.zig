@@ -44,7 +44,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    zigts_mod.linkSystemLibrary("sqlite3", .{});
+    zigts_mod.addCSourceFile(.{
+        .file = b.path("deps/sqlite/sqlite3.c"),
+        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+    });
+    zigts_mod.addIncludePath(b.path("deps/sqlite"));
     zigts_mod.addImport("zigttp-sdk", zigttp_sdk_mod);
     zigts_mod.addImport("zigttp-ext-demo", ext_demo_mod);
 
@@ -60,7 +64,11 @@ pub fn build(b: *std.Build) void {
     const zigts_tests = b.addTest(.{
         .root_module = zigts_tests_root,
     });
-    zigts_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    zigts_tests.root_module.addCSourceFile(.{
+        .file = b.path("deps/sqlite/sqlite3.c"),
+        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+    });
+    zigts_tests.root_module.addIncludePath(b.path("deps/sqlite"));
     const run_zigts_tests = b.addRunArtifact(zigts_tests);
     const zigts_test_step = b.step("test-zigts", "Run zigts unit tests");
     zigts_test_step.dependOn(&run_zigts_tests.step);

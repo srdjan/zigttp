@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: '0.16.0-dev.3073+28ae5d415'
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - run: zig build test
+      - run: zig build test-zigts
+      - run: zig build test-zruntime
+
+  build:
+    needs: test
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-macos-none
+            os: macos
+            arch: x86_64
+          - target: aarch64-macos-none
+            os: macos
+            arch: aarch64
+          - target: x86_64-linux-gnu
+            os: linux
+            arch: x86_64
+          - target: aarch64-linux-gnu
+            os: linux
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build release binaries
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
+
+      - name: Package tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          DIR="zigttp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "${DIR}"
+          cp zig-out/bin/zigttp "${DIR}/"
+          cp zig-out/bin/zigts "${DIR}/"
+          tar czf "${DIR}.tar.gz" "${DIR}"
+          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zigttp-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            zigttp-*.tar.gz
+            zigttp-*.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create checksums file
+        run: cat *.sha256 > checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ```
+            curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
+            ```
+
+            Or download a tarball below and extract it manually.
+          files: |
+            zigttp-*.tar.gz
+            zigttp-*.tar.gz.sha256
+            checksums-sha256.txt

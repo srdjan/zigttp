@@ -104,9 +104,11 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         if (client_fd < 0) continue;
         defer _ = c.close(client_fd);
 
-        // Prevent SIGPIPE on write to closed client (macOS)
-        var nosigpipe: c_int = 1;
-        _ = c.setsockopt(client_fd, c.SOL_SOCKET, c.SO_NOSIGPIPE, &nosigpipe, @sizeOf(c_int));
+        // Prevent SIGPIPE on write to closed client (macOS only)
+        if (comptime @hasDecl(c, "SO_NOSIGPIPE")) {
+            var nosigpipe: c_int = 1;
+            _ = c.setsockopt(client_fd, c.SOL_SOCKET, c.SO_NOSIGPIPE, &nosigpipe, @sizeOf(c_int));
+        }
 
         handleRequest(client_fd, routes.items);
     }

@@ -386,8 +386,9 @@ pub fn getSelfExePath(allocator: std.mem.Allocator) ![]u8 {
         return try resolveRealPath(allocator, symlink_path);
     } else if (builtin.os.tag == .linux) {
         var path_buf: [std.c.PATH_MAX + 1]u8 = undefined;
-        const len = try std.posix.readlinkatZ(std.posix.AT.FDCWD, "/proc/self/exe", &path_buf);
-        return try allocator.dupe(u8, path_buf[0..len]);
+        const rc = std.c.readlink("/proc/self/exe", &path_buf, path_buf.len);
+        if (rc < 0) return error.UnsupportedPlatform;
+        return try allocator.dupe(u8, path_buf[0..@intCast(rc)]);
     } else {
         return error.UnsupportedPlatform;
     }
@@ -405,9 +406,10 @@ fn resolveRealPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 // -- File I/O helpers --
 
 fn getFileSize(fd: std.c.fd_t) ?u64 {
-    var stat: std.c.Stat = undefined;
-    if (std.c.fstat(fd, &stat) != 0) return null;
-    return @intCast(stat.size);
+    const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+    if (end < 0) return null;
+    _ = std.c.lseek(fd, 0, std.c.SEEK.SET);
+    return @intCast(end);
 }
 
 const readFile = zigts.file_io.readFile;
