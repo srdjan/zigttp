@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const precompile = @import("precompile.zig");
+const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");
@@ -46,6 +47,14 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try system_build.runWithArgs(allocator, argv[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "features")) {
+        try runFeaturesCommand(argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "modules")) {
+        try runModulesCommand(argv[1..]);
+        return;
+    }
 
     printHelp();
     return error.UnknownCommand;
@@ -56,6 +65,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var handler_path: ?[]const u8 = null;
     var emit_contract = false;
     var emit_types = false;
+    var json_mode = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -72,6 +82,10 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
         if (std.mem.eql(u8, arg, "--types")) {
             emit_types = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--json")) {
+            json_mode = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--help")) {
@@ -91,8 +105,30 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try defaultProjectEntry(allocator);
     defer if (handler_path == null) allocator.free(target);
 
-    var result = try precompile.runCheckOnly(allocator, target, sql_schema_path);
+    var result = try precompile.runCheckOnly(allocator, target, sql_schema_path, json_mode);
     defer result.deinit(allocator);
+
+    if (json_mode) {
+        // JSON output to stdout
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+        if (result.totalErrors() > 0) {
+            json_diag.writeErrorJson(&aw.writer, result.json_diagnostics.items) catch {};
+        } else {
+            const contract_ptr: ?*const zts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
+            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items) catch {};
+        }
+
+        buf = aw.toArrayList();
+        if (buf.items.len > 0) {
+            _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        }
+
+        if (result.totalErrors() > 0) std.process.exit(1);
+        return;
+    }
 
     {
         var card_buf: std.ArrayList(u8) = .empty;
@@ -140,6 +176,52 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     if (result.totalWarnings() > 0) std.process.exit(2);
 }
 
+fn runFeaturesCommand(argv: []const []const u8) !void {
+    var json_mode = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) json_mode = true;
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    const allocator = std.heap.smp_allocator;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    if (json_mode) {
+        json_diag.writeFeaturesJson(&aw.writer) catch return;
+    } else {
+        json_diag.writeFeaturesText(&aw.writer) catch return;
+    }
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
+fn runModulesCommand(argv: []const []const u8) !void {
+    var json_mode = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) json_mode = true;
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    const allocator = std.heap.smp_allocator;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    if (json_mode) {
+        json_diag.writeModulesJson(&aw.writer) catch return;
+    } else {
+        json_diag.writeModulesText(&aw.writer) catch return;
+    }
+
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) {
+        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    }
+}
+
 fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -171,11 +253,13 @@ fn printHelp() void {
         \\zts - compiler and analysis tools for zigttp handlers
         \\
         \\Usage:
-        \\  zts check [handler.ts] [--contract] [--types] [--sql-schema path]
+        \\  zts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path]
         \\  zts compile [precompile flags] <handler.ts> <output.zig>
         \\  zts prove <old-contract.json> <new-contract.json> [output-dir/]
         \\  zts mock <tests.jsonl> [--port PORT]
         \\  zts link <system.json> [--output-dir <dir>]
+        \\  zts features [--json]
+        \\  zts modules [--json]
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -188,6 +272,7 @@ fn printCheckHelp() void {
         \\Usage: zts check [handler.ts] [options]
         \\
         \\Options:
+        \\  --json           Emit structured JSON to stdout (for tool integration)
         \\  --contract       Emit contract.json in current directory
         \\  --types          Emit zigttp.d.ts type definitions for IDE autocomplete
         \\  --sql-schema P   SQLite schema file for query validation

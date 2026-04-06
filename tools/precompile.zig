@@ -25,6 +25,7 @@ const sdk_codegen = @import("sdk_codegen.zig");
 const property_expectations = @import("property_expectations.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
 const build_report = @import("report.zig");
+pub const json_diag = @import("json_diagnostics.zig");
 const sqlite = zts.sqlite;
 const sql_analysis = zts.sql_analysis;
 
@@ -963,6 +964,8 @@ pub const CheckResult = struct {
     fault_covered: u32 = 0,
     properties: ?handler_contract.HandlerProperties = null,
     contract: ?HandlerContract = null,
+    /// Structured diagnostics for JSON output mode.
+    json_diagnostics: std.ArrayList(json_diag.JsonDiagnostic) = .empty,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
         return self.parse_errors + self.bool_errors + self.type_errors + self.verify_errors;
@@ -974,12 +977,13 @@ pub const CheckResult = struct {
 
     pub fn deinit(self: *CheckResult, allocator: std.mem.Allocator) void {
         if (self.contract) |*c| c.deinit(allocator);
+        self.json_diagnostics.deinit(allocator);
     }
 };
 
 /// Run the full analysis pipeline without generating bytecode.
 /// Returns a CheckResult with all verification, contract, and coverage data.
-pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_schema_path: ?[]const u8) !CheckResult {
+pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_schema_path: ?[]const u8, json_mode: bool) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
         return err;
@@ -1024,13 +1028,19 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
 
     const root = js_parser.parse() catch {
         const errors = js_parser.errors.getErrors();
-        for (errors) |parse_error| {
-            std.debug.print("{s}:{}:{}: {s}\n", .{
-                handler_path,
-                parse_error.location.line,
-                parse_error.location.column,
-                parse_error.message,
-            });
+        if (json_mode) {
+            for (errors) |parse_error| {
+                result.json_diagnostics.append(allocator, json_diag.fromParseError(parse_error, handler_path)) catch {};
+            }
+        } else {
+            for (errors) |parse_error| {
+                std.debug.print("{s}:{}:{}: {s}\n", .{
+                    handler_path,
+                    parse_error.location.line,
+                    parse_error.location.column,
+                    parse_error.message,
+                });
+            }
         }
         result.parse_errors = @intCast(errors.len);
         return result;
@@ -1065,12 +1075,20 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
         result.bool_warnings = @intCast(bool_diags.len -| result.bool_errors);
 
         if (bool_diags.len > 0) {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-            checker.formatDiagnostics(source_to_parse, &aw.writer) catch {};
-            buf = aw.toArrayList();
-            if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+            if (json_mode) {
+                for (bool_diags) |diag| {
+                    if (json_diag.fromBoolDiagnostic(diag, ir_view, handler_path)) |jd| {
+                        result.json_diagnostics.append(allocator, jd) catch {};
+                    }
+                }
+            } else {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                checker.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+            }
         }
 
         if (result.bool_errors > 0) {
@@ -1096,12 +1114,20 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
         result.type_errors = @intCast(try tc.check(root));
         const tc_diags = tc.getDiagnostics();
         if (tc_diags.len > 0) {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-            tc.formatDiagnostics(source_to_parse, &aw.writer) catch {};
-            buf = aw.toArrayList();
-            if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+            if (json_mode) {
+                for (tc_diags) |diag| {
+                    if (json_diag.fromTypeDiagnostic(diag, ir_view, handler_path)) |jd| {
+                        result.json_diagnostics.append(allocator, jd) catch {};
+                    }
+                }
+            } else {
+                var buf: std.ArrayList(u8) = .empty;
+                defer buf.deinit(allocator);
+                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                tc.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                buf = aw.toArrayList();
+                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+            }
         }
         if (result.type_errors > 0) {
             return result;
@@ -1143,12 +1169,20 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
             result.verify_warnings = @intCast(diags.len -| result.verify_errors);
 
             if (diags.len > 0) {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
-                buf = aw.toArrayList();
-                if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                if (json_mode) {
+                    for (diags) |diag| {
+                        if (json_diag.fromVerifierDiagnostic(diag, ir_view, handler_path)) |jd| {
+                            result.json_diagnostics.append(allocator, jd) catch {};
+                        }
+                    }
+                } else {
+                    var buf: std.ArrayList(u8) = .empty;
+                    defer buf.deinit(allocator);
+                    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+                    verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                    buf = aw.toArrayList();
+                    if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
+                }
             }
 
             if (result.verify_errors == 0) {
