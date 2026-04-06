@@ -24,7 +24,7 @@ zigttp's JavaScript subset bans most sources of non-trivial control flow:
 
 `break` and `continue` are allowed within `for-of` loops. Both are forward jumps only (break jumps past the loop end, continue jumps to the next iteration) and do not introduce back-edges, so the verification invariant holds.
 
-The only control flow is: `if`/`else` (forward branching), `switch`/`case` (forward branching), `for-of` (bounded iteration with `break`/`continue`), and `return` (function exit). The IR tree IS the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+The only control flow is: `if`/`else` (forward branching), `match` (exhaustive forward branching), `for-of` (bounded iteration with `break`/`continue`), `assert` (guard with early return), and `return` (function exit). The IR tree IS the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 ## Checks
 
@@ -35,7 +35,6 @@ Every code path through the handler must return a Response. The verifier recursi
 - `return` - always returns
 - `if` without `else` - sometimes (even if the then-branch returns)
 - `if`/`else` where both branches return - always returns
-- `switch` with `default` and all cases returning - always returns
 - `for-of` - never (iterable could be empty)
 - `var_decl`, `expr_stmt` - never returns
 
@@ -47,7 +46,7 @@ verify error: not all code paths return a Response
    |
   2 | function handler(req) {
    |                 ^
-   = help: ensure every branch (if/else, switch/default) ends with a return statement
+   = help: ensure every branch (if/else) ends with a return statement
 ```
 
 **Fix:** add `else` clauses, `default` cases, or trailing return statements.

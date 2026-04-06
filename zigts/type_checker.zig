@@ -216,9 +216,25 @@ pub const TypeChecker = struct {
                     }
 
                     // Track inferred type for use in later expressions.
+                    // When annotation is a base primitive (number, string, boolean) and
+                    // the inferred type is the corresponding literal, keep the narrower
+                    // literal. This gives `: Type` satisfies-like semantics for primitives.
+                    // For unions and compound annotations, keep the declared type since
+                    // the annotation carries semantic intent for exhaustiveness checking.
                     // For let bindings without explicit type annotations, widen
                     // literal types to their base type so reassignment works.
-                    var effective = if (declared != null_type_idx) declared else inferred;
+                    var effective = blk: {
+                        if (declared != null_type_idx and inferred != null_type_idx) {
+                            const dt = self.env.pool.getTag(declared) orelse break :blk declared;
+                            const it = self.env.pool.getTag(inferred) orelse break :blk declared;
+                            const is_literal_of_base =
+                                (dt == .t_number and it == .t_literal_number) or
+                                (dt == .t_string and it == .t_literal_string) or
+                                (dt == .t_boolean and it == .t_literal_bool);
+                            break :blk if (is_literal_of_base) inferred else declared;
+                        }
+                        break :blk if (declared != null_type_idx) declared else inferred;
+                    };
                     if (effective != null_type_idx and declared == null_type_idx and vd.kind == .let) {
                         effective = self.env.pool.widenLiteral(effective);
                     }
@@ -245,10 +261,14 @@ pub const TypeChecker = struct {
                         _ = self.binding_types.remove(narrow.key);
                     }
 
-                    // if (!x) { return; } narrows x after the block
-                    if (narrow.negated and if_s.else_branch == null_node) {
-                        if (self.branchAlwaysReturns(if_s.then_branch)) {
+                    // Forward narrowing after early return:
+                    // if (!x) { return; } narrows x to non-null after the block
+                    // if (x.kind === "err") { return; } narrows x to excluded union
+                    if (if_s.else_branch == null_node and self.branchAlwaysReturns(if_s.then_branch)) {
+                        if (narrow.negated) {
                             self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
+                        } else if (narrow.else_type != null_type_idx) {
+                            self.binding_types.put(self.allocator, narrow.key, narrow.else_type) catch {};
                         }
                     }
                 } else {
@@ -276,6 +296,20 @@ pub const TypeChecker = struct {
                             });
                         }
                     }
+                }
+            },
+
+            .assert_stmt => {
+                // Extract narrowing guard from the assert condition and install
+                // it as permanent forward narrowing (no restore after).
+                const assert = self.ir_view.getAssertStmt(node) orelse return;
+                self.walkExpr(assert.condition);
+                if (assert.error_expr != null_node) {
+                    self.walkExpr(assert.error_expr);
+                }
+                const narrow = self.extractNarrowingGuard(assert.condition);
+                if (narrow.key != 0 and narrow.narrowed_type != null_type_idx and !narrow.negated) {
+                    self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch {};
                 }
             },
 
@@ -409,6 +443,28 @@ pub const TypeChecker = struct {
                             const val_type = self.inferType(asgn.value);
                             if (val_type != null_type_idx and !self.env.pool.isAssignableTo(val_type, declared)) {
                                 self.addTypeMismatch(node, declared, val_type);
+                            }
+                        }
+                    }
+                } else if (target_tag == .member_access) {
+                    // Check readonly field assignment
+                    const member = self.ir_view.getMember(asgn.target) orelse return;
+                    const obj_tag = self.ir_view.getTag(member.object) orelse return;
+                    if (obj_tag == .identifier) {
+                        const binding = self.ir_view.getBinding(member.object) orelse return;
+                        const key = packBindingKey(binding.scope_id, binding.slot);
+                        if (self.binding_types.get(key)) |obj_type| {
+                            const prop_name = self.resolveAtomName(member.property) orelse return;
+                            if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
+                                if (field.readonly) {
+                                    self.addDiagnostic(.{
+                                        .severity = .err,
+                                        .kind = .type_mismatch,
+                                        .node = node,
+                                        .message = "cannot assign to readonly property",
+                                        .help = null,
+                                    });
+                                }
                             }
                         }
                     }
@@ -820,6 +876,9 @@ pub const TypeChecker = struct {
         key: u32 = 0,
         narrowed_type: TypeIndex = null_type_idx,
         negated: bool = false,
+        /// For discriminated unions: the type to install after the then-branch
+        /// returns (the union with the matched member excluded).
+        else_type: TypeIndex = null_type_idx,
     };
 
     /// Extract a narrowing guard from an if-condition.
@@ -833,7 +892,7 @@ pub const TypeChecker = struct {
             return .{ .key = r.key, .narrowed_type = r.inner, .negated = false };
         }
 
-        // if (x !== undefined) or if (x === undefined)
+        // if (x !== undefined), if (x === undefined), or if (x.prop === "literal")
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(condition) orelse return .{};
             if (bin.op != .strict_neq and bin.op != .strict_eq) return .{};
@@ -841,19 +900,29 @@ pub const TypeChecker = struct {
             const lhs_tag = self.ir_view.getTag(bin.left) orelse return .{};
             const rhs_tag = self.ir_view.getTag(bin.right) orelse return .{};
 
-            const ident_node = if (lhs_tag == .identifier and rhs_tag == .lit_undefined)
-                bin.left
-            else if (rhs_tag == .identifier and lhs_tag == .lit_undefined)
-                bin.right
-            else
-                return .{};
+            // Pattern: x === undefined / x !== undefined
+            if ((lhs_tag == .identifier and rhs_tag == .lit_undefined) or
+                (rhs_tag == .identifier and lhs_tag == .lit_undefined))
+            {
+                const ident_node = if (lhs_tag == .identifier) bin.left else bin.right;
+                const r = self.resolveNullableBinding(ident_node) orelse return .{};
+                return .{
+                    .key = r.key,
+                    .narrowed_type = r.inner,
+                    .negated = bin.op == .strict_eq, // === undefined is negated (narrows in else)
+                };
+            }
 
-            const r = self.resolveNullableBinding(ident_node) orelse return .{};
-            return .{
-                .key = r.key,
-                .narrowed_type = r.inner,
-                .negated = bin.op == .strict_eq, // === undefined is negated (narrows in else)
-            };
+            // Pattern: x.prop === "literal" (discriminated union narrowing)
+            if ((lhs_tag == .member_access and rhs_tag == .lit_string) or
+                (rhs_tag == .member_access and lhs_tag == .lit_string))
+            {
+                const member_node = if (lhs_tag == .member_access) bin.left else bin.right;
+                const string_node = if (lhs_tag == .lit_string) bin.left else bin.right;
+                if (self.extractDiscriminantGuard(member_node, string_node, bin.op)) |guard| {
+                    return guard;
+                }
+            }
         }
 
         // if (!x) - negated truthiness guard
@@ -880,6 +949,48 @@ pub const TypeChecker = struct {
         const current_tag = self.env.pool.getTag(current) orelse return null;
         if (current_tag != .t_nullable) return null;
         return .{ .key = key, .inner = self.env.pool.getNullableInner(current) };
+    }
+
+    /// Extract a discriminated union narrowing guard from x.prop === "literal".
+    /// Returns the matched union member for the then-branch. The caller handles
+    /// else-branch narrowing via the negated flag.
+    fn extractDiscriminantGuard(
+        self: *const TypeChecker,
+        member_node: NodeIndex,
+        string_node: NodeIndex,
+        op: @import("parser/ir.zig").BinaryOp,
+    ) ?NarrowingGuard {
+        const member = self.ir_view.getMember(member_node) orelse return null;
+        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const current = self.binding_types.get(key) orelse return null;
+        if (self.env.pool.getTag(current) != .t_union) return null;
+
+        const prop_name = self.resolveAtomName(member.property) orelse return null;
+        const str_idx = self.ir_view.getStringIdx(string_node) orelse return null;
+        const lit_value = self.ir_view.getString(str_idx) orelse return null;
+
+        const matched = self.env.pool.findUnionMemberByDiscriminant(current, prop_name, lit_value) orelse return null;
+
+        if (op == .strict_eq) {
+            // x.prop === "literal": then-branch narrows to matched member,
+            // else_type is the union with matched excluded (for after early return)
+            const excluded = self.env.pool.excludeUnionMember(self.allocator, current, matched);
+            return .{
+                .key = key,
+                .narrowed_type = matched,
+                .negated = false,
+                .else_type = excluded,
+            };
+        } else {
+            // x.prop !== "literal": narrow to union excluding the matched member
+            const excluded = self.env.pool.excludeUnionMember(self.allocator, current, matched);
+            if (excluded == null_type_idx) return null;
+            return .{ .key = key, .narrowed_type = excluded, .negated = false };
+        }
     }
 
     /// Check if a branch unconditionally returns (simple check for early-return pattern).
@@ -1006,8 +1117,11 @@ pub const TypeChecker = struct {
 
     fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const member = self.ir_view.getMember(node) orelse return null_type_idx;
-        const obj_type = self.inferType(member.object);
-        if (obj_type == null_type_idx) return null_type_idx;
+        const raw_obj_type = self.inferType(member.object);
+        if (raw_obj_type == null_type_idx) return null_type_idx;
+
+        // Unwrap nominal types for member access (operations work on the base type)
+        const obj_type = self.env.pool.unwrapNominal(raw_obj_type);
 
         const prop_name = self.resolveAtomName(member.property) orelse return null_type_idx;
 
@@ -1055,6 +1169,12 @@ pub const TypeChecker = struct {
                         return self.typedResultType(schema_type);
                     }
                 }
+            }
+        }
+        // Check if this is a nominal type constructor: UserId("str")
+        if (self.env.getTypeAlias(name)) |alias_type| {
+            if (self.env.pool.isNominal(alias_type)) {
+                return alias_type;
             }
         }
         const sig = self.env.getFnSigByName(name) orelse return null_type_idx;
@@ -1316,4 +1436,74 @@ test "TypeChecker warns on non-exhaustive match over union" {
         \\  when "a": 1,
         \\};
     , 0, 1);
+}
+
+test "TypeChecker: annotation preserves narrow inferred type" {
+    // const p: number = 3000 should keep type 3000, not widen to number
+    try checkTypedSource(
+        \\const p: number = 3000;
+    , 0, 0);
+}
+
+test "TypeChecker: annotation rejects incompatible type" {
+    // const bad: number = "oops" should error
+    try checkTypedSource(
+        \\const bad: number = "oops";
+    , 1, 0);
+}
+
+test "TypeChecker: rejects assignment to readonly property" {
+    try checkTypedSource(
+        \\type Config = { readonly port: number; host: string };
+        \\const cfg: Config = { port: 3000, host: "localhost" };
+        \\cfg.port = 8080;
+    , 1, 0);
+}
+
+test "TypeChecker: allows assignment to non-readonly property" {
+    try checkTypedSource(
+        \\type Config = { readonly port: number; host: string };
+        \\const cfg: Config = { port: 3000, host: "localhost" };
+        \\cfg.host = "other";
+    , 0, 0);
+}
+
+test "TypeChecker: distinct type rejects cross-nominal assignment" {
+    // SessionId should not be assignable to UserId
+    try checkTypedSource(
+        \\distinct type UserId = string;
+        \\distinct type SessionId = string;
+        \\const sid: SessionId = SessionId("sess_456");
+        \\const uid: UserId = sid;
+    , 1, 0);
+}
+
+test "TypeChecker: distinct type constructor returns nominal type" {
+    // UserId("str") should produce a UserId, accepted where UserId is expected
+    try checkTypedSource(
+        \\distinct type UserId = string;
+        \\const uid: UserId = UserId("usr_123");
+    , 0, 0);
+}
+
+test "TypeChecker: distinct type rejects raw base type" {
+    // raw string should not be assignable to UserId
+    try checkTypedSource(
+        \\distinct type UserId = string;
+        \\const uid: UserId = "raw_string";
+    , 1, 0);
+}
+
+test "TypeChecker: template literal type accepts matching string" {
+    try checkTypedSource(
+        \\type ApiRoute = `/api/${string}`;
+        \\const good: ApiRoute = "/api/users";
+    , 0, 0);
+}
+
+test "TypeChecker: template literal type rejects non-matching string" {
+    try checkTypedSource(
+        \\type ApiRoute = `/api/${string}`;
+        \\const bad: ApiRoute = "/other";
+    , 1, 0);
 }

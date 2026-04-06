@@ -53,6 +53,9 @@ pub const TypeTag = enum(u8) {
     t_generic_param, // type variable (T in <T>)
     t_generic_app, // generic application (Array<number>)
 
+    // Template literal type
+    t_template_literal, // `/api/${string}` (pattern of literal + type slot parts)
+
     // Optional shorthand
     t_nullable, // T | undefined (wraps inner type)
 };
@@ -68,6 +71,7 @@ pub const RecordField = struct {
     name_len: u8,
     type_idx: TypeIndex,
     optional: bool,
+    readonly: bool = false,
 };
 
 /// Function parameter.
@@ -76,6 +80,15 @@ pub const FuncParam = struct {
     name_len: u8,
     type_idx: TypeIndex,
     optional: bool,
+};
+
+/// Template literal type part: either a literal string segment or a type slot.
+pub const TemplatePart = struct {
+    kind: enum(u1) { literal, type_slot },
+    /// For literal: name_start/name_len in name pool. For type_slot: type_idx.
+    name_start: u16 = 0,
+    name_len: u8 = 0,
+    type_idx: TypeIndex = null_type_idx,
 };
 
 /// Packed payload for a TypeNode, interpreted based on the tag.
@@ -104,6 +117,8 @@ pub const TypePool = struct {
     members: std.ArrayListUnmanaged(TypeIndex),
     /// Name storage for record fields and function params
     names: std.ArrayListUnmanaged(u8),
+    /// Template literal type parts storage
+    template_parts: std.ArrayListUnmanaged(TemplatePart),
 
     // Pre-allocated primitive indices (populated during init)
     idx_boolean: TypeIndex = null_type_idx,
@@ -122,6 +137,7 @@ pub const TypePool = struct {
             .params = .empty,
             .members = .empty,
             .names = .empty,
+            .template_parts = .empty,
         };
         // Pre-allocate primitive types
         pool.idx_boolean = pool.addNode(allocator, .{ .tag = .t_boolean, .data = .{} });
@@ -141,6 +157,7 @@ pub const TypePool = struct {
         self.params.deinit(allocator);
         self.members.deinit(allocator);
         self.names.deinit(allocator);
+        self.template_parts.deinit(allocator);
     }
 
     // -------------------------------------------------------------------
@@ -196,6 +213,26 @@ pub const TypePool = struct {
     pub fn isNominal(self: *const TypePool, idx: TypeIndex) bool {
         if (idx == null_type_idx or idx >= self.nodes.items.len) return false;
         return self.nodes.items[idx].nominal;
+    }
+
+    /// Create a nominal (branded) alias of a base type. The resulting type is
+    /// structurally identical but incompatible with other types via nominal flag.
+    /// Returns the new nominal type index.
+    pub fn addNominalAlias(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex) TypeIndex {
+        const base_node = if (base < self.nodes.items.len) self.nodes.items[base] else return null_type_idx;
+        return self.addNode(allocator, .{
+            .tag = base_node.tag,
+            .data = base_node.data,
+            .nominal = true,
+        });
+    }
+
+    /// Unwrap a nominal type to its base primitive. For non-nominal types, returns unchanged.
+    /// Nominal types are branded wrappers around primitives (string, number, boolean),
+    /// so widening always recovers the correct base type.
+    pub fn unwrapNominal(self: *const TypePool, idx: TypeIndex) TypeIndex {
+        if (!self.isNominal(idx)) return idx;
+        return self.widenLiteral(idx);
     }
 
     // -------------------------------------------------------------------
@@ -400,6 +437,142 @@ pub const TypePool = struct {
         return self.members.items[start .. start + count];
     }
 
+    /// Look up a record field by name. Returns the field if found.
+    pub fn lookupRecordField(self: *const TypePool, idx: TypeIndex, field_name: []const u8) ?RecordField {
+        const fields = self.getRecordFields(idx);
+        for (fields) |field| {
+            if (std.mem.eql(u8, self.getName(field.name_start, field.name_len), field_name)) {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    /// Create a new record type with all fields marked readonly (Readonly<T> utility).
+    pub fn makeReadonly(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        const fields = self.getRecordFields(idx);
+        if (fields.len == 0) return idx;
+        var ro_fields: [32]RecordField = undefined;
+        const count = @min(fields.len, 32);
+        for (fields[0..count], 0..) |field, i| {
+            ro_fields[i] = field;
+            ro_fields[i].readonly = true;
+        }
+        return self.addRecord(allocator, ro_fields[0..count]);
+    }
+
+    /// Get the string value of a literal string type.
+    pub fn getLiteralStringValue(self: *const TypePool, idx: TypeIndex) ?[]const u8 {
+        if (self.getTag(idx) != .t_literal_string) return null;
+        const data = self.getData(idx) orelse return null;
+        return self.getName(data.a, @intCast(data.b));
+    }
+
+    /// Create a template literal type from parts.
+    /// TypeData: a = parts_start, b = parts_count.
+    pub fn addTemplateLiteral(self: *TypePool, allocator: std.mem.Allocator, parts: []const TemplatePart) TypeIndex {
+        const start: u16 = @intCast(self.template_parts.items.len);
+        const count: u16 = @intCast(parts.len);
+        self.template_parts.appendSlice(allocator, parts) catch return null_type_idx;
+        return self.addNode(allocator, .{
+            .tag = .t_template_literal,
+            .data = .{ .a = start, .b = count },
+        });
+    }
+
+    /// Get the parts of a template literal type.
+    pub fn getTemplateParts(self: *const TypePool, idx: TypeIndex) []const TemplatePart {
+        if (self.getTag(idx) != .t_template_literal) return &.{};
+        const data = self.getData(idx) orelse return &.{};
+        const start = data.a;
+        const count = data.b;
+        if (start + count > self.template_parts.items.len) return &.{};
+        return self.template_parts.items[start .. start + count];
+    }
+
+    /// Check if a literal string matches a template literal type pattern.
+    /// E.g., "/api/users" matches `/api/${string}`.
+    pub fn matchesTemplateLiteral(self: *const TypePool, literal_idx: TypeIndex, template_idx: TypeIndex) bool {
+        const literal_val = self.getLiteralStringValue(literal_idx) orelse return false;
+        const parts = self.getTemplateParts(template_idx);
+        if (parts.len == 0) return false;
+
+        var pos: usize = 0;
+        for (parts, 0..) |part, i| {
+            if (part.kind == .literal) {
+                const segment = self.getName(part.name_start, part.name_len);
+                if (pos + segment.len > literal_val.len) return false;
+                if (!std.mem.eql(u8, literal_val[pos .. pos + segment.len], segment)) return false;
+                pos += segment.len;
+            } else {
+                // Type slot (e.g., ${string}): matches any characters
+                // If this is the last part, consume the rest
+                if (i + 1 >= parts.len) {
+                    pos = literal_val.len;
+                } else {
+                    // Find the next literal segment
+                    const next = parts[i + 1];
+                    if (next.kind == .literal) {
+                        const next_seg = self.getName(next.name_start, next.name_len);
+                        // Find the next literal segment in the remaining string
+                        if (std.mem.indexOf(u8, literal_val[pos..], next_seg)) |found| {
+                            pos += found;
+                        } else {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return pos == literal_val.len;
+    }
+
+    /// Find a union member whose discriminant field matches a literal string value.
+    /// For a union like { kind: "ok", value: string } | { kind: "err", error: string },
+    /// calling findUnionMemberByDiscriminant(union_idx, "kind", "ok") returns the first member.
+    pub fn findUnionMemberByDiscriminant(
+        self: *const TypePool,
+        union_idx: TypeIndex,
+        field_name: []const u8,
+        literal_value: []const u8,
+    ) ?TypeIndex {
+        const members = self.getUnionMembers(union_idx);
+        if (members.len == 0) return null;
+        for (members) |member| {
+            const fields = self.getRecordFields(member);
+            for (fields) |field| {
+                const name = self.getName(field.name_start, field.name_len);
+                if (!std.mem.eql(u8, name, field_name)) continue;
+                const val = self.getLiteralStringValue(field.type_idx) orelse continue;
+                if (std.mem.eql(u8, val, literal_value)) return member;
+            }
+        }
+        return null;
+    }
+
+    /// Return a new union with the specified member excluded.
+    /// If only one member remains, returns that member directly.
+    pub fn excludeUnionMember(
+        self: *TypePool,
+        allocator: std.mem.Allocator,
+        union_idx: TypeIndex,
+        exclude: TypeIndex,
+    ) TypeIndex {
+        const members = self.getUnionMembers(union_idx);
+        if (members.len == 0) return union_idx;
+        var remaining: [16]TypeIndex = undefined;
+        var count: usize = 0;
+        for (members) |member| {
+            if (member != exclude and count < 16) {
+                remaining[count] = member;
+                count += 1;
+            }
+        }
+        if (count == 0) return null_type_idx;
+        if (count == 1) return remaining[0];
+        return self.addUnion(allocator, remaining[0..count]);
+    }
+
     /// Get function params and return type.
     /// Layout: data.a = param_start (into params array), data.b = return type index.
     /// Param count is stored as a members entry at index = node index.
@@ -518,6 +691,11 @@ pub const TypePool = struct {
         if (src_tag == .t_literal_string and tgt_tag == .t_string) return true;
         if (src_tag == .t_literal_number and tgt_tag == .t_number) return true;
         if (src_tag == .t_literal_bool and tgt_tag == .t_boolean) return true;
+
+        // Literal string assignable to template literal type if it matches the pattern
+        if (src_tag == .t_literal_string and tgt_tag == .t_template_literal) {
+            return self.matchesTemplateLiteral(source, target);
+        }
 
         // null/undefined are assignable to nullable types
         if (tgt_tag == .t_nullable) {
@@ -727,6 +905,19 @@ pub const TypePool = struct {
                 }
                 try writer.writeByte(']');
             },
+            .t_template_literal => {
+                try writer.writeByte('`');
+                for (self.getTemplateParts(idx)) |part| {
+                    if (part.kind == .literal) {
+                        try writer.writeAll(self.getName(part.name_start, part.name_len));
+                    } else {
+                        try writer.writeAll("${");
+                        try self.writeType(part.type_idx, writer);
+                        try writer.writeByte('}');
+                    }
+                }
+                try writer.writeByte('`');
+            },
             .t_generic_app => {
                 const data = self.getData(idx) orelse return;
                 try self.writeType(data.a, writer);
@@ -825,6 +1016,9 @@ const TypeExprParser = struct {
         // String literal type: "..." or '...'
         if (c == '"' or c == '\'') return self.parseStringLiteral();
 
+        // Template literal type: `...${T}...`
+        if (c == '`') return self.parseTemplateLiteralType();
+
         // Number literal (including negative)
         if (std.ascii.isDigit(c) or (c == '-' and self.pos + 1 < self.source.len and std.ascii.isDigit(self.source[self.pos + 1]))) {
             return self.parseNumberLiteral();
@@ -850,8 +1044,24 @@ const TypeExprParser = struct {
             self.skipWs();
             if (self.pos >= self.source.len or self.source[self.pos] == '}') break;
 
-            // Parse field name
-            const name_str = self.scanIdent();
+            // Check for readonly modifier
+            var is_readonly = false;
+            const saved_pos = self.pos;
+            const first_ident = self.scanIdent();
+            if (first_ident.len == 0) break;
+            if (std.mem.eql(u8, first_ident, "readonly")) {
+                self.skipWs();
+                // Peek: if next char could start an ident, this was a modifier
+                if (self.pos < self.source.len and isIdentStart(self.source[self.pos])) {
+                    is_readonly = true;
+                } else {
+                    // "readonly" is the field name itself
+                    self.pos = saved_pos + first_ident.len;
+                }
+            }
+
+            // Parse field name (or use first_ident if not readonly)
+            const name_str = if (is_readonly) self.scanIdent() else first_ident;
             if (name_str.len == 0) break;
 
             self.skipWs();
@@ -877,6 +1087,7 @@ const TypeExprParser = struct {
                     .name_len = n.len,
                     .type_idx = field_type,
                     .optional = optional,
+                    .readonly = is_readonly,
                 };
                 count += 1;
             }
@@ -1015,6 +1226,43 @@ const TypeExprParser = struct {
         return self.pool.addLiteralNumber(self.allocator, value);
     }
 
+    fn parseTemplateLiteralType(self: *TypeExprParser) TypeIndex {
+        if (!self.match('`')) return null_type_idx;
+
+        var parts_buf: [16]TemplatePart = undefined;
+        var count: usize = 0;
+
+        while (self.pos < self.source.len and self.source[self.pos] != '`') {
+            if (count >= parts_buf.len) break;
+
+            if (self.source[self.pos] == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
+                // Type slot: ${T}
+                self.pos += 2; // skip ${
+                self.skipWs();
+                const slot_type = self.parseUnion();
+                self.skipWs();
+                _ = self.match('}');
+                parts_buf[count] = .{ .kind = .type_slot, .type_idx = slot_type };
+                count += 1;
+            } else {
+                // Literal segment: read until ` or ${
+                const seg_start = self.pos;
+                while (self.pos < self.source.len and self.source[self.pos] != '`') {
+                    if (self.source[self.pos] == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') break;
+                    self.pos += 1;
+                }
+                if (self.pos > seg_start) {
+                    const n = self.pool.addName(self.allocator, self.source[seg_start..self.pos]);
+                    parts_buf[count] = .{ .kind = .literal, .name_start = n.start, .name_len = n.len };
+                    count += 1;
+                }
+            }
+        }
+        _ = self.match('`');
+        if (count == 0) return null_type_idx;
+        return self.pool.addTemplateLiteral(self.allocator, parts_buf[0..count]);
+    }
+
     fn resolveIdentType(self: *TypeExprParser, ident: []const u8) TypeIndex {
         // Check primitives
         if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.pool.idx_boolean;
@@ -1085,6 +1333,11 @@ const TypeExprParser = struct {
         // Array<T> -> T[]
         if (is_array and count == 1) {
             return self.pool.addArray(self.allocator, args_buf[0]);
+        }
+
+        // Readonly<T> -> record with all fields readonly
+        if (std.mem.eql(u8, base_name, "Readonly") and count == 1) {
+            return self.pool.makeReadonly(self.allocator, args_buf[0]);
         }
 
         const base = self.pool.addRef(self.allocator, base_name);
@@ -1396,4 +1649,122 @@ test "TypePool instantiate generic" {
     try std.testing.expectEqual(pool.idx_boolean, fields[0].type_idx);
     // "value" field should now be string (was T)
     try std.testing.expectEqual(pool.idx_string, fields[1].type_idx);
+}
+
+test "findUnionMemberByDiscriminant matches correct member" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // Build { kind: "ok", value: string }
+    const kind_ok = pool.addLiteralString(allocator, "ok");
+    const ok_member = pool.addRecord(allocator, &.{
+        .{ .name_start = blk: {
+            const n = pool.addName(allocator, "kind");
+            break :blk n.start;
+        }, .name_len = 4, .type_idx = kind_ok, .optional = false },
+        .{ .name_start = blk: {
+            const n = pool.addName(allocator, "value");
+            break :blk n.start;
+        }, .name_len = 5, .type_idx = pool.idx_string, .optional = false },
+    });
+
+    // Build { kind: "err", error: string }
+    const kind_err = pool.addLiteralString(allocator, "err");
+    const err_member = pool.addRecord(allocator, &.{
+        .{ .name_start = blk: {
+            const n = pool.addName(allocator, "kind");
+            break :blk n.start;
+        }, .name_len = 4, .type_idx = kind_err, .optional = false },
+        .{ .name_start = blk: {
+            const n = pool.addName(allocator, "error");
+            break :blk n.start;
+        }, .name_len = 5, .type_idx = pool.idx_string, .optional = false },
+    });
+
+    // Build union
+    const union_type = pool.addUnion(allocator, &.{ ok_member, err_member });
+
+    // Find by discriminant
+    try std.testing.expectEqual(ok_member, pool.findUnionMemberByDiscriminant(union_type, "kind", "ok").?);
+    try std.testing.expectEqual(err_member, pool.findUnionMemberByDiscriminant(union_type, "kind", "err").?);
+    try std.testing.expect(pool.findUnionMemberByDiscriminant(union_type, "kind", "unknown") == null);
+    try std.testing.expect(pool.findUnionMemberByDiscriminant(union_type, "type", "ok") == null);
+
+    // Exclude member
+    const excluded = pool.excludeUnionMember(allocator, union_type, ok_member);
+    try std.testing.expectEqual(err_member, excluded);
+}
+
+test "parseTypeExpr parses readonly record fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "{ readonly port: number; host: string }");
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(idx).?);
+    const fields = pool.getRecordFields(idx);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    // port should be readonly
+    try std.testing.expectEqualStrings("port", pool.getName(fields[0].name_start, fields[0].name_len));
+    try std.testing.expect(fields[0].readonly);
+    try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
+    // host should not be readonly
+    try std.testing.expectEqualStrings("host", pool.getName(fields[1].name_start, fields[1].name_len));
+    try std.testing.expect(!fields[1].readonly);
+    try std.testing.expectEqual(pool.idx_string, fields[1].type_idx);
+}
+
+test "makeReadonly marks all fields readonly" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "{ port: number; host: string }");
+    const ro = pool.makeReadonly(allocator, idx);
+    const fields = pool.getRecordFields(ro);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(fields[0].readonly);
+    try std.testing.expect(fields[1].readonly);
+}
+
+test "parseTypeExpr template literal type" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const idx = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(idx).?);
+    const parts = pool.getTemplateParts(idx);
+    try std.testing.expectEqual(@as(usize, 2), parts.len);
+    try std.testing.expectEqual(.literal, parts[0].kind);
+    try std.testing.expectEqualStrings("/api/", pool.getName(parts[0].name_start, parts[0].name_len));
+    try std.testing.expectEqual(.type_slot, parts[1].kind);
+    try std.testing.expectEqual(pool.idx_string, parts[1].type_idx);
+}
+
+test "matchesTemplateLiteral matches correctly" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const template = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    const good = pool.addLiteralString(allocator, "/api/users");
+    const bad = pool.addLiteralString(allocator, "/other");
+
+    try std.testing.expect(pool.matchesTemplateLiteral(good, template));
+    try std.testing.expect(!pool.matchesTemplateLiteral(bad, template));
+}
+
+test "template literal type assignability" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const template = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    const good = pool.addLiteralString(allocator, "/api/users");
+    const bad = pool.addLiteralString(allocator, "/other");
+
+    try std.testing.expect(pool.isAssignableTo(good, template));
+    try std.testing.expect(!pool.isAssignableTo(bad, template));
 }

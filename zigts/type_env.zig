@@ -155,6 +155,7 @@ pub const TypeEnv = struct {
             switch (entry.kind) {
                 .type_alias => self.processTypeAlias(tm, entry, &generic_params_map),
                 .interface_decl => self.processInterface(tm, entry),
+                .distinct_type => self.processDistinctType(tm, entry),
                 else => {},
             }
         }
@@ -241,6 +242,21 @@ pub const TypeEnv = struct {
         const type_idx = self.resolveType(type_text);
         const owned_name = self.internName(name);
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch {};
+    }
+
+    fn processDistinctType(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
+        const name = tm.getNameText(entry) orelse return;
+        const type_text = tm.getTypeText(entry);
+        if (type_text.len == 0) return;
+
+        // Resolve the base type, then create a nominal alias.
+        const base_idx = self.resolveType(type_text);
+        if (base_idx == null_type_idx) return;
+        const nominal_idx = self.pool.addNominalAlias(self.allocator, base_idx);
+        if (nominal_idx == null_type_idx) return;
+
+        const owned_name = self.internName(name);
+        self.type_aliases.put(self.allocator, owned_name, nominal_idx) catch {};
     }
 
     fn processInterface(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {

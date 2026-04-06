@@ -392,8 +392,8 @@ const Stripper = struct {
                 const ret_type_end = self.pos;
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
-                // Record return type annotation
-                self.recordTypeAnnotation(.return_annotation, ret_type_start, ret_type_end, fn_name_start, fn_name_end);
+                const kind = classifyReturnType(self.source[ret_type_start..ret_type_end]);
+                self.recordTypeAnnotation(kind, ret_type_start, ret_type_end, fn_name_start, fn_name_end);
                 // Blank the return type annotation (but preserve final whitespace)
                 self.blankSpan(colon_pos, self.pos);
             }
@@ -546,8 +546,8 @@ const Stripper = struct {
                 if (self.pos + 1 < self.source.len and
                     self.source[self.pos] == '=' and self.source[self.pos + 1] == '>')
                 {
-                    // Record arrow function return type (no name for arrows)
-                    self.recordTypeAnnotation(.return_annotation, ret_type_start, ret_type_end, 0, 0);
+                    const arrow_kind = classifyReturnType(self.source[ret_type_start..ret_type_end]);
+                    self.recordTypeAnnotation(arrow_kind, ret_type_start, ret_type_end, 0, 0);
                     // Blank just the return type, not the =>
                     self.blankSpan(colon_pos, self.pos);
                     return;
@@ -697,14 +697,48 @@ const Stripper = struct {
         const saved_line = self.line;
         const saved_col = self.col;
 
-        // Check for 'type' or 'interface' keyword
-        const keyword = self.peekKeyword();
-        if (keyword == null) return false;
+        // Check for 'distinct', 'type', or 'interface' keyword
+        var is_distinct = false;
+        const first_kw = self.peekKeyword();
+        if (first_kw == null) return false;
+
+        // Check for 'distinct type' prefix
+        if (std.mem.eql(u8, first_kw.?, "distinct")) {
+            is_distinct = true;
+            self.pos += first_kw.?.len;
+            self.col += @intCast(first_kw.?.len);
+            self.skipWhitespaceTracked();
+        }
+
+        const keyword = if (is_distinct) self.peekKeyword() else first_kw;
+        if (keyword == null) {
+            if (is_distinct) {
+                self.pos = saved_pos;
+                self.line = saved_line;
+                self.col = saved_col;
+            }
+            return false;
+        }
 
         const is_type = std.mem.eql(u8, keyword.?, "type");
         const is_interface = std.mem.eql(u8, keyword.?, "interface");
 
-        if (!is_type and !is_interface) return false;
+        if (!is_type and !is_interface) {
+            if (is_distinct) {
+                self.pos = saved_pos;
+                self.line = saved_line;
+                self.col = saved_col;
+            }
+            return false;
+        }
+
+        // distinct only applies to type, not interface
+        if (is_distinct and is_interface) {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        }
 
         // Skip the keyword
         self.pos += keyword.?.len;
@@ -782,7 +816,7 @@ const Stripper = struct {
         }
 
         // Record in TypeMap before blanking
-        const kind: TypeMapKind = if (is_type) .type_alias else .interface_decl;
+        const kind: TypeMapKind = if (is_distinct) .distinct_type else if (is_type) .type_alias else .interface_decl;
         self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
         if (generic_start != 0) {
             self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
@@ -835,7 +869,23 @@ const Stripper = struct {
         self.col += 6;
         self.skipWhitespaceTracked();
 
-        const decl_kw = self.peekKeyword();
+        // Check for optional 'distinct' prefix: export distinct type
+        var export_is_distinct = false;
+        const first_decl_kw = self.peekKeyword();
+        if (first_decl_kw == null) {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        }
+        if (std.mem.eql(u8, first_decl_kw.?, "distinct")) {
+            export_is_distinct = true;
+            self.pos += first_decl_kw.?.len;
+            self.col += @intCast(first_decl_kw.?.len);
+            self.skipWhitespaceTracked();
+        }
+
+        const decl_kw = if (export_is_distinct) self.peekKeyword() else first_decl_kw;
         if (decl_kw == null) {
             self.pos = saved_pos;
             self.line = saved_line;
@@ -852,12 +902,19 @@ const Stripper = struct {
             return false;
         }
 
+        if (export_is_distinct and is_interface) {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        }
+
         self.pos += decl_kw.?.len;
         self.col += @intCast(decl_kw.?.len);
         self.skipWhitespaceTracked();
 
         // Handle `export type { Foo }` re-exports.
-        if (is_type and self.pos < self.source.len and self.source[self.pos] == '{') {
+        if (is_type and !export_is_distinct and self.pos < self.source.len and self.source[self.pos] == '{') {
             self.skipToStatementEnd();
             self.blankSpan(saved_pos, self.pos);
             return true;
@@ -924,7 +981,7 @@ const Stripper = struct {
             self.col += 1;
         }
 
-        const kind: TypeMapKind = if (is_type) .type_alias else .interface_decl;
+        const kind: TypeMapKind = if (export_is_distinct) .distinct_type else if (is_type) .type_alias else .interface_decl;
         self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
         if (generic_start != 0) {
             self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
@@ -1075,10 +1132,10 @@ const Stripper = struct {
         if (self.pos >= self.source.len) return false;
         const c = self.source[self.pos];
 
-        // Type starts with: identifier, {, (, [, <, 'string', "string", typeof, keyof
+        // Type starts with: identifier, {, (, [, <, 'string', "string", `template`, typeof, keyof
         if (isIdentifierStart(c)) return true;
         if (c == '{' or c == '(' or c == '[' or c == '<') return true;
-        if (c == '\'' or c == '"') return true;
+        if (c == '\'' or c == '"' or c == '`') return true;
 
         return false;
     }
@@ -1767,6 +1824,11 @@ const Stripper = struct {
 };
 
 /// Trim trailing whitespace from a source range, returning the new end position.
+/// Classify return type text as a type guard ("x is T") or plain return annotation.
+fn classifyReturnType(text: []const u8) TypeMapKind {
+    return if (std.mem.indexOf(u8, text, " is ") != null) .type_guard_annotation else .return_annotation;
+}
+
 fn trimTrailingWs(source: []const u8, start: usize, end: usize) usize {
     var pos = end;
     while (pos > start and (source[pos - 1] == ' ' or source[pos - 1] == '\t')) {
@@ -2346,4 +2408,42 @@ test "TypeMap records arrow function return type" {
         }
     }
     try std.testing.expect(found_return);
+}
+
+test "type guard annotation detected" {
+    const allocator = std.testing.allocator;
+    const source = "function isString(x: unknown): x is string { return typeof x === 'string'; }";
+    var result = try strip(allocator, source, .{});
+    defer result.deinit();
+
+    const tm = &result.type_map;
+    var found_guard = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .type_guard_annotation) {
+            found_guard = true;
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expect(std.mem.indexOf(u8, type_text, "x is string") != null);
+        }
+    }
+    try std.testing.expect(found_guard);
+}
+
+test "distinct type declaration stripped" {
+    const allocator = std.testing.allocator;
+    const source = "distinct type UserId = string;";
+    var result = try strip(allocator, source, .{});
+    defer result.deinit();
+
+    const tm = &result.type_map;
+    var found_distinct = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .distinct_type) {
+            found_distinct = true;
+            const name = tm.getNameText(entry) orelse "";
+            try std.testing.expectEqualStrings("UserId", name);
+            const type_text = tm.getTypeText(entry);
+            try std.testing.expectEqualStrings("string", type_text);
+        }
+    }
+    try std.testing.expect(found_distinct);
 }

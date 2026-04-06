@@ -12,8 +12,9 @@ The type stripper (`zigts/stripper.zig`) removes TypeScript syntax before parsin
 
 **Type declarations** (stripped entirely):
 - `type` aliases (including ADT unions)
+- `distinct type` declarations (nominal/branded types)
 - `interface` declarations
-- `export type ...` / `import type ...`
+- `export type ...` / `export distinct type ...` / `import type ...`
 
 **Type annotations** (stripped in place):
 - Variable annotations: `let x: T = ...`
@@ -86,9 +87,12 @@ The type checker (`zigts/type_checker.zig`) validates type annotations at build 
 - Variable declaration types match initializer types
 - Function argument types match declared parameter types
 - Return values match declared return types
-- Property access on known record types
+- Property access on known record types (including `readonly` enforcement)
 - Virtual module function signatures (argument count and types)
-- Discriminated union narrowing in match expressions
+- Discriminated union narrowing in `match` expressions and `if` conditions
+- Nominal type safety for `distinct type` declarations
+- Template literal type pattern matching
+- Type guard narrowing (`x is T`) in `if` branches and `assert` statements
 
 ### Structural Matching
 
@@ -116,9 +120,97 @@ if (val !== undefined) {
 }
 ```
 
-### Literal Widening
+### Discriminated Union Narrowing
 
-`const` bindings retain their literal type (`const x = 200` has type `200`). `let` bindings without explicit annotations are widened to the base type (`let x = 200` has type `number`), so `x = 404` compiles without error.
+Discriminated unions narrow through `if` conditions on tag fields:
+
+```typescript
+type Result = { kind: "ok", value: string } | { kind: "err", error: string };
+
+if (r.kind === "err") {
+    return Response.json({ error: r.error }, { status: 400 });
+}
+// r is narrowed to { kind: "ok", value: string } from here
+r.value.toUpperCase();
+```
+
+`match` handles exhaustive branching. `if` handles control flow with early returns. Different tools for different jobs.
+
+### Type Guards and Assert
+
+Type guard functions narrow in `if` branches. The `assert` statement installs permanent forward narrowing:
+
+```typescript
+function isString(x: unknown): x is string {
+    return typeof x === "string";
+}
+
+if (isString(val)) {
+    val.toUpperCase();   // narrowed in then-branch
+}
+
+assert isString(val);
+val.toUpperCase();       // narrowed from here forward
+
+assert isString(name), Response.json({ error: "name required" }, { status: 400 });
+```
+
+When `assert` fails with no error expression, the handler halts. With an explicit error expression, that value is returned.
+
+### Distinct Types
+
+`distinct type` creates nominal types that prevent accidental cross-assignment:
+
+```typescript
+distinct type UserId = string;
+distinct type SessionId = string;
+
+const uid: UserId = UserId("usr_123");     // constructor wraps the base type
+const sid: SessionId = SessionId("sess");
+
+const lookup = (id: UserId) => id;
+lookup(uid);    // OK
+lookup(sid);    // ERROR: SessionId is not assignable to UserId
+lookup("raw");  // ERROR: string is not assignable to UserId
+
+uid.toUpperCase();  // operations unwrap to base type
+```
+
+### Readonly Fields
+
+The `readonly` modifier prevents assignment to record fields:
+
+```typescript
+type Config = { readonly port: number; host: string };
+const cfg: Config = { port: 3000, host: "localhost" };
+cfg.host = "other";  // OK
+cfg.port = 8080;     // ERROR: cannot assign to readonly property
+```
+
+`Readonly<T>` marks all fields readonly.
+
+### Template Literal Types
+
+Template literal types validate string patterns at build time:
+
+```typescript
+type ApiRoute = `/api/${string}`;
+const good: ApiRoute = "/api/users";   // OK
+const bad: ApiRoute = "/other";        // ERROR
+```
+
+### Literal Types and Annotation Semantics
+
+`const` bindings preserve their literal type (`const x = 200` has type `200`). `let` bindings without explicit annotations are widened to the base type (`let x = 200` has type `number`), so `x = 404` compiles without error.
+
+When a `const` binding has a base primitive annotation, the compiler validates assignability but keeps the narrower literal type:
+
+```typescript
+const port: number = 3000;  // type is 3000, validated against number
+const bad: number = "oops"; // ERROR: string not assignable to number
+```
+
+For union annotations, the declared type is preserved to support exhaustiveness checking in `match` expressions.
 
 ### Generic Type Aliases
 

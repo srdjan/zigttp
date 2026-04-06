@@ -101,6 +101,12 @@ These were previously detected by the stripper but moved to the parser for consi
 | `throw` statement | Use Result types for error handling |
 | `try/catch/finally` | Use Result types for error handling |
 
+### Control Flow Statements
+
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `switch/case/break` | Use `match` expression instead |
+
 ### Classes and OOP
 
 | Feature | Suggested Alternative |

@@ -197,7 +197,12 @@ pub const Parser = struct {
                 self.advance();
                 return error.ParseError;
             },
-            .kw_switch => self.parseSwitchStatement(),
+            .kw_switch => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'switch' is not supported; use 'match' expression instead");
+                self.advance();
+                return error.ParseError;
+            },
+            .kw_assert => self.parseAssertStatement(),
             // class keyword in statement context: class Foo { }
             // Catches class declarations (both .js and .ts files after stripping)
             .kw_class => {
@@ -1102,81 +1107,25 @@ pub const Parser = struct {
         });
     }
 
-    fn parseSwitchStatement(self: *Parser) anyerror!NodeIndex {
+    fn parseAssertStatement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
-        self.advance(); // consume 'switch'
+        self.advance(); // consume 'assert'
 
-        try self.expect(.lparen, "'('");
-        const discriminant = try self.parseExpression(.none);
-        try self.expect(.rparen, "')'");
-        try self.expect(.lbrace, "'{'");
+        const condition = try self.parseExpression(.none);
 
-        var cases = std.ArrayList(NodeIndex).empty;
-        defer cases.deinit(self.allocator);
-
-        const was_in_switch = self.in_switch;
-        self.in_switch = true;
-
-        while (!self.check(.rbrace) and !self.check(.eof)) {
-            const case_loc = self.current.location();
-            var test_expr: NodeIndex = null_node;
-
-            if (self.match(.kw_case)) {
-                test_expr = try self.parseExpression(.none);
-            } else if (self.match(.kw_default)) {
-                // default case
-            } else {
-                self.errorAtCurrent("expected 'case' or 'default'");
-                break;
-            }
-            try self.expect(.colon, "':'");
-
-            // Parse case body statements
-            var body_stmts = std.ArrayList(NodeIndex).empty;
-            defer body_stmts.deinit(self.allocator);
-
-            while (!self.check(.kw_case) and !self.check(.kw_default) and
-                !self.check(.rbrace) and !self.check(.eof))
-            {
-                if (self.parseStatement()) |stmt| {
-                    try body_stmts.append(self.allocator, stmt);
-                } else |_| {
-                    self.synchronize();
-                }
-            }
-
-            const body_start = if (body_stmts.items.len > 0)
-                try self.addStmtList(body_stmts.items)
-            else
-                null_node;
-
-            const case_node = try self.nodes.add(.{
-                .tag = .case_clause,
-                .loc = case_loc,
-                .data = .{ .case_clause = .{
-                    .test_expr = test_expr,
-                    .body_start = body_start,
-                    .body_count = @intCast(body_stmts.items.len),
-                } },
-            });
-            try cases.append(self.allocator, case_node);
+        // Optional comma-separated error expression: assert expr, errorExpr;
+        var error_expr: NodeIndex = null_node;
+        if (self.match(.comma)) {
+            error_expr = try self.parseExpression(.none);
         }
 
-        self.in_switch = was_in_switch;
-        try self.expect(.rbrace, "'}'");
-
-        const cases_start = if (cases.items.len > 0)
-            try self.addNodeList(cases.items)
-        else
-            null_node;
-
+        try self.expectSemicolon();
         return try self.nodes.add(.{
-            .tag = .switch_stmt,
+            .tag = .assert_stmt,
             .loc = loc,
-            .data = .{ .switch_stmt = .{
-                .discriminant = discriminant,
-                .cases_start = cases_start,
-                .cases_count = @intCast(cases.items.len),
+            .data = .{ .assert_stmt = .{
+                .condition = condition,
+                .error_expr = error_expr,
             } },
         });
     }
@@ -4100,6 +4049,49 @@ test "unsupported: do-while loop" {
     };
 
     try std.testing.expect(false);
+}
+
+test "unsupported: switch statement" {
+    const allocator = std.testing.allocator;
+    const source = "switch (x) { case 1: break; }";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        const err = errors[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "switch") != null);
+        try std.testing.expect(std.mem.indexOf(u8, err.message, "match") != null);
+        return;
+    };
+
+    try std.testing.expect(false);
+}
+
+test "assert statement parses" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "assert isString(val);");
+    defer parser.deinit();
+    _ = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "assert statement with error expression parses" {
+    const allocator = std.testing.allocator;
+    var parser = Parser.init(allocator, "assert isString(val), Response.json({ error: 'bad' });");
+    defer parser.deinit();
+    _ = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "break in for-of" {

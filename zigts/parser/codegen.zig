@@ -405,7 +405,8 @@ pub const CodeGen = struct {
             .for_stmt => try self.emitForLoop(self.ir.getLoop(index).?),
             .for_of_stmt => try self.emitForIterLoop(self.ir.getForIter(index).?),
             .return_stmt => try self.emitReturn(self.ir.getOptValue(index)),
-            .switch_stmt => try self.emitSwitch(self.ir.getSwitchStmt(index).?),
+            .assert_stmt => try self.emitAssert(self.ir.getAssertStmt(index).?),
+            .switch_stmt => unreachable, // switch is rejected at parse time
             .block, .program => try self.emitBlock(self.ir.getBlock(index).?),
             // Module declarations
             // Emit alias binding copies for named imports.
@@ -1937,65 +1938,22 @@ pub const CodeGen = struct {
         }
     }
 
-    fn emitSwitch(self: *CodeGen, switch_stmt: Node.SwitchStmt) !void {
-        try self.emitNode(switch_stmt.discriminant);
+    fn emitAssert(self: *CodeGen, assert: Node.AssertStmt) !void {
+        // Emit condition; if true, skip past the failure path
+        try self.emitNode(assert.condition);
+        const skip_label = try self.createLabel();
+        try self.emitJump(.if_true, skip_label);
+        self.popStack(1); // if_true consumes the boolean
 
-        const end_label = try self.createLabel();
-        var case_labels = std.ArrayList(u32).empty;
-        defer case_labels.deinit(self.allocator);
-        var default_label: ?u32 = null;
-
-        // Create labels for each case
-        var i: u8 = 0;
-        while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
-            const label = try self.createLabel();
-            try case_labels.append(self.allocator, label);
-
-            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
-            if (case_clause.test_expr == null_node) {
-                default_label = label;
-            }
-        }
-
-        // Emit comparisons
-        i = 0;
-        while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
-            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
-
-            if (case_clause.test_expr != null_node) {
-                try self.emitEqTest(case_clause.test_expr, case_labels.items[i]);
-            }
-        }
-
-        // Jump to default or end
-        if (default_label) |lbl| {
-            try self.emitJump(.goto, lbl);
+        // Failure path: emit error response and return, or halt
+        if (assert.error_expr != null_node) {
+            try self.emitNode(assert.error_expr);
+            try self.emit(.ret);
         } else {
-            try self.emitJump(.goto, end_label);
+            try self.emit(.halt);
         }
 
-        // Drop discriminant
-        try self.emit(.drop);
-        self.popStack(1);
-
-        // Emit case bodies
-        i = 0;
-        while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
-            try self.placeLabel(case_labels.items[i]);
-
-            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
-
-            var j: u16 = 0;
-            while (j < case_clause.body_count) : (j += 1) {
-                const body_idx = self.ir.getListIndex(case_clause.body_start, j);
-                try self.emitNode(body_idx);
-            }
-        }
-
-        try self.placeLabel(end_label);
+        try self.placeLabel(skip_label);
     }
 
     fn emitMatchExpr(self: *CodeGen, match_expr: Node.MatchExpr) !void {

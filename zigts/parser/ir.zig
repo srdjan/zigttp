@@ -184,6 +184,7 @@ pub const NodeTag = enum(u8) {
     switch_stmt,
     case_clause,
     return_stmt,
+    assert_stmt,
     throw_stmt,
     break_stmt,
     continue_stmt,
@@ -304,6 +305,9 @@ pub const Node = struct {
         // Match pattern (object pattern)
         match_pattern: MatchPatternObj,
 
+        // Assert statement
+        assert_stmt: AssertStmt,
+
         // Return/throw with optional value
         opt_value: ?NodeIndex,
 
@@ -375,6 +379,11 @@ pub const Node = struct {
         property: u16, // Atom index for .property access
         computed: NodeIndex, // For [expr] access, null_node if not computed
         is_optional: bool, // obj?.prop
+    };
+
+    pub const AssertStmt = struct {
+        condition: NodeIndex,
+        error_expr: NodeIndex, // null_node if no explicit error expression
     };
 
     pub const AssignExpr = struct {
@@ -1224,6 +1233,10 @@ pub const IRStore = struct {
                 });
             },
             .return_stmt, .throw_stmt => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
+            .assert_stmt => blk: {
+                const a = node.data.assert_stmt;
+                break :blk self.addNode(.assert_stmt, loc, .{ .a = a.condition, .b = a.error_expr });
+            },
             .break_stmt, .continue_stmt => self.addNode(node.tag, loc, .{ .a = node.data.opt_label orelse 0, .b = 0 }),
             .try_stmt => blk: {
                 const t = node.data.try_stmt;
@@ -2090,6 +2103,21 @@ pub const IrView = struct {
                 if (idx >= ir.data.items.len) break :blk null;
                 const val = ir.data.items[idx].a;
                 break :blk if (val == null_node) null else val;
+            },
+        };
+    }
+
+    /// Get assert statement data: condition and optional error expression
+    pub fn getAssertStmt(self: IrView, idx: NodeIndex) ?Node.AssertStmt {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.assert_stmt else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .condition = d.a,
+                    .error_expr = d.b,
+                };
             },
         };
     }

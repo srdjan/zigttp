@@ -220,7 +220,6 @@ pub const HandlerAnalyzer = struct {
 
         switch (tag) {
             .if_stmt => try self.extractPatternFromIfStmt(stmt_node),
-            .switch_stmt => try self.extractPatternFromSwitchStmt(stmt_node),
             .return_stmt => try self.extractPatternFromReturnMatch(stmt_node),
             else => return,
         }
@@ -270,42 +269,6 @@ pub const HandlerAnalyzer = struct {
             .content_type_idx = response.content_type_idx,
             .body_source = response.body_source,
         });
-    }
-
-    fn extractPatternFromSwitchStmt(self: *HandlerAnalyzer, stmt_node: NodeIndex) !void {
-        const switch_stmt = self.ir.getSwitchStmt(stmt_node) orelse return;
-
-        // We only optimize switch(route) where route is the discovered url/path binding.
-        const discr_tag = self.ir.getTag(switch_stmt.discriminant) orelse return;
-        if (discr_tag != .identifier) return;
-        const discr_binding = self.ir.getBinding(switch_stmt.discriminant) orelse return;
-        if (self.route_binding_slot == null) return;
-        if (discr_binding.slot != self.route_binding_slot.?) return;
-
-        var i: u8 = 0;
-        while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.ir.getListIndex(switch_stmt.cases_start, i);
-            const case_clause = self.ir.getCaseClause(case_idx) orelse continue;
-            if (case_clause.test_expr == null_node) continue; // default case
-
-            const route_pattern = self.analyzeSwitchCaseExact(case_clause.test_expr) orelse continue;
-            const static_response = try self.analyzeCaseClauseReturn(case_clause);
-            if (static_response == null) {
-                self.allocator.free(route_pattern.url_bytes);
-                continue;
-            }
-
-            const response = static_response.?;
-            try self.patterns.append(self.allocator, .{
-                .pattern_type = route_pattern.pattern_type,
-                .url_atom = route_pattern.url_atom,
-                .url_bytes = route_pattern.url_bytes,
-                .static_body = response.body,
-                .status = response.status,
-                .content_type_idx = response.content_type_idx,
-                .body_source = response.body_source,
-            });
-        }
     }
 
     fn extractPatternFromReturnMatch(self: *HandlerAnalyzer, stmt_node: NodeIndex) !void {
@@ -400,19 +363,6 @@ pub const HandlerAnalyzer = struct {
             .url_atom = self.route_atom,
             .url_bytes = url_bytes,
         };
-    }
-
-    fn analyzeCaseClauseReturn(self: *HandlerAnalyzer, case_clause: Node.CaseClause) !?StaticResponseInfo {
-        if (case_clause.body_count == 0 or case_clause.body_start == null_node) return null;
-        var i: u16 = 0;
-        while (i < case_clause.body_count) : (i += 1) {
-            const stmt_idx = self.ir.getListIndex(case_clause.body_start, i);
-            const stmt_tag = self.ir.getTag(stmt_idx) orelse continue;
-            if (stmt_tag == .return_stmt) {
-                return try self.analyzeReturnStmt(stmt_idx);
-            }
-        }
-        return null;
     }
 
     const UrlPatternInfo = struct {
@@ -1063,7 +1013,7 @@ fn bindingSlotIfBindable(binding: anytype) ?u16 {
     };
 }
 
-test "HandlerAnalyzer extracts switch route patterns" {
+test "HandlerAnalyzer extracts match route patterns" {
     const allocator = std.testing.allocator;
 
     var atoms = context.AtomTable.init(allocator);
@@ -1072,14 +1022,11 @@ test "HandlerAnalyzer extracts switch route patterns" {
     const source =
         \\function handler(request) {
         \\  const url = request.url;
-        \\  switch (url) {
-        \\    case '/api/a':
-        \\      return Response.json({ ok: true });
-        \\    case '/api/b':
-        \\      return Response.text('plain');
-        \\    default:
-        \\      return Response.json({ error: 'nf' }, { status: 404 });
-        \\  }
+        \\  return match (url) {
+        \\    when '/api/a': Response.json({ ok: true }),
+        \\    when '/api/b': Response.text('plain'),
+        \\    default: Response.json({ error: 'nf' }, { status: 404 }),
+        \\  };
         \\}
     ;
 

@@ -354,8 +354,6 @@ pub const HandlerVerifier = struct {
 
             .if_stmt => self.ifReturns(node),
 
-            .switch_stmt => self.switchReturns(node),
-
             .for_of_stmt => self.forOfReturns(node),
 
             .var_decl,
@@ -433,58 +431,6 @@ pub const HandlerVerifier = struct {
     }
 
     /// Analyze return status of a switch statement.
-    fn switchReturns(self: *HandlerVerifier, node: NodeIndex) ReturnStatus {
-        const switch_stmt = self.ir_view.getSwitchStmt(node) orelse return .never;
-        if (switch_stmt.cases_count == 0) return .never;
-
-        var has_default = false;
-        var all_return = true;
-
-        var i: u8 = 0;
-        while (i < switch_stmt.cases_count) : (i += 1) {
-            const case_idx = self.ir_view.getListIndex(switch_stmt.cases_start, i);
-            const case_clause = self.ir_view.getCaseClause(case_idx) orelse continue;
-
-            // Default case has null_node test_expr
-            if (case_clause.test_expr == null_node) {
-                has_default = true;
-            }
-
-            // Check if this case's body returns
-            const case_status = self.caseBodyReturns(case_clause);
-            if (case_status != .always) {
-                all_return = false;
-            }
-        }
-
-        // Switch only guarantees return if it has a default and all cases return
-        if (has_default and all_return) return .always;
-        if (!has_default) {
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = .missing_return_default,
-                .node = node,
-                .message = "switch statement without default case may not return a Response",
-                .help = "add a default case that returns a Response",
-            });
-        }
-        return .sometimes;
-    }
-
-    /// Check if a case clause's body always returns.
-    fn caseBodyReturns(self: *HandlerVerifier, case_clause: Node.CaseClause) ReturnStatus {
-        if (case_clause.body_count == 0) return .never;
-
-        // Walk case body statements
-        var i: u16 = 0;
-        while (i < case_clause.body_count) : (i += 1) {
-            const stmt_idx = self.ir_view.getListIndex(case_clause.body_start, i);
-            const status = self.stmtReturns(stmt_idx);
-            if (status == .always) return .always;
-        }
-        return .never;
-    }
-
     /// for-of body returns .never because the iterable could be empty.
     fn forOfReturns(_: *HandlerVerifier, _: NodeIndex) ReturnStatus {
         return .never;
@@ -681,23 +627,6 @@ pub const HandlerVerifier = struct {
                     self.walkForResultsAndRefs(if_stmt.then_branch);
                     if (if_stmt.else_branch != null_node) {
                         self.walkForResultsAndRefs(if_stmt.else_branch);
-                    }
-                }
-            },
-            .switch_stmt => {
-                const switch_stmt = self.ir_view.getSwitchStmt(node) orelse return;
-                self.walkExprForRefs(switch_stmt.discriminant);
-                var i: u8 = 0;
-                while (i < switch_stmt.cases_count) : (i += 1) {
-                    const case_idx = self.ir_view.getListIndex(switch_stmt.cases_start, i);
-                    const case_clause = self.ir_view.getCaseClause(case_idx) orelse continue;
-                    if (case_clause.test_expr != null_node) {
-                        self.walkExprForRefs(case_clause.test_expr);
-                    }
-                    var j: u16 = 0;
-                    while (j < case_clause.body_count) : (j += 1) {
-                        const stmt_idx = self.ir_view.getListIndex(case_clause.body_start, j);
-                        self.walkForResultsAndRefs(stmt_idx);
                     }
                 }
             },

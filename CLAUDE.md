@@ -68,9 +68,9 @@ Import via `import { fn } from "zigttp:module"`. Implementations in `zigts/modul
 
 ## JavaScript Subset
 
-ES5 + arrow functions, template literals, destructuring, spread, `for...of` (arrays), optional chaining, nullish coalescing, `match` expression, pipe operator, typed arrays, compound assignments, array HOFs, `Object.keys/values/entries`, `range()`.
+ES5 + arrow functions, template literals, destructuring, spread, `for...of` (arrays), optional chaining, nullish coalescing, `match` expression, `assert` statement, pipe operator, typed arrays, compound assignments, array HOFs, `Object.keys/values/entries`, `range()`.
 
-Not supported (detected at parse time with suggestions): classes, async/await, Promises, `var`, `while`, `this`, `new`, `try/catch`, `null`, regex, `==`, `++`. Use `undefined` as sole absent-value sentinel. See [docs/feature-detection.md](docs/feature-detection.md).
+Not supported (detected at parse time with suggestions): classes, async/await, Promises, `var`, `while`, `switch`, `this`, `new`, `try/catch`, `null`, regex, `==`, `++`. Use `undefined` as sole absent-value sentinel. See [docs/feature-detection.md](docs/feature-detection.md).
 
 Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`.
 

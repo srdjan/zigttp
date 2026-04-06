@@ -156,6 +156,9 @@ pub const TokenType = enum(u8) {
     kw_match,
     kw_when,
 
+    // Assert statement
+    kw_assert,
+
     // Decorator
     at_sign, // @
 
@@ -332,6 +335,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "protected", .kw_protected },
     .{ "match", .kw_match },
     .{ "when", .kw_when },
+    .{ "assert", .kw_assert },
     .{ "true", .true_lit },
     .{ "false", .false_lit },
     .{ "null", .null_lit },

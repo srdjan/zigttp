@@ -18,12 +18,16 @@ pub const TypeMapKind = enum(u8) {
     type_alias,
     /// `interface CacheFx { ... }` - interface declaration
     interface_decl,
+    /// `distinct type Foo = string` - nominal/branded type declaration
+    distinct_type,
     /// `const x: Type = ...` or `let x: Type = ...` - variable annotation
     var_annotation,
     /// `function f(x: Type, ...)` - parameter annotation
     param_annotation,
     /// `function f(...): Type` - return type annotation
     return_annotation,
+    /// `function f(x: unknown): x is string` - type guard return annotation
+    type_guard_annotation,
     /// `function f<T, U>(...)` or `type Foo<T> = ...` - generic parameters
     generic_params,
 };

@@ -492,6 +492,13 @@ pub const FlowChecker = struct {
                 self.checkExprSinks(node);
             },
 
+            .assert_stmt => {
+                const assert = self.ir_view.getAssertStmt(node) orelse return;
+                if (assert.error_expr != null_node) {
+                    self.checkExprSinks(assert.error_expr);
+                }
+            },
+
             else => {},
         }
     }

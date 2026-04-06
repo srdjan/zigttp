@@ -349,6 +349,14 @@ pub const BoolChecker = struct {
                 }
             },
 
+            .assert_stmt => {
+                const assert = self.ir_view.getAssertStmt(node) orelse return;
+                self.walkExpr(assert.condition);
+                if (assert.error_expr != null_node) {
+                    self.walkExpr(assert.error_expr);
+                }
+            },
+
             .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |expr| {
                     self.walkExpr(expr);

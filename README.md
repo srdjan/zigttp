@@ -11,7 +11,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 ### What makes it different
 
-**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops - just functions, `let`/`const`, arrow functions, destructuring, `for...of`, and `match` expressions. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace. Wait for it, there is a payoff for this :) 
+**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops, no `switch` - just functions, `let`/`const`, arrow functions, destructuring, `for...of`, `match` expressions, and `assert` statements. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace. Wait for it, there is a payoff for this :) 
 
 **JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
 
@@ -25,7 +25,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Handler effect classification.** Every virtual module function carries a compile-time effect annotation (read, write, or none). The compiler aggregates these to prove handler-level properties: pure, read-only, stateless, retry-safe, deterministic, idempotent (safe for at-least-once delivery), injection-safe (no unvalidated input in sinks), and state-isolated (no cross-request data leakage). The I/O depth bound (max virtual module calls per request) enables compile-time Lambda timeout derivation. These flow into deployment manifests, OWASP compliance mapping, and the build report - no annotations or configuration needed.
 
-**Full TypeScript type checking.** The compiler checks type annotations, not just strips them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are validated at build time. Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. Object literals are structurally matched against declared interface and type alias return types. Optional types from virtual modules (`env()`, `cacheGet()`, `parseBearer()`) are narrowed in if-guards: `if (x)`, `if (!x) return`, and `if (x !== undefined)` all narrow nullable bindings to their inner type. Literal types are widened for `let` bindings so reassignment works without explicit annotations. Interface declarations with all-function members are nominal to prevent structural forgery.
+**Full TypeScript type checking.** The compiler checks type annotations, not just strips them. Variable types, function argument types, return types, property access on records, and virtual module function signatures are validated at build time. Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. Object literals are structurally matched against declared interface and type alias return types. Optional types from virtual modules (`env()`, `cacheGet()`, `parseBearer()`) are narrowed in if-guards: `if (x)`, `if (!x) return`, and `if (x !== undefined)` all narrow nullable bindings to their inner type. Discriminated unions narrow in if-conditions: `if (r.kind === "err") { return; }` narrows `r` to the remaining member afterward. Type guard functions (`x is T`) narrow in both if-branches and after `assert` statements. `distinct type UserId = string` creates nominal types that prevent cross-type assignment while unwrapping for operations. `readonly` fields reject assignment at compile time. Template literal types (`` `/api/${string}` ``) validate string patterns at build time. `const` bindings preserve literal types; `: Type` annotations validate assignability without widening. `let` bindings widen literals so reassignment works. Interface declarations with all-function members are nominal to prevent structural forgery.
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
@@ -357,7 +357,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
 
-**Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression.
+**Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression, `assert` statement, `distinct type`, `readonly` fields, template literal types, type guards (`x is T`).
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
@@ -449,14 +449,14 @@ zig build -Dhandler=handler.ts -Dreport=json
 
 The verifier statically proves six properties of your handler at compile time:
 
-1. **Every code path returns a Response.** Missing `else` branches, `switch` cases without `default`, and paths that fall through without returning are all caught.
+1. **Every code path returns a Response.** Missing `else` branches and paths that fall through without returning are caught.
 2. **Result values are checked before access.** Calls like `jwtVerify`, `decodeJson`, and `decodeQuery` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
 3. **No unreachable code.** Statements after an unconditional return produce a warning.
 4. **No unused variables.** Declared variables that are never referenced produce a warning. Suppress with an underscore prefix (`_unused`).
 5. **Match expressions have default arms.** A `match` without a default arm produces a warning.
 6. **Optional values are checked before use.** Values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed via `if (val)`, `val !== undefined`, `val ?? default`, or reassignment before use in expressions.
 
-This works because zigttp's JS subset eliminates most non-trivial control flow - no `while`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+This works because zigttp's JS subset eliminates most non-trivial control flow - no `while`, no `switch`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 ```
 $ zig build -Dhandler=handler.ts -Dverify
@@ -466,7 +466,7 @@ verify error: not all code paths return a Response
    |
   2 | function handler(req) {
    |                 ^
-   = help: ensure every branch (if/else, switch/default) ends with a return statement
+   = help: ensure every branch (if/else) ends with a return statement
 ```
 
 See [docs/verification.md](docs/verification.md) for the full specification.
