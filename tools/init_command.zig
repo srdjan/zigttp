@@ -6,10 +6,14 @@ const skill_md = @embedFile("skills/zigts-expert/SKILL.md");
 const virtual_modules_md = @embedFile("skills/zigts-expert/references/virtual-modules.md");
 const testing_replay_md = @embedFile("skills/zigts-expert/references/testing-replay.md");
 const jsx_patterns_md = @embedFile("skills/zigts-expert/references/jsx-patterns.md");
+const pre_edit_hook = @embedFile("hooks/pre-edit-zts.sh");
+const post_edit_hook = @embedFile("hooks/post-edit-zts.sh");
+const session_start_hook = @embedFile("hooks/session-start.sh");
 
 const SkillFile = struct {
     path: []const u8,
     data: []const u8,
+    executable: bool = false,
 };
 
 const skill_files = [_]SkillFile{
@@ -17,6 +21,9 @@ const skill_files = [_]SkillFile{
     .{ .path = ".claude/skills/zigts-expert/references/virtual-modules.md", .data = virtual_modules_md },
     .{ .path = ".claude/skills/zigts-expert/references/testing-replay.md", .data = testing_replay_md },
     .{ .path = ".claude/skills/zigts-expert/references/jsx-patterns.md", .data = jsx_patterns_md },
+    .{ .path = ".claude/hooks/pre-edit-zts.sh", .data = pre_edit_hook, .executable = true },
+    .{ .path = ".claude/hooks/post-edit-zts.sh", .data = post_edit_hook, .executable = true },
+    .{ .path = ".claude/hooks/session-start.sh", .data = session_start_hook, .executable = true },
 };
 
 pub fn runInit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -38,6 +45,7 @@ pub fn runInit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const io = io_backend.io();
 
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, ".claude/skills/zigts-expert/references");
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, ".claude/hooks");
 
     var written: usize = 0;
     var skipped: usize = 0;
@@ -52,13 +60,17 @@ pub fn runInit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             std.debug.print("  error writing {s}: {}\n", .{ file.path, err });
             return err;
         };
+        if (file.executable) {
+            makeExecutable(allocator, file.path);
+        }
         std.debug.print("  wrote {s}\n", .{file.path});
         written += 1;
     }
 
-    std.debug.print("\nInstalled zigts-expert skill ({d} files written, {d} skipped)\n", .{ written, skipped });
+    std.debug.print("\nInstalled zigts-expert ({d} files written, {d} skipped)\n", .{ written, skipped });
     if (written > 0) {
         std.debug.print("\nClaude Code will now use the compiler-in-the-loop workflow.\n", .{});
+        std.debug.print("Hook scripts installed in .claude/hooks/\n", .{});
         std.debug.print("Run `zigts check --json handler.ts` to verify handlers.\n", .{});
     }
 }
@@ -69,6 +81,12 @@ fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
     const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch return false;
     std.Io.Threaded.closeFd(fd);
     return true;
+}
+
+fn makeExecutable(allocator: std.mem.Allocator, path: []const u8) void {
+    const path_z = allocator.dupeZ(u8, path) catch return;
+    defer allocator.free(path_z);
+    _ = std.c.chmod(path_z, 0o755);
 }
 
 fn printInitHelp() void {

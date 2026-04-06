@@ -113,11 +113,16 @@ zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
 zigts describe-rule [rule-name|code] [--json] [--hash]
 zigts search <keyword> [--json]
 zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
+zigts expert meta [--json]
+zigts expert verify-paths <file>... [--json]
+zigts expert <subcommand> [options]
 ```
 
-`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts init` writes zigts-expert skill files into the current project so Claude Code picks up the compiler-in-the-loop workflow.
+`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts init` writes zigts-expert skill files and hook scripts into the current project so Claude Code picks up the compiler-in-the-loop workflow.
 
 `zigts edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigts describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigts search` finds rules by keyword. `zigts review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations.
+
+`zigts expert` is the hook-oriented interface. `expert meta` emits policy metadata (version, hash, rule count). `expert verify-paths` runs analysis on specified files. Other expert subcommands delegate to their top-level equivalents.
 
 ## Conventions
 

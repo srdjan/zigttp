@@ -120,22 +120,27 @@ The skill files need to live in the project's local `.claude/skills/` directory 
 zigts init
 ```
 
-This writes the skill into `.claude/skills/zigts-expert/` within the current directory:
+This writes skill files and hook scripts into the current directory:
 
 ```
 my-app/
   src/handler.ts
   tests/handler.test.jsonl
   zigttp.json
-  .claude/skills/zigts-expert/
-    SKILL.md              # Compiler tool usage, language reference
-    references/
-      virtual-modules.md  # Full API docs for zigttp:* imports
-      testing-replay.md   # JSONL test format and replay workflow
-      jsx-patterns.md     # JSX/TSX component patterns
+  .claude/
+    skills/zigts-expert/
+      SKILL.md              # Compiler tool usage, language reference
+      references/
+        virtual-modules.md  # Full API docs for zigttp:* imports
+        testing-replay.md   # JSONL test format and replay workflow
+        jsx-patterns.md     # JSX/TSX component patterns
+    hooks/
+      pre-edit-zts.sh       # PreToolUse: check before edits
+      post-edit-zts.sh      # PostToolUse: analyze after edits
+      session-start.sh      # SessionStart: export policy env vars
 ```
 
-Add `.claude/skills/` to `.gitignore`. These are local tool configuration, not project source - they should not be committed.
+Add `.claude/skills/` and `.claude/hooks/` to `.gitignore`. These are local tool configuration, not project source.
 
 ### Existing Project
 
@@ -409,18 +414,72 @@ This works because virtual modules are the only I/O boundary. Handlers are deter
 
 ---
 
-## Post-Edit Hook
+## Hooks
 
-zigttp can run `zigts edit-simulate` automatically after every file edit via Claude Code hooks. This provides immediate feedback on new violations without manual compiler runs.
+`zigts init` installs three hook scripts into `.claude/hooks/` alongside the skill files. Each script calls `zigts`, parses the output, and returns structured JSON to Claude Code.
 
-**How it works.** A PostToolUse hook in `.claude/settings.json` triggers after Edit/Write/MultiEdit operations on `.ts`, `.tsx`, `.js`, or `.jsx` files. The hook runs `zigts edit-simulate` on the edited file and reports any violations.
+### Pre-Edit Hook (PreToolUse)
 
-**Advisory-only.** The hook never blocks edits. PostToolUse hooks run after the tool succeeds, so the edit is already applied. If the hook times out (30 seconds) or fails, the edit proceeds normally.
+`.claude/hooks/pre-edit-zts.sh` runs before Edit/Write/MultiEdit on `.ts`, `.tsx`, `.js`, or `.jsx` files. It calls `zigts check --json` on the current file and surfaces existing violations as warnings. The hook does not block edits - it gives Claude context about pre-existing problems.
 
-**Scoped to the edited file.** The hook only analyzes the single file that was edited, not the entire project. This keeps feedback fast and focused.
+Timeout: 12 seconds (script), 15 seconds (harness). On timeout or missing binary, the hook exits silently and the edit proceeds.
 
-**No Python dependency.** The hook calls the `zigts` binary directly. No Python, Node, or other runtimes are required.
+### Post-Edit Hook (PostToolUse)
 
-**Configuration.** The hook is defined in `.claude/settings.json` under `hooks.PostToolUse`. To disable it, remove the `hooks` section. The `permissions.deny` list blocks `python3` and `python` commands for consistency.
+`.claude/hooks/post-edit-zts.sh` runs after Edit/Write/MultiEdit on handler files. It calls `zigts edit-simulate` on the edited file and reports violations, distinguishing new ones from pre-existing. Advisory only; the edit is already on disk.
 
-**Note on settings keys.** The settings file does not use `defaultMode`, `disableBypassPermissionsMode`, or `$schema`. These keys are not part of the verified Claude Code settings schema and should not be added.
+Timeout: 30 seconds. On timeout or missing binary, the hook exits silently.
+
+### Session Start Hook
+
+`.claude/hooks/session-start.sh` runs at session start when `CLAUDE_ENV_FILE` is set. It calls `zigts expert meta --json` and writes `ZIGTS_POLICY_VERSION` and `ZIGTS_POLICY_HASH` into the session environment.
+
+### Hook Sources
+
+The canonical hook scripts live in `tools/hooks/` and are embedded into the `zigts` binary via `@embedFile`. Running `zigts init` copies them to `.claude/hooks/` with executable permissions. To update hooks after a zigts upgrade, run `zigts init --force`.
+
+### Configuration
+
+Hooks are configured in `.claude/settings.json` under `hooks.PreToolUse` and `hooks.PostToolUse`. The `permissions.deny` list prevents Claude from editing hook scripts or the rule registry directly. To disable hooks, remove the `hooks` section from settings.json.
+
+---
+
+## The `zigts expert` CLI
+
+`zigts expert` is a stable, versioned interface for hooks and CI. It groups analysis commands under a single namespace with consistent JSON output.
+
+```bash
+zigts expert meta [--json]                    # Policy metadata (version, hash, rule count)
+zigts expert verify-paths <file>... [--json]  # Full analysis on files, exit 1 on errors
+zigts expert review-patch ...                 # Delegates to zigts review-patch
+zigts expert edit-simulate ...                # Delegates to zigts edit-simulate
+zigts expert describe-rule ...                # Delegates to zigts describe-rule
+zigts expert search ...                       # Delegates to zigts search
+```
+
+`expert meta --json` output:
+
+```json
+{
+  "compiler_version": "0.14.0",
+  "policy_version": "2026.04.1",
+  "policy_hash": "9ede01bd...",
+  "rule_count": 25,
+  "categories": {"verifier": 11, "policy": 8, "property": 6},
+  "mode": "embedded"
+}
+```
+
+`expert verify-paths --json` output:
+
+```json
+{
+  "ok": true,
+  "policy_version": "2026.04.1",
+  "policy_hash": "9ede01bd...",
+  "checked_files": ["handler.ts"],
+  "violations": []
+}
+```
+
+The remaining subcommands take the same arguments as their top-level equivalents. The `expert` prefix gives hooks and CI a stable interface independent of the top-level command layout.

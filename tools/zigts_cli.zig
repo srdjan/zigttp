@@ -10,6 +10,7 @@ const edit_simulate = @import("edit_simulate.zig");
 const describe_rule = @import("describe_rule.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
+const expert = @import("expert.zig");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
 const zigts_file_io = zigts.file_io;
@@ -78,6 +79,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "review-patch")) {
         try review_patch.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "expert")) {
+        try expert.runWithArgs(allocator, argv[1..]);
         return;
     }
 
@@ -290,6 +295,7 @@ fn printHelp() void {
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
+        \\  zigts expert <subcommand> [options]   (hook-oriented interface)
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

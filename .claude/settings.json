@@ -6,23 +6,43 @@
       "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/virtual-modules.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/virtual-modules.md)",
       "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/testing-replay.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/testing-replay.md)",
       "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/jsx-patterns.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/jsx-patterns.md)",
-      "Bash(/Users/srdjans/Code/ZigttpHome/zigttp/zig-out/bin/zigts init:*)"
+      "Bash(/Users/srdjans/Code/ZigttpHome/zigttp/zig-out/bin/zigts init:*)",
+      "Bash(zigts expert *)",
+      "Bash(zigts check *)",
+      "Bash(zigts edit-simulate *)",
+      "Bash(zigts describe-rule *)",
+      "Bash(zigts search *)"
     ],
     "deny": [
       "Bash(python3 *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Edit(./.claude/hooks/**)",
+      "Write(./.claude/hooks/**)",
+      "Edit(./zigts/rule_registry.zig)",
+      "Write(./zigts/rule_registry.zig)"
     ]
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pre-edit-zts.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "FILE=$(cat | jq -r '.tool_input.file_path // empty') && [ -n \"$FILE\" ] && [[ \"$FILE\" == *.ts || \"$FILE\" == *.tsx || \"$FILE\" == *.js || \"$FILE\" == *.jsx ]] && timeout 30 zigts edit-simulate \"$FILE\" 2>/dev/null || true",
-            "timeout": 30,
-            "statusMessage": "Checking handler violations..."
+            "command": "bash .claude/hooks/post-edit-zts.sh",
+            "timeout": 30
           }
         ]
       }

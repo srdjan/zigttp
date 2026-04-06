@@ -214,7 +214,7 @@ pub fn fromVerifierDiagnostic(diag: handler_verifier.Diagnostic, ir_view: IrView
 // JSON serialization
 // -------------------------------------------------------------------------
 
-fn writeDiagnosticJson(writer: anytype, diag: *const JsonDiagnostic) !void {
+pub fn writeDiagnosticJson(writer: anytype, diag: *const JsonDiagnostic) !void {
     try writer.writeAll("{\"code\":");
     try writeJsonString(writer, diag.code);
     try writer.writeAll(",\"severity\":");

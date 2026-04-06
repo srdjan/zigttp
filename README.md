@@ -317,7 +317,9 @@ zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
 zigts link <system.json>              # Cross-handler contract linking
 zigts features [--json]               # List allowed/blocked language features
 zigts modules [--json]                # List virtual modules and exports
-zigts init                            # Install zigts-expert skill for Claude Code
+zigts init                            # Install skill files and hooks for Claude Code
+zigts expert meta [--json]            # Policy metadata (version, hash, rule count)
+zigts expert verify-paths <f>... [--json]  # Full analysis on files
 ```
 
 #### Structured JSON output

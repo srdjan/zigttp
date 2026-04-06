@@ -39,6 +39,12 @@ jobs:
             exit 1
           fi
 
+      - name: Verify expert subsystem
+        run: |
+          META=$(./zig-out/bin/zigts expert meta --json)
+          echo "$META" | jq -e '.rule_count >= 25'
+          echo "$META" | jq -e '.policy_hash | length == 64'
+
   build:
     needs: test
     timeout-minutes: 30

@@ -272,9 +272,18 @@ zigttp/
 │   ├── durable_store.zig     # Signal persistence backend
 │   └── durable_scheduler.zig # Background scheduler for durable waits
 ├── tools/
-│   ├── precompile.zig     # Build-time bytecode compiler
+│   ├── precompile.zig         # Build-time bytecode compiler
+│   ├── zigts_cli.zig          # CLI dispatcher for zigts subcommands
+│   ├── expert.zig             # zigts expert namespace (meta, verify-paths, delegation)
+│   ├── edit_simulate.zig      # Diff-aware violation analysis
+│   ├── review_patch.zig       # Patch review with --diff-only filtering
 │   ├── deploy_manifest.zig    # Proven deployment manifest generator
-│   └── openapi_manifest.zig   # OpenAPI spec generator
+│   ├── openapi_manifest.zig   # OpenAPI spec generator
+│   ├── init_command.zig       # zigts init (installs skills + hooks)
+│   └── hooks/                 # Canonical hook scripts (embedded by init)
+│       ├── pre-edit-zts.sh    # PreToolUse: check before edits
+│       ├── post-edit-zts.sh   # PostToolUse: analyze after edits
+│       └── session-start.sh   # SessionStart: export policy env vars
 └── examples/
     ├── handler/           # Basic handler variants (TS, TSX)
     ├── jsx/               # JSX rendering demos
