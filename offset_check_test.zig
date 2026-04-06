@@ -1,6 +1,6 @@
 const std = @import("std");
-const context = @import("zts/context.zig");
-const interpreter_mod = @import("zts/interpreter.zig");
+const context = @import("zigts/context.zig");
+const interpreter_mod = @import("zigts/interpreter.zig");
 
 test "print offsets" {
     std.debug.print("\nContext.stack offset: {}\n", .{@offsetOf(context.Context, "stack")});

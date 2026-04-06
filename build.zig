@@ -64,8 +64,6 @@ pub fn build(b: *std.Build) void {
     const run_zigts_tests = b.addRunArtifact(zigts_tests);
     const zigts_test_step = b.step("test-zigts", "Run zigts unit tests");
     zigts_test_step.dependOn(&run_zigts_tests.step);
-    const zts_test_step = b.step("test-zts", "Run zigts unit tests (compat alias)");
-    zts_test_step.dependOn(&run_zigts_tests.step);
 
     const precompile_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -247,10 +245,6 @@ pub fn build(b: *std.Build) void {
         .root_module = zigts_cli_mod,
     });
     b.installArtifact(zigts_exe);
-    const zts_compat_install = b.addInstallArtifact(zigts_exe, .{
-        .dest_sub_path = "zts",
-    });
-    b.getInstallStep().dependOn(&zts_compat_install.step);
 
     // Run command
     const run_cmd = b.addRunArtifact(exe);

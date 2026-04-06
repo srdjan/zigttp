@@ -278,7 +278,6 @@ fn printCheckHelp() void {
         \\  --sql-schema P   SQLite schema file for query validation
         \\
         \\If no handler is specified, uses the entry from zigttp.json.
-        \\`zts` remains available as a compatibility alias for this CLI.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

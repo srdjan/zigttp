@@ -7,7 +7,7 @@ A JavaScript runtime built from scratch in Zig for serverless workloads. One bin
 
 Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zigts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
 
-Validated release target: Zig `0.16.0-dev.3073+28ae5d415`, with `zigts` as the canonical compiler/analyzer CLI. `zts` remains available as a compatibility alias during the rename transition.
+Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer CLI is `zigts`.
 
 ### What makes it different
 
@@ -303,7 +303,7 @@ zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
 zigts link <system.json>              # Cross-handler contract linking
 zigts features [--json]               # List allowed/blocked language features
 zigts modules [--json]                # List virtual modules and exports
-zigts init                            # Install zts-expert skill for Claude Code
+zigts init                            # Install zigts-expert skill for Claude Code
 ```
 
 #### Structured JSON output

@@ -255,9 +255,3 @@ Before consolidation, features like `class` and `enum` were detected in the stri
 
 The features remaining in the stripper are `any` type detection (because `any` only appears in type annotation positions that are stripped before the parser runs) and `as`/`satisfies` assertion rejection (because these are type-position syntax that the parser never sees).
 
-## Migration History
-
-- **Stage 4 (complete)**: Moved enum, namespace, implements, decorators, access modifiers from stripper to parser
-- **Stage 3 (complete)**: Moved `class` and `abstract class` from stripper to parser
-- **Stage 2 (complete)**: Enhanced stripper error logging to include helpful alternatives
-- **Initial state**: 48 parser features, 7 stripper features (with class duplication)
