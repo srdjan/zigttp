@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/srdjans/Code/_skills/**)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/SKILL.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/SKILL.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/virtual-modules.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/virtual-modules.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/testing-replay.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/testing-replay.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/jsx-patterns.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/jsx-patterns.md)",
+      "Bash(/Users/srdjans/Code/ZigttpHome/zigttp/zig-out/bin/zigts init:*)"
+    ],
+    "deny": [
+      "Bash(python3 *)",
+      "Bash(python *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "FILE=$(cat | jq -r '.tool_input.file_path // empty') && [ -n \"$FILE\" ] && [[ \"$FILE\" == *.ts || \"$FILE\" == *.tsx || \"$FILE\" == *.js || \"$FILE\" == *.jsx ]] && timeout 30 zigts edit-simulate \"$FILE\" 2>/dev/null || true",
+            "timeout": 30,
+            "statusMessage": "Checking handler violations..."
+          }
+        ]
+      }
+    ]
+  }
+}

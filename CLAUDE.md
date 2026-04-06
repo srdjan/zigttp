@@ -109,9 +109,15 @@ zigts link <system.json> [--output-dir <dir>]
 zigts features [--json]
 zigts modules [--json]
 zigts init
+zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
+zigts describe-rule [rule-name|code] [--json] [--hash]
+zigts search <keyword> [--json]
+zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
 ```
 
 `--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts init` writes zigts-expert skill files into the current project so Claude Code picks up the compiler-in-the-loop workflow.
+
+`zigts edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigts describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigts search` finds rules by keyword. `zigts review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations.
 
 ## Conventions
 

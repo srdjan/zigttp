@@ -41,6 +41,7 @@
 - Zig identifiers: types in `UpperCamelCase`, functions and variables in `lowerCamelCase`.
 - Files are short, descriptive, and lowercase (e.g., `server.zig`, `zruntime.zig`).
 - Keep APIs explicit: the project uses `Result(T)`-style error handling across the engine/runtime.
+- Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
 ## Testing Guidelines
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).

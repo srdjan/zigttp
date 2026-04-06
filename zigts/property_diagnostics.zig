@@ -71,6 +71,9 @@ pub const PropertyViolation = struct {
     /// should be overridden to the failure result. Set when PathGenerator has no explicit
     /// failure path (code does not branch on result.ok), requiring a synthetic stub.
     counterexample_force_failure: bool = false,
+    /// True when this violation was introduced by the current edit (not pre-existing).
+    /// Set by the edit-simulate diff engine; defaults to false for non-diff analysis.
+    introduced_by_patch: bool = false,
 };
 
 /// Free owned strings in violations that were allocated by collectors.
@@ -252,6 +255,9 @@ pub fn fillVerifierCounterexamples(
                 // while the verifier stores the full specifier ("zigttp:auth").
                 const mod_match = std.mem.eql(u8, stub.module, src_mod) or
                     std.mem.endsWith(u8, src_mod, stub.module);
+                // TODO(v0.1): Substring heuristic for matching failure results.
+                // Replace with structured JSON field comparison once stub result
+                // types are promoted to typed structs.
                 if (mod_match and
                     std.mem.eql(u8, stub.func, src_fn) and
                     std.mem.indexOf(u8, stub.result_json, "\"ok\":false") != null)

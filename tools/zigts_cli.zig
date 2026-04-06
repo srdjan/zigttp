@@ -5,6 +5,11 @@ const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");
+const init_command = @import("init_command.zig");
+const edit_simulate = @import("edit_simulate.zig");
+const describe_rule = @import("describe_rule.zig");
+const search_rules = @import("search_rules.zig");
+const review_patch = @import("review_patch.zig");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
 const zigts_file_io = zigts.file_io;
@@ -53,6 +58,26 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "modules")) {
         try runModulesCommand(argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "init")) {
+        try init_command.runInit(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "edit-simulate")) {
+        try edit_simulate.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "describe-rule")) {
+        try describe_rule.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "search")) {
+        try search_rules.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "review-patch")) {
+        try review_patch.runWithArgs(allocator, argv[1..]);
         return;
     }
 
@@ -260,6 +285,11 @@ fn printHelp() void {
         \\  zigts link <system.json> [--output-dir <dir>]
         \\  zigts features [--json]
         \\  zigts modules [--json]
+        \\  zigts init [--force]
+        \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
+        \\  zigts describe-rule [rule-name|code] [--json] [--hash]
+        \\  zigts search <keyword> [--json]
+        \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

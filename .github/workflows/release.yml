@@ -24,6 +24,21 @@ jobs:
       - name: Run all tests
         run: zig build test test-zigts test-zruntime
 
+      - name: Build zigts for policy hash check
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Assert policy hash unchanged
+        run: |
+          EXPECTED=$(cat policy-hash.txt 2>/dev/null || echo "")
+          ACTUAL=$(./zig-out/bin/zigts describe-rule --hash)
+          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::Policy hash mismatch - rules changed without updating policy-hash.txt"
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $ACTUAL"
+            echo "Run: ./zig-out/bin/zigts describe-rule --hash > policy-hash.txt"
+            exit 1
+          fi
+
   build:
     needs: test
     timeout-minutes: 30
@@ -59,6 +74,7 @@ jobs:
           mkdir -p "${DIR}"
           cp zig-out/bin/zigttp "${DIR}/"
           cp zig-out/bin/zigts "${DIR}/"
+          cp build.zig "${DIR}/"
           tar czf "${DIR}.tar.gz" "${DIR}"
           shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
 

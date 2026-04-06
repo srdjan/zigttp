@@ -10,7 +10,7 @@ const HandlerContract = contract_mod.HandlerContract;
 const ascii = std.ascii;
 
 pub const AllowList = struct {
-    values: std.ArrayList([]const u8) = .empty,
+    values: std.ArrayListUnmanaged([]const u8) = .empty,
 
     pub fn deinit(self: *AllowList, allocator: std.mem.Allocator) void {
         for (self.values.items) |item| {
@@ -164,10 +164,11 @@ pub const PolicyViolation = struct {
     category: PolicyCategory,
     kind: ViolationKind,
     value: ?[]const u8 = null,
+    introduced_by_patch: bool = false,
 };
 
 pub const ValidationReport = struct {
-    violations: std.ArrayList(PolicyViolation) = .empty,
+    violations: std.ArrayListUnmanaged(PolicyViolation) = .empty,
 
     pub fn deinit(self: *ValidationReport, allocator: std.mem.Allocator) void {
         self.violations.deinit(allocator);
