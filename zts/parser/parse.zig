@@ -95,6 +95,8 @@ pub const Parser = struct {
 
     // Guard composition: binding slot for `guard` imported from zigttp:compose
     guard_binding_slot: ?u16 = null,
+    // Pipe composition: binding slot for `pipe` imported from zigttp:compose
+    pipe_binding_slot: ?u16 = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         var parser = Parser{
@@ -1444,8 +1446,9 @@ pub const Parser = struct {
         var specifiers = std.ArrayList(NodeIndex).empty;
         defer specifiers.deinit(self.allocator);
 
-        // Track guard binding candidate (confirmed after module string is known)
+        // Track binding candidates (confirmed after module string is known)
         var guard_candidate_slot: ?u16 = null;
+        var pipe_candidate_slot: ?u16 = null;
 
         // Must have { for named imports
         if (!self.check(.lbrace)) {
@@ -1515,10 +1518,12 @@ pub const Parser = struct {
 
             try specifiers.append(self.allocator, spec_node);
 
-            // Track guard binding candidate for zigttp:compose detection
+            // Track binding candidates for zigttp:compose detection
             const imported_text = imported_name.text(self.source);
             if (std.mem.eql(u8, imported_text, "guard")) {
                 guard_candidate_slot = binding.slot;
+            } else if (std.mem.eql(u8, imported_text, "pipe")) {
+                pipe_candidate_slot = binding.slot;
             }
 
             if (!self.match(.comma)) break;
@@ -1542,10 +1547,13 @@ pub const Parser = struct {
 
         try self.expectSemicolon();
 
-        // Confirm guard binding from zigttp:compose for pipe chain desugaring
+        // Confirm bindings from zigttp:compose for compile-time desugaring
         if (std.mem.eql(u8, module_str, "zigttp:compose")) {
             if (guard_candidate_slot) |slot| {
                 self.guard_binding_slot = slot;
+            }
+            if (pipe_candidate_slot) |slot| {
+                self.pipe_binding_slot = slot;
             }
         }
 
@@ -2101,6 +2109,15 @@ pub const Parser = struct {
             }
         }
         try self.expect(.rparen, "')'");
+
+        // Desugar pipe(f1, f2, ..., fN) into fN(...(f2(f1()))...)
+        if (self.isPipeCall(callee)) {
+            if (args.items.len == 0) {
+                self.errorAt(loc, "pipe() requires at least one function argument");
+                return error.ParseError;
+            }
+            return self.desugarPipeCall(loc, args.items);
+        }
 
         const args_start = if (args.items.len > 0)
             try self.addNodeList(args.items)
@@ -3305,6 +3322,49 @@ pub const Parser = struct {
             self.advance();
         }
         self.errors.exitPanicMode();
+    }
+
+    // ============ Pipe Composition ============
+
+    /// Check if a callee node is the `pipe` binding from zigttp:compose
+    fn isPipeCall(self: *const Parser, callee: NodeIndex) bool {
+        const pipe_slot = self.pipe_binding_slot orelse return false;
+        if (self.nodes.getTag(callee) != .identifier) return false;
+        const binding = self.nodes.getBinding(callee);
+        return binding.slot == pipe_slot;
+    }
+
+    /// Desugar pipe(f1, f2, ..., fN) into nested calls: fN(...(f2(f1()))...)
+    /// First function is called with no args, each subsequent receives the previous result.
+    fn desugarPipeCall(self: *Parser, loc: SourceLocation, funcs: []const NodeIndex) !NodeIndex {
+        // Call first function with zero args: f1()
+        var result = try self.nodes.add(.{
+            .tag = .call,
+            .loc = loc,
+            .data = .{ .call = .{
+                .callee = funcs[0],
+                .args_start = null_node,
+                .args_count = 0,
+                .is_optional = false,
+            } },
+        });
+
+        // Chain remaining: f2(prev), f3(prev), ...
+        for (funcs[1..]) |func| {
+            const args_start = try self.addNodeList(&[_]NodeIndex{result});
+            result = try self.nodes.add(.{
+                .tag = .call,
+                .loc = loc,
+                .data = .{ .call = .{
+                    .callee = func,
+                    .args_start = args_start,
+                    .args_count = 1,
+                    .is_optional = false,
+                } },
+            });
+        }
+
+        return result;
     }
 
     // ============ Guard Composition ============

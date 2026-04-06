@@ -6,10 +6,13 @@
 //!     The parser recognizes guard() calls in pipe chains and desugars
 //!     the entire chain into a single flat function at compile time.
 //!
-//! guard() is a compile-time construct. It should never be called at
-//! runtime because the parser replaces guard pipe chains with desugared
-//! code. The native function exists only for import validation and as
-//! a fallback identity if used outside a pipe chain.
+//!   pipe(f1, f2, ..., fN) -> result (compile-time desugaring)
+//!     Chains functions sequentially: calls f1() with no args, passes
+//!     result to f2, then to f3, etc. Desugared at parse time into
+//!     nested calls: fN(...(f2(f1()))...).
+//!
+//! Both are compile-time constructs. The parser replaces all usage with
+//! desugared code. Native functions exist only for import validation.
 
 const value = @import("../value.zig");
 const resolver = @import("resolver.zig");
@@ -23,6 +26,9 @@ pub const binding = mb.ModuleBinding{
         .{ .name = "guard", .func = guardNative, .arg_count = 1,
            .effect = .none, .returns = .string, .param_types = &.{.string},
            .traceable = false },
+        .{ .name = "pipe", .func = pipeNative, .arg_count = 0,
+           .effect = .none, .returns = .unknown, .param_types = &.{},
+           .traceable = false },
     },
 };
 
@@ -34,4 +40,11 @@ pub const exports = binding.toModuleExports();
 fn guardNative(_: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     if (args.len == 0) return value.JSValue.undefined_val;
     return args[0];
+}
+
+/// pipe(f1, f2, ..., fN) - compile-time function chaining.
+/// The parser desugars pipe() calls into nested function calls.
+/// This fallback returns undefined and should never be reached.
+fn pipeNative(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+    return value.JSValue.undefined_val;
 }
