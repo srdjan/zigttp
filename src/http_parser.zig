@@ -265,6 +265,7 @@ pub const FastHeaderSlots = struct {
     connection: ?[]const u8 = null,
     content_length: ?usize = null,
     content_type: ?[]const u8 = null,
+    has_chunked_encoding: bool = false,
 };
 
 /// Process a single header line: normalize key to lowercase, copy into storage,
@@ -301,6 +302,10 @@ fn processHeaderLine(
         fast_slots.connection = value_dup;
     } else if (std.mem.eql(u8, key_lower, "content-type")) {
         fast_slots.content_type = value_dup;
+    } else if (std.mem.eql(u8, key_lower, "transfer-encoding")) {
+        if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) {
+            fast_slots.has_chunked_encoding = true;
+        }
     }
 }
 
@@ -327,6 +332,10 @@ fn processHeaderLineBorrowed(
         fast_slots.connection = value;
     } else if (std.ascii.eqlIgnoreCase(key, "content-type")) {
         fast_slots.content_type = value;
+    } else if (std.ascii.eqlIgnoreCase(key, "transfer-encoding")) {
+        if (std.ascii.indexOfIgnoreCase(value, "chunked") != null) {
+            fast_slots.has_chunked_encoding = true;
+        }
     }
 }
 
@@ -363,4 +372,19 @@ pub fn parseContentLength(header_section: []const u8) !?usize {
         }
     }
     return found;
+}
+
+/// Check if headers contain Transfer-Encoding: chunked
+pub fn hasTransferEncodingChunked(header_section: []const u8) bool {
+    var lines = std.mem.splitSequence(u8, header_section, "\r\n");
+    _ = lines.next() orelse return false; // skip request line
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const header = splitHeaderLine(line) orelse continue;
+        if (std.ascii.eqlIgnoreCase(header.key, "transfer-encoding")) {
+            const val = std.mem.trim(u8, header.value, " \t");
+            if (std.ascii.indexOfIgnoreCase(val, "chunked") != null) return true;
+        }
+    }
+    return false;
 }

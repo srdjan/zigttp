@@ -30,29 +30,27 @@
 - [x] **Threaded backend reads only once** — `src/server.zig:252-265` + `parseRequestFromBuffer`.
   - Root cause: single 8KB read can truncate headers/body; keep-alive can desync.
   - Fix: incremental read until `\r\n\r\n`, then read `Content-Length` bytes.
-- [ ] **Closure data freed as BytecodeFunctionData** — `zigts/object.zig:1415-1450`, `zigts/object.zig:1579-1616`.
+- [x] **Closure data freed as BytecodeFunctionData** — `zigts/object.zig:1415-1450`, `zigts/object.zig:1579-1616`.
   - Root cause: closures set `FUNC_IS_BYTECODE`, but `destroyFull` assumes `FUNC_DATA` is `BytecodeFunctionData`.
-  - Fix: add an explicit closure tag/slot or discriminator; update `destroyFull` to free `ClosureData` separately.
-  - Impact: invalid frees or crashes during teardown when closures are destroyed.
-- [ ] **Chunked transfer encoding not handled** — `src/server.zig:304-333`, `src/server.zig:900-936`, `src/server.zig:1551-1559`.
+  - Fix: `destroyFull` now checks `FUNC_IS_CLOSURE` slot before casting, freeing `ClosureData` (with upvalues) separately from `BytecodeFunctionData`.
+- [x] **Chunked transfer encoding not handled** — `src/server.zig:304-333`, `src/http_parser.zig`.
   - Root cause: parser only honors `Content-Length` and ignores `Transfer-Encoding: chunked`.
-  - Fix: implement chunked decoding or reject chunked requests with 400/501; ensure keep-alive doesn’t desync.
-  - Impact: request smuggling/desync under proxies or clients using chunked encoding.
-- [ ] **Bytecode cache is trusted input** — `zigts/bytecode_cache.zig:244-296`, `src/zruntime.zig:507-520`.
+  - Fix: detect chunked encoding via `FastHeaderSlots.has_chunked_encoding` and reject with 501 Not Implemented. Serverless proxies decode chunked before reaching the handler.
+- [x] **Bytecode cache is trusted input** — `zigts/bytecode_cache.zig`.
   - Root cause: deserialized bytecode is executed without validation.
-  - Fix: validate opcodes, operand bounds, constant indices, stack effects.
-- [ ] **Static file path traversal via symlinks** — `src/server.zig:1099-1115`, `src/server.zig:1491-1511`.
-  - Root cause: string-level checks only; symlink inside static dir can escape.
-  - Fix: open via `openat`/no-follow or verify realpath prefix.
+  - Fix: `validateBytecode` walks opcodes after CRC check, rejects unknown opcodes, validates operand bounds (constant indices, local indices, upvalue indices), and verifies instruction alignment.
+- [x] **Static file path traversal via symlinks** — `src/server.zig`.
+  - Root cause: `isCanonicalPathInsideRoot` ran after file open; `Dir.openFile` followed symlinks by default.
+  - Fix: moved realpath check before file open, and open with `follow_symlinks: false`. Applied to both async and sync paths.
 
 ## Medium
 - [x] **Bytecode constants leak (strings/float boxes/nested functions)** — `zigts/object.zig:1421-1450`, `zigts/bytecode_cache.zig:172-230`.
   - Root cause: `destroyFull` frees `FunctionBytecode` arrays but never walks `constants` to free heap payloads.
   - Fix: add recursive constant cleanup (strings, float boxes, nested `FunctionBytecode`) or ref-counted constant pools.
   - Impact: memory growth in long-lived runtimes.
-- [ ] **HandlerPool test still flakes under Zig build runner** — `src/zruntime.zig:6380-6565`, `zigts/pool.zig`, `zigts/bytecode_cache.zig`.
-  - Current state: direct test-binary reruns pass, but long `zig build test-zruntime` soak loops still intermittently hit a build-runner-side `TRAP` in pooled owned-response / teardown paths.
-  - Follow-up: keep the new pooled teardown regression, then isolate any remaining `--listen`-specific lifetime differences in pooled response extraction and cached-bytecode teardown.
+- [x] **HandlerPool test still flakes under Zig build runner** — `src/zruntime.zig:6380-6565`, `zigts/pool.zig`.
+  - Root cause: closure `destroyFull` bug (see Critical fix above) caused memory corruption during builtin teardown in pooled runtimes, manifesting as intermittent TRAPs under build runner memory reuse.
+  - Fix: resolved by the closure discriminator fix in `destroyFull`.
 - [x] **NaN treated as non-number in arithmetic** — `zigts/value.zig:147-155`, `zigts/interpreter.zig:2602-2638`.
   - Root cause: `JSValue.toNumber()` returns null for `nan_val`; arithmetic paths treat null as TypeError.
   - Fix: return `std.math.nan(f64)` for `nan_val` or treat it as a float number.

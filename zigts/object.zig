@@ -1555,11 +1555,18 @@ pub const JSObject = extern struct {
                     allocator.destroy(data);
                 }
             } else if (data_val.isExternPtr()) {
-                // Bytecode function - free the BytecodeFunctionData and FunctionBytecode internals
-                const bc_data = data_val.toExternPtr(BytecodeFunctionData);
-                destroyFunctionBytecode(allocator, @constCast(bc_data.bytecode));
-                // Free the BytecodeFunctionData
-                allocator.destroy(bc_data);
+                if (self.inline_slots[Slots.FUNC_IS_CLOSURE].isTrue()) {
+                    // Closure - free ClosureData (which owns upvalues array)
+                    const closure_data = data_val.toExternPtr(ClosureData);
+                    destroyFunctionBytecode(allocator, @constCast(closure_data.bytecode));
+                    closure_data.deinit(allocator);
+                    allocator.destroy(closure_data);
+                } else {
+                    // Bytecode function - free the BytecodeFunctionData and FunctionBytecode internals
+                    const bc_data = data_val.toExternPtr(BytecodeFunctionData);
+                    destroyFunctionBytecode(allocator, @constCast(bc_data.bytecode));
+                    allocator.destroy(bc_data);
+                }
             }
         }
         // Free overflow slots and object

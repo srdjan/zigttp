@@ -200,6 +200,10 @@ const ConnectionPool = struct {
 
         const request_data = self.readRequestData(fd, req_allocator) catch |err| {
             if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return false;
+            if (err == error.UnsupportedTransferEncoding) {
+                self.sendErrorSync(fd, 501, "Not Implemented") catch {};
+                return false;
+            }
             return err;
         };
         var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return false;
@@ -306,6 +310,9 @@ const ConnectionPool = struct {
             if (header_end == null) {
                 if (findHeaderEnd(current_data)) |offset| {
                     header_end = offset;
+                    if (http_parser.hasTransferEncodingChunked(current_data[0..offset])) {
+                        return error.UnsupportedTransferEncoding;
+                    }
                     const body_start = offset + 4;
                     content_length = (try parseContentLength(current_data[0..offset])) orelse 0;
                     if (content_length > self.server.config.max_body_size) {
@@ -442,18 +449,6 @@ const ConnectionPool = struct {
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ static_dir, path }) catch return error.PathTooLong;
 
         const io = self.server.io_backend.io();
-        const file = Dir.openFile(Dir.cwd(), io, full_path, .{}) catch {
-            const connection = if (keep_alive) "keep-alive" else "close";
-            var out_buf: [256]u8 = undefined;
-            const response = std.fmt.bufPrint(
-                &out_buf,
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: {s}\r\n\r\nNot Found",
-                .{connection},
-            ) catch return;
-            try writeAllFd(fd, response);
-            return;
-        };
-        defer file.close(io);
 
         if (!isCanonicalPathInsideRoot(self.server.allocator, io, static_dir, full_path)) {
             const connection = if (keep_alive) "keep-alive" else "close";
@@ -466,6 +461,19 @@ const ConnectionPool = struct {
             try writeAllFd(fd, response);
             return;
         }
+
+        const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch {
+            const connection = if (keep_alive) "keep-alive" else "close";
+            var out_buf: [256]u8 = undefined;
+            const response = std.fmt.bufPrint(
+                &out_buf,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: {s}\r\n\r\nNot Found",
+                .{connection},
+            ) catch return;
+            try writeAllFd(fd, response);
+            return;
+        };
+        defer file.close(io);
 
         const stat = try file.stat(io);
         const size: usize = std.math.cast(usize, stat.size) orelse return error.FileTooLarge;
@@ -969,6 +977,10 @@ pub const Server = struct {
             if (err == error.EndOfStream or err == error.ConnectionResetByPeer) {
                 return false;
             }
+            if (err == error.UnsupportedTransferEncoding) {
+                self.sendErrorResponse(stream, io, 501, "Not Implemented") catch {};
+                return false;
+            }
             return err;
         };
         defer request.deinit(req_allocator);
@@ -1123,6 +1135,9 @@ pub const Server = struct {
             &fast_slots,
             &line_reader,
         );
+
+        // Reject chunked transfer encoding (not supported in serverless runtime)
+        if (fast_slots.has_chunked_encoding) return error.UnsupportedTransferEncoding;
 
         // Read body if Content-Length present
         var body: ?[]u8 = null;
@@ -1346,15 +1361,6 @@ pub const Server = struct {
             return error.PathTooLong;
         };
 
-        const file = Dir.openFile(Dir.cwd(), io, full_path, .{}) catch {
-            var out_buf: [256]u8 = undefined;
-            var writer = stream.writer(io, &out_buf);
-            try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found");
-            try writer.interface.flush();
-            return;
-        };
-        defer file.close(io);
-
         if (!isCanonicalPathInsideRoot(self.allocator, io, static_dir, full_path)) {
             var out_buf: [256]u8 = undefined;
             var writer = stream.writer(io, &out_buf);
@@ -1362,6 +1368,15 @@ pub const Server = struct {
             try writer.interface.flush();
             return;
         }
+
+        const file = Dir.openFile(Dir.cwd(), io, full_path, .{ .follow_symlinks = false }) catch {
+            var out_buf: [256]u8 = undefined;
+            var writer = stream.writer(io, &out_buf);
+            try writer.interface.writeAll("HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found");
+            try writer.interface.flush();
+            return;
+        };
+        defer file.close(io);
 
         const stat = try file.stat(io);
         const content_type = getContentType(path);
@@ -1811,6 +1826,7 @@ fn getStatusText(status: u16) []const u8 {
         422 => "Unprocessable Entity",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         504 => "Gateway Timeout",

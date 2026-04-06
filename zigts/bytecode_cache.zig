@@ -645,7 +645,49 @@ pub fn deserialize(reader: anytype, allocator: std.mem.Allocator) !*bytecode.Fun
         return error.ChecksumMismatch;
     }
 
-    return @ptrCast(@alignCast(bytes.ptr));
+    const func: *bytecode.FunctionBytecodeCompact = @ptrCast(@alignCast(bytes.ptr));
+    try validateBytecode(func, header.bytecode_size);
+    return func;
+}
+
+/// Validate deserialized bytecode: opcodes, operand bounds, instruction alignment.
+/// Called after CRC verification to reject malformed or tampered cache files.
+pub fn validateBytecode(func: *const bytecode.FunctionBytecodeCompact, total_size: usize) !void {
+    // Structural: header fields must produce a size within the allocation
+    const min_size = bytecode.FunctionBytecodeCompact.calcSize(func.code_len, func.const_count, func.upvalue_count);
+    if (min_size > total_size) return error.InvalidBytecode;
+
+    // Walk opcodes: every byte must decode to a known opcode with valid size
+    const code = func.getCode();
+    var pos: usize = 0;
+    while (pos < code.len) {
+        const op: bytecode.Opcode = @enumFromInt(code[pos]);
+        const info = bytecode.getOpcodeInfo(op);
+        // Unknown opcodes get name "unknown" from the catch-all
+        if (std.mem.eql(u8, info.name, "unknown")) return error.InvalidBytecode;
+        if (pos + info.size > code.len) return error.InvalidBytecode;
+        // Validate operand bounds for instructions that index into tables
+        switch (op) {
+            .push_const, .make_function => {
+                const idx = std.mem.readInt(u16, code[pos + 1 ..][0..2], .little);
+                if (idx >= func.const_count) return error.InvalidBytecode;
+            },
+            .get_loc, .put_loc => {
+                if (code[pos + 1] >= func.local_count) return error.InvalidBytecode;
+            },
+            .get_upvalue, .put_upvalue, .close_upvalue => {
+                if (code[pos + 1] >= func.upvalue_count) return error.InvalidBytecode;
+            },
+            .make_closure => {
+                const func_idx = std.mem.readInt(u16, code[pos + 1 ..][0..2], .little);
+                if (func_idx >= func.const_count) return error.InvalidBytecode;
+            },
+            else => {},
+        }
+        pos += info.size;
+    }
+    // Instructions must consume exactly code_len bytes
+    if (pos != code.len) return error.InvalidBytecode;
 }
 
 /// Validate cached bytecode integrity
@@ -779,8 +821,8 @@ pub const SliceReader = struct {
 test "BytecodeCache serialization roundtrip" {
     const allocator = std.testing.allocator;
 
-    // Create test bytecode
-    const code = [_]u8{ 0x01, 0x00, 0x02, 0x20, 0x53 };
+    // Create test bytecode: push_const 0, add, ret
+    const code = [_]u8{ 0x01, 0x00, 0x00, 0x20, 0x53 };
     const constants = [_]u32{ 10, 20 };
     const upvalues = [_]bytecode.UpvalueInfo{
         .{ .is_local = true, .index = 0 },
