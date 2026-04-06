@@ -9,7 +9,7 @@ A guide to the serverless JavaScript runtime that proves your code correct befor
 1. [What Is zigttp?](#1-what-is-zigttp)
 2. [Writing Handlers](#2-writing-handlers)
 3. [Virtual Modules](#3-virtual-modules---native-power-zero-overhead)
-4. [The zts Compiler](#4-the-zts-compiler)
+4. [The zigts Compiler](#4-the-zigts-compiler)
 5. [Compile-Time Verification](#5-compile-time-verification)
 6. [Contracts, Sandboxing, and Deployment](#6-contracts-sandboxing-and-deployment)
 7. [Testing and Replay](#7-testing-and-replay)
@@ -133,11 +133,11 @@ function handler(req: Request): Response {
 }
 ```
 
-Beyond stripping, the zts type checker validates annotations against actual usage. If you annotate a parameter as `string` and pass a number, the compiler catches it. Virtual module return types are fully typed - `jwtVerify` returns `{ok: boolean, value?: object, error?: string}`, and the type checker knows this. Generic type aliases are fully supported: `type Result<T> = { ok: boolean; value: T; error: string }` can be used in annotations like `const auth: Result<object>`, and the checker instantiates the body with the provided type arguments.
+Beyond stripping, the zigts type checker validates annotations against actual usage. If you annotate a parameter as `string` and pass a number, the compiler catches it. Virtual module return types are fully typed - `jwtVerify` returns `{ok: boolean, value?: object, error?: string}`, and the type checker knows this. Generic type aliases are fully supported: `type Result<T> = { ok: boolean; value: T; error: string }` can be used in annotations like `const auth: Result<object>`, and the checker instantiates the body with the provided type arguments.
 
 ### JSX and Server-Side Rendering
 
-JSX is a first-class syntax in zts. The parser handles `.jsx` and `.tsx` files directly - no Babel, no React, no virtual DOM library. JSX compiles to `h()` calls, and `renderToString()` produces HTML:
+JSX is a first-class syntax in zigts. The parser handles `.jsx` and `.tsx` files directly - no Babel, no React, no virtual DOM library. JSX compiles to `h()` calls, and `renderToString()` produces HTML:
 
 ```jsx
 function HomePage() {
@@ -415,9 +415,9 @@ These classifications flow into deployment manifests as machine-readable tags, i
 
 ---
 
-## 4. The zts Compiler
+## 4. The zigts Compiler
 
-zts is the JavaScript engine at the heart of zigttp. It is written entirely in Zig with no external dependencies - no libc (except for SQLite), no LLVM, no runtime library. Everything from the tokenizer to the JIT compiler is purpose-built for the zigttp use case.
+zigts is the JavaScript engine at the heart of zigttp. It is written entirely in Zig with no external dependencies - no libc (except for SQLite), no LLVM, no runtime library. Everything from the tokenizer to the JIT compiler is purpose-built for the zigttp use case.
 
 ### Two-Pass Compilation
 
@@ -443,7 +443,7 @@ Sound mode is zigttp's type-directed analysis layer. The BoolChecker walks the I
 
 ### Progressive Type Inference
 
-zts infers types progressively from virtual module return signatures, match expression arms, optional narrowing, and result property access:
+zigts infers types progressively from virtual module return signatures, match expression arms, optional narrowing, and result property access:
 
 ```typescript
 const val = env("KEY");        // inferred: optional_string (string | undefined)
@@ -462,17 +462,17 @@ const name = env("NAME") ?? "default";  // inferred: string (resolved via ??)
 
 ### NaN-Boxing
 
-Every JavaScript value in zts is a 64-bit word using type-prefix NaN-boxing. Each type owns a unique upper 16-bit prefix: pointers use 0xFFFC, integers use 0xFFFD, special values (true, false, undefined) use 0xFFFE, and extern references use 0xFFFF. Raw f64 doubles are stored inline whenever the prefix is below 0xFFFC. Checking whether a value is, say, an integer is a single shift-and-compare: `(raw >> 48) == 0xFFFD`. No tag bits stolen from pointers, no boxing allocations, no union discriminants.
+Every JavaScript value in zigts is a 64-bit word using type-prefix NaN-boxing. Each type owns a unique upper 16-bit prefix: pointers use 0xFFFC, integers use 0xFFFD, special values (true, false, undefined) use 0xFFFE, and extern references use 0xFFFF. Raw f64 doubles are stored inline whenever the prefix is below 0xFFFC. Checking whether a value is, say, an integer is a single shift-and-compare: `(raw >> 48) == 0xFFFD`. No tag bits stolen from pointers, no boxing allocations, no union discriminants.
 
 ### Hidden Classes and Inline Caching
 
-zts implements V8-style hidden classes for objects. When you create `{ name: "Alice", age: 30 }`, the runtime constructs a hidden class chain: empty -> +name -> +name+age. Objects with the same property sequence share the same hidden class. Property access sites are backed by an 8-entry polymorphic inline cache (PIC) that maps hidden class to property slot offset. Monomorphic sites (one shape seen) resolve in O(1) via the last-hit optimization. Objects with 8 or more properties fall back to binary search on sorted property arrays.
+zigts implements V8-style hidden classes for objects. When you create `{ name: "Alice", age: 30 }`, the runtime constructs a hidden class chain: empty -> +name -> +name+age. Objects with the same property sequence share the same hidden class. Property access sites are backed by an 8-entry polymorphic inline cache (PIC) that maps hidden class to property slot offset. Monomorphic sites (one shape seen) resolve in O(1) via the last-hit optimization. Objects with 8 or more properties fall back to binary search on sorted property arrays.
 
 For HTTP objects, this goes further. Request and Response shapes are preallocated at startup with known property layouts. Creating a Request does not trigger any hidden class transitions - the object is born with its final shape, and property values are written directly to inline slots via `setSlot()`.
 
 ### JIT Baseline Compiler
 
-zts includes a baseline JIT compiler for x86-64 and ARM64. The JIT watches call sites via type feedback counters and compiles hot functions to native code after a configurable threshold (default: 100 calls in lazy mode, 25 in eager mode). The JIT generates fast paths for inline cache hits, type-proven arithmetic, and property access patterns observed during interpretation. When a fast path misses, execution falls back to a helper that updates the cache and returns to native code.
+zigts includes a baseline JIT compiler for x86-64 and ARM64. The JIT watches call sites via type feedback counters and compiles hot functions to native code after a configurable threshold (default: 100 calls in lazy mode, 25 in eager mode). The JIT generates fast paths for inline cache hits, type-proven arithmetic, and property access patterns observed during interpretation. When a fast path misses, execution falls back to a helper that updates the cache and returns to native code.
 
 For FaaS workloads, the JIT threshold is intentionally lower than a general-purpose engine (the inlining threshold is 5 calls instead of 10) to account for shorter handler lifetimes. The JIT can also be disabled entirely (`-Djit=disabled`) for maximum cold start predictability.
 
@@ -635,8 +635,8 @@ This produces `src/generated/deploy/template.json` (AWS SAM template) and `src/g
 The deploy report includes: PROVEN/NEEDS MANUAL REVIEW sections, FLOW ANALYSIS (secret/credential leakage, input validation), FAULT COVERAGE, HANDLER PROPERTIES, OWASP TOP 10 COVERAGE (A01-A07 mapped to proven properties), VPC EGRESS (when egress hosts exist), and COST ESTIMATE (AWS Lambda pricing derived from proven I/O depth).
 
 Two standalone tools support the deployment workflow:
-- `zts prove old.json new.json` compares two contracts and classifies the change (exit 0 for safe, 1 for breaking)
-- `zts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases
+- `zigts prove old.json new.json` compares two contracts and classifies the change (exit 0 for safe, 1 for breaking)
+- `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases
 
 ### Fault Coverage
 
@@ -891,7 +891,7 @@ Each request flows through a pipeline optimized at every stage:
 
 ### Benchmarks
 
-zts benchmarks at 63x faster than QuickJS on string operations and delivers cold starts in the 71-83ms range. The JIT compiler narrows the gap with general-purpose engines on compute-heavy workloads while maintaining predictable cold start behavior.
+zigts benchmarks at 63x faster than QuickJS on string operations and delivers cold starts in the 71-83ms range. The JIT compiler narrows the gap with general-purpose engines on compute-heavy workloads while maintaining predictable cold start behavior.
 
 For detailed benchmark methodology and results, see the separate `zigttp-bench` repository.
 
@@ -944,8 +944,8 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 
 | Command | Description |
 |---------|-------------|
-| `zts prove old.json new.json [dir/]` | Compare two contracts, classify as equivalent/additive/breaking |
-| `zts mock tests.jsonl [--port PORT]` | Serve mock HTTP responses from generated tests |
+| `zigts prove old.json new.json [dir/]` | Compare two contracts, classify as equivalent/additive/breaking |
+| `zigts mock tests.jsonl [--port PORT]` | Serve mock HTTP responses from generated tests |
 | `zig build bench` | Run performance benchmarks |
 
 ### Virtual Module Exports

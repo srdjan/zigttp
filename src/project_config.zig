@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zts = @import("zts");
+const zigts = @import("zigts");
 
 pub const ProjectConfig = struct {
     root_dir: []const u8,
@@ -69,13 +69,12 @@ pub fn discover(
         const manifest_path = try std.fs.path.resolve(allocator, &.{ current, "zigttp.json" });
         defer allocator.free(manifest_path);
 
-        std.Io.Dir.accessAbsolute(io, manifest_path, .{}) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
         if (std.Io.Dir.accessAbsolute(io, manifest_path, .{})) |_| {
             return try loadAbsolute(allocator, io, manifest_path);
-        } else |_| {}
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
 
         const parent = std.fs.path.dirname(current) orelse break;
         if (parent.len == current.len) break;
@@ -93,7 +92,7 @@ pub fn loadAbsolute(
     io: std.Io,
     manifest_path: []const u8,
 ) !ProjectConfig {
-    const bytes = try zts.file_io.readFile(allocator, manifest_path, 1024 * 1024);
+    const bytes = try zigts.file_io.readFile(allocator, manifest_path, 1024 * 1024);
     defer allocator.free(bytes);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
@@ -138,33 +137,44 @@ fn findStartDir(
     start_path: ?[]const u8,
 ) ![]u8 {
     const input = start_path orelse return try dupCurrentDir(allocator, io);
+    const normalized = try normalizeAbsolutePath(allocator, io, input);
+    errdefer allocator.free(normalized);
+
     if (std.mem.eql(u8, std.fs.path.basename(input), "zigttp.json")) {
-        const resolved = try std.fs.path.resolve(allocator, &.{input});
-        const dir_name = std.fs.path.dirname(resolved) orelse return error.InvalidProjectConfig;
-        defer allocator.free(resolved);
+        const dir_name = std.fs.path.dirname(normalized) orelse return error.InvalidProjectConfig;
         return try allocator.dupe(u8, dir_name);
     }
 
-    const resolved = try std.fs.path.resolve(allocator, &.{input});
-    errdefer allocator.free(resolved);
-
-    const stat = std.Io.Dir.statFile(std.Io.Dir.cwd(), io, resolved, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return try dupCurrentDir(allocator, io),
+    var dir = std.Io.Dir.openDirAbsolute(io, normalized, .{}) catch |err| switch (err) {
+        error.FileNotFound => return try dupCurrentDir(allocator, io),
+        error.NotDir => {
+            const dir_name = std.fs.path.dirname(normalized) orelse return error.InvalidProjectConfig;
+            return try allocator.dupe(u8, dir_name);
+        },
         else => return err,
     };
-
-    if (stat.kind == .directory) return resolved;
-
-    const dir_name = std.fs.path.dirname(resolved) orelse ".";
-    const result = try allocator.dupe(u8, dir_name);
-    allocator.free(resolved);
-    return result;
+    defer dir.close(io);
+    return normalized;
 }
 
 fn dupCurrentDir(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
     const path_z = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
     defer allocator.free(path_z);
     return try allocator.dupe(u8, path_z);
+}
+
+fn normalizeAbsolutePath(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        return try allocator.dupe(u8, path);
+    }
+
+    const cwd = try dupCurrentDir(allocator, io);
+    defer allocator.free(cwd);
+    return try std.fs.path.resolve(allocator, &.{ cwd, path });
 }
 
 fn dupStringField(
@@ -260,4 +270,45 @@ test "project config parses and defaults public directory" {
     try std.testing.expectEqualStrings("api.internal", config.outbound_hosts[0]);
     try std.testing.expect(config.static_dir != null);
     try std.testing.expectEqualStrings("public", config.static_dir.?);
+}
+
+test "discover finds manifest from relative handler path" {
+    var io_backend = std.Io.Threaded.init(std.testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.Io.Dir.createDirPath(tmp.dir, io, "src");
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "zigttp.json",
+        .data =
+        \\{
+        \\  "entry": "src/handler.ts"
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "src/handler.ts",
+        .data = "function handler(req) { return Response.text('ok') }\n",
+    });
+
+    const cwd = try dupCurrentDir(std.testing.allocator, io);
+    defer std.testing.allocator.free(cwd);
+
+    const handler_abs = try std.fs.path.resolve(std.testing.allocator, &.{ tmp.sub_path, "src", "handler.ts" });
+    defer std.testing.allocator.free(handler_abs);
+
+    const relative_handler = try std.fs.path.relative(std.testing.allocator, cwd, handler_abs);
+    defer std.testing.allocator.free(relative_handler);
+
+    var config = (try discover(std.testing.allocator, io, relative_handler)).?;
+    defer config.deinit(std.testing.allocator);
+
+    const expected_root = try std.fs.path.resolve(std.testing.allocator, &.{tmp.sub_path});
+    defer std.testing.allocator.free(expected_root);
+
+    try std.testing.expectEqualStrings(expected_root, config.root_dir);
+    try std.testing.expectEqualStrings("src/handler.ts", config.entry);
 }

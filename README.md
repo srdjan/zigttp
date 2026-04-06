@@ -5,10 +5,9 @@
 
 A JavaScript runtime built from scratch in Zig for serverless workloads. One binary, no dependencies, instant cold starts.
 
-Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
+Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zigts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
 
-[![status: experimental](https://github.com/GIScience/badges/raw/master/status/experimental.svg)](https://github.com/GIScience/badges#experimental)
-> Not Ready (yet)! Still under active development.
+Validated release target: Zig `0.16.0-dev.3073+28ae5d415`, with `zigts` as the canonical compiler/analyzer CLI. `zts` remains available as a compatibility alias during the rename transition.
 
 ### What makes it different
 
@@ -40,9 +39,9 @@ Where Node.js and Deno optimize for generality, zigttp optimizes for a single us
 
 **Behavioral contract.** `-Dcontract` enumerates every execution path through the handler and embeds them in contract.json as structured `behaviors`. Each path records the route, branching conditions (which I/O calls succeed or fail), the I/O sequence, and the resulting HTTP status. The restricted JS subset has no back-edges and no exceptions, so path enumeration is finite and exhaustive. Comparing two behavioral contracts shows which paths were preserved, which changed response codes, which were removed, and which are new.
 
-**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zts prove old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
+**Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zigts prove old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
 
-**Contract-driven mock server.** `zts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
+**Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
 
@@ -157,7 +156,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
-| `zigttp:compose` | `guard` | Compile-time handler composition via pipe operator |
+| `zigttp:compose` | `guard`, `pipe` | Compile-time handler composition via pipe operator |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
 
 Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
@@ -291,6 +290,44 @@ Options:
   --sqlite <FILE>       SQLite database path for zigttp:sql
   --durable <DIR>       Enable durable execution with write-ahead oplog
 ```
+
+### zigts CLI (compiler and analyzer)
+
+Standalone analysis and compilation without starting a server.
+
+```bash
+zigts check [handler.ts] [options]    # Verify handler, show proof card
+zigts compile <handler.ts> <out.zig>  # Compile to embedded bytecode
+zigts prove <old.json> <new.json>     # Compare contracts (exit 0=safe, 1=breaking)
+zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
+zigts link <system.json>              # Cross-handler contract linking
+zigts features [--json]               # List allowed/blocked language features
+zigts modules [--json]                # List virtual modules and exports
+zigts init                            # Install zts-expert skill for Claude Code
+```
+
+#### Structured JSON output
+
+`zigts check --json handler.ts` writes machine-readable diagnostics to stdout. Each diagnostic has an error code, source location, and a suggestion naming the idiomatic replacement.
+
+```json
+{
+  "success": false,
+  "diagnostics": [{
+    "code": "ZTS001",
+    "severity": "error",
+    "message": "'try/catch' is not supported",
+    "file": "handler.ts",
+    "line": 23,
+    "column": 3,
+    "suggestion": "use Result types for error handling"
+  }]
+}
+```
+
+On success, the output includes a proof summary: env vars, outbound hosts, virtual modules, and handler properties.
+
+Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx (handler verifier).
 
 ## Key Features
 
@@ -750,7 +787,7 @@ When updating to a new Zig nightly, run:
 zig version
 zig build
 zig build test
-zig build test-zts
+zig build test-zigts
 zig build test-zruntime
 bash scripts/test-examples.sh
 ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
@@ -773,7 +810,7 @@ Then update the pinned version in this README and `docs/user-guide.md`.
 
 ## JavaScript Subset
 
-zts implements ES5 with select ES6+ extensions:
+zigts implements ES5 with select ES6+ extensions:
 
 **Supported**: Strict mode, let/const, arrow functions, template literals, destructuring, spread operator, for...of (arrays) with `break`/`continue`, optional chaining, nullish coalescing, typed arrays, exponentiation operator, compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`, bitwise), pipe operator (`|>`), array higher-order methods (`.map()`, `.filter()`, `.reduce()`, `.find()`, `.findIndex()`, `.some()`, `.every()`, `.forEach()`), `Object.keys()` / `.values()` / `.entries()`, Math extensions, modern string methods (replaceAll, trimStart/End), globalThis, `range()`, `match` expression (pattern matching).
 
@@ -787,6 +824,6 @@ MIT licensed.
 
 ## Credits
 
-- **zts** - Pure Zig JavaScript engine (part of this project)
+- **zigts** - Pure Zig JavaScript engine (part of this project)
 - [Zig](https://ziglang.org/) programming language
 - Codex & Claude

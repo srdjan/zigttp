@@ -4,13 +4,13 @@
 //! compiles each handler to extract its contract, runs the system linker,
 //! and writes system-contract.json and system-report.txt.
 //!
-//! Usage: zts link <system.json> [--output-dir <dir>]
+//! Usage: zigts link <system.json> [--output-dir <dir>]
 
 const std = @import("std");
-const zts = @import("zts");
+const zigts = @import("zigts");
 const precompile = @import("precompile.zig");
-const system_linker = zts.system_linker;
-const handler_contract = zts.handler_contract;
+const system_linker = zigts.system_linker;
+const handler_contract = zigts.handler_contract;
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var system_path: ?[]const u8 = null;
@@ -51,7 +51,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 }
 
 fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []const u8) !void {
-    const system_json = zts.file_io.readFile(allocator, system_path, 1024 * 1024) catch |err| {
+    const system_json = zigts.file_io.readFile(allocator, system_path, 1024 * 1024) catch |err| {
         std.debug.print("Error reading {s}: {}\n", .{ system_path, err });
         std.process.exit(2);
     };
@@ -201,7 +201,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
 
 fn printHelp() void {
     std.debug.print(
-        \\Usage: zts link <system.json> [options]
+        \\Usage: zigts link <system.json> [options]
         \\
         \\Cross-handler contract linking. Proves that a system of handlers
         \\communicates correctly at compile time.

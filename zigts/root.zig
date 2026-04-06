@@ -1,4 +1,4 @@
-//! zts - Zig TypeScript compiler
+//! zigts - Zig TypeScript compiler
 //!
 //! A performance-oriented JavaScript engine featuring:
 //! - Generational GC with bump allocation
@@ -9,10 +9,10 @@
 //! ## Quick Start
 //!
 //! ```zig
-//! const zts = @import("zts");
+//! const zigts = @import("zigts");
 //!
 //! // Create a runtime pool
-//! var pool = try zts.LockFreePool.init(allocator, .{});
+//! var pool = try zigts.LockFreePool.init(allocator, .{});
 //! defer pool.deinit();
 //!
 //! // Acquire a runtime
@@ -138,9 +138,9 @@ pub const TRACE_STATE_SLOT = trace.TRACE_STATE_SLOT;
 /// Version information
 pub const version = struct {
     pub const major = 0;
-    pub const minor = 1;
+    pub const minor = 14;
     pub const patch = 0;
-    pub const string = "0.1.0";
+    pub const string = "0.14.0";
 };
 
 /// Create a new standalone context (not pooled)
@@ -180,7 +180,7 @@ test {
 }
 
 test "version" {
-    try std.testing.expectEqualStrings("0.1.0", version.string);
+    try std.testing.expectEqualStrings("0.14.0", version.string);
 }
 
 test "create and destroy context" {

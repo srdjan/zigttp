@@ -1,4 +1,4 @@
-//! zts Performance Benchmark Runner
+//! zigts Performance Benchmark Runner
 //!
 //! Runs JavaScript benchmarks and times them individually from Zig side.
 //!
@@ -7,7 +7,7 @@
 const std = @import("std");
 const compat = @import("compat.zig");
 const zruntime = @import("zruntime.zig");
-const zq = @import("zts");
+const zq = @import("zigts");
 const Runtime = zruntime.Runtime;
 const RuntimeConfig = zruntime.RuntimeConfig;
 
@@ -470,7 +470,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (!options.quiet and !options.json) {
         println("");
-        println("=== zts JavaScript Engine Benchmarks ===");
+        println("=== zigts JavaScript Engine Benchmarks ===");
         println("");
     }
 
@@ -570,7 +570,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
 
     if (!options.quiet and options.compare) {
-        printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "baseline", "Ratio" });
+        printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zigts", "baseline", "Ratio" });
         println("------------------------------------------------------------");
     }
 

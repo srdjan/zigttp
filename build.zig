@@ -37,33 +37,35 @@ pub fn build(b: *std.Build) void {
     const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/data-label/replay/report wiring");
     const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
 
-    // zts module (Zig TypeScript compiler - the primary JS engine)
-    const zts_mod = b.addModule("zts", .{
-        .root_source_file = b.path("zts/root.zig"),
+    // zigts module (Zig TypeScript compiler - the primary JS engine)
+    const zigts_mod = b.addModule("zigts", .{
+        .root_source_file = b.path("zigts/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    zts_mod.linkSystemLibrary("sqlite3", .{});
-    zts_mod.addImport("zigttp-sdk", zigttp_sdk_mod);
-    zts_mod.addImport("zigttp-ext-demo", ext_demo_mod);
+    zigts_mod.linkSystemLibrary("sqlite3", .{});
+    zigts_mod.addImport("zigttp-sdk", zigttp_sdk_mod);
+    zigts_mod.addImport("zigttp-ext-demo", ext_demo_mod);
 
-    // zts tests
-    const zts_tests_root = b.createModule(.{
-        .root_source_file = b.path("zts/root.zig"),
+    // zigts tests
+    const zigts_tests_root = b.createModule(.{
+        .root_source_file = b.path("zigts/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    zts_tests_root.addImport("zigttp-sdk", zigttp_sdk_mod);
-    zts_tests_root.addImport("zigttp-ext-demo", ext_demo_mod);
-    const zts_tests = b.addTest(.{
-        .root_module = zts_tests_root,
+    zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_mod);
+    zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_mod);
+    const zigts_tests = b.addTest(.{
+        .root_module = zigts_tests_root,
     });
-    zts_tests.root_module.linkSystemLibrary("sqlite3", .{});
-    const run_zts_tests = b.addRunArtifact(zts_tests);
-    const zts_test_step = b.step("test-zts", "Run zts unit tests");
-    zts_test_step.dependOn(&run_zts_tests.step);
+    zigts_tests.root_module.linkSystemLibrary("sqlite3", .{});
+    const run_zigts_tests = b.addRunArtifact(zigts_tests);
+    const zigts_test_step = b.step("test-zigts", "Run zigts unit tests");
+    zigts_test_step.dependOn(&run_zigts_tests.step);
+    const zts_test_step = b.step("test-zts", "Run zigts unit tests (compat alias)");
+    zts_test_step.dependOn(&run_zigts_tests.step);
 
     const precompile_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -73,7 +75,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    precompile_tests.root_module.addImport("zts", zts_mod);
+    precompile_tests.root_module.addImport("zigts", zigts_mod);
     const run_precompile_tests = b.addRunArtifact(precompile_tests);
     const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
     precompile_test_step.dependOn(&run_precompile_tests.step);
@@ -86,28 +88,28 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    prop_expect_tests.root_module.addImport("zts", zts_mod);
+    prop_expect_tests.root_module.addImport("zigts", zigts_mod);
     const run_prop_expect_tests = b.addRunArtifact(prop_expect_tests);
     const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
     prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
 
-    const zts_cli_mod = b.createModule(.{
-        .root_source_file = b.path("tools/zts_cli.zig"),
+    const zigts_cli_mod = b.createModule(.{
+        .root_source_file = b.path("tools/zigts_cli.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    zts_cli_mod.addImport("zts", zts_mod);
+    zigts_cli_mod.addImport("zigts", zigts_mod);
     const project_config_mod = b.createModule(.{
         .root_source_file = b.path("src/project_config.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    project_config_mod.addImport("zts", zts_mod);
-    zts_cli_mod.addImport("project_config", project_config_mod);
+    project_config_mod.addImport("zigts", zigts_mod);
+    zigts_cli_mod.addImport("project_config", project_config_mod);
 
-    // Internal precompile tool used by build steps and the zts CLI.
+    // Internal precompile tool used by build steps and the zigts CLI.
     const precompile_exe = b.addExecutable(.{
         .name = "precompile",
         .root_module = b.createModule(.{
@@ -116,7 +118,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    precompile_exe.root_module.addImport("zts", zts_mod);
+    precompile_exe.root_module.addImport("zigts", zigts_mod);
 
     // Runtime/project CLI
     const exe = b.addExecutable(.{
@@ -129,9 +131,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add zts module to main executable
-    exe.root_module.addImport("zts", zts_mod);
-    exe.root_module.addImport("zts_cli", zts_cli_mod);
+    // Add zigts module to main executable
+    exe.root_module.addImport("zigts", zigts_mod);
+    exe.root_module.addImport("zigts_cli", zigts_cli_mod);
     exe.root_module.addImport("project_config", project_config_mod);
 
     // If handler is specified, precompile it and add as dependency
@@ -220,11 +222,11 @@ pub fn build(b: *std.Build) void {
         // Main exe depends on precompile completing
         exe.step.dependOn(&run_precompile.step);
 
-        // Add the generated module (with zts dependency for transpiled handlers)
+        // Add the generated module (with zigts dependency for transpiled handlers)
         exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("src/generated/embedded_handler.zig"),
             .imports = &.{
-                .{ .name = "zts", .module = zts_mod },
+                .{ .name = "zigts", .module = zigts_mod },
             },
         });
     } else {
@@ -232,7 +234,7 @@ pub fn build(b: *std.Build) void {
         exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("src/embedded_handler_stub.zig"),
             .imports = &.{
-                .{ .name = "zts", .module = zts_mod },
+                .{ .name = "zigts", .module = zigts_mod },
             },
         });
     }
@@ -240,11 +242,15 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     // Compiler/analyzer CLI
-    const zts_exe = b.addExecutable(.{
-        .name = "zts",
-        .root_module = zts_cli_mod,
+    const zigts_exe = b.addExecutable(.{
+        .name = "zigts",
+        .root_module = zigts_cli_mod,
     });
-    b.installArtifact(zts_exe);
+    b.installArtifact(zigts_exe);
+    const zts_compat_install = b.addInstallArtifact(zigts_exe, .{
+        .dest_sub_path = "zts",
+    });
+    b.getInstallStep().dependOn(&zts_compat_install.step);
 
     // Run command
     const run_cmd = b.addRunArtifact(exe);
@@ -266,14 +272,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add zts module to tests
-    unit_tests.root_module.addImport("zts", zts_mod);
-    unit_tests.root_module.addImport("zts_cli", zts_cli_mod);
+    // Add zigts module to tests
+    unit_tests.root_module.addImport("zigts", zigts_mod);
+    unit_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
     unit_tests.root_module.addImport("project_config", project_config_mod);
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
+            .{ .name = "zigts", .module = zigts_mod },
         },
     });
 
@@ -291,11 +297,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    zruntime_tests.root_module.addImport("zts", zts_mod);
+    zruntime_tests.root_module.addImport("zigts", zigts_mod);
     zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
+            .{ .name = "zigts", .module = zigts_mod },
         },
     });
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
@@ -312,11 +318,11 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    bench_exe.root_module.addImport("zts", zts_mod);
+    bench_exe.root_module.addImport("zigts", zigts_mod);
     bench_exe.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),
         .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
+            .{ .name = "zigts", .module = zigts_mod },
         },
     });
     b.installArtifact(bench_exe);
@@ -329,7 +335,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Release build step (with handler precompilation if provided)
-    const release_step = b.step("release", "Build optimized release binaries (zigttp, zts)");
+    const release_step = b.step("release", "Build optimized release binaries (zigttp, zigts)");
     release_step.dependOn(b.getInstallStep());
     if (handler_path) |_| {
         const release_note = b.addSystemCommand(if (aot_enabled) &.{
@@ -343,7 +349,7 @@ pub fn build(b: *std.Build) void {
     } else {
         const release_note = b.addSystemCommand(&.{
             "echo",
-            "Release build: zig-out/bin/zigttp and zig-out/bin/zts",
+            "Release build: zig-out/bin/zigttp and zig-out/bin/zigts",
         });
         release_note.step.dependOn(release_step);
     }
@@ -353,7 +359,7 @@ pub fn build(b: *std.Build) void {
     // System linking step (cross-handler contract verification)
     const system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking");
     if (system_path) |sys_path| {
-        const run_system = b.addRunArtifact(zts_exe);
+        const run_system = b.addRunArtifact(zigts_exe);
         run_system.addArg("link");
         run_system.addArg(sys_path);
         if (b.args) |args| {

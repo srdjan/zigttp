@@ -9,10 +9,10 @@
 //! Usage: called by precompile.zig when --deploy <target> is passed.
 
 const std = @import("std");
-const zts = @import("zts");
-const handler_contract = zts.handler_contract;
+const zigts = @import("zigts");
+const handler_contract = zigts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
-const contract_diff = zts.contract_diff;
+const contract_diff = zigts.contract_diff;
 
 // -------------------------------------------------------------------------
 // Platform-agnostic proven facts
@@ -221,7 +221,7 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     // Metadata
     try w.writeAll("  \"Metadata\": {\n");
     try w.writeAll("    \"zigttp\": {\n");
-    try w.writeAll("      \"version\": \"0.1.0\",\n");
+    try w.writeAll("      \"version\": \"0.14.0\",\n");
     try w.writeAll("      \"proofLevel\": \"");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\",\n");

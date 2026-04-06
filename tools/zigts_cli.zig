@@ -6,9 +6,9 @@ const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");
 const project_config_mod = @import("project_config");
-const zts = @import("zts");
-const zts_file_io = zts.file_io;
-const writeContractJson = zts.handler_contract.writeContractJson;
+const zigts = @import("zigts");
+const zigts_file_io = zigts.file_io;
+const writeContractJson = zigts.handler_contract.writeContractJson;
 
 pub fn main(init: std.process.Init.Minimal) !void {
     const allocator = std.heap.smp_allocator;
@@ -117,7 +117,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         if (result.totalErrors() > 0) {
             json_diag.writeErrorJson(&aw.writer, result.json_diagnostics.items) catch {};
         } else {
-            const contract_ptr: ?*const zts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
+            const contract_ptr: ?*const zigts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
             json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items) catch {};
         }
 
@@ -151,7 +151,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
                 return err;
             };
             json_output = aw.toArrayList();
-            zts_file_io.writeFile(allocator, "contract.json", json_output.items) catch |err| {
+            zigts_file_io.writeFile(allocator, "contract.json", json_output.items) catch |err| {
                 std.debug.print("Error writing contract.json: {}\n", .{err});
                 return err;
             };
@@ -165,7 +165,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
         precompile.generateTypeDefs(&aw.writer);
         buf = aw.toArrayList();
-        zts_file_io.writeFile(allocator, "zigttp.d.ts", buf.items) catch |err| {
+        zigts_file_io.writeFile(allocator, "zigttp.d.ts", buf.items) catch |err| {
             std.debug.print("Error writing zigttp.d.ts: {}\n", .{err});
             return err;
         };
@@ -250,16 +250,16 @@ pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) 
 
 fn printHelp() void {
     const help =
-        \\zts - compiler and analysis tools for zigttp handlers
+        \\zigts - compiler and analysis tools for zigttp handlers
         \\
         \\Usage:
-        \\  zts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path]
-        \\  zts compile [precompile flags] <handler.ts> <output.zig>
-        \\  zts prove <old-contract.json> <new-contract.json> [output-dir/]
-        \\  zts mock <tests.jsonl> [--port PORT]
-        \\  zts link <system.json> [--output-dir <dir>]
-        \\  zts features [--json]
-        \\  zts modules [--json]
+        \\  zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path]
+        \\  zigts compile [precompile flags] <handler.ts> <output.zig>
+        \\  zigts prove <old-contract.json> <new-contract.json> [output-dir/]
+        \\  zigts mock <tests.jsonl> [--port PORT]
+        \\  zigts link <system.json> [--output-dir <dir>]
+        \\  zigts features [--json]
+        \\  zigts modules [--json]
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -267,9 +267,9 @@ fn printHelp() void {
 
 fn printCheckHelp() void {
     const help =
-        \\zts check - verify handler and show proof card
+        \\zigts check - verify handler and show proof card
         \\
-        \\Usage: zts check [handler.ts] [options]
+        \\Usage: zigts check [handler.ts] [options]
         \\
         \\Options:
         \\  --json           Emit structured JSON to stdout (for tool integration)
@@ -278,6 +278,7 @@ fn printCheckHelp() void {
         \\  --sql-schema P   SQLite schema file for query validation
         \\
         \\If no handler is specified, uses the entry from zigttp.json.
+        \\`zts` remains available as a compatibility alias for this CLI.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
