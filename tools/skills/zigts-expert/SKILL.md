@@ -128,18 +128,19 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | Category | Features |
 |----------|----------|
 | Declarations | `let`, `const`, `function`, arrow functions, destructuring (array/object/rest) |
-| Control flow | `if`/`else`, `switch`/`case`/`default`, `for...of` with `break`/`continue`, `return` |
+| Control flow | `if`/`else`, `for...of` with `break`/`continue`, `return`, `assert` |
 | Expressions | Template literals, ternary, spread, optional chaining (`?.`), nullish coalescing (`??`) |
 | Operators | `+` `-` `*` `/` `%` `**`, `===` `!==` `<` `>` `<=` `>=`, `&&` `||` `!` |
 | Assignment | `=` `+=` `-=` `*=` `/=` `%=` `**=` |
 | Modules | `import { x } from "zigttp:mod"`, `import { x } from "./local"`, `export` |
 | Special | `match` expression, pipe operator `|>`, `guard()` composition, `comptime()` |
-| Types | Type aliases, interfaces, annotations on params/returns/variables |
+| Types | Type aliases, `distinct type`, interfaces, annotations, `readonly` fields, type guards (`x is T`), template literal types |
 
 ### What's Blocked (and Why)
 
 | Banned | Use Instead |
 |--------|-------------|
+| `switch`/`case` | `match` expression |
 | `class` | Plain objects and functions |
 | `while`, `do...while` | `for (const x of range(n))` or `for (const x of collection)` |
 | C-style `for (;;)` | `for (const i of range(n))` |
@@ -176,6 +177,71 @@ const claims = result.value;
 | Early return | `if (!val) return ...; // val is T below` |
 | Undefined check | `if (val !== undefined) { /* val is T */ }` |
 | Nullish coalesce | `const v = val ?? "default"; // v is string` |
+
+### Type Guards and Assert
+
+Type guard functions declare narrowing with `x is T` return types. The `assert` statement applies the guard as permanent forward narrowing:
+
+```typescript
+function isString(x: unknown): x is string {
+    return typeof x === "string";
+}
+
+// Branch narrowing
+if (isString(val)) { val.toUpperCase(); }
+
+// Forward narrowing (permanent from this point)
+assert isString(val);
+val.toUpperCase();
+
+// With explicit error response
+assert isString(name), Response.json({ error: "name required" }, { status: 400 });
+```
+
+Without an error expression, `assert` halts. With one, it returns that value.
+
+### Discriminated Union Narrowing
+
+Unions with a tag field narrow through `if` conditions:
+
+```typescript
+type Result = { kind: "ok", value: string } | { kind: "err", error: string };
+
+if (r.kind === "err") {
+    return Response.json({ error: r.error }, { status: 400 });
+}
+// r is narrowed to { kind: "ok", value: string }
+```
+
+### Distinct Types
+
+`distinct type` creates nominal types. Values of different distinct types are incompatible even if they share the same base:
+
+```typescript
+distinct type UserId = string;
+distinct type SessionId = string;
+
+const uid: UserId = UserId("usr_123");
+const sid: SessionId = SessionId("sess");
+// uid and sid are not interchangeable
+```
+
+### Readonly and Template Literal Types
+
+`readonly` fields reject assignment at compile time:
+
+```typescript
+type Config = { readonly port: number; host: string };
+cfg.port = 8080;  // ERROR
+```
+
+Template literal types validate string patterns:
+
+```typescript
+type ApiRoute = `/api/${string}`;
+const good: ApiRoute = "/api/users";   // OK
+const bad: ApiRoute = "/other";        // ERROR
+```
 
 ### Handler Structure
 
