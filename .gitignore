@@ -16,6 +16,8 @@ test_prot
 test_time
 build_link.log
 .claude/settings.local.json
+.claude/skills/
+.codex/skills/
 proof-report.txt
 proof.json
 codedb.snapshot
