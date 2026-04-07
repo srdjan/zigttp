@@ -21,7 +21,6 @@ const context = @import("context.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_checker_mod = @import("type_checker.zig");
-const modules_resolver = @import("modules/resolver.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 
