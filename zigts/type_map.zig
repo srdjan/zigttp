@@ -100,13 +100,6 @@ pub const TypeMap = struct {
     pub fn count(self: *const TypeMap) usize {
         return self.entries.items.len;
     }
-
-    /// Get entries by kind.
-    pub fn getEntriesByKind(self: *const TypeMap, kind: TypeMapKind) []const TypeMapEntry {
-        // Returns all entries; caller filters. For a small list this is fine.
-        _ = kind;
-        return self.entries.items;
-    }
 };
 
 // ---------------------------------------------------------------------------
