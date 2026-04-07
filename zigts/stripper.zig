@@ -2447,3 +2447,24 @@ test "distinct type declaration stripped" {
     }
     try std.testing.expect(found_distinct);
 }
+
+test "export distinct type stripped" {
+    const allocator = std.testing.allocator;
+    const source = "export distinct type UserId = string;";
+    var result = try strip(allocator, source, .{});
+    defer result.deinit();
+
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+
+    const tm = &result.type_map;
+    var found_distinct = false;
+    for (tm.entries.items) |entry| {
+        if (entry.kind == .distinct_type) {
+            found_distinct = true;
+            const name = tm.getNameText(entry) orelse "";
+            try std.testing.expectEqualStrings("UserId", name);
+        }
+    }
+    try std.testing.expect(found_distinct);
+}
