@@ -693,16 +693,22 @@ const Stripper = struct {
     // ========================================================================
 
     fn tryStripTypeDeclaration(self: *Self) StripError!bool {
-        const saved_pos = self.pos;
-        const saved_line = self.line;
-        const saved_col = self.col;
+        return self.stripTypeOrInterfaceBody(self.pos, self.line, self.col);
+    }
 
+    /// Shared body for stripping [distinct] type/interface declarations.
+    /// `span_start` marks where blanking begins (before any `export` prefix).
+    fn stripTypeOrInterfaceBody(self: *Self, span_start: usize, span_start_line: u32, span_start_col: u32) StripError!bool {
         // Check for 'distinct', 'type', or 'interface' keyword
         var is_distinct = false;
         const first_kw = self.peekKeyword();
-        if (first_kw == null) return false;
+        if (first_kw == null) {
+            self.pos = span_start;
+            self.line = span_start_line;
+            self.col = span_start_col;
+            return false;
+        }
 
-        // Check for 'distinct type' prefix
         if (std.mem.eql(u8, first_kw.?, "distinct")) {
             is_distinct = true;
             self.pos += first_kw.?.len;
@@ -712,31 +718,19 @@ const Stripper = struct {
 
         const keyword = if (is_distinct) self.peekKeyword() else first_kw;
         if (keyword == null) {
-            if (is_distinct) {
-                self.pos = saved_pos;
-                self.line = saved_line;
-                self.col = saved_col;
-            }
+            self.pos = span_start;
+            self.line = span_start_line;
+            self.col = span_start_col;
             return false;
         }
 
         const is_type = std.mem.eql(u8, keyword.?, "type");
         const is_interface = std.mem.eql(u8, keyword.?, "interface");
 
-        if (!is_type and !is_interface) {
-            if (is_distinct) {
-                self.pos = saved_pos;
-                self.line = saved_line;
-                self.col = saved_col;
-            }
-            return false;
-        }
-
-        // distinct only applies to type, not interface
-        if (is_distinct and is_interface) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
+        if ((!is_type and !is_interface) or (is_distinct and is_interface)) {
+            self.pos = span_start;
+            self.line = span_start_line;
+            self.col = span_start_col;
             return false;
         }
 
@@ -747,13 +741,12 @@ const Stripper = struct {
 
         // Must be followed by identifier
         if (!self.peekIdentifierStart()) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
+            self.pos = span_start;
+            self.line = span_start_line;
+            self.col = span_start_col;
             return false;
         }
 
-        // Skip identifier - record name position
         const name_start = self.pos;
         _ = self.scanIdentifier();
         const name_end = self.pos;
@@ -765,9 +758,9 @@ const Stripper = struct {
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             generic_start = self.pos;
             if (!self.skipBalancedAngles()) {
-                self.pos = saved_pos;
-                self.line = saved_line;
-                self.col = saved_col;
+                self.pos = span_start;
+                self.line = span_start_line;
+                self.col = span_start_col;
                 return false;
             }
             generic_end = self.pos;
@@ -781,17 +774,14 @@ const Stripper = struct {
                 self.pos += 7; // "extends"
                 self.col += 7;
                 self.skipWhitespaceTracked();
-                // Skip base type(s)
                 try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' }, false);
                 self.skipWhitespaceTracked();
             }
         }
 
-        // Record type body position for the type map
         var type_body_start: usize = 0;
         var type_body_end: usize = 0;
 
-        // For type: skip = and type expression
         if (is_type and self.pos < self.source.len and self.source[self.pos] == '=') {
             self.pos += 1;
             self.col += 1;
@@ -801,29 +791,25 @@ const Stripper = struct {
             type_body_end = self.pos;
         }
 
-        // For interface: skip the { ... } body
         if (is_interface and self.pos < self.source.len and self.source[self.pos] == '{') {
             type_body_start = self.pos;
             self.skipBalancedBraces();
             type_body_end = self.pos;
         }
 
-        // Skip optional semicolon
         self.skipWhitespaceTracked();
         if (self.pos < self.source.len and self.source[self.pos] == ';') {
             self.pos += 1;
             self.col += 1;
         }
 
-        // Record in TypeMap before blanking
         const kind: TypeMapKind = if (is_distinct) .distinct_type else if (is_type) .type_alias else .interface_decl;
         self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
         if (generic_start != 0) {
             self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
         }
 
-        // Blank the entire span
-        self.blankSpan(saved_pos, self.pos);
+        self.blankSpan(span_start, self.pos);
         return true;
     }
 
@@ -869,126 +855,22 @@ const Stripper = struct {
         self.col += 6;
         self.skipWhitespaceTracked();
 
-        // Check for optional 'distinct' prefix: export distinct type
-        var export_is_distinct = false;
-        const first_decl_kw = self.peekKeyword();
-        if (first_decl_kw == null) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
-            return false;
-        }
-        if (std.mem.eql(u8, first_decl_kw.?, "distinct")) {
-            export_is_distinct = true;
-            self.pos += first_decl_kw.?.len;
-            self.col += @intCast(first_decl_kw.?.len);
-            self.skipWhitespaceTracked();
-        }
-
-        const decl_kw = if (export_is_distinct) self.peekKeyword() else first_decl_kw;
-        if (decl_kw == null) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
-            return false;
-        }
-
-        const is_type = std.mem.eql(u8, decl_kw.?, "type");
-        const is_interface = std.mem.eql(u8, decl_kw.?, "interface");
-        if (!is_type and !is_interface) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
-            return false;
-        }
-
-        if (export_is_distinct and is_interface) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
-            return false;
-        }
-
-        self.pos += decl_kw.?.len;
-        self.col += @intCast(decl_kw.?.len);
-        self.skipWhitespaceTracked();
-
-        // Handle `export type { Foo }` re-exports.
-        if (is_type and !export_is_distinct and self.pos < self.source.len and self.source[self.pos] == '{') {
-            self.skipToStatementEnd();
-            self.blankSpan(saved_pos, self.pos);
-            return true;
-        }
-
-        if (!self.peekIdentifierStart()) {
-            self.pos = saved_pos;
-            self.line = saved_line;
-            self.col = saved_col;
-            return false;
-        }
-
-        const name_start = self.pos;
-        _ = self.scanIdentifier();
-        const name_end = self.pos;
-        self.skipWhitespaceTracked();
-
-        var generic_start: usize = 0;
-        var generic_end: usize = 0;
-        if (self.pos < self.source.len and self.source[self.pos] == '<') {
-            generic_start = self.pos;
-            if (!self.skipBalancedAngles()) {
-                self.pos = saved_pos;
-                self.line = saved_line;
-                self.col = saved_col;
-                return false;
-            }
-            generic_end = self.pos;
-            self.skipWhitespaceTracked();
-        }
-
-        if (is_interface) {
-            const extends_kw = self.peekKeyword();
-            if (extends_kw != null and std.mem.eql(u8, extends_kw.?, "extends")) {
-                self.pos += 7; // "extends"
-                self.col += 7;
+        // Handle `export type { Foo }` re-exports before delegating.
+        const peek_kw = self.peekKeyword();
+        if (peek_kw != null and std.mem.eql(u8, peek_kw.?, "type")) {
+            var scan = self.pos + 4;
+            while (scan < self.source.len and (self.source[scan] == ' ' or self.source[scan] == '\t')) : (scan += 1) {}
+            if (scan < self.source.len and self.source[scan] == '{') {
+                self.pos += 4;
+                self.col += 4;
                 self.skipWhitespaceTracked();
-                try self.skipTypeExpressionUntilDelimiter(&[_]u8{ '{', ';' }, false);
-                self.skipWhitespaceTracked();
+                self.skipToStatementEnd();
+                self.blankSpan(saved_pos, self.pos);
+                return true;
             }
         }
 
-        var type_body_start: usize = 0;
-        var type_body_end: usize = 0;
-
-        if (is_type and self.pos < self.source.len and self.source[self.pos] == '=') {
-            self.pos += 1;
-            self.col += 1;
-            self.skipWhitespaceTracked();
-            type_body_start = self.pos;
-            try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' }, false);
-            type_body_end = self.pos;
-        }
-
-        if (is_interface and self.pos < self.source.len and self.source[self.pos] == '{') {
-            type_body_start = self.pos;
-            self.skipBalancedBraces();
-            type_body_end = self.pos;
-        }
-
-        self.skipWhitespaceTracked();
-        if (self.pos < self.source.len and self.source[self.pos] == ';') {
-            self.pos += 1;
-            self.col += 1;
-        }
-
-        const kind: TypeMapKind = if (export_is_distinct) .distinct_type else if (is_type) .type_alias else .interface_decl;
-        self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
-        if (generic_start != 0) {
-            self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
-        }
-
-        self.blankSpan(saved_pos, self.pos);
-        return true;
+        return self.stripTypeOrInterfaceBody(saved_pos, saved_line, saved_col);
     }
 
     // ========================================================================
