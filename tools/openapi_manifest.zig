@@ -11,7 +11,7 @@ const ApiRouteInfo = handler_contract.ApiRouteInfo;
 
 pub const RenderOptions = struct {
     title: ?[]const u8 = null,
-    version: []const u8 = "0.14.0",
+    version: []const u8 = "0.16.0",
 };
 
 pub fn writeOpenApiJson(

@@ -140,9 +140,9 @@ pub const TRACE_STATE_SLOT = trace.TRACE_STATE_SLOT;
 /// Version information
 pub const version = struct {
     pub const major = 0;
-    pub const minor = 14;
+    pub const minor = 16;
     pub const patch = 0;
-    pub const string = "0.14.0";
+    pub const string = "0.16.0";
 };
 
 /// Create a new standalone context (not pooled)
@@ -182,7 +182,7 @@ test {
 }
 
 test "version" {
-    try std.testing.expectEqualStrings("0.14.0", version.string);
+    try std.testing.expectEqualStrings("0.16.0", version.string);
 }
 
 test "create and destroy context" {

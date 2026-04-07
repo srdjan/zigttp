@@ -14,7 +14,7 @@ const describe_rule = @import("describe_rule.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
 
-const compiler_version = "0.14.0";
+const compiler_version = "0.16.0";
 const policy_version = "2026.04.1";
 
 const CategoryCounts = struct { verifier: usize, policy: usize, property: usize };
