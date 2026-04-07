@@ -241,9 +241,9 @@ The skill file gives Claude enough context to write reasonable first drafts. The
 
 zigts is not TypeScript. It is a restricted subset compiled by a Zig-based compiler. Claude knows the full allowed/blocked feature matrix:
 
-**Allowed:** `let`, `const`, `function`, arrow functions, destructuring, `if/else`, `switch`, `for...of`, template literals, optional chaining (`?.`), nullish coalescing (`??`), `match` expressions, pipe operator (`|>`), type annotations, interfaces.
+**Allowed:** `let`, `const`, `function`, arrow functions, destructuring, `if/else`, `for...of`, template literals, optional chaining (`?.`), nullish coalescing (`??`), `match` expressions, pipe operator (`|>`), `assert` statements, `distinct type` declarations, type annotations, interfaces, `readonly` fields, type guards (`x is T`), template literal types.
 
-**Blocked:** `class`, `while`, `do...while`, C-style `for`, `for...in`, `try/catch`, `throw`, `var`, `null`, `==`/`!=`, `++`/`--`, regex, `new`, `this`, `async/await`, `Promise`, `delete`.
+**Blocked:** `class`, `while`, `do...while`, `switch`/`case`, C-style `for`, `for...in`, `try/catch`, `throw`, `var`, `null`, `==`/`!=`, `++`/`--`, regex, `new`, `this`, `async/await`, `Promise`, `delete`.
 
 Claude will not write blocked features. If you ask for a retry loop, it uses `for (const _ of range(n))`. If you ask for error handling, it uses Result types. If you ask for async operations, it uses `fetchSync()` with `parallel()` or `race()`.
 

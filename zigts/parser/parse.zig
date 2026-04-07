@@ -90,7 +90,6 @@ pub const Parser = struct {
 
     // Context flags
     in_loop: bool,
-    in_switch: bool,
     in_function: bool,
 
     // Guard composition: binding slot for `guard` imported from zigttp:compose
@@ -111,7 +110,6 @@ pub const Parser = struct {
             .previous = undefined,
             .atoms = null,
             .in_loop = false,
-            .in_switch = false,
             .in_function = false,
         };
         // Prime the parser with first token
@@ -1002,8 +1000,8 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume 'break'
 
-        if (!self.in_loop and !self.in_switch) {
-            self.errorAt(loc, "'break' outside of loop or switch");
+        if (!self.in_loop) {
+            self.errorAt(loc, "'break' outside of loop");
         }
 
         // Labeled break is not supported

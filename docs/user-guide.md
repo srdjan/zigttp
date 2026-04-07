@@ -2081,7 +2081,7 @@ verify error: not all code paths return a Response
    |
   2 | function handler(req) {
    |                 ^
-   = help: ensure every branch (if/else, switch/default) ends with a return statement
+   = help: ensure every branch (if/else) ends with a return statement
 ```
 
 ```

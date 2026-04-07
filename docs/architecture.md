@@ -396,7 +396,7 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 
 ### Compile-Time Path Analysis and Behavioral Contract
 
-`PathGenerator` (`zigts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`/`switch`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
+`PathGenerator` (`zigts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
 
 Each enumerated path becomes a `BehaviorPath` (`zigts/handler_contract.zig`) in the contract's `behaviors` section. A `BehaviorPath` records route method/pattern, branching conditions (which I/O calls succeed or fail), the I/O call sequence, response status, I/O depth, and whether it represents a failure path. `behaviors_exhaustive` is true when PathGenerator did not hit the 1024-path cap.
 

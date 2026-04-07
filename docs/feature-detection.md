@@ -90,7 +90,7 @@ These were previously detected by the stripper but moved to the parser for consi
 |---------|--------|
 | `break` in `for-of` | Supported |
 | `continue` in `for-of` | Supported |
-| `break` outside loop | Error: "'break' outside of loop or switch" |
+| `break` outside loop | Error: "'break' outside of loop" |
 | `continue` outside loop | Error: "'continue' outside of loop" |
 | Labeled `break`/`continue` | Error: use a conditional instead |
 
