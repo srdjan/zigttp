@@ -199,12 +199,8 @@ pub const TypeChecker = struct {
                     const inferred = self.inferType(vd.init);
 
                     const loc = self.ir_view.getLoc(node);
-                    const declared = if (loc) |l|
-                        (self.env.getVarTypeByLoc(l.line, l.column) orelse blk: {
-                            const name = self.resolveAtomName(binding.slot);
-                            break :blk if (name) |n| self.env.getVarTypeByName(n) orelse null_type_idx else null_type_idx;
-                        })
-                    else blk: {
+                    const by_loc = if (loc) |l| self.env.getVarTypeByLoc(l.line, l.column) else null;
+                    const declared = by_loc orelse blk: {
                         const name = self.resolveAtomName(binding.slot);
                         break :blk if (name) |n| self.env.getVarTypeByName(n) orelse null_type_idx else null_type_idx;
                     };
