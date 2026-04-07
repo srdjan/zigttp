@@ -964,15 +964,10 @@ pub const Parser = struct {
             }
         }
 
-        if (!is_for_of) {
-            // C-style for loops are not supported - only for-of
-            self.scopes.popScope();
-            self.errors.addErrorAt(.unsupported_feature, self.previous, "C-style 'for' loops are not supported; use 'for (let x of array)' or 'for (let i of range(n))' instead");
-            return error.ParseError;
-        }
-
+        // C-style for loops are not supported - only for-of
         self.scopes.popScope();
-        return error.UnexpectedToken;
+        self.errors.addErrorAt(.unsupported_feature, self.previous, "C-style 'for' loops are not supported; use 'for (let x of array)' or 'for (let i of range(n))' instead");
+        return error.ParseError;
     }
 
     fn parseReturnStatement(self: *Parser) anyerror!NodeIndex {
