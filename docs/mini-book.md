@@ -351,7 +351,10 @@ const user = serviceCall("users", "GET /api/users/:id", {
 Named internal service calls. Instead of baking internal base URLs into source,
 handlers can call other handlers declared in `system.json` by stable service
 name. The linker resolves those edges directly and can prove that the target
-route exists and that required params are present.
+route exists and that required params are present. With `zigts check --system
+system.json`, literal `serviceCall()` sites also get typed `status` values and
+typed `.json()` payloads. If different statuses produce different payload
+shapes, narrow on `response.status` before calling `.json()`.
 
 ### zigttp:io
 
@@ -597,6 +600,7 @@ The contract captures:
 - **Environment variables**: every literal `env("NAME")` call, with `dynamic: true` if any non-literal argument is detected
 - **Outbound hosts**: every literal URL in `fetchSync()` calls
 - **Internal service calls**: every literal `serviceCall(service, "METHOD /path", init)` edge
+- **System payload proof**: payload compatibility for each named internal edge, with explicit gaps when response schemas stay dynamic
 - **Cache namespaces**: every literal namespace in cache operations
 - **Route patterns**: every route string passed to `routerMatch`
 - **SQL queries**: every SQL statement with operation type and table references
@@ -947,6 +951,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `-Dhandler=<path>` | Precompile handler into binary |
 | `-Dverify` | Enable compile-time verification |
 | `-Dcontract` | Emit contract.json |
+| `-Dsystem=<path>` | Thread system.json into compile-time `serviceCall()` typing |
 | `-Ddeploy=aws` | Generate deployment manifest |
 | `-Dreplay=<traces>` | Replay-verify before embedding |
 | `-Dtest-file=<tests>` | Run handler tests at build time |

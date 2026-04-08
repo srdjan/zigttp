@@ -979,7 +979,7 @@ pub const Runtime = struct {
                 zq.modules.populateModuleTypes(&type_env, &type_pool, self.allocator);
                 type_env.populateFromTypeMap(&tm);
 
-                var tc = zq.TypeChecker.init(self.allocator, ir_view, &self.ctx.atoms, &type_env);
+                var tc = zq.TypeChecker.init(self.allocator, ir_view, &self.ctx.atoms, &type_env, null);
                 defer tc.deinit();
 
                 const tc_errors = try tc.check(p.root_node);

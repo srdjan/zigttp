@@ -61,6 +61,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
         std.debug.print("Error parsing {s}: {}\n", .{ system_path, err });
         std.process.exit(2);
     };
+    try precompile.resolveSystemHandlerPaths(allocator, system_path, &config);
 
     if (config.handlers.len == 0) {
         std.debug.print("Error: system.json contains no handlers\n", .{});
@@ -81,7 +82,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     for (config.handlers, 0..) |entry, idx| {
         std.debug.print("  [{d}/{d}] Checking {s}...", .{ idx + 1, config.handlers.len, entry.path });
 
-        var result = precompile.runCheckOnly(allocator, entry.path, null, false) catch |err| {
+        var result = precompile.runCheckOnly(allocator, entry.path, null, false, system_path) catch |err| {
             std.debug.print(" FAILED ({s})\n", .{@errorName(err)});
             total_errors += 1;
             // Initialize a minimal contract so we can continue

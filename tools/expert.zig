@@ -148,7 +148,7 @@ fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void 
     var has_errors = false;
 
     for (paths.items) |path| {
-        var result = precompile.runCheckOnly(allocator, path, null, true) catch |err| {
+        var result = precompile.runCheckOnly(allocator, path, null, true, null) catch |err| {
             if (json_mode) {
                 // Report file-level error as a diagnostic
                 try all_diagnostics.append(allocator, .{

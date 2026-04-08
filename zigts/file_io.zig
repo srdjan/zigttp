@@ -24,6 +24,15 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize)
     return buffer.toOwnedSlice(allocator);
 }
 
+/// Check whether a file exists using POSIX open (no fstat/libc dependency).
+pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
+    const path_z = allocator.dupeZ(u8, path) catch return false;
+    defer allocator.free(path_z);
+    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch return false;
+    std.Io.Threaded.closeFd(fd);
+    return true;
+}
+
 /// Write a file synchronously using POSIX operations.
 pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);

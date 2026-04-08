@@ -314,7 +314,7 @@ Standalone analysis and compilation without starting a server.
 
 ```bash
 zigts check [handler.ts] [options]    # Verify handler, show proof card
-zigts compile <handler.ts> <out.zig>  # Compile to embedded bytecode
+zigts compile [--system path] <handler.ts> <out.zig>  # Compile to embedded bytecode
 zigts prove <old.json> <new.json>     # Compare contracts (exit 0=safe, 1=breaking)
 zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
 zigts link <system.json>              # Cross-handler contract linking
@@ -327,7 +327,7 @@ zigts expert verify-paths <f>... [--json]  # Full analysis on files
 
 #### Structured JSON output
 
-`zigts check --json handler.ts` writes machine-readable diagnostics to stdout. Each diagnostic has an error code, source location, and a suggestion naming the idiomatic replacement.
+`zigts check --json handler.ts` writes machine-readable diagnostics to stdout. Add `--system system.json` when the handler uses `serviceCall()` and you want compile-time typing for internal service responses and request-shape validation.
 
 ```json
 {
@@ -417,7 +417,7 @@ function handler(req: Request): Response {
     params: { id: "123" },
   });
 
-  if (!user.ok) {
+  if (user.status !== 200) {
     return Response.json({ error: "user service unavailable" }, { status: 502 });
   }
 
@@ -426,6 +426,13 @@ function handler(req: Request): Response {
 ```
 
 `serviceCall(serviceName, "METHOD /path", init?)` resolves through `system.json`, lowers to the existing outbound bridge, and gives `zigts link` a first-class internal edge to verify.
+
+With `zigts check --system <FILE>` or `zigts compile --system <FILE>`, literal `serviceCall()` sites also become payload-aware at compile time:
+
+- `status` narrows to the target route's proven status codes
+- `.json()` returns the target route's proven JSON type when there is a single compatible response schema
+- if different status codes produce different schemas, narrow on `resp.status` before calling `.json()`
+- required path/query/header/body inputs are validated against the target route contract during type checking
 
 `init` supports:
 
@@ -453,6 +460,12 @@ zigttp serve --system examples/system/system.json examples/system/gateway.ts
 ```
 
 `zigts link <system.json>` uses those names and routes to prove internal service composition. Raw `fetchSync("https://users.internal/...")` still works, but named service calls produce stronger linking and clearer diagnostics.
+
+The linker now reports payload proof separately from route proof. `proofLevel` keeps its current meaning, while `system-contract.json` and `system-report.txt` add explicit payload fields:
+
+- `payloadProven`
+- `payloadCompatible`
+- `payloadDetail`
 
 ## Compile-Time Toolchain
 
@@ -531,6 +544,7 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **Environment variables** accessed via `env("NAME")` - literal names are enumerated, dynamic access is flagged
 - **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
 - **Internal service calls** made via `serviceCall("name", "METHOD /path", init)` - service names, route signatures, and statically proven params/query/header/body keys are captured
+- **System-linked payload facts** for named internal edges - target response statuses, JSON payload proof, and payload-proof gaps are reported in system-level output
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
 - **API surface** from proven routes: method/path, path/query/header params, JSON request bodies, response variants, and bearer auth metadata

@@ -91,6 +91,17 @@ pub const ResponseCoverage = struct {
     }
 };
 
+pub const PayloadProof = struct {
+    source_idx: usize,
+    target_idx: usize,
+    compatible: bool,
+    detail: ?[]const u8 = null,
+
+    pub fn deinit(self: *PayloadProof, allocator: std.mem.Allocator) void {
+        if (self.detail) |detail| allocator.free(detail);
+    }
+};
+
 pub const CrossBoundaryFlow = struct {
     source_idx: usize,
     target_idx: usize,
@@ -110,6 +121,7 @@ pub const FailureCascade = struct {
 pub const SystemProperties = struct {
     all_links_resolved: bool,
     all_responses_covered: bool,
+    payload_compatible: bool,
     injection_safe: bool,
     no_secret_leakage: bool,
     no_credential_leakage: bool,
@@ -130,6 +142,7 @@ pub const SystemAnalysis = struct {
     links: std.ArrayList(SystemLink),
     unresolved: std.ArrayList(UnresolvedLink),
     response_coverage: std.ArrayList(ResponseCoverage),
+    payload_proofs: std.ArrayList(PayloadProof),
     cross_boundary_flows: std.ArrayList(CrossBoundaryFlow),
     failure_cascades: std.ArrayList(FailureCascade),
     properties: SystemProperties,
@@ -142,6 +155,8 @@ pub const SystemAnalysis = struct {
         self.unresolved.deinit(allocator);
         for (self.response_coverage.items) |*rc| rc.deinit(allocator);
         self.response_coverage.deinit(allocator);
+        for (self.payload_proofs.items) |*proof| proof.deinit(allocator);
+        self.payload_proofs.deinit(allocator);
         self.cross_boundary_flows.deinit(allocator);
         self.failure_cascades.deinit(allocator);
         for (self.warnings.items) |w| allocator.free(w);
@@ -161,7 +176,7 @@ const RouteResolution = struct {
     matched_method: ?[]const u8,
 };
 
-const ParsedServiceRoute = struct {
+pub const ParsedServiceRoute = struct {
     method: []const u8,
     path: []const u8,
 };
@@ -249,7 +264,7 @@ fn findHandlerByName(config: SystemConfig, service_name: []const u8) ?usize {
     return null;
 }
 
-fn parseServiceRoute(route_pattern: []const u8) ?ParsedServiceRoute {
+pub fn parseServiceRoute(route_pattern: []const u8) ?ParsedServiceRoute {
     const sep = std.mem.indexOfScalar(u8, route_pattern, ' ') orelse return null;
     if (sep == 0 or sep + 1 >= route_pattern.len) return null;
 
@@ -318,11 +333,91 @@ fn findApiRoute(contract: *const HandlerContract, method: []const u8, path: []co
     return null;
 }
 
+fn findApiRouteForLink(contract: *const HandlerContract, link: SystemLink) ?*const handler_contract.ApiRouteInfo {
+    const matched_method = link.matched_method orelse return null;
+    for (contract.api.routes.items) |*api_route| {
+        if (!methodMatches(matched_method, api_route.method)) continue;
+        if (route_match.pathsMatch(api_route.path, link.matched_route)) return api_route;
+    }
+    return null;
+}
+
+fn findResponseSchemaJson(
+    contract: *const HandlerContract,
+    route: *const handler_contract.ApiRouteInfo,
+    response: handler_contract.ApiResponseInfo,
+) ?[]const u8 {
+    if (response.schema_json) |schema_json| return schema_json;
+    if (response.schema_ref) |schema_ref| {
+        for (contract.api.schemas.items) |schema| {
+            if (std.mem.eql(u8, schema.name, schema_ref)) return schema.schema_json;
+        }
+    }
+    if (route.response_schema_json) |schema_json| return schema_json;
+    if (route.response_schema_ref) |schema_ref| {
+        for (contract.api.schemas.items) |schema| {
+            if (std.mem.eql(u8, schema.name, schema_ref)) return schema.schema_json;
+        }
+    }
+    return null;
+}
+
+fn payloadGap(allocator: std.mem.Allocator, link: SystemLink, detail: []const u8) !PayloadProof {
+    return .{
+        .source_idx = link.source_idx,
+        .target_idx = link.target_idx,
+        .compatible = false,
+        .detail = try allocator.dupe(u8, detail),
+    };
+}
+
+fn analyzePayloadProof(
+    allocator: std.mem.Allocator,
+    contracts: []const HandlerContract,
+    link: SystemLink,
+) !PayloadProof {
+    const target = &contracts[link.target_idx];
+    const api_route = findApiRouteForLink(target, link) orelse
+        return payloadGap(allocator, link, "target route has no API payload contract");
+
+    if (api_route.responses_dynamic)
+        return payloadGap(allocator, link, "target route has dynamic response variants");
+
+    if (api_route.responses.items.len == 0)
+        return payloadGap(allocator, link, "target route has no declared responses");
+
+    for (api_route.responses.items) |response| {
+        if (response.dynamic)
+            return payloadGap(allocator, link, "target route response schema is dynamic");
+        if (response.status == null)
+            return payloadGap(allocator, link, "target route response status is unknown");
+
+        const content_type = response.content_type orelse api_route.response_content_type orelse
+            return payloadGap(allocator, link, "target route response content type is unknown");
+        if (!std.mem.startsWith(u8, content_type, "application/json")) {
+            return .{
+                .source_idx = link.source_idx,
+                .target_idx = link.target_idx,
+                .compatible = false,
+                .detail = try std.fmt.allocPrint(allocator, "target route response is not JSON ({s})", .{content_type}),
+            };
+        }
+        if (findResponseSchemaJson(target, api_route, response) == null)
+            return payloadGap(allocator, link, "target route JSON schema is unavailable");
+    }
+
+    return .{
+        .source_idx = link.source_idx,
+        .target_idx = link.target_idx,
+        .compatible = true,
+    };
+}
+
 fn pathParamProvided(call: handler_contract.ServiceCallInfo, name: []const u8) bool {
     return handler_contract.containsString(call.path_params.items, name);
 }
 
-fn collectRoutePathParamNames(
+pub fn collectRoutePathParamNames(
     allocator: std.mem.Allocator,
     route: *const handler_contract.ApiRouteInfo,
 ) !std.ArrayList([]const u8) {
@@ -441,6 +536,7 @@ pub fn linkSystem(
     var links: std.ArrayList(SystemLink) = .empty;
     var unresolved: std.ArrayList(UnresolvedLink) = .empty;
     var response_coverage: std.ArrayList(ResponseCoverage) = .empty;
+    var payload_proofs: std.ArrayList(PayloadProof) = .empty;
     var cross_boundary_flows: std.ArrayList(CrossBoundaryFlow) = .empty;
     var failure_cascades: std.ArrayList(FailureCascade) = .empty;
     var warnings: std.ArrayList([]const u8) = .empty;
@@ -666,6 +762,25 @@ pub fn linkSystem(
         try response_coverage.append(allocator, rc);
     }
 
+    // Phase C2: Payload proof for each resolved link
+    for (links.items) |link| {
+        const proof = try analyzePayloadProof(allocator, contracts, link);
+        if (!proof.compatible) {
+            const msg = try std.fmt.allocPrint(
+                allocator,
+                "{s}: {s} {s} payload proof gap: {s}",
+                .{
+                    config.handlers[link.source_idx].path,
+                    if (link.kind == .fetch_url) "fetchSync target" else "serviceCall target",
+                    config.handlers[link.target_idx].path,
+                    proof.detail orelse "unknown reason",
+                },
+            );
+            try warnings.append(allocator, msg);
+        }
+        try payload_proofs.append(allocator, proof);
+    }
+
     // Phase D: Cross-boundary data flow analysis (property-based)
     for (links.items) |link| {
         const source_props = contracts[link.source_idx].properties;
@@ -729,6 +844,12 @@ pub fn linkSystem(
             break;
         }
     }
+    for (payload_proofs.items) |proof| {
+        if (!proof.compatible) {
+            properties.payload_compatible = false;
+            break;
+        }
+    }
 
     const all_verified = blk: {
         for (contracts) |c| {
@@ -747,6 +868,7 @@ pub fn linkSystem(
         .links = links,
         .unresolved = unresolved,
         .response_coverage = response_coverage,
+        .payload_proofs = payload_proofs,
         .cross_boundary_flows = cross_boundary_flows,
         .failure_cascades = failure_cascades,
         .properties = properties,
@@ -919,6 +1041,7 @@ fn composeSystemProperties(
         // Computed by caller from analysis results
         .all_links_resolved = true,
         .all_responses_covered = true,
+        .payload_compatible = true,
         .injection_safe = injection_safe,
         .no_secret_leakage = no_secret_leakage,
         .no_credential_leakage = no_credential_leakage,
@@ -1071,6 +1194,7 @@ pub fn writeSystemContractJson(
     // links
     try writer.writeAll("  \"links\": [\n");
     for (analysis.links.items, 0..) |link, i| {
+        const payload_proof = if (i < analysis.payload_proofs.items.len) analysis.payload_proofs.items[i] else null;
         if (i > 0) try writer.writeAll(",\n");
         try writer.writeAll("    {\n");
         try writer.writeAll("      \"kind\": ");
@@ -1083,6 +1207,15 @@ pub fn writeSystemContractJson(
         try json_utils.writeJsonString(writer, config_handlers[link.target_idx].path);
         try writer.writeAll(",\n      \"matchedRoute\": ");
         try json_utils.writeJsonString(writer, link.matched_route);
+        if (payload_proof) |proof| {
+            try writer.print(",\n      \"payloadCompatible\": {s}", .{boolStr(proof.compatible)});
+            try writer.writeAll(",\n      \"payloadDetail\": ");
+            if (proof.detail) |detail| {
+                try json_utils.writeJsonString(writer, detail);
+            } else {
+                try writer.writeAll("null");
+            }
+        }
         try writer.writeAll(",\n      \"status\": \"linked\"\n");
         try writer.writeAll("    }");
     }
@@ -1135,6 +1268,7 @@ pub fn writeSystemContractJson(
     try writer.writeAll("  \"systemProperties\": {\n");
     try writer.print("    \"allLinksResolved\": {s},\n", .{boolStr(p.all_links_resolved)});
     try writer.print("    \"allResponsesCovered\": {s},\n", .{boolStr(p.all_responses_covered)});
+    try writer.print("    \"payloadCompatible\": {s},\n", .{boolStr(p.payload_compatible)});
     try writer.print("    \"injectionSafe\": {s},\n", .{boolStr(p.injection_safe)});
     try writer.print("    \"noSecretLeakage\": {s},\n", .{boolStr(p.no_secret_leakage)});
     try writer.print("    \"noCredentialLeakage\": {s},\n", .{boolStr(p.no_credential_leakage)});
@@ -1274,11 +1408,28 @@ pub fn writeSystemReport(
     }
     if (has_unsafe_flow) try writer.writeAll("\n");
 
+    var has_payload_gaps = false;
+    for (analysis.payload_proofs.items) |proof| {
+        if (!proof.compatible) {
+            if (!has_payload_gaps) {
+                try writer.writeAll("--- PAYLOAD PROOF ---\n");
+                has_payload_gaps = true;
+            }
+            try writer.print("  GAP: {s} -> {s}: {s}\n", .{
+                config_handlers[proof.source_idx].path,
+                config_handlers[proof.target_idx].path,
+                proof.detail orelse "unknown reason",
+            });
+        }
+    }
+    if (has_payload_gaps) try writer.writeAll("\n");
+
     // System properties
     try writer.writeAll("--- SYSTEM PROPERTIES ---\n");
     const p = analysis.properties;
     try writer.print("  {s} all_links_resolved\n", .{provenLabel(p.all_links_resolved)});
     try writer.print("  {s} all_responses_covered\n", .{provenLabel(p.all_responses_covered)});
+    try writer.print("  {s} payload_compatible\n", .{provenLabel(p.payload_compatible)});
     try writer.print("  {s} injection_safe\n", .{provenLabel(p.injection_safe)});
     try writer.print("  {s} no_secret_leakage\n", .{provenLabel(p.no_secret_leakage)});
     try writer.print("  {s} no_credential_leakage\n", .{provenLabel(p.no_credential_leakage)});
@@ -1478,6 +1629,127 @@ test "linkSystem: serviceCall links named services" {
     try std.testing.expectEqual(LinkKind.service_call, analysis.links.items[0].kind);
     try std.testing.expectEqualStrings("GET /api/users/:id", analysis.links.items[0].call_ref);
     try std.testing.expectEqual(@as(usize, 0), analysis.unresolved.items.len);
+}
+
+test "linkSystem: payload proof is reported for JSON service responses" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
+    var service_calls: std.ArrayList(handler_contract.ServiceCallInfo) = .empty;
+    try service_calls.append(allocator, .{
+        .service = try allocator.dupe(u8, "users"),
+        .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
+        .path_params = blk: {
+            var params: std.ArrayList([]const u8) = .empty;
+            try params.append(allocator, try allocator.dupe(u8, "id"));
+            break :blk params;
+        },
+    });
+    contracts[0].service_calls = service_calls;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "users.ts"));
+    var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
+    try responses.append(allocator, .{
+        .status = 200,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+    });
+    var api_routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
+    try api_routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/api/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .responses = responses,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+    });
+    contracts[1].api.routes = api_routes;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
+    };
+    const config = SystemConfig{
+        .version = 1,
+        .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries),
+    };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), analysis.payload_proofs.items.len);
+    try std.testing.expect(analysis.payload_proofs.items[0].compatible);
+    try std.testing.expect(analysis.properties.payload_compatible);
+}
+
+test "linkSystem: payload proof gap is explicit for dynamic responses" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
+    var service_calls: std.ArrayList(handler_contract.ServiceCallInfo) = .empty;
+    try service_calls.append(allocator, .{
+        .service = try allocator.dupe(u8, "users"),
+        .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
+        .path_params = blk: {
+            var params: std.ArrayList([]const u8) = .empty;
+            try params.append(allocator, try allocator.dupe(u8, "id"));
+            break :blk params;
+        },
+    });
+    contracts[0].service_calls = service_calls;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "users.ts"));
+    var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
+    try responses.append(allocator, .{
+        .status = 200,
+        .content_type = try allocator.dupe(u8, "application/json"),
+        .dynamic = true,
+    });
+    var api_routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
+    try api_routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/api/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .responses = responses,
+        .responses_dynamic = true,
+        .response_status = 200,
+        .response_content_type = try allocator.dupe(u8, "application/json"),
+        .response_schema_dynamic = true,
+    });
+    contracts[1].api.routes = api_routes;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
+    };
+    const config = SystemConfig{
+        .version = 1,
+        .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries),
+    };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), analysis.payload_proofs.items.len);
+    try std.testing.expect(!analysis.payload_proofs.items[0].compatible);
+    try std.testing.expect(!analysis.properties.payload_compatible);
+    try std.testing.expect(analysis.warnings.items.len > 0);
 }
 
 test "linkSystem: unlinked route" {

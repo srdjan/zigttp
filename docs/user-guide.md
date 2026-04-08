@@ -1253,7 +1253,7 @@ function handler(req) {
         headers: { "x-client-id": "gateway" },
     });
 
-    if (!user.ok) {
+    if (user.status !== 200) {
         return Response.json({ error: "upstream unavailable" }, { status: 502 });
     }
 
@@ -1284,6 +1284,17 @@ Minimal `system.json`:
 can prove that the named service exists, that the route exists on the target
 handler, and that required path/query/header/body inputs are present when the
 target route contract is statically known.
+
+For compile-time typing, run `zigts check --system <FILE>` or `zigts compile --system <FILE>`.
+When the service name and route are literal:
+
+- `response.status` narrows to the target route's proven statuses
+- `response.json()` returns the target route's proven JSON type when the route has one compatible JSON response shape
+- if the route has multiple status-specific JSON shapes, narrow on `response.status` before calling `response.json()`
+- required `params`, `query`, `headers`, and body presence are checked against the target route contract
+
+`zigts link` now reports payload proof separately from route proof. System output includes
+`payloadProven`, `payloadCompatible`, and `payloadDetail` for each linked internal edge.
 
 ### zigttp:io
 
@@ -2177,6 +2188,7 @@ The contract extracts from the handler's IR:
 - Literal env var names from `env("NAME")` calls
 - Outbound hosts from `fetchSync("https://...")` URL arguments
 - Named internal service calls from `serviceCall("name", "METHOD /path", init)`
+- System-level payload proof for named internal links, including explicit payload-proof gaps
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Registered SQL query names, operations, and touched tables from `sql("name", "...")`
 - Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)

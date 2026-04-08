@@ -15,7 +15,7 @@ function getUserById(req) {
   const orders = serviceCall("orders", "GET /api/orders", {
     query: { userId: id },
   });
-  if (!orders.ok) {
+  if (orders.status !== 200) {
     return Response.json({ error: "orders unavailable" }, { status: 502 });
   }
 

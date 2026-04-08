@@ -20,7 +20,7 @@ function handler(req) {
   const user = serviceCall("users", "GET /api/users/:id", {
     params: { id: auth.value.sub },
   });
-  if (!user.ok) {
+  if (user.status !== 200) {
     return Response.json({ error: "user service unavailable" }, { status: 502 });
   }
 

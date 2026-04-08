@@ -16,6 +16,10 @@ const ContractBuilder = handler_contract.ContractBuilder;
 const writeContractJson = handler_contract.writeContractJson;
 const HandlerContract = handler_contract.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
+const ServiceTypeContext = zigts.service_types.ServiceTypeContext;
+const ServiceRouteInfo = zigts.service_types.RouteInfo;
+const ServiceResponseVariant = zigts.service_types.ResponseVariant;
+const system_linker = zigts.system_linker;
 const handler_policy = zigts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
 const deploy_manifest = @import("deploy_manifest.zig");
@@ -97,6 +101,212 @@ pub const CompiledHandler = struct {
 
 const readFilePosix = zigts.file_io.readFile;
 
+const fileExists = zigts.file_io.fileExists;
+
+pub fn resolveSystemHandlerPaths(
+    allocator: std.mem.Allocator,
+    system_path: []const u8,
+    config: *system_linker.SystemConfig,
+) !void {
+    const base_dir = std.fs.path.dirname(system_path) orelse ".";
+    for (config.handlers) |*entry| {
+        if (std.fs.path.isAbsolute(entry.path)) continue;
+        if (!fileExists(allocator, entry.path)) {
+            const resolved = try std.fs.path.resolve(allocator, &.{ base_dir, entry.path });
+            allocator.free(entry.path);
+            entry.path = resolved;
+        }
+    }
+}
+
+fn findSchemaJsonByName(contract: *const HandlerContract, schema_ref: []const u8) ?[]const u8 {
+    for (contract.api.schemas.items) |schema| {
+        if (std.mem.eql(u8, schema.name, schema_ref)) return schema.schema_json;
+    }
+    return null;
+}
+
+const collectRoutePathParamNames = system_linker.collectRoutePathParamNames;
+
+fn buildServiceTypeContextFromContracts(
+    allocator: std.mem.Allocator,
+    config: *const system_linker.SystemConfig,
+    contracts: []const HandlerContract,
+) !ServiceTypeContext {
+    var route_count: usize = 0;
+    for (contracts) |contract| route_count += contract.api.routes.items.len;
+
+    var routes = try allocator.alloc(ServiceRouteInfo, route_count);
+    var out_index: usize = 0;
+    errdefer {
+        for (routes[0..out_index]) |*route| route.deinit(allocator);
+        allocator.free(routes);
+    }
+    for (contracts, config.handlers) |contract, entry| {
+        for (contract.api.routes.items) |api_route| {
+            var required_path_params = try collectRoutePathParamNames(allocator, &api_route);
+            errdefer {
+                for (required_path_params.items) |name| allocator.free(name);
+                required_path_params.deinit(allocator);
+            }
+
+            var required_query_params: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (required_query_params.items) |name| allocator.free(name);
+                required_query_params.deinit(allocator);
+            }
+            for (api_route.query_params.items) |param| {
+                if (!param.required) continue;
+                try required_query_params.append(allocator, try allocator.dupe(u8, param.name));
+            }
+
+            var required_header_params: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (required_header_params.items) |name| allocator.free(name);
+                required_header_params.deinit(allocator);
+            }
+            for (api_route.header_params.items) |param| {
+                if (!param.required) continue;
+                try required_header_params.append(allocator, try allocator.dupe(u8, param.name));
+            }
+
+            var responses = try allocator.alloc(ServiceResponseVariant, api_route.responses.items.len);
+            errdefer {
+                for (responses) |*response| response.deinit(allocator);
+                allocator.free(responses);
+            }
+            for (api_route.responses.items, 0..) |response, response_idx| {
+                const schema_json = if (response.schema_json) |raw_schema|
+                    try allocator.dupe(u8, raw_schema)
+                else if (response.schema_ref) |schema_ref|
+                    if (findSchemaJsonByName(&contract, schema_ref)) |resolved_schema|
+                        try allocator.dupe(u8, resolved_schema)
+                    else
+                        null
+                else
+                    null;
+                errdefer if (schema_json) |owned| allocator.free(owned);
+
+                responses[response_idx] = .{
+                    .status = response.status orelse api_route.response_status orelse 200,
+                    .content_type = if (response.content_type) |content_type|
+                        try allocator.dupe(u8, content_type)
+                    else if (api_route.response_content_type) |content_type|
+                        try allocator.dupe(u8, content_type)
+                    else
+                        null,
+                    .schema_json = schema_json,
+                    .dynamic = response.dynamic,
+                };
+            }
+
+            routes[out_index] = .{
+                .service_name = try allocator.dupe(u8, entry.name),
+                .handler_path = try allocator.dupe(u8, entry.path),
+                .method = try allocator.dupe(u8, api_route.method),
+                .path = try allocator.dupe(u8, api_route.path),
+                .required_path_params = try required_path_params.toOwnedSlice(allocator),
+                .required_query_params = try required_query_params.toOwnedSlice(allocator),
+                .required_header_params = try required_header_params.toOwnedSlice(allocator),
+                .request_dynamic = api_route.request_schema_dynamic or api_route.query_params_dynamic or api_route.header_params_dynamic or api_route.request_bodies_dynamic,
+                .response_dynamic = api_route.responses_dynamic,
+                .requires_body = api_route.request_bodies.items.len > 0,
+                .responses = responses,
+            };
+            out_index += 1;
+        }
+    }
+
+    return .{ .routes = routes[0..out_index] };
+}
+
+fn buildContractForServiceContext(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    sql_schema_path: ?[]const u8,
+) !HandlerContract {
+    const source = try readFilePosix(allocator, handler_path, 10 * 1024 * 1024);
+    defer allocator.free(source);
+
+    var source_to_parse: []const u8 = source;
+    var strip_result: ?zigts.StripResult = null;
+    defer if (strip_result) |*sr| sr.deinit();
+
+    const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
+    const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
+    if (is_ts or is_tsx) {
+        strip_result = try zigts.strip(allocator, source, .{
+            .tsx_mode = is_tsx,
+            .enable_comptime = true,
+            .comptime_env = .{},
+        });
+        source_to_parse = strip_result.?.code;
+    }
+
+    var atoms = zigts.context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var js_parser = zigts.parser.JsParser.init(allocator, source_to_parse);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
+        js_parser.tokenizer.enableJsx();
+    }
+
+    const root = try js_parser.parse();
+    try validateVirtualModuleImports(
+        ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        &atoms,
+        handler_path,
+    );
+    _ = zigts.parser.optimizeIR(allocator, &js_parser.nodes, &js_parser.constants, root) catch {};
+
+    return buildContractWithPolicy(
+        allocator,
+        &js_parser,
+        &atoms,
+        handler_path,
+        root,
+        null,
+        null,
+        if (strip_result) |*sr| &sr.type_map else null,
+        null,
+        sql_schema_path,
+        null,
+        null,
+    );
+}
+
+fn loadServiceTypeContext(
+    allocator: std.mem.Allocator,
+    system_path: ?[]const u8,
+    sql_schema_path: ?[]const u8,
+) !?ServiceTypeContext {
+    const resolved_system_path = system_path orelse return null;
+
+    const system_json = try readFilePosix(allocator, resolved_system_path, 1024 * 1024);
+    defer allocator.free(system_json);
+
+    var config = try system_linker.parseSystemConfig(allocator, system_json);
+    defer config.deinit(allocator);
+    try resolveSystemHandlerPaths(allocator, resolved_system_path, &config);
+
+    var contracts = try allocator.alloc(HandlerContract, config.handlers.len);
+    defer allocator.free(contracts);
+
+    var initialized: usize = 0;
+    defer {
+        for (contracts[0..initialized]) |*contract| contract.deinit(allocator);
+    }
+
+    for (config.handlers, 0..) |entry, idx| {
+        contracts[idx] = try buildContractForServiceContext(allocator, entry.path, sql_schema_path);
+        initialized += 1;
+    }
+
+    return try buildServiceTypeContextFromContracts(allocator, &config, contracts[0..initialized]);
+}
+
 /// Write a file synchronously using posix operations
 pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
     const path_z = try allocator.dupeZ(u8, path);
@@ -128,6 +338,7 @@ const PrecompileOptions = struct {
     emit_openapi: bool = false,
     sdk_target: ?[]const u8 = null,
     sql_schema_path: ?[]const u8 = null,
+    system_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
     deploy_target_str: ?[]const u8 = null,
     replay_trace_path: ?[]const u8 = null,
@@ -192,6 +403,14 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             index += 1;
             opts.sql_schema_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --sql-schema\n", .{});
+                return error.MissingArgument;
+            };
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--system")) {
+            index += 1;
+            opts.system_path = if (index < argv.len) argv[index] else {
+                std.debug.print("Missing path after --system\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -296,7 +515,7 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         std.debug.print(usage, .{});
         std.debug.print("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -440,6 +659,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     const emit_openapi = opts.emit_openapi;
     const sdk_target = opts.sdk_target;
     const sql_schema_path = opts.sql_schema_path;
+    const system_path = opts.system_path;
     const policy_path = opts.policy_path;
     const deploy_target_str = opts.deploy_target_str;
     const replay_trace_path = opts.replay_trace_path;
@@ -483,6 +703,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         policy,
         sql_schema_path,
         generate_tests,
+        system_path,
     ) catch |err| {
         std.debug.print("Compilation failed: {}\n", .{err});
         return err;
@@ -983,7 +1204,13 @@ pub const CheckResult = struct {
 
 /// Run the full analysis pipeline without generating bytecode.
 /// Returns a CheckResult with all verification, contract, and coverage data.
-pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_schema_path: ?[]const u8, json_mode: bool) !CheckResult {
+pub fn runCheckOnly(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    sql_schema_path: ?[]const u8,
+    json_mode: bool,
+    system_path: ?[]const u8,
+) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
         return err;
@@ -1000,6 +1227,10 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
     const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
     result.is_typescript = is_ts or is_tsx;
+
+    var service_type_context = try loadServiceTypeContext(allocator, system_path, sql_schema_path);
+    defer if (service_type_context) |*ctx| ctx.deinit(allocator);
+    const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
 
     // Stage 1: TypeScript strip
     if (is_ts or is_tsx) {
@@ -1109,7 +1340,13 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
         zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
         type_env.populateFromTypeMap(&tm);
 
-        var tc = zigts.type_checker.TypeChecker.init(allocator, ir_view, &atoms, &type_env);
+        var tc = zigts.type_checker.TypeChecker.init(
+            allocator,
+            ir_view,
+            &atoms,
+            &type_env,
+            stc_ptr,
+        );
         defer tc.deinit();
         result.type_errors = @intCast(try tc.check(root));
         const tc_diags = tc.getDiagnostics();
@@ -1152,7 +1389,13 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
             verify_type_env = zigts.TypeEnv.init(allocator, &verify_type_pool.?);
             zigts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
             verify_type_env.?.populateFromTypeMap(&sr.type_map);
-            verify_type_checker = zigts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
+            verify_type_checker = zigts.TypeChecker.init(
+                allocator,
+                ir_view,
+                &atoms,
+                &verify_type_env.?,
+                stc_ptr,
+            );
             _ = verify_type_checker.?.check(root) catch 0;
             break :blk &verify_type_env.?;
         } else null;
@@ -1220,6 +1463,7 @@ pub fn runCheckOnly(allocator: std.mem.Allocator, handler_path: []const u8, sql_
         null,
         sql_schema_path,
         null,
+        stc_ptr,
     );
 
     if (result.contract) |*c| {
@@ -1797,6 +2041,7 @@ pub fn compileHandler(
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     generate_tests: bool,
+    system_path: ?[]const u8,
 ) !CompiledHandler {
     var source_to_parse: []const u8 = source;
     var strip_result: ?zigts.StripResult = null;
@@ -1871,6 +2116,10 @@ pub fn compileHandler(
     // Check for file imports before proceeding with single-module compilation
     const has_file_imports = hasFileImports(&js_parser, root);
 
+    var service_type_context = try loadServiceTypeContext(allocator, system_path, sql_schema_path);
+    defer if (service_type_context) |*ctx| ctx.deinit(allocator);
+    const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
+
     if (has_file_imports) {
         if (!builtin.is_test) std.debug.print("File imports detected, building module graph...\n", .{});
         return compileMultiModule(
@@ -1883,6 +2132,7 @@ pub fn compileHandler(
             emit_contract,
             policy,
             sql_schema_path,
+            stc_ptr,
         );
     }
 
@@ -1946,7 +2196,13 @@ pub fn compileHandler(
             zigts.modules.populateModuleTypes(&type_env, &type_pool, allocator);
             type_env.populateFromTypeMap(&tm);
 
-            var tc = zigts.type_checker.TypeChecker.init(allocator, ir_view_check, &atoms, &type_env);
+            var tc = zigts.type_checker.TypeChecker.init(
+                allocator,
+                ir_view_check,
+                &atoms,
+                &type_env,
+                stc_ptr,
+            );
             defer tc.deinit();
 
             const tc_errors = try tc.check(root);
@@ -2002,7 +2258,13 @@ pub fn compileHandler(
             verify_type_env = zigts.TypeEnv.init(allocator, &verify_type_pool.?);
             zigts.modules.populateModuleTypes(&verify_type_env.?, &verify_type_pool.?, allocator);
             verify_type_env.?.populateFromTypeMap(&sr.type_map);
-            verify_type_checker = zigts.TypeChecker.init(allocator, ir_view, &atoms, &verify_type_env.?);
+            verify_type_checker = zigts.TypeChecker.init(
+                allocator,
+                ir_view,
+                &atoms,
+                &verify_type_env.?,
+                stc_ptr,
+            );
             _ = verify_type_checker.?.check(root) catch 0;
             break :blk &verify_type_env.?;
         } else null;
@@ -2180,6 +2442,7 @@ pub fn compileHandler(
                     policy,
                     sql_schema_path,
                     null,
+                    stc_ptr,
                 )
             else
                 null;
@@ -2227,6 +2490,7 @@ pub fn compileHandler(
             policy,
             sql_schema_path,
             &all_violations,
+            stc_ptr,
         );
 
         // Inject verification-derived properties (Checks 2, 6, 7)
@@ -2469,6 +2733,7 @@ fn compileMultiModule(
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
+    service_type_context: ?*const ServiceTypeContext,
 ) !CompiledHandler {
     // Build module graph
     var graph = zigts.modules.ModuleGraph.init(allocator);
@@ -2554,6 +2819,7 @@ fn compileMultiModule(
             emit_contract,
             policy,
             sql_schema_path,
+            service_type_context,
         );
     }
 
@@ -2634,6 +2900,7 @@ fn buildContract(
     aot: ?AotAnalysis,
     verify_info: ?VerificationInfo,
     type_map: ?*const zigts.TypeMap,
+    service_type_context: ?*const ServiceTypeContext,
 ) !HandlerContract {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
@@ -2656,7 +2923,7 @@ fn buildContract(
         type_env.populateFromTypeMap(tm);
     }
 
-    var type_checker = zigts.TypeChecker.init(allocator, ir_view, atoms, &type_env);
+    var type_checker = zigts.TypeChecker.init(allocator, ir_view, atoms, &type_env, service_type_context);
     defer type_checker.deinit();
     _ = type_checker.check(root) catch 0;
 
@@ -2687,6 +2954,7 @@ fn buildContractWithPolicy(
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     violations_out: ?*std.ArrayList(zigts.property_diagnostics.PropertyViolation),
+    service_type_context: ?*const ServiceTypeContext,
 ) !HandlerContract {
     var contract = try buildContract(
         allocator,
@@ -2697,6 +2965,7 @@ fn buildContractWithPolicy(
         aot,
         verify_info,
         type_map,
+        service_type_context,
     );
     errdefer contract.deinit(allocator);
 
@@ -2769,6 +3038,7 @@ fn buildMultiModuleContract(
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
+    service_type_context: ?*const ServiceTypeContext,
 ) !HandlerContract {
     var merged = try initMergedContract(allocator, entry_filename);
     errdefer merged.deinit(allocator);
@@ -2796,6 +3066,7 @@ fn buildMultiModuleContract(
             temp_aot,
             null,
             null,
+            service_type_context,
         );
         defer module_contract.deinit(allocator);
 
@@ -3731,6 +4002,7 @@ test "compileHandler aggregates contract across file imports" {
         policy,
         null,
         false,
+        null,
     );
     defer compiled.deinit(allocator);
 
@@ -3779,6 +4051,7 @@ test "compileHandler rejects disallowed policy from imported module" {
             policy,
             null,
             false,
+            null,
         ),
     );
 }
@@ -3811,6 +4084,7 @@ fn buildTestContractForSource(
         null,
         null,
         sql_schema_path,
+        null,
         null,
     );
 }
@@ -3956,6 +4230,7 @@ test "compileHandler rejects invalid virtual-module imports" {
             null,
             null,
             false,
+            null,
         ),
     );
 }
@@ -4082,6 +4357,7 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
         null, // policy
         null, // sql_schema_path
         false, // generate_tests
+        null, // system_path
     );
     defer compiled.deinit(allocator);
 
@@ -4124,6 +4400,7 @@ test "compileHandler sets result_safe and optional_safe when verification passes
         null, // policy
         null, // sql_schema_path
         false, // generate_tests
+        null, // system_path
     );
     defer compiled.deinit(allocator);
 

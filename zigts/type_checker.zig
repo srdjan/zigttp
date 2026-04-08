@@ -21,6 +21,7 @@ const object = @import("object.zig");
 const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
+const service_types_mod = @import("service_types.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 
@@ -33,9 +34,13 @@ const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
 const TypeEnv = type_env_mod.TypeEnv;
+const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 
 /// Max fields/enum members tracked per schema type. Schemas with more are silently truncated.
 const MAX_SCHEMA_FIELDS = 32;
+
+/// Max union members tracked during type inference (member access, return types, etc.).
+const MAX_UNION_MEMBERS = 16;
 
 // ---------------------------------------------------------------------------
 // Diagnostic types
@@ -86,6 +91,7 @@ pub const TypeChecker = struct {
     ir_view: IrView,
     atoms: ?*context.AtomTable,
     env: *TypeEnv,
+    service_type_context: ?*const ServiceTypeContext,
     diagnostics: std.ArrayListUnmanaged(Diagnostic),
     compiled_schemas: std.ArrayListUnmanaged(CompiledSchemaType),
 
@@ -96,12 +102,19 @@ pub const TypeChecker = struct {
     /// Track current function's declared return type for return statement checking
     current_return_type: TypeIndex = null_type_idx,
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable, env: *TypeEnv) TypeChecker {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*context.AtomTable,
+        env: *TypeEnv,
+        service_type_context: ?*const ServiceTypeContext,
+    ) TypeChecker {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
             .atoms = atoms,
             .env = env,
+            .service_type_context = service_type_context,
             .diagnostics = .empty,
             .compiled_schemas = .empty,
             .binding_types = .empty,
@@ -792,6 +805,245 @@ pub const TypeChecker = struct {
         });
     }
 
+    const ParsedServiceRoute = @import("system_linker.zig").ParsedServiceRoute;
+    const parseServiceRoute = @import("system_linker.zig").parseServiceRoute;
+
+    const ServiceCallInitInfo = struct {
+        path_params: std.ArrayList([]const u8) = .empty,
+        query_keys: std.ArrayList([]const u8) = .empty,
+        header_keys: std.ArrayList([]const u8) = .empty,
+        path_params_dynamic: bool = false,
+        query_dynamic: bool = false,
+        header_dynamic: bool = false,
+        has_body: bool = false,
+        body_dynamic: bool = false,
+
+        fn deinit(self: *ServiceCallInitInfo, allocator: std.mem.Allocator) void {
+            self.path_params.deinit(allocator);
+            self.query_keys.deinit(allocator);
+            self.header_keys.deinit(allocator);
+        }
+    };
+
+    fn extractServiceObjectKeys(
+        self: *const TypeChecker,
+        node_idx: NodeIndex,
+        target: *std.ArrayList([]const u8),
+        dynamic_flag: *bool,
+    ) void {
+        const tag = self.ir_view.getTag(node_idx) orelse {
+            dynamic_flag.* = true;
+            return;
+        };
+        if (tag != .object_literal) {
+            dynamic_flag.* = true;
+            return;
+        }
+
+        const obj = self.ir_view.getObject(node_idx) orelse {
+            dynamic_flag.* = true;
+            return;
+        };
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                dynamic_flag.* = true;
+                continue;
+            };
+            target.append(self.allocator, key) catch {};
+        }
+    }
+
+    fn extractServiceCallInitInfo(self: *const TypeChecker, call: Node.CallExpr) ServiceCallInitInfo {
+        var info = ServiceCallInitInfo{};
+        if (call.args_count <= 2) return info;
+
+        const init_idx = self.ir_view.getListIndex(call.args_start, 2);
+        const tag = self.ir_view.getTag(init_idx) orelse {
+            info.path_params_dynamic = true;
+            info.query_dynamic = true;
+            info.header_dynamic = true;
+            info.body_dynamic = true;
+            return info;
+        };
+        if (tag == .lit_null or tag == .lit_undefined) return info;
+        if (tag != .object_literal) {
+            info.path_params_dynamic = true;
+            info.query_dynamic = true;
+            info.header_dynamic = true;
+            info.body_dynamic = true;
+            return info;
+        }
+
+        const obj = self.ir_view.getObject(init_idx) orelse return info;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const key = self.getObjectPropertyKey(prop.key) orelse continue;
+
+            if (std.mem.eql(u8, key, "params")) {
+                self.extractServiceObjectKeys(prop.value, &info.path_params, &info.path_params_dynamic);
+            } else if (std.mem.eql(u8, key, "query")) {
+                self.extractServiceObjectKeys(prop.value, &info.query_keys, &info.query_dynamic);
+            } else if (std.mem.eql(u8, key, "headers")) {
+                self.extractServiceObjectKeys(prop.value, &info.header_keys, &info.header_dynamic);
+            } else if (std.mem.eql(u8, key, "body")) {
+                const body_tag = self.ir_view.getTag(prop.value) orelse {
+                    info.has_body = true;
+                    info.body_dynamic = true;
+                    continue;
+                };
+                if (body_tag == .lit_null or body_tag == .lit_undefined) continue;
+                info.has_body = true;
+                if (body_tag != .lit_string and body_tag != .object_literal and body_tag != .array_literal) {
+                    info.body_dynamic = true;
+                }
+            }
+        }
+        return info;
+    }
+
+    const containsString = json_utils.containsString;
+
+    fn addAllocatedDiagnostic(
+        self: *TypeChecker,
+        kind: DiagnosticKind,
+        node: NodeIndex,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = kind,
+            .node = node,
+            .message = msg,
+            .help = null,
+            .allocated = true,
+        });
+    }
+
+    fn validateServiceCallAgainstRoute(
+        self: *TypeChecker,
+        node: NodeIndex,
+        call: Node.CallExpr,
+        route: *const service_types_mod.RouteInfo,
+    ) void {
+        var init_info = self.extractServiceCallInitInfo(call);
+        defer init_info.deinit(self.allocator);
+
+        for (route.required_path_params) |name| {
+            if (init_info.path_params_dynamic) {
+                self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove path param '{s}'", .{name});
+                return;
+            }
+            if (!containsString(init_info.path_params.items, name)) {
+                self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing path param '{s}'", .{name});
+                return;
+            }
+        }
+
+        if (!route.request_dynamic) {
+            for (route.required_query_params) |name| {
+                if (init_info.query_dynamic) {
+                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove query param '{s}'", .{name});
+                    return;
+                }
+                if (!containsString(init_info.query_keys.items, name)) {
+                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing query param '{s}'", .{name});
+                    return;
+                }
+            }
+
+            for (route.required_header_params) |name| {
+                if (init_info.header_dynamic) {
+                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove header '{s}'", .{name});
+                    return;
+                }
+                if (!containsString(init_info.header_keys.items, name)) {
+                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing header '{s}'", .{name});
+                    return;
+                }
+            }
+
+            if (route.requires_body) {
+                if (init_info.body_dynamic) {
+                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove request body presence", .{});
+                    return;
+                }
+                if (!init_info.has_body) {
+                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing required request body", .{});
+                    return;
+                }
+            }
+        }
+    }
+
+    fn buildServiceResponseMember(
+        self: *const TypeChecker,
+        response: service_types_mod.ResponseVariant,
+    ) TypeIndex {
+        const pool = self.env.pool;
+        const status_name = pool.addName(self.allocator, "status");
+        const ok_name = pool.addName(self.allocator, "ok");
+        const json_name = pool.addName(self.allocator, "json");
+        const text_name = pool.addName(self.allocator, "text");
+        const headers_name = pool.addName(self.allocator, "headers");
+
+        const status_int: i16 = @intCast(@min(response.status, std.math.maxInt(i16)));
+        const status_type = pool.addLiteralNumber(self.allocator, status_int);
+        const ok_type = pool.addLiteralBool(self.allocator, response.status >= 200 and response.status < 300);
+        const json_return_type = blk: {
+            if (response.dynamic) break :blk pool.idx_unknown;
+            if (response.content_type) |content_type| {
+                if (!std.mem.startsWith(u8, content_type, "application/json")) break :blk pool.idx_unknown;
+            } else {
+                break :blk pool.idx_unknown;
+            }
+            if (response.schema_json) |schema_json| {
+                break :blk @constCast(self).schemaJsonToType(schema_json) catch pool.idx_unknown;
+            }
+            break :blk pool.idx_unknown;
+        };
+        const json_fn = pool.addFunction(self.allocator, &.{}, json_return_type);
+        const text_fn = pool.addFunction(self.allocator, &.{}, pool.idx_string);
+
+        return pool.addRecord(self.allocator, &.{
+            .{ .name_start = status_name.start, .name_len = status_name.len, .type_idx = status_type, .optional = false },
+            .{ .name_start = ok_name.start, .name_len = ok_name.len, .type_idx = ok_type, .optional = false },
+            .{ .name_start = json_name.start, .name_len = json_name.len, .type_idx = json_fn, .optional = false },
+            .{ .name_start = text_name.start, .name_len = text_name.len, .type_idx = text_fn, .optional = false },
+            .{ .name_start = headers_name.start, .name_len = headers_name.len, .type_idx = pool.idx_unknown, .optional = false },
+        });
+    }
+
+    fn inferServiceCallType(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
+        const service_context = self.service_type_context orelse return null_type_idx;
+        if (call.args_count < 2) return null_type_idx;
+
+        const service_node = self.ir_view.getListIndex(call.args_start, 0);
+        const route_node = self.ir_view.getListIndex(call.args_start, 1);
+        const service_name = self.getLiteralString(service_node) orelse return null_type_idx;
+        const route_pattern = self.getLiteralString(route_node) orelse return null_type_idx;
+        const parsed = parseServiceRoute(route_pattern) orelse return null_type_idx;
+        const route = service_context.lookupRoute(service_name, parsed.method, parsed.path) orelse return null_type_idx;
+        if (route.responses.len == 0) return null_type_idx;
+
+        var member_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        var count: usize = 0;
+        for (route.responses) |response| {
+            if (count >= member_types.len) break;
+            member_types[count] = self.buildServiceResponseMember(response);
+            count += 1;
+        }
+        if (count == 0) return null_type_idx;
+        if (count == 1) return member_types[0];
+        return self.env.pool.addUnion(self.allocator, member_types[0..count]);
+    }
+
     // -------------------------------------------------------------------
     // Type inference (TypePool-based)
     // -------------------------------------------------------------------
@@ -909,13 +1161,15 @@ pub const TypeChecker = struct {
                 };
             }
 
-            // Pattern: x.prop === "literal" (discriminated union narrowing)
-            if ((lhs_tag == .member_access and rhs_tag == .lit_string) or
-                (rhs_tag == .member_access and lhs_tag == .lit_string))
+            // Pattern: x.prop === <literal> (discriminated union narrowing)
+            const lhs_is_literal = lhs_tag == .lit_string or lhs_tag == .lit_int or lhs_tag == .lit_bool;
+            const rhs_is_literal = rhs_tag == .lit_string or rhs_tag == .lit_int or rhs_tag == .lit_bool;
+            if ((lhs_tag == .member_access and rhs_is_literal) or
+                (rhs_tag == .member_access and lhs_is_literal))
             {
                 const member_node = if (lhs_tag == .member_access) bin.left else bin.right;
-                const string_node = if (lhs_tag == .lit_string) bin.left else bin.right;
-                if (self.extractDiscriminantGuard(member_node, string_node, bin.op)) |guard| {
+                const literal_node = if (lhs_is_literal) bin.left else bin.right;
+                if (self.extractDiscriminantGuard(member_node, literal_node, bin.op)) |guard| {
                     return guard;
                 }
             }
@@ -947,13 +1201,13 @@ pub const TypeChecker = struct {
         return .{ .key = key, .inner = self.env.pool.getNullableInner(current) };
     }
 
-    /// Extract a discriminated union narrowing guard from x.prop === "literal".
+    /// Extract a discriminated union narrowing guard from x.prop === <literal>.
     /// Returns the matched union member for the then-branch. The caller handles
     /// else-branch narrowing via the negated flag.
     fn extractDiscriminantGuard(
         self: *const TypeChecker,
         member_node: NodeIndex,
-        string_node: NodeIndex,
+        literal_node: NodeIndex,
         op: @import("parser/ir.zig").BinaryOp,
     ) ?NarrowingGuard {
         const member = self.ir_view.getMember(member_node) orelse return null;
@@ -966,10 +1220,22 @@ pub const TypeChecker = struct {
         if (self.env.pool.getTag(current) != .t_union) return null;
 
         const prop_name = self.resolveAtomName(member.property) orelse return null;
-        const str_idx = self.ir_view.getStringIdx(string_node) orelse return null;
-        const lit_value = self.ir_view.getString(str_idx) orelse return null;
+        const literal_type = self.inferType(literal_node);
+        const literal_tag = self.env.pool.getTag(literal_type) orelse return null;
+        if (literal_tag != .t_literal_string and literal_tag != .t_literal_number and literal_tag != .t_literal_bool) return null;
 
-        const matched = self.env.pool.findUnionMemberByDiscriminant(current, prop_name, lit_value) orelse return null;
+        const matched = blk: {
+            for (self.env.pool.getUnionMembers(current)) |member_type| {
+                const field = self.env.pool.lookupRecordField(member_type, prop_name) orelse continue;
+                if (self.env.pool.isAssignableTo(field.type_idx, literal_type) and
+                    self.env.pool.isAssignableTo(literal_type, field.type_idx))
+                {
+                    break :blk member_type;
+                }
+            }
+            break :blk null_type_idx;
+        };
+        if (matched == null_type_idx) return null;
 
         if (op == .strict_eq) {
             // x.prop === "literal": then-branch narrows to matched member,
@@ -985,7 +1251,12 @@ pub const TypeChecker = struct {
             // x.prop !== "literal": narrow to union excluding the matched member
             const excluded = self.env.pool.excludeUnionMember(self.allocator, current, matched);
             if (excluded == null_type_idx) return null;
-            return .{ .key = key, .narrowed_type = excluded, .negated = false };
+            return .{
+                .key = key,
+                .narrowed_type = excluded,
+                .negated = false,
+                .else_type = matched,
+            };
         }
     }
 
@@ -1111,6 +1382,16 @@ pub const TypeChecker = struct {
         return self.env.pool.addTuple(self.allocator, element_types[0..count]);
     }
 
+    fn functionsCompatible(self: *const TypeChecker, field_type: TypeIndex, first_info: anytype) bool {
+        if (self.env.pool.getTag(field_type) != .t_function) return false;
+        const info = self.env.pool.getFunctionInfo(field_type);
+        if (info.params.len != first_info.params.len) return false;
+        for (info.params, first_info.params) |param, first_param| {
+            if (param.type_idx != first_param.type_idx) return false;
+        }
+        return info.ret == first_info.ret;
+    }
+
     fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const member = self.ir_view.getMember(node) orelse return null_type_idx;
         const raw_obj_type = self.inferType(member.object);
@@ -1121,16 +1402,11 @@ pub const TypeChecker = struct {
 
         const prop_name = self.resolveAtomName(member.property) orelse return null_type_idx;
 
-        // Look up field in record type
         const tag = self.env.pool.getTag(obj_type) orelse return null_type_idx;
         if (tag == .t_record) {
-            for (self.env.pool.getRecordFields(obj_type)) |field| {
-                const field_name = self.env.pool.getName(field.name_start, field.name_len);
-                if (std.mem.eql(u8, field_name, prop_name)) {
-                    return field.type_idx;
-                }
+            if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
+                return field.type_idx;
             }
-            // Field not found on known record type
             @constCast(self).addDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_field,
@@ -1141,16 +1417,78 @@ pub const TypeChecker = struct {
             return null_type_idx;
         }
 
+        if (tag == .t_union) {
+            var field_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+            var count: usize = 0;
+            for (self.env.pool.getUnionMembers(obj_type)) |member_type| {
+                const field = self.env.pool.lookupRecordField(member_type, prop_name) orelse return null_type_idx;
+                if (count >= field_types.len) return null_type_idx;
+                field_types[count] = field.type_idx;
+                count += 1;
+            }
+            if (count == 0) return null_type_idx;
+            if (count == 1) return field_types[0];
+
+            const first_tag = self.env.pool.getTag(field_types[0]) orelse return null_type_idx;
+            if (first_tag == .t_function) {
+                const first_info = self.env.pool.getFunctionInfo(field_types[0]);
+                for (field_types[1..count]) |field_type| {
+                    if (!self.functionsCompatible(field_type, first_info)) {
+                        @constCast(self).addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .type_mismatch,
+                            .node = node,
+                            .message = "must narrow union before calling this member",
+                            .help = null,
+                        });
+                        return null_type_idx;
+                    }
+                }
+                return field_types[0];
+            }
+
+            return self.env.pool.addUnion(self.allocator, field_types[0..count]);
+        }
+
+        return null_type_idx;
+    }
+
+    fn inferFunctionReturnType(self: *const TypeChecker, callee_type: TypeIndex) TypeIndex {
+        const tag = self.env.pool.getTag(callee_type) orelse return null_type_idx;
+        if (tag == .t_function) {
+            return self.env.pool.getFunctionInfo(callee_type).ret;
+        }
+        if (tag == .t_union) {
+            var return_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+            var count: usize = 0;
+            for (self.env.pool.getUnionMembers(callee_type)) |member_type| {
+                if (self.env.pool.getTag(member_type) != .t_function) return null_type_idx;
+                if (count >= return_types.len) return null_type_idx;
+                return_types[count] = self.env.pool.getFunctionInfo(member_type).ret;
+                count += 1;
+            }
+            if (count == 0) return null_type_idx;
+            if (count == 1) return return_types[0];
+            return self.env.pool.addUnion(self.allocator, return_types[0..count]);
+        }
         return null_type_idx;
     }
 
     fn inferCallType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const call = self.ir_view.getCall(node) orelse return null_type_idx;
         const callee_tag = self.ir_view.getTag(call.callee) orelse return null_type_idx;
+
+        if (callee_tag == .member_access) {
+            return self.inferFunctionReturnType(self.inferType(call.callee));
+        }
         if (callee_tag != .identifier) return null_type_idx;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return null_type_idx;
         const name = self.resolveAtomName(binding.slot) orelse return null_type_idx;
+        if (std.mem.eql(u8, name, "serviceCall")) {
+            const service_call_type = self.inferServiceCallType(call);
+            if (service_call_type != null_type_idx) return service_call_type;
+        }
         if (std.mem.eql(u8, name, "validateJson") or
             std.mem.eql(u8, name, "validateObject") or
             std.mem.eql(u8, name, "coerceJson") or
@@ -1251,12 +1589,110 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
-        // Resolve callee to a function signature
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag == .member_access) {
+            const callee_type = self.inferType(call.callee);
+            const tag = self.env.pool.getTag(callee_type) orelse return;
+            if (tag == .t_function) {
+                const info = self.env.pool.getFunctionInfo(callee_type);
+                if (call.args_count != info.params.len) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .arg_count_mismatch,
+                        .node = node,
+                        .message = "wrong number of arguments",
+                        .help = null,
+                    });
+                    return;
+                }
+                for (info.params, 0..) |param, i| {
+                    const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
+                    const arg_type = self.inferType(arg_idx);
+                    if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param.type_idx)) {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .arg_type_mismatch,
+                            .node = arg_idx,
+                            .message = "argument type does not match parameter type",
+                            .help = null,
+                        });
+                    }
+                }
+            } else if (tag == .t_union) {
+                const members = self.env.pool.getUnionMembers(callee_type);
+                if (members.len == 0) return;
+
+                var shared_param_count: ?usize = null;
+                var param_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                var param_count: usize = 0;
+
+                for (members) |member_type| {
+                    if (self.env.pool.getTag(member_type) != .t_function) return;
+                    const info = self.env.pool.getFunctionInfo(member_type);
+                    if (shared_param_count == null) {
+                        shared_param_count = info.params.len;
+                        param_count = info.params.len;
+                        if (param_count > param_types.len) return;
+                        for (info.params, 0..) |param, i| {
+                            param_types[i] = param.type_idx;
+                        }
+                    } else if (shared_param_count.? != info.params.len) {
+                        return;
+                    } else {
+                        for (info.params, 0..) |param, i| {
+                            if (param_types[i] != param.type_idx) return;
+                        }
+                    }
+                }
+
+                if (call.args_count != param_count) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .arg_count_mismatch,
+                        .node = node,
+                        .message = "wrong number of arguments",
+                        .help = null,
+                    });
+                    return;
+                }
+
+                for (0..param_count) |i| {
+                    const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
+                    const arg_type = self.inferType(arg_idx);
+                    if (arg_type != null_type_idx and param_types[i] != null_type_idx and !self.env.pool.isAssignableTo(arg_type, param_types[i])) {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .arg_type_mismatch,
+                            .node = arg_idx,
+                            .message = "argument type does not match parameter type",
+                            .help = null,
+                        });
+                    }
+                }
+            }
+            return;
+        }
         if (callee_tag != .identifier) return;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return;
         const name = self.resolveAtomName(binding.slot) orelse return;
+
+        if (std.mem.eql(u8, name, "serviceCall")) {
+            const service_context = self.service_type_context orelse return;
+            if (call.args_count >= 2) {
+                const service_node = self.ir_view.getListIndex(call.args_start, 0);
+                const route_node = self.ir_view.getListIndex(call.args_start, 1);
+                if (self.getLiteralString(service_node)) |service_name| {
+                    if (self.getLiteralString(route_node)) |route_pattern| {
+                        if (parseServiceRoute(route_pattern)) |parsed| {
+                            if (service_context.lookupRoute(service_name, parsed.method, parsed.path)) |route| {
+                                self.validateServiceCallAgainstRoute(node, call, route);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         const sig = self.env.getFnSigByName(name) orelse return;
 
@@ -1336,6 +1772,15 @@ const getSourceLine = bool_checker_mod.getSourceLine;
 const writeJsonString = json_utils.writeJsonString;
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
+    try checkTypedSourceWithServiceContext(source, null, expect_errors, expect_warnings);
+}
+
+fn checkTypedSourceWithServiceContext(
+    source: []const u8,
+    service_type_context: ?*const ServiceTypeContext,
+    expect_errors: u32,
+    expect_warnings: ?u32,
+) !void {
     const allocator = std.testing.allocator;
 
     var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
@@ -1355,7 +1800,7 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
     @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, service_type_context);
     defer checker.deinit();
 
     const errors = try checker.check(root);
@@ -1368,6 +1813,64 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
         }
         try std.testing.expectEqual(w, warning_count);
     }
+}
+
+const RawTestResponse = struct {
+    status: u16,
+    content_type: ?[]const u8 = "application/json",
+    schema_json: ?[]const u8 = null,
+    dynamic: bool = false,
+};
+
+fn makeTestServiceContext(
+    allocator: std.mem.Allocator,
+    required_path_params: []const []const u8,
+    responses: []const RawTestResponse,
+) !ServiceTypeContext {
+    const routes = try allocator.alloc(service_types_mod.RouteInfo, 1);
+    errdefer allocator.free(routes);
+
+    const path_params = try allocator.alloc([]const u8, required_path_params.len);
+    errdefer allocator.free(path_params);
+    for (required_path_params, 0..) |name, i| {
+        path_params[i] = try allocator.dupe(u8, name);
+    }
+
+    const query_params = try allocator.alloc([]const u8, 0);
+    const header_params = try allocator.alloc([]const u8, 0);
+
+    const route_responses = try allocator.alloc(service_types_mod.ResponseVariant, responses.len);
+    errdefer allocator.free(route_responses);
+    for (responses, 0..) |response, i| {
+        route_responses[i] = .{
+            .status = response.status,
+            .content_type = if (response.content_type) |content_type|
+                try allocator.dupe(u8, content_type)
+            else
+                null,
+            .schema_json = if (response.schema_json) |schema_json|
+                try allocator.dupe(u8, schema_json)
+            else
+                null,
+            .dynamic = response.dynamic,
+        };
+    }
+
+    routes[0] = .{
+        .service_name = try allocator.dupe(u8, "users"),
+        .handler_path = try allocator.dupe(u8, "users.ts"),
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/api/users/:id"),
+        .required_path_params = path_params,
+        .required_query_params = query_params,
+        .required_header_params = header_params,
+        .request_dynamic = false,
+        .response_dynamic = false,
+        .requires_body = false,
+        .responses = route_responses,
+    };
+
+    return .{ .routes = routes };
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,10 +1900,65 @@ test "TypeChecker init and deinit" {
 
     const view = ir.IrView.fromNodeList(&node_list, &constants);
 
-    var checker = TypeChecker.init(allocator, view, null, &env);
+    var checker = TypeChecker.init(allocator, view, null, &env, null);
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), checker.diagnostics.items.len);
+}
+
+test "TypeChecker infers serviceCall json payload with system context" {
+    var service_context = try makeTestServiceContext(
+        std.testing.allocator,
+        &.{"id"},
+        &.{
+            .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
+        },
+    );
+    defer service_context.deinit(std.testing.allocator);
+
+    try checkTypedSourceWithServiceContext(
+        \\const user = serviceCall("users", "GET /api/users/:id", {
+        \\  params: { id: "123" }
+        \\});
+        \\const status: number = user.status;
+        \\const payload = user.json();
+        \\const id: string = payload.id;
+    , &service_context, 0, 0);
+}
+
+test "TypeChecker rejects serviceCall missing required path param" {
+    var service_context = try makeTestServiceContext(
+        std.testing.allocator,
+        &.{"id"},
+        &.{
+            .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
+        },
+    );
+    defer service_context.deinit(std.testing.allocator);
+
+    try checkTypedSourceWithServiceContext(
+        \\const user = serviceCall("users", "GET /api/users/:id", {});
+        \\const payload = user.json();
+    , &service_context, 1, 0);
+}
+
+test "TypeChecker requires narrowing before multi-status serviceCall json" {
+    var service_context = try makeTestServiceContext(
+        std.testing.allocator,
+        &.{"id"},
+        &.{
+            .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
+            .{ .status = 404, .schema_json = "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}" },
+        },
+    );
+    defer service_context.deinit(std.testing.allocator);
+
+    try checkTypedSourceWithServiceContext(
+        \\const user = serviceCall("users", "GET /api/users/:id", {
+        \\  params: { id: "123" }
+        \\});
+        \\const payload = user.json();
+    , &service_context, 2, 0);
 }
 
 test "TypeChecker proves literal union match exhaustiveness" {

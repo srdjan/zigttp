@@ -50,7 +50,7 @@ pub fn simulate(
         allocator.free(tmp_path);
     }
 
-    var new_check = try precompile.runCheckOnly(allocator, tmp_path, null, true);
+    var new_check = try precompile.runCheckOnly(allocator, tmp_path, null, true, null);
     defer new_check.deinit(allocator);
 
     var baseline_keys: ?std.AutoHashMapUnmanaged(ViolationKey, void) = null;
@@ -63,7 +63,7 @@ pub fn simulate(
             allocator.free(before_path);
         }
 
-        var old_check = try precompile.runCheckOnly(allocator, before_path, null, true);
+        var old_check = try precompile.runCheckOnly(allocator, before_path, null, true, null);
         defer old_check.deinit(allocator);
 
         baseline_keys = .empty;

@@ -715,6 +715,7 @@ fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void 
         null, // no explicit policy
         null, // no sql schema
         false, // no test generation
+        null, // no system context
     ) catch |err| {
         std.log.err("Compilation failed: {}", .{err});
         return err;

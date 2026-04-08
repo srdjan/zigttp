@@ -92,6 +92,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var sql_schema_path: ?[]const u8 = null;
+    var explicit_system_path: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
     var emit_contract = false;
     var emit_types = false;
@@ -108,6 +109,12 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
         if (std.mem.eql(u8, arg, "--contract")) {
             emit_contract = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--system")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            explicit_system_path = argv[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--types")) {
@@ -135,7 +142,15 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try defaultProjectEntry(allocator);
     defer if (handler_path == null) allocator.free(target);
 
-    var result = try precompile.runCheckOnly(allocator, target, sql_schema_path, json_mode);
+    const discovered_system = if (explicit_system_path == null)
+        try discoverProjectSystemPath(allocator, if (handler_path) |path| path else null)
+    else
+        null;
+    defer if (discovered_system) |path| allocator.free(path);
+
+    const system_path = explicit_system_path orelse discovered_system;
+
+    var result = try precompile.runCheckOnly(allocator, target, sql_schema_path, json_mode, system_path);
     defer result.deinit(allocator);
 
     if (json_mode) {
@@ -266,6 +281,20 @@ fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
     return error.NoProjectConfig;
 }
 
+fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var project = try project_config_mod.discover(allocator, io, start_path);
+    defer if (project) |*p| p.deinit(allocator);
+
+    if (project) |*cfg| {
+        return try cfg.resolvedSystemPath(allocator);
+    }
+    return null;
+}
+
 pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
     var args_iter = std.process.Args.Iterator.init(args_vector);
     defer args_iter.deinit();
@@ -283,7 +312,7 @@ fn printHelp() void {
         \\zigts - compiler and analysis tools for zigttp handlers
         \\
         \\Usage:
-        \\  zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path]
+        \\  zigts check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path]
         \\  zigts compile [precompile flags] <handler.ts> <output.zig>
         \\  zigts prove <old-contract.json> <new-contract.json> [output-dir/]
         \\  zigts mock <tests.jsonl> [--port PORT]
@@ -312,6 +341,7 @@ fn printCheckHelp() void {
         \\  --contract       Emit contract.json in current directory
         \\  --types          Emit zigttp.d.ts type definitions for IDE autocomplete
         \\  --sql-schema P   SQLite schema file for query validation
+        \\  --system P       system.json for internal serviceCall typing
         \\
         \\If no handler is specified, uses the entry from zigttp.json.
         \\

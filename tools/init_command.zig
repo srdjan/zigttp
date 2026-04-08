@@ -75,13 +75,7 @@ pub fn runInit(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 }
 
-fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
-    const path_z = allocator.dupeZ(u8, path) catch return false;
-    defer allocator.free(path_z);
-    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch return false;
-    std.Io.Threaded.closeFd(fd);
-    return true;
-}
+const fileExists = zigts.file_io.fileExists;
 
 fn makeExecutable(allocator: std.mem.Allocator, path: []const u8) void {
     const path_z = allocator.dupeZ(u8, path) catch return;
