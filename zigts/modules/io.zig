@@ -31,14 +31,11 @@ pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.i
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:io",
     .name = "io",
+    .required_capabilities = &.{.runtime_callback},
     .stateful = true,
     .exports = &.{
-        .{ .name = "parallel", .func = parallelNative, .arg_count = 1,
-           .effect = .write, .returns = .string, .param_types = &.{},
-           .return_labels = .{ .external = true } },
-        .{ .name = "race", .func = raceNative, .arg_count = 1,
-           .effect = .write, .returns = .string, .param_types = &.{},
-           .return_labels = .{ .external = true } },
+        .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .effect = .write, .returns = .string, .param_types = &.{}, .return_labels = .{ .external = true } },
+        .{ .name = "race", .func = raceNative, .arg_count = 1, .effect = .write, .returns = .string, .param_types = &.{}, .return_labels = .{ .external = true } },
     },
 };
 
@@ -340,7 +337,7 @@ fn raceNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue
 // ============================================================================
 
 fn getCallbacks(ctx: *context.Context) ?*IoCallbacks {
-    return ctx.getModuleState(IoCallbacks, MODULE_STATE_SLOT);
+    return mb.getRuntimeCallbackStateChecked(ctx, IoCallbacks, MODULE_STATE_SLOT);
 }
 
 // ============================================================================
@@ -400,4 +397,48 @@ test "FetchResult init and deinit" {
         .ok = true,
     };
     result.deinit(allocator);
+}
+
+test "getCallbacks returns installed runtime callback state under capability context" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{});
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    gc_state.setHeap(heap_state);
+    const ctx = try context.Context.init(allocator, gc_state, .{});
+    defer {
+        ctx.deinit();
+        heap_state.deinit();
+        gc_state.deinit();
+        allocator.destroy(heap_state);
+        allocator.destroy(gc_state);
+    }
+
+    const callbacks = try allocator.create(IoCallbacks);
+    callbacks.* = .{
+        .call_thunk_fn = struct {
+            fn call(_: *anyopaque, _: value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.call,
+        .execute_fetches_fn = struct {
+            fn exec(_: *anyopaque, _: []const FetchDescriptor, _: []FetchResult) void {}
+        }.exec,
+        .build_response_fn = struct {
+            fn build(_: *anyopaque, _: *const FetchResult) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.build,
+        .runtime_ptr = @ptrFromInt(0x1),
+    };
+    ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(callbacks), &IoCallbacks.deinitOpaque);
+
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
+    try std.testing.expect(getCallbacks(ctx) != null);
 }

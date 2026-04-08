@@ -374,7 +374,7 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 
 ### Module Binding System
 
-Each virtual module declares a `pub const binding: ModuleBinding` struct - the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. The `builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency).
+Each virtual module declares a `pub const binding: ModuleBinding` struct - the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. `ModuleBinding` also carries `required_capabilities`, which records the runtime capabilities consumed by the module's Zig implementation for governance and auditability. These declarations are distinct from handler-facing `effect` metadata and do not feed into `RuntimePolicy`. The `builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency, duplicate capability declarations).
 
 Consumers that previously maintained separate hardcoded tables now read from the registry:
 - **Type checker** (`types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`
@@ -382,7 +382,7 @@ Consumers that previously maintained separate hardcoded tables now read from the
 - **Bool checker**: maps `ReturnKind` to `ExprType` via `returnKindToExprType()`
 - **Contract builder**: uses `GenericBinding` entries populated from `FunctionBinding.contract_extractions` and `contract_flags`
 
-Third-party modules use `ModuleFn` (opaque `*ModuleHandle`) instead of `NativeFn` (raw `*anyopaque`). The opaque handle prevents dereferencing - all interaction goes through SDK free functions. Build-path isolation via a separate `zigttp-sdk` package prevents importing runtime internals.
+Third-party modules use `ModuleFn` (opaque `*ModuleHandle`) instead of `NativeFn` (raw `*anyopaque`). The opaque handle prevents dereferencing - all interaction goes through SDK free functions. Capability-checked SDK helpers (for example clock/random/stderr access) run under the module's declared `required_capabilities`, so extension modules can only use that helper surface when the binding metadata allows it. Build-path isolation via a separate `zigttp-sdk` package prevents importing runtime internals.
 
 ### Handler Effect Classification
 
@@ -399,7 +399,7 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 
 **Key files**:
 - `zigts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `validateBindings()`
-- `zigts/builtin_modules.zig` - registry of all 10 built-in bindings with comptime validation
+- `zigts/builtin_modules.zig` - registry of all built-in bindings with comptime validation
 - `zigts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension

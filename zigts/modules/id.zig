@@ -20,39 +20,19 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
-const compat = @import("../compat.zig");
 
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:id",
     .name = "id",
+    .required_capabilities = &.{ .clock, .random },
     .exports = &.{
-        .{ .name = "uuid", .func = uuidNative, .arg_count = 0,
-           .returns = .string, .param_types = &.{},
-           .effect = .read, .return_labels = .{ .internal = true } },
-        .{ .name = "ulid", .func = ulidNative, .arg_count = 0,
-           .returns = .string, .param_types = &.{},
-           .effect = .read, .return_labels = .{ .internal = true } },
-        .{ .name = "nanoid", .func = nanoidNative, .arg_count = 1,
-           .returns = .string, .param_types = &.{.number},
-           .effect = .read, .return_labels = .{ .internal = true } },
+        .{ .name = "uuid", .func = uuidNative, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
+        .{ .name = "ulid", .func = ulidNative, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
+        .{ .name = "nanoid", .func = nanoidNative, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .effect = .read, .return_labels = .{ .internal = true } },
     },
 };
 
 pub const exports = binding.toModuleExports();
-
-// -------------------------------------------------------------------------
-// PRNG - seeded from real-time clock, same pattern as Math.random()
-// -------------------------------------------------------------------------
-
-var prng: ?std.Random.DefaultPrng = null;
-
-fn getRandom() std.Random {
-    if (prng == null) {
-        const seed = compat.realtimeNowNs() catch 0x9e3779b97f4a7c15;
-        prng = std.Random.DefaultPrng.init(seed);
-    }
-    return prng.?.random();
-}
 
 // -------------------------------------------------------------------------
 // UUID v4
@@ -62,8 +42,7 @@ fn getRandom() std.Random {
 /// format as 8-4-4-4-12 lowercase hex.
 fn formatUuidV4(buf: *[36]u8) void {
     var bytes: [16]u8 = undefined;
-    var rng = getRandom();
-    rng.bytes(&bytes);
+    mb.fillRandomChecked(&bytes);
 
     // Set version 4: byte 6 high nibble = 0100
     bytes[6] = (bytes[6] & 0x0F) | 0x40;
@@ -100,7 +79,7 @@ const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Encode 48-bit timestamp (ms) as 10 Crockford base32 chars,
 /// then 80 random bits as 16 base32 chars. Total: 26 chars.
 fn formatUlid(buf: *[26]u8) void {
-    const ms: u64 = @intCast(@max(0, compat.realtimeNowMs() catch 0));
+    const ms: u64 = @intCast(@max(0, mb.clockNowMsChecked()));
 
     // Timestamp: 10 chars encoding 48 bits, most significant first
     var ts = ms;
@@ -114,8 +93,7 @@ fn formatUlid(buf: *[26]u8) void {
     // Randomness: 16 base32 chars from 10 random bytes (80 bits)
     // Extract 5 bits at a time across byte boundaries
     var rand_bytes: [10]u8 = undefined;
-    var rng = getRandom();
-    rng.bytes(&rand_bytes);
+    mb.fillRandomChecked(&rand_bytes);
 
     var bit_offset: u32 = 0;
     for (buf[10..26]) |*c| {
@@ -156,10 +134,10 @@ fn nanoidNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
     } else NANOID_DEFAULT_LEN;
 
     var buf: [NANOID_MAX_LEN]u8 = undefined;
-    var rng = getRandom();
-    for (buf[0..len]) |*c| {
+    var random_bytes: [NANOID_MAX_LEN]u8 = undefined;
+    mb.fillRandomChecked(random_bytes[0..len]);
+    for (buf[0..len], random_bytes[0..len]) |*c, byte| {
         // Alphabet is 64 chars = 6 bits, mask random byte to avoid bias
-        const byte = rng.int(u8);
         c.* = NANOID_ALPHABET[byte & 0x3F];
     }
 
@@ -171,6 +149,9 @@ fn nanoidNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
 // -------------------------------------------------------------------------
 
 test "formatUuidV4: correct format" {
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
     var buf: [36]u8 = undefined;
     formatUuidV4(&buf);
 
@@ -195,6 +176,9 @@ test "formatUuidV4: correct format" {
 }
 
 test "formatUuidV4: uniqueness" {
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
     var a: [36]u8 = undefined;
     var b: [36]u8 = undefined;
     formatUuidV4(&a);
@@ -203,6 +187,9 @@ test "formatUuidV4: uniqueness" {
 }
 
 test "formatUlid: correct length and charset" {
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
     var buf: [26]u8 = undefined;
     formatUlid(&buf);
     try std.testing.expectEqual(@as(usize, 26), buf.len);
@@ -213,10 +200,13 @@ test "formatUlid: correct length and charset" {
 
 test "nanoid alphabet coverage" {
     // Generate a long nanoid and verify all chars are from the alphabet
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
+    var bytes: [NANOID_MAX_LEN]u8 = undefined;
+    mb.fillRandomChecked(&bytes);
     var buf: [NANOID_MAX_LEN]u8 = undefined;
-    var rng = getRandom();
-    for (&buf) |*c| {
-        const byte = rng.int(u8);
+    for (&buf, bytes) |*c, byte| {
         c.* = NANOID_ALPHABET[byte & 0x3F];
     }
     for (buf) |c| {

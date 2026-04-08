@@ -22,23 +22,15 @@ pub const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.s
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:sql",
     .name = "sql",
+    .required_capabilities = &.{ .sqlite, .policy_check },
     .stateful = true,
     .contract_section = "sql",
     .sandboxable = true,
     .exports = &.{
-        .{ .name = "sql", .func = sqlRegisterNative, .arg_count = 2,
-           .returns = .boolean, .param_types = &.{ .string, .string },
-           .traceable = false,
-           .contract_extractions = &.{.{ .category = .sql_registration }} },
-        .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2,
-           .returns = .optional_object, .param_types = &.{ .string, .object },
-           .failure_severity = .expected,
-           .return_labels = .{ .internal = true } },
-        .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2,
-           .returns = .object, .param_types = &.{ .string, .object },
-           .return_labels = .{ .internal = true } },
-        .{ .name = "sqlExec", .func = sqlExecNative, .arg_count = 2,
-           .effect = .write, .returns = .object, .param_types = &.{ .string, .object } },
+        .{ .name = "sql", .func = sqlRegisterNative, .arg_count = 2, .returns = .boolean, .param_types = &.{ .string, .string }, .traceable = false, .contract_extractions = &.{.{ .category = .sql_registration }} },
+        .{ .name = "sqlOne", .func = sqlOneNative, .arg_count = 2, .returns = .optional_object, .param_types = &.{ .string, .object }, .failure_severity = .expected, .return_labels = .{ .internal = true } },
+        .{ .name = "sqlMany", .func = sqlManyNative, .arg_count = 2, .returns = .object, .param_types = &.{ .string, .object }, .return_labels = .{ .internal = true } },
+        .{ .name = "sqlExec", .func = sqlExecNative, .arg_count = 2, .effect = .write, .returns = .object, .param_types = &.{ .string, .object } },
     },
 };
 

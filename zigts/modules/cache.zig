@@ -25,7 +25,6 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
 const string = @import("../string.zig");
-const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
@@ -34,33 +33,23 @@ const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.cache
 
 /// Get current time in seconds (epoch)
 fn nowSeconds() i64 {
-    const ms = compat.realtimeNowMs() catch return 0;
+    const ms = mb.clockNowMsChecked();
     return @divTrunc(ms, 1000);
 }
 
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:cache",
     .name = "cache",
+    .required_capabilities = &.{ .clock, .policy_check },
     .stateful = true,
     .contract_section = "cache",
     .sandboxable = true,
     .exports = &.{
-        .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2,
-           .effect = .read, .returns = .optional_string, .param_types = &.{.string},
-           .failure_severity = .expected,
-           .contract_extractions = &.{.{ .category = .cache_namespace }},
-           .return_labels = .{ .internal = true } },
-        .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4,
-           .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string },
-           .contract_extractions = &.{.{ .category = .cache_namespace }} },
-        .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2,
-           .effect = .write, .returns = .boolean, .param_types = &.{.string},
-           .contract_extractions = &.{.{ .category = .cache_namespace }} },
-        .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4,
-           .effect = .write, .returns = .number, .param_types = &.{.string},
-           .contract_extractions = &.{.{ .category = .cache_namespace }} },
-        .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1,
-           .effect = .read, .returns = .object, .param_types = &.{} },
+        .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2, .effect = .read, .returns = .optional_string, .param_types = &.{.string}, .failure_severity = .expected, .contract_extractions = &.{.{ .category = .cache_namespace }}, .return_labels = .{ .internal = true } },
+        .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{.string}, .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4, .effect = .write, .returns = .number, .param_types = &.{.string}, .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1, .effect = .read, .returns = .object, .param_types = &.{} },
     },
 };
 
@@ -456,9 +445,13 @@ fn intToJsValue(n: anytype) value.JSValue {
 }
 
 fn ensureNamespaceAllowed(ctx: *context.Context, ns: []const u8) bool {
-    if (ctx.capability_policy.allowsCacheNamespace(ns)) return true;
+    if (mb.allowsCacheNamespaceChecked(ctx, ns)) return true;
     _ = util.throwCapabilityPolicyError(ctx, "cache namespace", ns);
     return false;
+}
+
+fn pushCacheTestContext() mb.ActiveModuleToken {
+    return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
 }
 
 // ============================================================================
@@ -466,6 +459,9 @@ fn ensureNamespaceAllowed(ctx: *context.Context, ns: []const u8) bool {
 // ============================================================================
 
 test "CacheStore: set and get" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -476,6 +472,9 @@ test "CacheStore: set and get" {
 }
 
 test "CacheStore: get missing key" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -484,6 +483,9 @@ test "CacheStore: get missing key" {
 }
 
 test "CacheStore: delete" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -494,6 +496,9 @@ test "CacheStore: delete" {
 }
 
 test "CacheStore: delete missing key" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -502,6 +507,9 @@ test "CacheStore: delete missing key" {
 }
 
 test "CacheStore: TTL expiry" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -513,6 +521,9 @@ test "CacheStore: TTL expiry" {
 }
 
 test "CacheStore: LRU eviction" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -532,6 +543,9 @@ test "CacheStore: LRU eviction" {
 }
 
 test "CacheStore: LRU promotes on access" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -553,6 +567,9 @@ test "CacheStore: LRU promotes on access" {
 }
 
 test "CacheStore: namespace isolation" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -568,6 +585,9 @@ test "CacheStore: namespace isolation" {
 }
 
 test "CacheStore: overwrite existing key" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -581,6 +601,9 @@ test "CacheStore: overwrite existing key" {
 }
 
 test "CacheStore: increment" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -606,6 +629,9 @@ test "CacheStore: increment" {
 }
 
 test "CacheStore: stats tracking" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     var store = CacheStore.init(allocator);
     defer store.deinitSelf();
@@ -621,6 +647,9 @@ test "CacheStore: stats tracking" {
 }
 
 test "cache policy rejects disallowed namespace" {
+    const token = pushCacheTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");

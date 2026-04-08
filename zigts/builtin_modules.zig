@@ -158,3 +158,31 @@ test "failure_severity annotations on failable functions" {
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlParse").?.func.failure_severity);
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlEncode").?.func.failure_severity);
 }
+
+fn bindingHasCapability(binding: *const ModuleBinding, capability: mb.ModuleCapability) bool {
+    for (binding.required_capabilities) |item| {
+        if (item == capability) return true;
+    }
+    return false;
+}
+
+test "module capability annotations cover representative runtime dependencies" {
+    const env_binding = fromSpecifier("zigttp:env").?;
+    try std.testing.expect(bindingHasCapability(env_binding, .env));
+    try std.testing.expect(bindingHasCapability(env_binding, .policy_check));
+
+    const auth_binding = fromSpecifier("zigttp:auth").?;
+    try std.testing.expect(bindingHasCapability(auth_binding, .crypto));
+    try std.testing.expect(bindingHasCapability(auth_binding, .clock));
+
+    const id_binding = fromSpecifier("zigttp:id").?;
+    try std.testing.expect(bindingHasCapability(id_binding, .random));
+    try std.testing.expect(bindingHasCapability(id_binding, .clock));
+
+    const service_binding = fromSpecifier("zigttp:service").?;
+    try std.testing.expect(bindingHasCapability(service_binding, .filesystem));
+    try std.testing.expect(bindingHasCapability(service_binding, .runtime_callback));
+
+    const url_binding = fromSpecifier("zigttp:url").?;
+    try std.testing.expectEqual(@as(usize, 0), url_binding.required_capabilities.len);
+}

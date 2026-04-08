@@ -10,7 +10,7 @@
 const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
-const file_io = @import("../file_io.zig");
+const string = @import("../string.zig");
 const system_linker = @import("../system_linker.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
@@ -28,6 +28,7 @@ pub const ServiceCallFn = *const fn (
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:service",
     .name = "service",
+    .required_capabilities = &.{ .filesystem, .runtime_callback },
     .stateful = true,
     .exports = &.{
         .{ .name = "serviceCall", .func = serviceCallNative, .arg_count = 3, .effect = .write, .returns = .object, .param_types = &.{ .string, .string, .object }, .return_labels = .{ .external = true }, .contract_extractions = &.{.{ .category = .service_call }} },
@@ -48,6 +49,9 @@ pub const ServiceState = struct {
         runtime_ptr: *anyopaque,
         call_fn: ServiceCallFn,
     ) !ServiceState {
+        const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+        defer mb.popActiveModuleContext(token);
+
         var self = ServiceState{
             .allocator = allocator,
             .services = std.StringHashMap([]const u8).init(allocator),
@@ -56,7 +60,7 @@ pub const ServiceState = struct {
         };
         errdefer self.deinitSelf();
 
-        const system_json = try file_io.readFile(allocator, system_path, 1024 * 1024);
+        const system_json = try mb.readFileChecked(allocator, system_path, 1024 * 1024);
         defer allocator.free(system_json);
 
         var config = try system_linker.parseSystemConfig(allocator, system_json);
@@ -135,5 +139,73 @@ fn serviceCallNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.
         return util.throwError(ctx, "Error", "serviceCall() references an unknown service");
     };
 
+    mb.runtimeCallbackCapabilityChecked();
     return state.call_fn(state.runtime_ptr, ctx, base_url, route_pattern, init_val);
+}
+
+fn pushServiceTestContext() mb.ActiveModuleToken {
+    return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+}
+
+test "service installState loads config and delegates callback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "system.json",
+        .data =
+        \\{
+        \\  "version": 1,
+        \\  "handlers": [
+        \\    {
+        \\      "name": "users",
+        \\      "path": "users.ts",
+        \\      "base_url": "http://users.internal"
+        \\    }
+        \\  ]
+        \\}
+        ,
+    });
+    const system_path = try tmp.dir.realPathFileAlloc(std.testing.io, "system.json", std.testing.allocator);
+    defer std.testing.allocator.free(system_path);
+
+    var gc_state = try @import("../gc.zig").GC.init(std.testing.allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var heap_state = @import("../heap.zig").Heap.init(std.testing.allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    const ctx = try context.Context.init(std.testing.allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const install_token = pushServiceTestContext();
+    defer mb.popActiveModuleContext(install_token);
+    try installState(ctx, system_path, @ptrFromInt(0x1), struct {
+        fn call(
+            _: *anyopaque,
+            cb_ctx: *context.Context,
+            base_url: []const u8,
+            route: []const u8,
+            init_val: value.JSValue,
+        ) anyerror!value.JSValue {
+            try std.testing.expectEqualStrings("http://users.internal", base_url);
+            try std.testing.expectEqualStrings("/inspect", route);
+            try std.testing.expect(init_val.isUndefined());
+            return cb_ctx.createString(base_url);
+        }
+    }.call);
+
+    const service_name = try ctx.createString("users");
+    defer string.freeString(std.testing.allocator, service_name.toPtr(string.JSString));
+    const route = try ctx.createString("/inspect");
+    defer string.freeString(std.testing.allocator, route.toPtr(string.JSString));
+
+    const call_token = pushServiceTestContext();
+    defer mb.popActiveModuleContext(call_token);
+    const result = try serviceCallNative(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
+        service_name,
+        route,
+    });
+
+    try std.testing.expectEqualStrings("http://users.internal", util.extractString(result).?);
 }

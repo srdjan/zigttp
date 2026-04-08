@@ -2425,6 +2425,10 @@ not modify external state), write (modifies external state), or none (compile-ti
 only, like `guard`). During precompilation, the contract builder aggregates these
 effects to derive handler-level properties:
 
+This handler-facing effect metadata is separate from module-level
+`required_capabilities`, which describe what a virtual module's Zig
+implementation consumes internally for governance and auditability.
+
 | Property | Meaning |
 |----------|---------|
 | `pure` | No virtual module calls and no fetchSync. Handler is a function of the request only. |

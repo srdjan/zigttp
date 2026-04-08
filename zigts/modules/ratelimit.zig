@@ -13,7 +13,6 @@
 const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
-const compat = @import("../compat.zig");
 const builtins_helpers = @import("../builtins/helpers.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
@@ -23,16 +22,11 @@ const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.ratel
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:ratelimit",
     .name = "ratelimit",
+    .required_capabilities = &.{.clock},
     .stateful = true,
     .exports = &.{
-        .{ .name = "rateCheck", .func = rateCheckNative, .arg_count = 3,
-           .returns = .result, .param_types = &.{ .string, .number, .number },
-           .effect = .write, .failure_severity = .critical,
-           .contract_extractions = &.{.{ .arg_position = 0, .category = .rate_limit_key }},
-           .return_labels = .{ .internal = true } },
-        .{ .name = "rateReset", .func = rateResetNative, .arg_count = 1,
-           .returns = .boolean, .param_types = &.{.string},
-           .effect = .write },
+        .{ .name = "rateCheck", .func = rateCheckNative, .arg_count = 3, .returns = .result, .param_types = &.{ .string, .number, .number }, .effect = .write, .failure_severity = .critical, .contract_extractions = &.{.{ .arg_position = 0, .category = .rate_limit_key }}, .return_labels = .{ .internal = true } },
+        .{ .name = "rateReset", .func = rateResetNative, .arg_count = 1, .returns = .boolean, .param_types = &.{.string}, .effect = .write },
     },
 };
 
@@ -163,7 +157,7 @@ const RateStore = struct {
 };
 
 fn nowSeconds() i64 {
-    const ms = compat.realtimeNowMs() catch return 0;
+    const ms = mb.clockNowMsChecked();
     return @divTrunc(ms, 1000);
 }
 
@@ -216,12 +210,16 @@ fn rateCheckNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
         const tag_str = try ctx.createString("rate_exceeded");
         try err_obj.setProperty(ctx.allocator, pool, tag_atom, tag_str);
 
-        const now_ms = compat.realtimeNowMs() catch 0;
+        const now_ms = mb.clockNowMsChecked();
         const retry_after_ms = result.reset_at - now_ms;
         const retry_sec = @divTrunc(@max(0, retry_after_ms), 1000);
         try err_obj.setProperty(ctx.allocator, pool, retry_atom, builtins_helpers.allocFloat(ctx, @floatFromInt(retry_sec)));
         return util.createPlainResultErrValue(ctx, err_obj.toValue());
     }
+}
+
+fn pushRateLimitTestContext() mb.ActiveModuleToken {
+    return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
 }
 
 /// rateReset(key) -> boolean
@@ -240,6 +238,9 @@ fn rateResetNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
 // -------------------------------------------------------------------------
 
 test "RateStore: basic check" {
+    const token = pushRateLimitTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const store_obj = RateStore.init(std.testing.allocator);
     var store = store_obj;
     defer store.deinit();
@@ -261,6 +262,9 @@ test "RateStore: basic check" {
 }
 
 test "RateStore: reset" {
+    const token = pushRateLimitTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const store_obj = RateStore.init(std.testing.allocator);
     var store = store_obj;
     defer store.deinit();
@@ -271,6 +275,9 @@ test "RateStore: reset" {
 }
 
 test "RateStore: independent keys" {
+    const token = pushRateLimitTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const store_obj = RateStore.init(std.testing.allocator);
     var store = store_obj;
     defer store.deinit();

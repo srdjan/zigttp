@@ -18,6 +18,8 @@ comptime {
         @compileError("sdk.ReturnKind ordinals diverge from internal");
     if (@intFromEnum(sdk.FailureSeverity.none) != @intFromEnum(internal.FailureSeverity.none))
         @compileError("sdk.FailureSeverity ordinals diverge from internal");
+    if (@intFromEnum(sdk.ModuleCapability.policy_check) != @intFromEnum(internal.ModuleCapability.policy_check))
+        @compileError("sdk.ModuleCapability ordinals diverge from internal");
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
@@ -25,11 +27,13 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
         @compileError("extension binding specifier must start with 'zigttp-ext:': " ++ binding.specifier);
     }
 
-    const exports = comptime adaptFunctionBindings(binding.exports);
+    const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);
+    const required_capabilities = comptime adaptModuleCapabilities(binding.required_capabilities);
     return .{
         .specifier = binding.specifier,
         .name = binding.name,
         .exports = &exports,
+        .required_capabilities = &required_capabilities,
         .stateful = binding.stateful,
         .state_init = binding.state_init,
         .state_deinit = binding.state_deinit,
@@ -39,20 +43,37 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
     };
 }
 
-fn adaptFunctionBindings(comptime exports: []const sdk.FunctionBinding) [exports.len]internal.FunctionBinding {
+fn adaptFunctionBindings(
+    comptime specifier: []const u8,
+    comptime required_capabilities: []const sdk.ModuleCapability,
+    comptime exports: []const sdk.FunctionBinding,
+) [exports.len]internal.FunctionBinding {
     var out: [exports.len]internal.FunctionBinding = undefined;
     for (exports, 0..) |binding, i| {
-        out[i] = adaptFunctionBinding(binding);
+        out[i] = adaptFunctionBinding(specifier, required_capabilities, binding);
     }
     return out;
 }
 
-fn adaptFunctionBinding(comptime binding: sdk.FunctionBinding) internal.FunctionBinding {
+fn adaptModuleCapabilities(comptime capabilities: []const sdk.ModuleCapability) [capabilities.len]internal.ModuleCapability {
+    var out: [capabilities.len]internal.ModuleCapability = undefined;
+    for (capabilities, 0..) |capability, i| {
+        out[i] = @enumFromInt(@intFromEnum(capability));
+    }
+    return out;
+}
+
+fn adaptFunctionBinding(
+    comptime specifier: []const u8,
+    comptime required_capabilities: []const sdk.ModuleCapability,
+    comptime binding: sdk.FunctionBinding,
+) internal.FunctionBinding {
     const param_types = comptime adaptReturnKinds(binding.param_types);
     const contract_extractions = comptime adaptContractExtractions(binding.contract_extractions);
+    const internal_required_capabilities = comptime adaptModuleCapabilities(required_capabilities);
     return .{
         .name = binding.name,
-        .func = wrapToNativeFn(binding.module_func),
+        .func = wrapToNativeFn(binding.module_func, specifier, &internal_required_capabilities),
         .arg_count = binding.arg_count,
         .effect = @enumFromInt(@intFromEnum(binding.effect)),
         .returns = @enumFromInt(@intFromEnum(binding.returns)),
@@ -97,9 +118,16 @@ fn adaptContractExtractions(comptime extractions: []const sdk.ContractExtraction
 /// Produce a NativeFn directly from a sdk.ModuleFn, avoiding double-wrapping.
 /// Both JSValue types are bit-identical packed structs, so args are aliased
 /// via @ptrCast with zero per-element copy.
-fn wrapToNativeFn(comptime module_fn: sdk.ModuleFn) object.NativeFn {
+fn wrapToNativeFn(
+    comptime module_fn: sdk.ModuleFn,
+    comptime specifier: []const u8,
+    comptime required_capabilities: []const internal.ModuleCapability,
+) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const prev = internal.pushActiveModuleContext(specifier, required_capabilities);
+            defer internal.popActiveModuleContext(prev);
+
             const sdk_args: []const sdk.JSValue = @ptrCast(args);
             const result = try module_fn(
                 @ptrCast(ctx_ptr),
@@ -109,4 +137,28 @@ fn wrapToNativeFn(comptime module_fn: sdk.ModuleFn) object.NativeFn {
             return @bitCast(result);
         }
     }.call;
+}
+
+test "adaptModuleBinding preserves required capabilities" {
+    const binding = sdk.ModuleBinding{
+        .specifier = "zigttp-ext:test",
+        .name = "test",
+        .required_capabilities = &.{ .clock, .runtime_callback },
+        .exports = &.{
+            .{
+                .name = "noop",
+                .module_func = struct {
+                    fn f(_: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        return sdk.JSValue.undefined_val;
+                    }
+                }.f,
+                .arg_count = 0,
+            },
+        },
+    };
+
+    const adapted = comptime adaptModuleBinding(binding);
+    try std.testing.expectEqual(@as(usize, 2), adapted.required_capabilities.len);
+    try std.testing.expectEqual(internal.ModuleCapability.clock, adapted.required_capabilities[0]);
+    try std.testing.expectEqual(internal.ModuleCapability.runtime_callback, adapted.required_capabilities[1]);
 }

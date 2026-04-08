@@ -26,15 +26,10 @@ pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:time",
     .name = "time",
     .exports = &.{
-        .{ .name = "formatIso", .func = formatIsoNative, .arg_count = 1,
-           .returns = .string, .param_types = &.{.number} },
-        .{ .name = "formatHttp", .func = formatHttpNative, .arg_count = 1,
-           .returns = .string, .param_types = &.{.number} },
-        .{ .name = "parseIso", .func = parseIsoNative, .arg_count = 1,
-           .returns = .number, .param_types = &.{.string},
-           .failure_severity = .expected },
-        .{ .name = "addSeconds", .func = addSecondsNative, .arg_count = 2,
-           .returns = .number, .param_types = &.{ .number, .number } },
+        .{ .name = "formatIso", .func = formatIsoNative, .arg_count = 1, .returns = .string, .param_types = &.{.number} },
+        .{ .name = "formatHttp", .func = formatHttpNative, .arg_count = 1, .returns = .string, .param_types = &.{.number} },
+        .{ .name = "parseIso", .func = parseIsoNative, .arg_count = 1, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected },
+        .{ .name = "addSeconds", .func = addSecondsNative, .arg_count = 2, .returns = .number, .param_types = &.{ .number, .number } },
     },
 };
 

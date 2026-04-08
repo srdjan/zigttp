@@ -18,24 +18,16 @@ const value = @import("../value.zig");
 const object = @import("../object.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
-const compat = @import("../compat.zig");
 
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:log",
     .name = "log",
+    .required_capabilities = &.{ .clock, .stderr },
     .exports = &.{
-        .{ .name = "logDebug", .func = logDebugNative, .arg_count = 2,
-           .returns = .unknown, .param_types = &.{ .string, .object },
-           .effect = .write, .traceable = false },
-        .{ .name = "logInfo", .func = logInfoNative, .arg_count = 2,
-           .returns = .unknown, .param_types = &.{ .string, .object },
-           .effect = .write, .traceable = false },
-        .{ .name = "logWarn", .func = logWarnNative, .arg_count = 2,
-           .returns = .unknown, .param_types = &.{ .string, .object },
-           .effect = .write, .traceable = false },
-        .{ .name = "logError", .func = logErrorNative, .arg_count = 2,
-           .returns = .unknown, .param_types = &.{ .string, .object },
-           .effect = .write, .traceable = false },
+        .{ .name = "logDebug", .func = logDebugNative, .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
+        .{ .name = "logInfo", .func = logInfoNative, .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
+        .{ .name = "logWarn", .func = logWarnNative, .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
+        .{ .name = "logError", .func = logErrorNative, .arg_count = 2, .returns = .unknown, .param_types = &.{ .string, .object }, .effect = .write, .traceable = false },
     },
 };
 
@@ -65,7 +57,7 @@ const logErrorNative = makeLogFn("error");
 
 fn emitLog(ctx: *context.Context, level: []const u8, args: []const value.JSValue) void {
     const message = if (args.len > 0) util.extractString(args[0]) orelse "" else "";
-    const ts = compat.realtimeNowMs() catch 0;
+    const ts = mb.clockNowMsChecked();
 
     var buf = std.ArrayList(u8).empty;
     defer buf.deinit(ctx.allocator);
@@ -175,7 +167,7 @@ fn appendJsonValue(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, val: v
 const atomToString = util.atomToString;
 
 fn writeStderr(data: []const u8) void {
-    _ = std.c.write(std.c.STDERR_FILENO, data.ptr, data.len);
+    mb.writeStderrChecked(data);
 }
 
 // -------------------------------------------------------------------------

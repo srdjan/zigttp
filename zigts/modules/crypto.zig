@@ -19,20 +19,16 @@ const mb = @import("../module_binding.zig");
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:crypto",
     .name = "crypto",
+    .required_capabilities = &.{.crypto},
     .exports = &.{
-        .{ .name = "sha256", .func = sha256Native, .arg_count = 1,
-           .returns = .string, .param_types = &.{.string} },
-        .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2,
-           .returns = .string, .param_types = &.{ .string, .string } },
-        .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1,
-           .returns = .string, .param_types = &.{.string} },
-        .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1,
-           .returns = .string, .param_types = &.{.string} },
+        .{ .name = "sha256", .func = sha256Native, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
+        .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .string } },
+        .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
+        .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
     },
 };
 
 pub const exports = binding.toModuleExports();
-
 
 /// sha256(data) -> hex string
 fn sha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
@@ -41,9 +37,8 @@ fn sha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVal
     if (args.len == 0) return value.JSValue.undefined_val;
     const data = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
 
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(data);
-    const digest = hasher.finalResult();
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    mb.sha256Checked(&digest, data);
 
     // Convert to hex string
     const hex = std.fmt.bytesToHex(digest, .lower);
@@ -59,7 +54,7 @@ fn hmacSha256Native(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.J
     const data = util.extractString(args[1]) orelse return value.JSValue.undefined_val;
 
     var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
-    std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, data, key);
+    mb.hmacSha256Checked(&mac, data, key);
 
     const hex = std.fmt.bytesToHex(mac, .lower);
     return ctx.createString(&hex) catch value.JSValue.undefined_val;

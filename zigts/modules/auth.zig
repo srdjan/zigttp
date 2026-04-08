@@ -23,7 +23,6 @@ const context = @import("../context.zig");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
 const builtins = @import("../builtins/root.zig");
-const compat = @import("../compat.zig");
 const resolver = @import("resolver.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
@@ -34,24 +33,13 @@ const base64url = std.base64.url_safe_no_pad;
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:auth",
     .name = "auth",
+    .required_capabilities = &.{ .crypto, .clock },
     .exports = &.{
-        .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1,
-           .returns = .optional_string, .param_types = &.{.string},
-           .failure_severity = .expected,
-           .contract_flags = .{ .sets_bearer_auth = true },
-           .return_labels = .{ .credential = true } },
-        .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3,
-           .returns = .result, .param_types = &.{ .string, .string },
-           .failure_severity = .critical,
-           .contract_flags = .{ .sets_jwt_auth = true },
-           .return_labels = .{ .credential = true, .validated = true } },
-        .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2,
-           .returns = .string, .param_types = &.{ .string, .string },
-           .return_labels = .{ .credential = true } },
-        .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3,
-           .returns = .boolean, .param_types = &.{ .string, .string, .string } },
-        .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2,
-           .returns = .boolean, .param_types = &.{ .string, .string } },
+        .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1, .returns = .optional_string, .param_types = &.{.string}, .failure_severity = .expected, .contract_flags = .{ .sets_bearer_auth = true }, .return_labels = .{ .credential = true } },
+        .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .critical, .contract_flags = .{ .sets_jwt_auth = true }, .return_labels = .{ .credential = true, .validated = true } },
+        .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
+        .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3, .returns = .boolean, .param_types = &.{ .string, .string, .string } },
+        .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2, .returns = .boolean, .param_types = &.{ .string, .string } },
     },
 };
 
@@ -103,7 +91,7 @@ fn jwtVerifyNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
 
     // Verify signature: HMAC-SHA256(signing_input, secret)
     var expected_mac: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&expected_mac, signing_input, secret);
+    mb.hmacSha256Checked(&expected_mac, signing_input, secret);
 
     // Decode the provided signature (strip trailing '=' padding if present)
     const sig_clean = trimTrailingPadding(signature_b64, "=");
@@ -138,7 +126,7 @@ fn jwtVerifyNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JS
     if (claims_val.isObject()) {
         const claims_obj = claims_val.toPtr(object.JSObject);
         const pool = ctx.hidden_class_pool orelse return util.createPlainResultErr(ctx, "internal error");
-        const now_ms = compat.realtimeNowMs() catch return util.createPlainResultErr(ctx, "clock error");
+        const now_ms = mb.nowMsForActiveModule() catch return util.createPlainResultErr(ctx, "clock error");
         const now = @divTrunc(now_ms, 1000);
 
         // Check exp (expiration)
@@ -193,7 +181,7 @@ fn jwtSignNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSVa
 
     // HMAC-SHA256 sign
     var mac: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&mac, signing_input, secret);
+    mb.hmacSha256Checked(&mac, signing_input, secret);
 
     // Base64url-encode signature
     const sig_b64 = encodeBase64url(ctx.allocator, &mac) catch return value.JSValue.undefined_val;
@@ -226,7 +214,7 @@ fn verifyWebhookSignatureNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []c
 
     // Compute expected HMAC
     var expected_mac: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&expected_mac, payload, secret);
+    mb.hmacSha256Checked(&expected_mac, payload, secret);
     const expected_hex = std.fmt.bytesToHex(expected_mac, .lower);
 
     // Strip "sha256=" prefix if present

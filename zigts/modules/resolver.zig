@@ -68,12 +68,13 @@ pub fn registerVirtualModule(comptime binding: mb.ModuleBinding, ctx: *context.C
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
             pool,
             ctx.root_class_idx,
-            exp.getNativeFn(),
+            base_func,
             name_atom,
             exp.arg_count,
         );
@@ -87,10 +88,11 @@ pub fn registerVirtualModuleTraced(comptime binding: mb.ModuleBinding, ctx: *con
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
         const func = if (comptime shouldWrapExport(binding, exp))
-            comptime trace.makeTracingWrapper(binding.name, exp.name, exp.getNativeFn())
+            comptime trace.makeTracingWrapper(binding.name, exp.name, base_func)
         else
-            exp.getNativeFn();
+            base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
@@ -110,10 +112,11 @@ pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *con
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
         const func = if (comptime shouldWrapExport(binding, exp))
             comptime trace.makeReplayStub(binding.name, exp.name)
         else
-            exp.getNativeFn();
+            base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
@@ -133,10 +136,11 @@ pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *co
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     inline for (binding.exports) |exp| {
+        const base_func = comptime wrappedExportFn(binding, exp);
         const func = if (comptime shouldWrapExport(binding, exp))
-            comptime trace.makeDurableWrapper(binding.name, exp.name, exp.getNativeFn())
+            comptime trace.makeDurableWrapper(binding.name, exp.name, base_func)
         else
-            exp.getNativeFn();
+            base_func;
         const name_atom = try ctx.atoms.intern(exp.name);
         const fn_obj = try object.JSObject.createNativeFunction(
             allocator,
@@ -153,6 +157,14 @@ pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *co
 
 fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
     return !binding.comptime_only and !binding.self_managed_io and func_binding.traceable;
+}
+
+fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
+    if (func_binding.func) |native_fn| {
+        if (binding.required_capabilities.len == 0) return native_fn;
+        return comptime mb.wrapNativeFnWithCapabilities(native_fn, binding.specifier, binding.required_capabilities);
+    }
+    return func_binding.getNativeFn();
 }
 
 /// Validate that all import specifiers from a module are actually exported.

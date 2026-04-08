@@ -96,6 +96,58 @@ pub const FailureSeverity = enum {
     none,
 };
 
+pub const ModuleCapability = enum {
+    env,
+    clock,
+    random,
+    crypto,
+    stderr,
+    runtime_callback,
+    sqlite,
+    filesystem,
+    network,
+    policy_check,
+};
+
+pub const ModuleCapabilityError = error{
+    MissingModuleCapability,
+    ClockUnavailable,
+    StderrWriteFailed,
+};
+
+extern fn zigttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool;
+extern fn zigttpSdkNowMs(handle: *ModuleHandle, out_ms: *i64) bool;
+extern fn zigttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) void;
+extern fn zigttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, len: usize) bool;
+
+pub fn hasCapability(handle: *ModuleHandle, capability: ModuleCapability) bool {
+    return zigttpSdkHasCapability(handle, @intFromEnum(capability));
+}
+
+pub fn requireCapability(handle: *ModuleHandle, capability: ModuleCapability) ModuleCapabilityError!void {
+    if (hasCapability(handle, capability)) return;
+    return error.MissingModuleCapability;
+}
+
+pub fn nowMs(handle: *ModuleHandle) ModuleCapabilityError!i64 {
+    try requireCapability(handle, .clock);
+    var out_ms: i64 = 0;
+    if (!zigttpSdkNowMs(handle, &out_ms)) return error.ClockUnavailable;
+    return out_ms;
+}
+
+pub fn fillRandom(handle: *ModuleHandle, buf: []u8) ModuleCapabilityError!void {
+    try requireCapability(handle, .random);
+    if (buf.len == 0) return;
+    zigttpSdkFillRandom(handle, buf.ptr, buf.len);
+}
+
+pub fn writeStderr(handle: *ModuleHandle, buf: []const u8) ModuleCapabilityError!void {
+    try requireCapability(handle, .stderr);
+    if (buf.len == 0) return;
+    if (!zigttpSdkWriteStderr(handle, buf.ptr, buf.len)) return error.StderrWriteFailed;
+}
+
 pub const DataLabel = enum(u3) {
     secret,
     credential,
@@ -169,6 +221,7 @@ pub const ModuleBinding = struct {
     specifier: []const u8,
     name: []const u8,
     exports: []const FunctionBinding,
+    required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
     state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
     state_deinit: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
@@ -190,6 +243,9 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
         }
         if (binding.state_init == null and binding.state_deinit != null) {
             @compileError("module has state_deinit but missing state_init: " ++ binding.specifier);
+        }
+        if (findDuplicateRequiredCapability(binding.required_capabilities)) |capability| {
+            @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
         }
     }
 
@@ -214,4 +270,13 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             }
         }
     }
+}
+
+fn findDuplicateRequiredCapability(comptime capabilities: []const ModuleCapability) ?ModuleCapability {
+    for (capabilities, 0..) |capability, i| {
+        for (capabilities[i + 1 ..]) |other| {
+            if (capability == other) return capability;
+        }
+    }
+    return null;
 }

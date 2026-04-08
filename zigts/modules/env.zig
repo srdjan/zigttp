@@ -20,14 +20,11 @@ const mb = @import("../module_binding.zig");
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:env",
     .name = "env",
+    .required_capabilities = &.{ .env, .policy_check },
     .contract_section = "env",
     .sandboxable = true,
     .exports = &.{
-        .{ .name = "env", .func = envNative, .arg_count = 1,
-           .returns = .optional_string, .param_types = &.{.string},
-           .failure_severity = .expected,
-           .contract_extractions = &.{.{ .category = .env }},
-           .return_labels = .{ .secret = true } },
+        .{ .name = "env", .func = envNative, .arg_count = 1, .returns = .optional_string, .param_types = &.{.string}, .failure_severity = .expected, .contract_extractions = &.{.{ .category = .env }}, .return_labels = .{ .secret = true } },
     },
 };
 

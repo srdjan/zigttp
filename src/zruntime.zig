@@ -5315,11 +5315,12 @@ test "packaged extension module import resolves to callable binding" {
     defer rt.deinit();
 
     const handler_code =
-        \\import { double, isEven } from "zigttp-ext:math";
+        \\import { double, isEven, clockModulo } from "zigttp-ext:math";
         \\function handler(req) {
         \\  return Response.json({
         \\    doubled: double(21),
-        \\    even: isEven(42)
+        \\    even: isEven(42),
+        \\    modulo: clockModulo(1)
         \\  });
         \\}
     ;
@@ -5335,7 +5336,40 @@ test "packaged extension module import resolves to callable binding" {
 
     var response = try rt.executeHandler(request.asView());
     defer response.deinit();
-    try std.testing.expectEqualStrings("{\"doubled\":42,\"even\":true}", response.body);
+    try std.testing.expectEqualStrings("{\"doubled\":42,\"even\":true,\"modulo\":0}", response.body);
+}
+
+test "built-in module import runs under capability wrapper context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { uuid, nanoid } from "zigttp:id";
+        \\function handler(req) {
+        \\  const a = uuid();
+        \\  const b = nanoid(4);
+        \\  return Response.json({
+        \\    uuidLen: a.length,
+        \\    nanoLen: b.length
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<builtin-capability-wrapper>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("{\"uuidLen\":36,\"nanoLen\":4}", response.body);
 }
 
 test "durable run reuses completed response for duplicate key" {

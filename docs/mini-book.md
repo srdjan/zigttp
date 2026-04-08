@@ -182,7 +182,7 @@ Most serverless handlers need the same handful of capabilities: read an environm
 
 zigttp replaces all of this with virtual modules - native Zig implementations exposed through ES module syntax. When you write `import { jwtVerify } from "zigttp:auth"`, the import resolves to a native function that executes directly in Zig. There is no JavaScript interpretation overhead for these calls. There is no npm. There is no `node_modules` directory.
 
-Each virtual module export carries metadata that the compiler uses for verification, contract extraction, and effect classification. This metadata is the foundation for everything the compiler can prove about your handler.
+Each virtual module export carries metadata that the compiler uses for verification, contract extraction, and effect classification. Module bindings also declare the internal runtime capabilities their Zig implementation consumes, which zigttp uses as governance metadata for auditing virtual modules without changing handler contracts or sandbox policy. This metadata is the foundation for everything the compiler can prove about your handler.
 
 ### zigttp:env
 

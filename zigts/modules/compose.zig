@@ -23,12 +23,8 @@ pub const binding = mb.ModuleBinding{
     .name = "compose",
     .comptime_only = true,
     .exports = &.{
-        .{ .name = "guard", .func = guardNative, .arg_count = 1,
-           .effect = .none, .returns = .string, .param_types = &.{.string},
-           .traceable = false },
-        .{ .name = "pipe", .func = pipeNative, .arg_count = 0,
-           .effect = .none, .returns = .unknown, .param_types = &.{},
-           .traceable = false },
+        .{ .name = "guard", .func = guardNative, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .traceable = false },
+        .{ .name = "pipe", .func = pipeNative, .arg_count = 0, .effect = .none, .returns = .unknown, .param_types = &.{}, .traceable = false },
     },
 };
 
