@@ -37,7 +37,7 @@ zigts link system.json               # Cross-handler contract linking
 
 Two layers. Server (`src/`): HTTP, CLI, request routing, static files. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`. Engine (`zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `zigts/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`.
 
-Request flow: accept connection, acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime.
+Request flow: accept connection, check proven route table (contract-aware pre-filter), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, and property logging (`contract_runtime.zig`).
 
 Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`zigts/modules/compose.zig`).
 
@@ -96,7 +96,7 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 ### zigttp (server)
 
-`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`.
+`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`.
 
 ### zigts (compiler/analyzer)
 

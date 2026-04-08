@@ -21,7 +21,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Compile-time evaluation.** `comptime()` folds expressions at load time, modeled after Zig's comptime. Hash a version string, uppercase a constant, precompute a config value - all before the handler runs.
 
-**Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces, SQL query names) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`.
+**Automatic runtime sandboxing.** Every precompiled handler is sandboxed by default. The compiler extracts a contract of what the handler does (env vars, outbound hosts, cache namespaces, SQL query names) and derives a least-privilege policy that restricts runtime access to exactly the proven values. No configuration required. `-Dcontract` additionally emits a `contract.json` manifest. `-Dpolicy=policy.json` overrides auto-derived sandboxing with an explicit policy. Non-literal arguments honestly report `"dynamic": true`. Self-extracting binaries parse the embedded contract at startup: proven env vars are validated (missing vars fail fast instead of causing a 500 on first request), proven routes reject non-matching requests at the HTTP layer before entering JS, and proven handler properties are logged for operator visibility.
 
 **Handler effect classification.** Every virtual module function carries a compile-time effect annotation (read, write, or none). The compiler aggregates these to prove handler-level properties: pure, read-only, stateless, retry-safe, deterministic, idempotent (safe for at-least-once delivery), injection-safe (no unvalidated input in sinks), and state-isolated (no cross-request data leakage). The I/O depth bound (max virtual module calls per request) enables compile-time Lambda timeout derivation. These flow into deployment manifests, OWASP compliance mapping, and the build report - no annotations or configuration needed.
 
@@ -305,6 +305,7 @@ Options:
   --sqlite <FILE>       SQLite database path for zigttp:sql
   --durable <DIR>       Enable durable execution with write-ahead oplog
   --system <FILE>       System registry for zigttp:service
+  --no-env-check        Skip startup env var validation (development use)
 ```
 
 ### zigts CLI (compiler and analyzer)

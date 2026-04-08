@@ -23,6 +23,9 @@ const HttpResponse = http_types.HttpResponse;
 const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
 
+const contract_runtime = @import("contract_runtime.zig");
+const RuntimeContract = contract_runtime.RuntimeContract;
+
 const RequestLine = http_parser.RequestLine;
 const QueryParseResult = http_parser.QueryParseResult;
 const FastHeaderSlots = http_parser.FastHeaderSlots;
@@ -225,6 +228,14 @@ const ConnectionPool = struct {
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                 };
+                return keep_alive;
+            }
+        }
+
+        // Route pre-filtering (threaded path)
+        if (self.server.contract) |*contract| {
+            if (!contract.matchesRoute(request.method, request.path)) {
+                self.sendErrorSync(fd, 404, "Not Found") catch {};
                 return keep_alive;
             }
         }
@@ -672,6 +683,14 @@ pub const ServerConfig = struct {
 
     /// Log pool metrics every N requests (0 = disabled)
     pool_metrics_every: u64 = 0,
+
+    /// Embedded contract JSON (from self-extracting binary).
+    /// When present, enables contract-aware runtime behavior:
+    /// startup env validation, route pre-filtering, property logging.
+    contract_json: ?[]const u8 = null,
+
+    /// Skip startup env validation (for testing/development)
+    skip_env_check: bool = false,
 };
 
 pub const HandlerSource = union(enum) {
@@ -691,6 +710,7 @@ pub const HandlerSource = union(enum) {
 pub const AppendedPayload = struct {
     bytecode: []const u8,
     dep_bytecodes: []const []const u8,
+    contract_json: ?[]const u8 = null,
 };
 
 // ============================================================================
@@ -712,6 +732,7 @@ pub const Server = struct {
     running: bool,
     request_count: std.atomic.Value(u64),
     conn_pool: ?*ConnectionPool,
+    contract: ?RuntimeContract,
 
     const Self = @This();
     const ConnectionEvent = enum { done, timeout };
@@ -767,6 +788,7 @@ pub const Server = struct {
             .running = false,
             .request_count = std.atomic.Value(u64).init(0),
             .conn_pool = null,
+            .contract = null,
         };
     }
 
@@ -775,6 +797,7 @@ pub const Server = struct {
         if (self.conn_pool) |cp| cp.deinit();
 
         if (self.pool) |*p| p.deinit();
+        if (self.contract) |*c| c.deinit();
         self.static_cache.deinit();
         if (self.evented_ready) {
             const io = self.io_backend.io();
@@ -811,6 +834,31 @@ pub const Server = struct {
             std.log.info("Pool ready: {d} slots, {d} prewarmed, {d}ms", .{
                 self.config.pool_size, prewarm_count, elapsed_ms,
             });
+        }
+
+        // Parse embedded contract (if present) for runtime optimizations
+        if (self.config.contract_json) |json| {
+            self.contract = contract_runtime.parseContractJson(self.allocator, json) catch |err| blk: {
+                std.log.warn("Failed to parse embedded contract: {} (continuing without)", .{err});
+                break :blk null;
+            };
+        }
+
+        if (self.contract) |*contract| {
+            // Log proven contract summary
+            logContractSummary(contract);
+
+            // Fail fast if proven env vars are missing
+            if (!self.config.skip_env_check) {
+                const missing = try contract_runtime.validateEnvVars(self.allocator, contract);
+                defer self.allocator.free(missing);
+                if (missing.len > 0) {
+                    for (missing) |name| {
+                        std.log.err("required env var not set: {s} (proven by contract)", .{name});
+                    }
+                    return error.MissingEnvVars;
+                }
+            }
         }
 
         // Parse address and create listener
@@ -1002,6 +1050,21 @@ pub const Server = struct {
         if (self.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.url, "/static/")) {
                 try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive, request.headers.items);
+                return keep_alive;
+            }
+        }
+
+        // Route pre-filtering: reject requests to unproven routes before JS execution.
+        // When the contract proves the handler only serves specific method+path combos,
+        // we can return 404 directly from Zig without entering the JS runtime.
+        if (self.contract) |*contract| {
+            if (!contract.matchesRoute(request.method, request.path)) {
+                try self.sendErrorResponse(stream, io, 404, "Not Found");
+                if (self.config.log_requests) {
+                    std.log.info("[pre-filter] {s} {s} -> 404 (no matching proven route)", .{
+                        request.method, request.url,
+                    });
+                }
                 return keep_alive;
             }
         }
@@ -1908,6 +1971,35 @@ fn isCanonicalPathInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: 
     if (candidate.len == root_norm.len) return true;
     const boundary = candidate[root_norm.len];
     return boundary == '/' or boundary == '\\';
+}
+
+fn logContractSummary(contract: *const RuntimeContract) void {
+    const p = &contract.properties;
+    std.log.info("Contract loaded: {d} env vars{s}, {d} routes{s}", .{
+        contract.env_vars.len,
+        if (contract.env_dynamic) @as([]const u8, " (+dynamic)") else "",
+        contract.routes.len,
+        if (contract.routes_dynamic) @as([]const u8, " (+dynamic)") else "",
+    });
+
+    // Log proven properties as a separate line for clarity
+    if (p.pure or p.read_only or p.retry_safe or p.deterministic or
+        p.injection_safe or p.state_isolated or p.idempotent or
+        p.no_secret_leakage or p.fault_covered or p.result_safe)
+    {
+        std.log.info("   Proven:{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}", .{
+            if (p.pure) @as([]const u8, " pure") else "",
+            if (p.read_only) @as([]const u8, " read_only") else "",
+            if (p.retry_safe) @as([]const u8, " retry_safe") else "",
+            if (p.deterministic) @as([]const u8, " deterministic") else "",
+            if (p.injection_safe) @as([]const u8, " injection_safe") else "",
+            if (p.state_isolated) @as([]const u8, " state_isolated") else "",
+            if (p.idempotent) @as([]const u8, " idempotent") else "",
+            if (p.no_secret_leakage) @as([]const u8, " no_secret_leakage") else "",
+            if (p.fault_covered) @as([]const u8, " fault_covered") else "",
+            if (p.result_safe) @as([]const u8, " result_safe") else "",
+        });
+    }
 }
 
 fn defaultPoolSize() usize {

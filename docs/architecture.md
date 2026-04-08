@@ -31,12 +31,14 @@ This document describes the architecture of zigttp, a serverless JavaScript runt
 
 ### Server Layer (src/)
 
-HTTP listener, CLI, request routing, static file serving.
+HTTP listener, CLI, request routing, static file serving, contract-aware startup.
 
 **Key Components**:
 - `main.zig` - Entry point, CLI argument parsing
-- `server.zig` - HTTP request/response handling, static file cache
+- `server.zig` - HTTP request/response handling, static file cache, route pre-filtering
 - `zruntime.zig` - HandlerPool management, JS context lifecycle
+- `contract_runtime.zig` - Runtime contract parser for startup env validation, route pre-filtering, and property logging
+- `self_extract.zig` - Self-extracting binary format (bytecode, contract JSON, runtime policy)
 
 ### Engine Layer (zigts/)
 
@@ -84,11 +86,13 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 ## Request Flow
 
 1. Server accepts HTTP connection (`server.zig`)
-2. HandlerPool acquires an isolated runtime from LockFreePool (`zruntime.zig`)
-3. Request parsed and converted to JS Request object
-4. Handler function invoked with Request
-5. JS Response extracted and sent as HTTP response
-6. Runtime released back to pool
+2. Request parsed from HTTP bytes
+3. If contract is loaded, request method+path checked against proven routes - non-matching requests return 404 without entering JS (`contract_runtime.zig`)
+4. HandlerPool acquires an isolated runtime from LockFreePool (`zruntime.zig`)
+5. Request converted to JS Request object
+6. Handler function invoked with Request
+7. JS Response extracted and sent as HTTP response
+8. Runtime released back to pool
 
 ## Key Patterns
 
@@ -266,6 +270,8 @@ zigttp/
 │   ├── main.zig           # CLI entry point
 │   ├── zruntime.zig       # HandlerPool, JS context management
 │   ├── server.zig         # HTTP server implementation
+│   ├── contract_runtime.zig  # Runtime contract parser (env validation, route pre-filter)
+│   ├── self_extract.zig      # Self-extracting binary payload (bytecode + contract + policy)
 │   ├── test_runner.zig    # Declarative handler test runner
 │   ├── replay_runner.zig  # Deterministic replay runner
 │   ├── durable_recovery.zig  # Durable execution crash recovery
@@ -356,11 +362,13 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 - `tools/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
 - `zigts/modules/sql.zig` / `zigts/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
 
-**Enforcement points** (existing, activated by the embedded policy):
+**Enforcement points** (activated by the embedded policy and contract):
 - `zigts/modules/env.zig` - `allowsEnv()` check on env var access
 - `zigts/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
 - `zigts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
 - `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
+- `src/contract_runtime.zig` - startup env var validation, route pre-filtering
+- `src/server.zig` - route pre-filter rejects unproven method+path at HTTP layer
 
 ### Module Binding System
 

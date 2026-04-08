@@ -154,6 +154,9 @@ OPTIONS:
   --system <FILE>       System registry for zigttp:service
                         Required for named internal service calls
 
+  --no-env-check        Skip startup env var validation from contract
+                        Useful during development when env vars aren't set
+
   --cors                Enable CORS headers on all responses
 
   --static <DIR>        Serve static files from directory
@@ -2431,6 +2434,24 @@ Explicit policy rules:
   enumerate it soundly.
 - Local file imports are aggregated before validation, so helper modules count
   toward the same policy.
+
+### Contract-Aware Startup
+
+Self-extracting binaries (built with `zigttp compile handler.ts -o binary`)
+embed the contract JSON alongside bytecode and policy. At startup, the runtime
+parses this contract and uses it for three things:
+
+1. **Env var validation.** Proven env vars are checked via `getenv()` before
+   the server starts listening. If any are missing, the binary exits immediately
+   with a clear error instead of returning a 500 on the first request that
+   hits that code path. Skip with `--no-env-check` during development.
+
+2. **Route pre-filtering.** When the contract proves the handler only serves
+   specific method+path combinations, requests to other routes are rejected
+   with 404 at the HTTP layer without entering JS execution.
+
+3. **Property logging.** Proven handler properties (retry_safe, deterministic,
+   injection_safe, etc.) are logged at startup for operator visibility.
 
 ### Non-Precompiled Handlers
 

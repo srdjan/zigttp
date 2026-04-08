@@ -419,6 +419,8 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             i += 1;
             if (i >= argv.len) return error.MissingSystemFile;
             config.runtime_config.system_config_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--no-env-check")) {
+            config.skip_env_check = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             config.handler = .{ .file_path = arg };
             handler_set = true;
@@ -613,6 +615,7 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
             .bytecode = payload.bytecode,
             .dep_bytecodes = payload.dep_bytecodes,
         } },
+        .contract_json = payload.contract_json,
     };
 
     // Parse serve-compatible flags (port, host, cors, etc.) but ignore handler path args
@@ -635,8 +638,10 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
             i += 1;
             if (i >= argv.len) return error.MissingSystemFile;
             config.runtime_config.system_config_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--no-env-check")) {
+            config.skip_env_check = true;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q] [--system FILE]\n";
+            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q] [--no-env-check] [--system FILE]\n";
             _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
             return;
         }

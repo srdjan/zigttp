@@ -4,8 +4,9 @@
 //! the handler is allowed to do: which routes it serves, which virtual modules
 //! it uses, which env vars / outbound hosts / cache namespaces it references.
 //!
-//! This is purely an emission pass (v1). It does not enforce anything at runtime.
-//! Enforcement and doc generation are v2 concerns.
+//! Extraction is a compile-time pass. At runtime, the contract is parsed by
+//! contract_runtime.zig for startup env validation, route pre-filtering, and
+//! property-driven behavior (see server.zig).
 //!
 //! Usage: called by precompile.zig when --contract is passed.
 //!
