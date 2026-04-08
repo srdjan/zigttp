@@ -87,6 +87,9 @@ pub const RuntimeConfig = struct {
     /// Incomplete oplogs are replayed on startup; completed ones are kept so
     /// duplicate durable keys can return the recorded response.
     durable_oplog_dir: ?[]const u8 = null,
+
+    /// System registry used by zigttp:service for named internal calls.
+    system_config_path: ?[]const u8 = null,
 };
 
 /// Open a trace file for append writing using POSIX APIs.
@@ -500,6 +503,9 @@ pub const Runtime = struct {
         // was parsed or loaded from bytecode cache.
         try self.installVirtualModules();
         try self.installSqlModuleState();
+        if (self.config.system_config_path) |_| {
+            try self.installServiceModuleState();
+        }
 
         // Install io module callbacks for parallel/race (requires outbound HTTP)
         if (self.config.outbound_http_enabled) {
@@ -875,6 +881,11 @@ pub const Runtime = struct {
 
     fn installSqlModuleState(self: *Self) !void {
         try zq.modules.sql.installStore(self.ctx, self.config.sqlite_path);
+    }
+
+    fn installServiceModuleState(self: *Self) !void {
+        const system_path = self.config.system_config_path orelse return;
+        try zq.modules.service.installState(self.ctx, system_path, self, serviceCallCallback);
     }
 
     /// Load and compile JavaScript code
@@ -3396,6 +3407,231 @@ fn durableSignalAtCallback(
 ) anyerror!zq.JSValue {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
     return rt.durableSignalAt(ctx, key, name, at_ms, payload);
+}
+
+const ServiceRoute = struct {
+    method_text: []const u8,
+    path_pattern: []const u8,
+};
+
+fn serviceCallCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    base_url: []const u8,
+    route_pattern: []const u8,
+    init_val: zq.JSValue,
+) anyerror!zq.JSValue {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const route = parseServiceRoutePattern(route_pattern) catch {
+        return createFetchErrorResponse(rt, "InvalidServiceRoute", "route pattern must be 'METHOD /path'");
+    };
+
+    const init_obj = if (init_val.isObject()) init_val.toPtr(zq.JSObject) else null;
+    const url = buildServiceUrl(rt, ctx, base_url, route.path_pattern, init_obj) catch |err| {
+        return switch (err) {
+            error.MissingServiceParam => createFetchErrorResponse(rt, "MissingServiceParam", "missing required path parameter"),
+            error.InvalidServiceParam => createFetchErrorResponse(rt, "InvalidServiceParam", "service path params must be string, number, or boolean"),
+            error.InvalidServiceQuery => createFetchErrorResponse(rt, "InvalidServiceQuery", "service query values must be string, number, or boolean"),
+            else => createFetchErrorResponse(rt, "InternalError", @errorName(err)),
+        };
+    };
+    defer rt.allocator.free(url);
+
+    const fetch_init = try ctx.createObject(null);
+    try ctx.setPropertyChecked(fetch_init, zq.Atom.method, try ctx.createString(route.method_text));
+
+    if (init_obj) |obj| {
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+        if (getDynamicProperty(ctx, obj, pool, "body")) |body_val| {
+            if (!body_val.isUndefined() and !body_val.isNull()) {
+                const body_str = getStringData(body_val) orelse {
+                    return createFetchErrorResponse(rt, "InvalidBody", "serviceCall body must be string|null");
+                };
+                try ctx.setPropertyChecked(fetch_init, zq.Atom.body, try ctx.createString(body_str));
+            }
+        }
+
+        if (getDynamicProperty(ctx, obj, pool, "headers")) |headers_val| {
+            if (!headers_val.isObject()) {
+                return createFetchErrorResponse(rt, "InvalidHeaders", "serviceCall headers must be object<string,string>");
+            }
+            const headers_obj = try ctx.createObject(null);
+            const source_headers = headers_val.toPtr(zq.JSObject);
+            const keys = try source_headers.getOwnEnumerableKeys(rt.allocator, pool);
+            defer rt.allocator.free(keys);
+
+            for (keys) |key_atom| {
+                const header_val = source_headers.getOwnProperty(pool, key_atom) orelse continue;
+                const header_str = getStringData(header_val) orelse {
+                    return createFetchErrorResponse(rt, "InvalidHeaders", "serviceCall header values must be strings");
+                };
+                try ctx.setPropertyChecked(headers_obj, key_atom, try ctx.createString(header_str));
+            }
+
+            try ctx.setPropertyChecked(fetch_init, zq.Atom.headers, headers_obj.toValue());
+        }
+    }
+
+    const fetch_args = [_]zq.JSValue{
+        try ctx.createString(url),
+        fetch_init.toValue(),
+    };
+    return fetchSyncResult(rt, &fetch_args);
+}
+
+fn parseServiceRoutePattern(route_pattern: []const u8) !ServiceRoute {
+    const space = std.mem.indexOfScalar(u8, route_pattern, ' ') orelse return error.InvalidServiceRoute;
+    const method_text = std.mem.trim(u8, route_pattern[0..space], " ");
+    const path_pattern = std.mem.trim(u8, route_pattern[space + 1 ..], " ");
+    if (method_text.len == 0 or path_pattern.len == 0 or path_pattern[0] != '/') {
+        return error.InvalidServiceRoute;
+    }
+    if (parseHttpMethod(method_text) == null) return error.InvalidServiceRoute;
+    return .{
+        .method_text = method_text,
+        .path_pattern = path_pattern,
+    };
+}
+
+fn buildServiceUrl(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    base_url: []const u8,
+    path_pattern: []const u8,
+    init_obj: ?*zq.JSObject,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(rt.allocator);
+
+    try buf.ensureTotalCapacity(rt.allocator, base_url.len + path_pattern.len + 32);
+    try buf.appendSlice(rt.allocator, base_url);
+    if (path_pattern.len > 0) {
+        const base_has_slash = buf.items.len > 0 and buf.items[buf.items.len - 1] == '/';
+        const path_has_slash = path_pattern[0] == '/';
+        if (base_has_slash and path_has_slash) {
+            buf.items.len -= 1;
+        } else if (!base_has_slash and !path_has_slash) {
+            try buf.append(rt.allocator, '/');
+        }
+        try appendServicePath(rt, ctx, &buf, path_pattern, init_obj);
+    }
+
+    try appendServiceQuery(rt, ctx, &buf, init_obj);
+    return try buf.toOwnedSlice(rt.allocator);
+}
+
+fn appendServicePath(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    buf: *std.ArrayList(u8),
+    path_pattern: []const u8,
+    init_obj: ?*zq.JSObject,
+) !void {
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const params_obj = blk: {
+        const obj = init_obj orelse break :blk null;
+        const params_val = getDynamicProperty(ctx, obj, pool, "params") orelse break :blk null;
+        if (!params_val.isObject()) return error.InvalidServiceParam;
+        break :blk params_val.toPtr(zq.JSObject);
+    };
+
+    var i: usize = 0;
+    while (i < path_pattern.len) {
+        if (path_pattern[i] == ':' and (i == 0 or path_pattern[i - 1] == '/')) {
+            const name_start = i + 1;
+            var name_end = name_start;
+            while (name_end < path_pattern.len and path_pattern[name_end] != '/') : (name_end += 1) {}
+
+            const params = params_obj orelse return error.MissingServiceParam;
+            const val = getDynamicProperty(ctx, params, pool, path_pattern[name_start..name_end]) orelse {
+                return error.MissingServiceParam;
+            };
+            if (!try appendEncodedJsValue(rt, buf, val)) return error.InvalidServiceParam;
+            i = name_end;
+            continue;
+        }
+
+        const literal_start = i;
+        while (i < path_pattern.len and !(path_pattern[i] == ':' and (i == 0 or path_pattern[i - 1] == '/'))) : (i += 1) {}
+        try buf.appendSlice(rt.allocator, path_pattern[literal_start..i]);
+    }
+}
+
+fn appendServiceQuery(
+    rt: *Runtime,
+    ctx: *zq.Context,
+    buf: *std.ArrayList(u8),
+    init_obj: ?*zq.JSObject,
+) !void {
+    const obj = init_obj orelse return;
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const query_val = getDynamicProperty(ctx, obj, pool, "query") orelse return;
+    if (!query_val.isObject()) return error.InvalidServiceQuery;
+
+    const query_obj = query_val.toPtr(zq.JSObject);
+    const keys = try query_obj.getOwnEnumerableKeys(rt.allocator, pool);
+    defer rt.allocator.free(keys);
+
+    var wrote_any = false;
+    for (keys) |key_atom| {
+        const key_name = ctx.atoms.getName(key_atom) orelse continue;
+        const query_item = query_obj.getOwnProperty(pool, key_atom) orelse continue;
+        if (query_item.isUndefined()) continue;
+
+        try buf.append(rt.allocator, if (wrote_any) '&' else '?');
+        try appendPercentEncoded(rt, buf, key_name);
+        try buf.append(rt.allocator, '=');
+        if (!try appendEncodedJsValue(rt, buf, query_item)) return error.InvalidServiceQuery;
+        wrote_any = true;
+    }
+}
+
+fn appendEncodedJsValue(rt: *Runtime, buf: *std.ArrayList(u8), val: zq.JSValue) !bool {
+    if (getStringData(val)) |text| {
+        try appendPercentEncoded(rt, buf, text);
+        return true;
+    }
+    if (val.isInt()) {
+        var num_buf: [32]u8 = undefined;
+        const text = std.fmt.bufPrint(&num_buf, "{d}", .{val.getInt()}) catch return false;
+        try appendPercentEncoded(rt, buf, text);
+        return true;
+    }
+    if (val.isBool()) {
+        try appendPercentEncoded(rt, buf, if (val.getBool()) "true" else "false");
+        return true;
+    }
+    if (val.isFloat()) {
+        var num_buf: [64]u8 = undefined;
+        const text = std.fmt.bufPrint(&num_buf, "{d}", .{val.getFloat64()}) catch return false;
+        try appendPercentEncoded(rt, buf, text);
+        return true;
+    }
+    return false;
+}
+
+fn appendPercentEncoded(rt: *Runtime, buf: *std.ArrayList(u8), input: []const u8) !void {
+    for (input) |byte| {
+        if (isUrlUnreserved(byte)) {
+            try buf.append(rt.allocator, byte);
+            continue;
+        }
+
+        try buf.append(rt.allocator, '%');
+        const hex = std.fmt.bytesToHex([_]u8{byte}, .upper);
+        try buf.appendSlice(rt.allocator, &hex);
+    }
+}
+
+fn isUrlUnreserved(byte: u8) bool {
+    return (byte >= 'A' and byte <= 'Z') or
+        (byte >= 'a' and byte <= 'z') or
+        (byte >= '0' and byte <= '9') or
+        byte == '-' or
+        byte == '_' or
+        byte == '.' or
+        byte == '~';
 }
 
 /// IoCallbacks.execute_fetches_fn - execute HTTP fetches concurrently using threads.
@@ -5934,6 +6170,30 @@ test "fetchSync sends request data and exposes response helpers" {
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "Content-Type: text/plain\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "X-Test: alpha\r\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, obj.get("requestRaw").?.string, "\r\n\r\nping") != null);
+}
+
+test "buildServiceUrl renders service params and query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    const params = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(params, try rt.ctx.atoms.intern("id"), try rt.ctx.createString("42"));
+
+    const query = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(query, try rt.ctx.atoms.intern("mode"), try rt.ctx.createString("a b"));
+
+    const init = try rt.ctx.createObject(null);
+    try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("params"), params.toValue());
+    try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("query"), query.toValue());
+
+    const url = try buildServiceUrl(rt, rt.ctx, "http://users.internal", "/inspect/:id", init);
+    defer allocator.free(url);
+
+    try std.testing.expectEqualStrings("http://users.internal/inspect/42?mode=a%20b", url);
 }
 
 test "fetchSync enforces response byte limits" {

@@ -337,6 +337,22 @@ const result = sqlExecute("INSERT INTO users (name, email) VALUES (?, ?)", ["Ali
 
 SQLite queries with optional build-time schema validation. When a `-Dsql-schema` build option points to a schema snapshot, the compiler validates that query column references match the actual schema. Named query allowlisting restricts which SQL statements the handler can execute.
 
+### zigttp:service
+
+```typescript
+import { serviceCall } from "zigttp:service";
+
+const user = serviceCall("users", "GET /api/users/:id", {
+    params: { id: "123" },
+    query: { verbose: "1" }
+});
+```
+
+Named internal service calls. Instead of baking internal base URLs into source,
+handlers can call other handlers declared in `system.json` by stable service
+name. The linker resolves those edges directly and can prove that the target
+route exists and that required params are present.
+
 ### zigttp:io
 
 ```typescript
@@ -580,6 +596,7 @@ The contract captures:
 - **Virtual module imports**: which modules and functions the handler uses
 - **Environment variables**: every literal `env("NAME")` call, with `dynamic: true` if any non-literal argument is detected
 - **Outbound hosts**: every literal URL in `fetchSync()` calls
+- **Internal service calls**: every literal `serviceCall(service, "METHOD /path", init)` edge
 - **Cache namespaces**: every literal namespace in cache operations
 - **Route patterns**: every route string passed to `routerMatch`
 - **SQL queries**: every SQL statement with operation type and table references
@@ -920,6 +937,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `--replay` | - | Replay traces and verify output |
 | `--test` | - | Run declarative handler tests |
 | `--durable` | - | Enable durable execution with oplog directory |
+| `--system` | - | System registry for named `serviceCall()` edges |
 
 ### Build Options
 
@@ -960,6 +978,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | read |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | read/write |
 | `zigttp:sql` | `sqlQuery`, `sqlExecute` | read/write |
+| `zigttp:service` | `serviceCall` | write |
 | `zigttp:io` | `parallel`, `race` | read |
 | `zigttp:compose` | `guard` | none |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | write |

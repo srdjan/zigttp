@@ -11,4 +11,5 @@ pub const Slot = enum(u4) {
     io = 6,
     trace = 7,
     ratelimit = 8,
+    service = 9,
 };

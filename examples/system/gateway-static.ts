@@ -1,17 +1,18 @@
 // Gateway handler with static fetchSync URLs (for linking demo)
 import { env } from "zigttp:env";
+import { serviceCall } from "zigttp:service";
 
 function handler(req) {
   const appName = env("APP_NAME") ?? "demo";
 
-  // Static URL - can be linked to users service
-  const health = fetchSync("https://users.internal/api/users");
+  // Named internal call - linked directly to users service
+  const health = serviceCall("users", "GET /api/users", {});
   if (!health.ok) {
     return Response.json({ error: "users service down" }, { status: 502 });
   }
 
-  // Static URL - can be linked to orders service
-  const orders = fetchSync("https://orders.internal/api/orders");
+  // Named internal call - linked directly to orders service
+  const orders = serviceCall("orders", "GET /api/orders", {});
   if (!orders.ok) {
     return Response.json({ error: "orders service down" }, { status: 502 });
   }

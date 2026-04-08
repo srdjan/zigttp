@@ -1,6 +1,7 @@
 // Users service handler
 import { cacheGet, cacheSet } from "zigttp:cache";
 import { routerMatch } from "zigttp:router";
+import { serviceCall } from "zigttp:service";
 
 function getUserById(req) {
   const id = req.params.id;
@@ -11,7 +12,9 @@ function getUserById(req) {
   }
 
   // Fetch from orders service
-  const orders = fetchSync("https://orders.internal/api/orders?userId=" + id);
+  const orders = serviceCall("orders", "GET /api/orders", {
+    query: { userId: id },
+  });
   if (!orders.ok) {
     return Response.json({ error: "orders unavailable" }, { status: 502 });
   }

@@ -169,11 +169,12 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | Schema-backed typed ingress for JSON, URL-encoded forms, and query strings |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
+| `zigttp:service` | `serviceCall` | Named internal service-to-service calls backed by `system.json` |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:compose` | `guard`, `pipe` | Compile-time handler composition via pipe operator |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
 
-Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
+Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `serviceCall`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
 
 ### Auth Example
 
@@ -303,6 +304,7 @@ Options:
   --replay <FILE>       Replay recorded traces and verify handler output
   --sqlite <FILE>       SQLite database path for zigttp:sql
   --durable <DIR>       Enable durable execution with write-ahead oplog
+  --system <FILE>       System registry for zigttp:service
 ```
 
 ### zigts CLI (compiler and analyzer)
@@ -361,7 +363,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:service` (named internal service calls), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
@@ -401,6 +403,55 @@ const raw = httpRequest(JSON.stringify({
 
 `httpRequest` returns JSON with either `{ ok: true, status, reason, body, content_type? }` or `{ ok: false, error, details }`.
 Use `--outbound-host` to restrict egress to a single host.
+
+## Internal Service Calls
+
+For internal zigttp-to-zigttp calls, prefer `serviceCall()` from `zigttp:service` over hard-coded internal URLs:
+
+```typescript
+import { serviceCall } from "zigttp:service";
+
+function handler(req: Request): Response {
+  const user = serviceCall("users", "GET /api/users/:id", {
+    params: { id: "123" },
+  });
+
+  if (!user.ok) {
+    return Response.json({ error: "user service unavailable" }, { status: 502 });
+  }
+
+  return Response.json(user.json());
+}
+```
+
+`serviceCall(serviceName, "METHOD /path", init?)` resolves through `system.json`, lowers to the existing outbound bridge, and gives `zigts link` a first-class internal edge to verify.
+
+`init` supports:
+
+- `params` for `:path` placeholders
+- `query` for query string keys
+- `headers` for request headers
+- `body` for string request bodies
+
+Run handlers that use `zigttp:service` with `--system <FILE>`:
+
+```bash
+zigttp serve --system examples/system/system.json examples/system/gateway.ts
+```
+
+`system.json` now requires a stable `name` for each handler:
+
+```json
+{
+  "version": 1,
+  "handlers": [
+    { "name": "gateway", "path": "examples/system/gateway.ts", "baseUrl": "https://gateway.internal" },
+    { "name": "users", "path": "examples/system/users.ts", "baseUrl": "https://users.internal" }
+  ]
+}
+```
+
+`zigts link <system.json>` uses those names and routes to prove internal service composition. Raw `fetchSync("https://users.internal/...")` still works, but named service calls produce stronger linking and clearer diagnostics.
 
 ## Compile-Time Toolchain
 
@@ -478,6 +529,7 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **Virtual modules** imported and which functions are used
 - **Environment variables** accessed via `env("NAME")` - literal names are enumerated, dynamic access is flagged
 - **Outbound hosts** called via `fetchSync("https://...")` - hosts are extracted from URL literals
+- **Internal service calls** made via `serviceCall("name", "METHOD /path", init)` - service names, route signatures, and statically proven params/query/header/body keys are captured
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
 - **API surface** from proven routes: method/path, path/query/header params, JSON request bodies, response variants, and bearer auth metadata
@@ -488,7 +540,7 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 
 ```json
 {
-  "version": 6,
+  "version": 11,
   "modules": ["zigttp:auth", "zigttp:cache"],
   "functions": {
     "zigttp:auth": ["jwtVerify", "parseBearer"],

@@ -214,8 +214,8 @@ fn printHelp() void {
         \\  {{
         \\    "version": 1,
         \\    "handlers": [
-        \\      {{ "path": "gateway.ts", "baseUrl": "https://gateway.internal" }},
-        \\      {{ "path": "users.ts", "baseUrl": "https://users.internal" }}
+        \\      {{ "name": "gateway", "path": "gateway.ts", "baseUrl": "https://gateway.internal" }},
+        \\      {{ "name": "users", "path": "users.ts", "baseUrl": "https://users.internal" }}
         \\    ]
         \\  }}
         \\

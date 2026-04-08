@@ -28,12 +28,14 @@ pub const SystemConfig = struct {
     handlers: []HandlerEntry,
 
     pub const HandlerEntry = struct {
+        name: []const u8, // owned
         path: []const u8, // owned
         base_url: []const u8, // owned
     };
 
     pub fn deinit(self: *SystemConfig, allocator: std.mem.Allocator) void {
         for (self.handlers) |entry| {
+            allocator.free(entry.name);
             allocator.free(entry.path);
             allocator.free(entry.base_url);
         }
@@ -50,17 +52,26 @@ pub const LinkStatus = enum {
     unlinked,
 };
 
+pub const LinkKind = enum {
+    fetch_url,
+    service_call,
+};
+
 pub const SystemLink = struct {
+    kind: LinkKind,
     source_idx: usize,
     target_idx: usize,
-    fetch_url: []const u8, // borrowed from contract
+    call_ref: []const u8, // borrowed from contract
+    service_name: ?[]const u8 = null, // borrowed
     matched_route: []const u8, // borrowed from behavior path
     matched_method: ?[]const u8, // borrowed, null if multiple methods
 };
 
 pub const UnresolvedLink = struct {
+    kind: LinkKind,
     source_idx: usize,
-    fetch_url: []const u8, // borrowed
+    call_ref: []const u8, // borrowed
+    service_name: ?[]const u8 = null, // borrowed
     host: []const u8, // borrowed or extracted
     status: LinkStatus,
 };
@@ -150,6 +161,11 @@ const RouteResolution = struct {
     matched_method: ?[]const u8,
 };
 
+const ParsedServiceRoute = struct {
+    method: []const u8,
+    path: []const u8,
+};
+
 // -------------------------------------------------------------------------
 // URL parsing helpers
 // -------------------------------------------------------------------------
@@ -226,17 +242,53 @@ fn findHandlerForUrl(config: SystemConfig, url: []const u8) HandlerLookup {
     };
 }
 
+fn findHandlerByName(config: SystemConfig, service_name: []const u8) ?usize {
+    for (config.handlers, 0..) |entry, idx| {
+        if (std.mem.eql(u8, entry.name, service_name)) return idx;
+    }
+    return null;
+}
+
+fn parseServiceRoute(route_pattern: []const u8) ?ParsedServiceRoute {
+    const sep = std.mem.indexOfScalar(u8, route_pattern, ' ') orelse return null;
+    if (sep == 0 or sep + 1 >= route_pattern.len) return null;
+
+    const method = std.mem.trim(u8, route_pattern[0..sep], " ");
+    const path = std.mem.trim(u8, route_pattern[sep + 1 ..], " ");
+    if (method.len == 0 or path.len == 0 or path[0] != '/') return null;
+
+    return .{ .method = method, .path = path };
+}
+
+fn methodMatches(expected: []const u8, actual: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(expected, actual);
+}
+
 fn matchRoutePath(contract: *const HandlerContract, path: []const u8) ?RouteResolution {
+    return matchRoutePathWithMethod(contract, null, path);
+}
+
+fn matchRoutePathWithMethod(
+    contract: *const HandlerContract,
+    method: ?[]const u8,
+    path: []const u8,
+) ?RouteResolution {
     for (contract.behaviors.items) |behavior| {
+        if (method) |expected_method| {
+            if (!methodMatches(expected_method, behavior.route_method)) continue;
+        }
         if (route_match.pathsMatch(path, behavior.route_pattern)) {
             return .{
                 .matched_route = behavior.route_pattern,
-                .matched_method = null,
+                .matched_method = behavior.route_method,
             };
         }
     }
 
     for (contract.api.routes.items) |api_route| {
+        if (method) |expected_method| {
+            if (!methodMatches(expected_method, api_route.method)) continue;
+        }
         if (route_match.pathsMatch(path, api_route.path)) {
             return .{
                 .matched_route = api_route.path,
@@ -255,6 +307,125 @@ fn matchRoutePath(contract: *const HandlerContract, path: []const u8) ?RouteReso
     }
 
     return null;
+}
+
+fn findApiRoute(contract: *const HandlerContract, method: []const u8, path: []const u8) ?*const handler_contract.ApiRouteInfo {
+    for (contract.api.routes.items) |*api_route| {
+        if (methodMatches(method, api_route.method) and std.mem.eql(u8, api_route.path, path)) {
+            return api_route;
+        }
+    }
+    return null;
+}
+
+fn pathParamProvided(call: handler_contract.ServiceCallInfo, name: []const u8) bool {
+    return handler_contract.containsString(call.path_params.items, name);
+}
+
+fn collectRoutePathParamNames(
+    allocator: std.mem.Allocator,
+    route: *const handler_contract.ApiRouteInfo,
+) !std.ArrayList([]const u8) {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (names.items) |name| allocator.free(name);
+        names.deinit(allocator);
+    }
+
+    if (route.path_params.items.len > 0) {
+        for (route.path_params.items) |param| {
+            if (!handler_contract.containsString(names.items, param.name)) {
+                try names.append(allocator, try allocator.dupe(u8, param.name));
+            }
+        }
+        return names;
+    }
+
+    var iter = std.mem.splitScalar(u8, route.path, '/');
+    while (iter.next()) |segment| {
+        if (segment.len <= 1 or segment[0] != ':') continue;
+        const name = segment[1..];
+        if (!handler_contract.containsString(names.items, name)) {
+            try names.append(allocator, try allocator.dupe(u8, name));
+        }
+    }
+    return names;
+}
+
+fn validateServiceCallShape(
+    allocator: std.mem.Allocator,
+    call: handler_contract.ServiceCallInfo,
+    route: *const handler_contract.ApiRouteInfo,
+) !?[]const u8 {
+    var required_path_params = try collectRoutePathParamNames(allocator, route);
+    defer {
+        for (required_path_params.items) |name| allocator.free(name);
+        required_path_params.deinit(allocator);
+    }
+
+    for (required_path_params.items) |name| {
+        if (call.path_params_dynamic) {
+            return try std.fmt.allocPrint(allocator, "serviceCall cannot prove path param '{s}'", .{name});
+        }
+        if (!pathParamProvided(call, name)) {
+            return try std.fmt.allocPrint(allocator, "serviceCall is missing path param '{s}'", .{name});
+        }
+    }
+
+    for (route.query_params.items) |param| {
+        if (!param.required) continue;
+        if (call.query_dynamic) {
+            return try std.fmt.allocPrint(allocator, "serviceCall cannot prove query param '{s}'", .{param.name});
+        }
+        if (!handler_contract.containsString(call.query_keys.items, param.name)) {
+            return try std.fmt.allocPrint(allocator, "serviceCall is missing query param '{s}'", .{param.name});
+        }
+    }
+
+    for (route.header_params.items) |param| {
+        if (!param.required) continue;
+        if (call.header_dynamic) {
+            return try std.fmt.allocPrint(allocator, "serviceCall cannot prove header '{s}'", .{param.name});
+        }
+        if (!handler_contract.containsString(call.header_keys.items, param.name)) {
+            return try std.fmt.allocPrint(allocator, "serviceCall is missing header '{s}'", .{param.name});
+        }
+    }
+
+    if (route.request_bodies.items.len > 0 and !route.request_bodies_dynamic) {
+        if (call.body_dynamic) {
+            return try allocator.dupe(u8, "serviceCall cannot prove request body presence");
+        }
+        if (!call.has_body) {
+            return try allocator.dupe(u8, "serviceCall is missing required request body");
+        }
+    }
+
+    return null;
+}
+
+fn appendUnresolvedWarning(
+    allocator: std.mem.Allocator,
+    warnings: *std.ArrayList([]const u8),
+    source_path: []const u8,
+    kind: LinkKind,
+    service_name: ?[]const u8,
+    call_ref: []const u8,
+    detail: []const u8,
+) !void {
+    const msg = switch (kind) {
+        .fetch_url => try std.fmt.allocPrint(
+            allocator,
+            "{s}: fetchSync to {s} {s}",
+            .{ source_path, call_ref, detail },
+        ),
+        .service_call => try std.fmt.allocPrint(
+            allocator,
+            "{s}: serviceCall({s}, {s}) {s}",
+            .{ source_path, service_name orelse "?", call_ref, detail },
+        ),
+    };
+    try warnings.append(allocator, msg);
 }
 
 // -------------------------------------------------------------------------
@@ -304,56 +475,169 @@ pub fn linkSystem(
 
                 if (resolved) |match| {
                     try links.append(allocator, .{
+                        .kind = .fetch_url,
                         .source_idx = source_idx,
                         .target_idx = target_idx,
-                        .fetch_url = url,
+                        .call_ref = url,
                         .matched_route = match.matched_route,
                         .matched_method = match.matched_method,
                     });
                 } else {
+                    const detail = try std.fmt.allocPrint(allocator, "matches no route in {s}", .{config.handlers[target_idx].path});
+                    defer allocator.free(detail);
                     try unresolved.append(allocator, .{
+                        .kind = .fetch_url,
                         .source_idx = source_idx,
-                        .fetch_url = url,
+                        .call_ref = url,
                         .host = host,
                         .status = .unlinked,
                     });
-                    const msg = try std.fmt.allocPrint(
+                    try appendUnresolvedWarning(
                         allocator,
-                        "{s}: fetchSync to {s} matches no route in {s}",
-                        .{
-                            config.handlers[source_idx].path,
-                            url,
-                            config.handlers[target_idx].path,
-                        },
+                        &warnings,
+                        config.handlers[source_idx].path,
+                        .fetch_url,
+                        null,
+                        url,
+                        detail,
                     );
-                    try warnings.append(allocator, msg);
                 }
             } else if (lookup.matched_host) {
+                const detail = try std.fmt.allocPrint(allocator, "matches system host {s} but no configured baseUrl", .{host});
+                defer allocator.free(detail);
                 try unresolved.append(allocator, .{
+                    .kind = .fetch_url,
                     .source_idx = source_idx,
-                    .fetch_url = url,
+                    .call_ref = url,
                     .host = host,
                     .status = .unlinked,
                 });
-                const msg = try std.fmt.allocPrint(
+                try appendUnresolvedWarning(
                     allocator,
-                    "{s}: fetchSync to {s} matches system host {s} but no configured baseUrl",
-                    .{
-                        config.handlers[source_idx].path,
-                        url,
-                        host,
-                    },
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .fetch_url,
+                    null,
+                    url,
+                    detail,
                 );
-                try warnings.append(allocator, msg);
             } else {
                 // External service
                 try unresolved.append(allocator, .{
+                    .kind = .fetch_url,
                     .source_idx = source_idx,
-                    .fetch_url = url,
+                    .call_ref = url,
                     .host = host,
                     .status = .external,
                 });
             }
+        }
+
+        for (contract.service_calls.items) |service_call| {
+            if (service_call.dynamic or service_call.service.len == 0 or service_call.route_pattern.len == 0) {
+                dynamic_links += 1;
+                continue;
+            }
+
+            const target_idx = findHandlerByName(config, service_call.service) orelse {
+                try unresolved.append(allocator, .{
+                    .kind = .service_call,
+                    .source_idx = source_idx,
+                    .call_ref = service_call.route_pattern,
+                    .service_name = service_call.service,
+                    .host = service_call.service,
+                    .status = .unlinked,
+                });
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .service_call,
+                    service_call.service,
+                    service_call.route_pattern,
+                    "references an unknown service",
+                );
+                continue;
+            };
+
+            const parsed_route = parseServiceRoute(service_call.route_pattern) orelse {
+                try unresolved.append(allocator, .{
+                    .kind = .service_call,
+                    .source_idx = source_idx,
+                    .call_ref = service_call.route_pattern,
+                    .service_name = service_call.service,
+                    .host = service_call.service,
+                    .status = .unlinked,
+                });
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .service_call,
+                    service_call.service,
+                    service_call.route_pattern,
+                    "has an invalid route pattern",
+                );
+                continue;
+            };
+
+            const target_contract = &contracts[target_idx];
+            const resolved = matchRoutePathWithMethod(target_contract, parsed_route.method, parsed_route.path) orelse {
+                const detail = try std.fmt.allocPrint(allocator, "matches no route in {s}", .{config.handlers[target_idx].path});
+                defer allocator.free(detail);
+                try unresolved.append(allocator, .{
+                    .kind = .service_call,
+                    .source_idx = source_idx,
+                    .call_ref = service_call.route_pattern,
+                    .service_name = service_call.service,
+                    .host = service_call.service,
+                    .status = .unlinked,
+                });
+                try appendUnresolvedWarning(
+                    allocator,
+                    &warnings,
+                    config.handlers[source_idx].path,
+                    .service_call,
+                    service_call.service,
+                    service_call.route_pattern,
+                    detail,
+                );
+                continue;
+            };
+
+            if (findApiRoute(target_contract, parsed_route.method, parsed_route.path)) |api_route| {
+                if (try validateServiceCallShape(allocator, service_call, api_route)) |detail| {
+                    defer allocator.free(detail);
+                    try unresolved.append(allocator, .{
+                        .kind = .service_call,
+                        .source_idx = source_idx,
+                        .call_ref = service_call.route_pattern,
+                        .service_name = service_call.service,
+                        .host = service_call.service,
+                        .status = .unlinked,
+                    });
+                    try appendUnresolvedWarning(
+                        allocator,
+                        &warnings,
+                        config.handlers[source_idx].path,
+                        .service_call,
+                        service_call.service,
+                        service_call.route_pattern,
+                        detail,
+                    );
+                    continue;
+                }
+            }
+
+            try links.append(allocator, .{
+                .kind = .service_call,
+                .source_idx = source_idx,
+                .target_idx = target_idx,
+                .call_ref = service_call.route_pattern,
+                .service_name = service_call.service,
+                .matched_route = resolved.matched_route,
+                .matched_method = resolved.matched_method,
+            });
         }
     }
 
@@ -369,9 +653,10 @@ pub fn linkSystem(
             defer allocator.free(status_str);
             const msg = try std.fmt.allocPrint(
                 allocator,
-                "{s}: fetchSync to {s} does not handle status codes: {s}",
+                "{s}: {s} {s} does not handle status codes: {s}",
                 .{
                     config.handlers[link.source_idx].path,
+                    if (link.kind == .fetch_url) "fetchSync target" else "serviceCall target",
                     config.handlers[link.target_idx].path,
                     status_str,
                 },
@@ -485,6 +770,9 @@ fn analyzeResponseCoverage(
 
     // Check behavioral paths
     for (target.behaviors.items) |behavior| {
+        if (link.matched_method) |matched_method| {
+            if (!methodMatches(matched_method, behavior.route_method)) continue;
+        }
         if (route_match.pathsMatch(behavior.route_pattern, link.matched_route)) {
             if (!containsU16(target_statuses.items, behavior.response_status)) {
                 try target_statuses.append(allocator, behavior.response_status);
@@ -494,6 +782,9 @@ fn analyzeResponseCoverage(
 
     // Also check API route response statuses
     for (target.api.routes.items) |api_route| {
+        if (link.matched_method) |matched_method| {
+            if (!methodMatches(matched_method, api_route.method)) continue;
+        }
         if (route_match.pathsMatch(api_route.path, link.matched_route)) {
             // Add response status from API route
             if (api_route.response_status) |status| {
@@ -666,6 +957,7 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
     var entries: std.ArrayList(SystemConfig.HandlerEntry) = .empty;
     errdefer {
         for (entries.items) |entry| {
+            allocator.free(entry.name);
             allocator.free(entry.path);
             allocator.free(entry.base_url);
         }
@@ -705,6 +997,7 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
 
                 if (!parser.consume('{')) return error.InvalidJson;
 
+                var name: ?[]const u8 = null;
                 var path: ?[]const u8 = null;
                 var base_url: ?[]const u8 = null;
 
@@ -721,7 +1014,9 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
                     parser.skipWhitespace();
                     if (!parser.consume(':')) return error.InvalidJson;
 
-                    if (std.mem.eql(u8, obj_key, "path")) {
+                    if (std.mem.eql(u8, obj_key, "name")) {
+                        name = parser.readString();
+                    } else if (std.mem.eql(u8, obj_key, "path")) {
                         path = parser.readString();
                     } else if (std.mem.eql(u8, obj_key, "baseUrl")) {
                         base_url = parser.readString();
@@ -730,8 +1025,9 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
                     }
                 }
 
-                if (path != null and base_url != null) {
+                if (name != null and path != null and base_url != null) {
                     try entries.append(allocator, .{
+                        .name = try allocator.dupe(u8, name.?),
                         .path = try allocator.dupe(u8, path.?),
                         .base_url = try allocator.dupe(u8, base_url.?),
                     });
@@ -764,6 +1060,8 @@ pub fn writeSystemContractJson(
         if (i > 0) try writer.writeAll(",\n");
         try writer.writeAll("    { \"path\": ");
         try json_utils.writeJsonString(writer, h.path);
+        try writer.writeAll(", \"name\": ");
+        try json_utils.writeJsonString(writer, h.name);
         try writer.writeAll(", \"baseUrl\": ");
         try json_utils.writeJsonString(writer, h.base_url);
         try writer.writeAll(" }");
@@ -775,12 +1073,14 @@ pub fn writeSystemContractJson(
     for (analysis.links.items, 0..) |link, i| {
         if (i > 0) try writer.writeAll(",\n");
         try writer.writeAll("    {\n");
-        try writer.writeAll("      \"source\": ");
+        try writer.writeAll("      \"kind\": ");
+        try json_utils.writeJsonString(writer, @tagName(link.kind));
+        try writer.writeAll(",\n      \"callRef\": ");
+        try json_utils.writeJsonString(writer, link.call_ref);
+        try writer.writeAll(",\n      \"source\": ");
         try json_utils.writeJsonString(writer, config_handlers[link.source_idx].path);
         try writer.writeAll(",\n      \"target\": ");
         try json_utils.writeJsonString(writer, config_handlers[link.target_idx].path);
-        try writer.writeAll(",\n      \"fetchUrl\": ");
-        try json_utils.writeJsonString(writer, link.fetch_url);
         try writer.writeAll(",\n      \"matchedRoute\": ");
         try json_utils.writeJsonString(writer, link.matched_route);
         try writer.writeAll(",\n      \"status\": \"linked\"\n");
@@ -794,10 +1094,12 @@ pub fn writeSystemContractJson(
     for (analysis.unresolved.items, 0..) |u, i| {
         if (i > 0) try writer.writeAll(",\n");
         try writer.writeAll("    {\n");
-        try writer.writeAll("      \"source\": ");
+        try writer.writeAll("      \"kind\": ");
+        try json_utils.writeJsonString(writer, @tagName(u.kind));
+        try writer.writeAll(",\n      \"callRef\": ");
+        try json_utils.writeJsonString(writer, u.call_ref);
+        try writer.writeAll(",\n      \"source\": ");
         try json_utils.writeJsonString(writer, config_handlers[u.source_idx].path);
-        try writer.writeAll(",\n      \"fetchUrl\": ");
-        try json_utils.writeJsonString(writer, u.fetch_url);
         try writer.writeAll(",\n      \"host\": ");
         try json_utils.writeJsonString(writer, u.host);
         try writer.writeAll(",\n      \"status\": ");
@@ -896,10 +1198,11 @@ pub fn writeSystemReport(
     if (analysis.links.items.len > 0) {
         try writer.writeAll("--- LINKED ---\n");
         for (analysis.links.items) |link| {
-            try writer.print("  {s} -> {s} ({s} -> {s})\n", .{
+            try writer.print("  {s} -> {s} ({s}: {s} -> {s})\n", .{
                 config_handlers[link.source_idx].path,
                 config_handlers[link.target_idx].path,
-                link.fetch_url,
+                @tagName(link.kind),
+                link.call_ref,
                 link.matched_route,
             });
         }
@@ -914,7 +1217,7 @@ pub fn writeSystemReport(
             if (u.status == .unlinked) {
                 try writer.print("  ERROR: {s} calls {s} but no matching route exists\n", .{
                     config_handlers[u.source_idx].path,
-                    u.fetch_url,
+                    u.call_ref,
                 });
             }
         }
@@ -1034,8 +1337,8 @@ test "parseSystemConfig" {
         \\{
         \\  "version": 1,
         \\  "handlers": [
-        \\    { "path": "gateway.ts", "baseUrl": "https://gateway.internal" },
-        \\    { "path": "users.ts", "baseUrl": "https://users.internal" }
+        \\    { "name": "gateway", "path": "gateway.ts", "baseUrl": "https://gateway.internal" },
+        \\    { "name": "users", "path": "users.ts", "baseUrl": "https://users.internal" }
         \\  ]
         \\}
     ;
@@ -1044,6 +1347,7 @@ test "parseSystemConfig" {
 
     try std.testing.expectEqual(@as(u32, 1), config.version);
     try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
+    try std.testing.expectEqualStrings("gateway", config.handlers[0].name);
     try std.testing.expectEqualStrings("gateway.ts", config.handlers[0].path);
     try std.testing.expectEqualStrings("https://gateway.internal", config.handlers[0].base_url);
     try std.testing.expectEqualStrings("users.ts", config.handlers[1].path);
@@ -1089,8 +1393,8 @@ test "linkSystem: linked and external" {
 
     // Config
     var entries: [2]SystemConfig.HandlerEntry = .{
-        .{ .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
-        .{ .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
     };
     const handlers_slice = try allocator.dupe(SystemConfig.HandlerEntry, &entries);
 
@@ -1108,6 +1412,72 @@ test "linkSystem: linked and external" {
     try std.testing.expectEqual(@as(usize, 0), analysis.links.items[0].source_idx);
     try std.testing.expectEqual(@as(usize, 1), analysis.links.items[0].target_idx);
     try std.testing.expectEqualStrings("/api/v1/:id", analysis.links.items[0].matched_route);
+}
+
+test "linkSystem: serviceCall links named services" {
+    const allocator = std.testing.allocator;
+
+    var contracts: [2]HandlerContract = undefined;
+    contracts[0] = handler_contract.emptyContract(try allocator.dupe(u8, "gateway.ts"));
+
+    var service_calls: std.ArrayList(handler_contract.ServiceCallInfo) = .empty;
+    try service_calls.append(allocator, .{
+        .service = try allocator.dupe(u8, "users"),
+        .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
+        .path_params = blk: {
+            var params: std.ArrayList([]const u8) = .empty;
+            try params.append(allocator, try allocator.dupe(u8, "id"));
+            break :blk params;
+        },
+    });
+    contracts[0].service_calls = service_calls;
+
+    contracts[1] = handler_contract.emptyContract(try allocator.dupe(u8, "users.ts"));
+    var path_params: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
+    try path_params.append(allocator, .{
+        .name = try allocator.dupe(u8, "id"),
+        .location = "path",
+        .required = true,
+        .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+    });
+    var api_routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
+    try api_routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/api/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .path_params = path_params,
+        .responses = blk: {
+            var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
+            try responses.append(allocator, .{ .status = 200 });
+            break :blk responses;
+        },
+        .response_status = 200,
+    });
+    contracts[1].api.routes = api_routes;
+
+    var entries: [2]SystemConfig.HandlerEntry = .{
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
+    };
+    const config = SystemConfig{
+        .version = 1,
+        .handlers = try allocator.dupe(SystemConfig.HandlerEntry, &entries),
+    };
+
+    var analysis = try linkSystem(allocator, &contracts, config);
+    defer {
+        analysis.deinit(allocator);
+        contracts[0].deinit(allocator);
+        contracts[1].deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), analysis.links.items.len);
+    try std.testing.expectEqual(LinkKind.service_call, analysis.links.items[0].kind);
+    try std.testing.expectEqualStrings("GET /api/users/:id", analysis.links.items[0].call_ref);
+    try std.testing.expectEqual(@as(usize, 0), analysis.unresolved.items.len);
 }
 
 test "linkSystem: unlinked route" {
@@ -1141,8 +1511,8 @@ test "linkSystem: unlinked route" {
     contracts[1].behaviors = behaviors;
 
     var entries: [2]SystemConfig.HandlerEntry = .{
-        .{ .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
-        .{ .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
     };
 
     const config = SystemConfig{
@@ -1209,8 +1579,8 @@ test "linkSystem: mixed literal and dynamic fetches keep proof partial" {
     contracts[1].behaviors = behaviors;
 
     var entries: [2]SystemConfig.HandlerEntry = .{
-        .{ .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
-        .{ .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://users.internal") },
     };
 
     const config = SystemConfig{
@@ -1271,9 +1641,9 @@ test "linkSystem: longest baseUrl prefix wins on shared host" {
     contracts[2].behaviors = order_behaviors;
 
     var entries: [3]SystemConfig.HandlerEntry = .{
-        .{ .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
-        .{ .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://api.internal/users") },
-        .{ .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://api.internal/orders") },
+        .{ .name = try allocator.dupe(u8, "gateway"), .path = try allocator.dupe(u8, "gateway.ts"), .base_url = try allocator.dupe(u8, "https://gateway.internal") },
+        .{ .name = try allocator.dupe(u8, "users"), .path = try allocator.dupe(u8, "users.ts"), .base_url = try allocator.dupe(u8, "https://api.internal/users") },
+        .{ .name = try allocator.dupe(u8, "orders"), .path = try allocator.dupe(u8, "orders.ts"), .base_url = try allocator.dupe(u8, "https://api.internal/orders") },
     };
 
     const config = SystemConfig{

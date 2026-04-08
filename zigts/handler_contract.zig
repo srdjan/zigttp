@@ -481,14 +481,47 @@ pub const BehaviorPath = struct {
     }
 };
 
+pub const ServiceCallInfo = struct {
+    service: []const u8, // owned
+    route_pattern: []const u8, // owned
+    dynamic: bool = false,
+    path_params: std.ArrayList([]const u8) = .empty, // each entry owned
+    path_params_dynamic: bool = false,
+    query_keys: std.ArrayList([]const u8) = .empty, // each entry owned
+    query_dynamic: bool = false,
+    header_keys: std.ArrayList([]const u8) = .empty, // each entry owned
+    header_dynamic: bool = false,
+    has_body: bool = false,
+    body_dynamic: bool = false,
+
+    pub fn markAllDynamic(self: *ServiceCallInfo) void {
+        self.path_params_dynamic = true;
+        self.query_dynamic = true;
+        self.header_dynamic = true;
+        self.body_dynamic = true;
+    }
+
+    pub fn deinit(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.service);
+        allocator.free(self.route_pattern);
+        for (self.path_params.items) |param| allocator.free(param);
+        self.path_params.deinit(allocator);
+        for (self.query_keys.items) |key| allocator.free(key);
+        self.query_keys.deinit(allocator);
+        for (self.header_keys.items) |key| allocator.free(key);
+        self.header_keys.deinit(allocator);
+    }
+};
+
 pub const HandlerContract = struct {
-    version: u32 = 10,
+    version: u32 = 11,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
     functions: std.ArrayList(FunctionEntry),
     env: EnvInfo,
     egress: EgressInfo,
+    service_calls: std.ArrayList(ServiceCallInfo) = .empty,
     cache: CacheInfo,
     sql: SqlInfo,
     durable: DurableInfo,
@@ -536,6 +569,10 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.egress.urls.deinit(allocator);
+        for (self.service_calls.items) |*call| {
+            call.deinit(allocator);
+        }
+        self.service_calls.deinit(allocator);
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }
@@ -576,6 +613,7 @@ pub const ContractBuilder = struct {
     egress_hosts: std.ArrayList([]const u8),
     egress_urls: std.ArrayList([]const u8),
     egress_dynamic: bool,
+    service_calls: std.ArrayList(ServiceCallInfo),
     cache_namespaces: std.ArrayList([]const u8),
     cache_dynamic: bool,
     sql_queries: std.ArrayList(SqlQueryInfo),
@@ -631,6 +669,7 @@ pub const ContractBuilder = struct {
             .egress_hosts = .empty,
             .egress_urls = .empty,
             .egress_dynamic = false,
+            .service_calls = .empty,
             .cache_namespaces = .empty,
             .cache_dynamic = false,
             .sql_queries = .empty,
@@ -661,6 +700,8 @@ pub const ContractBuilder = struct {
         self.egress_hosts.deinit(self.allocator);
         for (self.egress_urls.items) |s| self.allocator.free(s);
         self.egress_urls.deinit(self.allocator);
+        for (self.service_calls.items) |*call| call.deinit(self.allocator);
+        self.service_calls.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
         self.cache_namespaces.deinit(self.allocator);
         for (self.sql_queries.items) |*query| query.deinit(self.allocator);
@@ -791,6 +832,7 @@ pub const ContractBuilder = struct {
                 .urls = self.egress_urls,
                 .dynamic = self.egress_dynamic,
             },
+            .service_calls = self.service_calls,
             .cache = .{
                 .namespaces = self.cache_namespaces,
                 .dynamic = self.cache_dynamic,
@@ -843,6 +885,7 @@ pub const ContractBuilder = struct {
         self.env_literals = .empty;
         self.egress_hosts = .empty;
         self.egress_urls = .empty;
+        self.service_calls = .empty;
         self.cache_namespaces = .empty;
         self.sql_queries = .empty;
         self.durable_key_literals = .empty;
@@ -990,6 +1033,7 @@ pub const ContractBuilder = struct {
                             .sql_registration => try self.extractSqlRegistration(call),
                             .schema_compile => try self.extractSchemaCompile(call),
                             .route_pattern => try self.extractApiRoutesFromCall(call),
+                            .service_call => try self.extractServiceCall(call),
                             // Generic: extract literal from arg N into category bucket
                             else => {
                                 if (self.getCategoryTarget(ext.category)) |target| {
@@ -1103,7 +1147,7 @@ pub const ContractBuilder = struct {
             .durable_producer_key => .{ .list = &self.durable_producer_key_literals, .dynamic = &self.durable_producer_key_dynamic },
             .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
             // Custom categories are dispatched directly, not via generic target
-            .sql_registration, .schema_compile, .route_pattern, .cookie_name, .cors_origin, .rate_limit_key => null,
+            .sql_registration, .schema_compile, .route_pattern, .service_call, .cookie_name, .cors_origin, .rate_limit_key => null,
         };
     }
 
@@ -1338,6 +1382,125 @@ pub const ContractBuilder = struct {
         };
 
         try self.extractApiRoutesFromObject(routes_obj);
+    }
+
+    fn extractServiceCall(self: *ContractBuilder, call: Node.CallExpr) !void {
+        var service_call = ServiceCallInfo{
+            .service = try self.allocator.dupe(u8, ""),
+            .route_pattern = try self.allocator.dupe(u8, ""),
+        };
+        errdefer service_call.deinit(self.allocator);
+
+        if (call.args_count < 2) {
+            service_call.dynamic = true;
+            try self.service_calls.append(self.allocator, service_call);
+            return;
+        }
+
+        const service_idx = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.getLiteralString(service_idx)) |service_name| {
+            self.allocator.free(service_call.service);
+            service_call.service = try self.allocator.dupe(u8, service_name);
+        } else {
+            service_call.dynamic = true;
+        }
+
+        const route_idx = self.ir_view.getListIndex(call.args_start, 1);
+        if (self.getLiteralString(route_idx)) |route_pattern| {
+            self.allocator.free(service_call.route_pattern);
+            service_call.route_pattern = try self.allocator.dupe(u8, route_pattern);
+        } else {
+            service_call.dynamic = true;
+        }
+
+        if (call.args_count > 2) {
+            const init_idx = self.ir_view.getListIndex(call.args_start, 2);
+            try self.extractServiceCallInit(init_idx, &service_call);
+        }
+
+        try self.service_calls.append(self.allocator, service_call);
+    }
+
+    fn extractServiceCallInit(self: *ContractBuilder, init_idx: NodeIndex, service_call: *ServiceCallInfo) !void {
+        const tag = self.ir_view.getTag(init_idx) orelse {
+            service_call.markAllDynamic();
+            return;
+        };
+        if (tag == .lit_null or tag == .lit_undefined) return;
+
+        const init_obj = self.resolveObjectLiteralNode(init_idx) orelse {
+            service_call.markAllDynamic();
+            return;
+        };
+        const obj = self.ir_view.getObject(init_obj) orelse return;
+
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            const key = self.getObjectPropertyKey(prop.key) orelse continue;
+
+            if (std.mem.eql(u8, key, "params")) {
+                try self.extractServiceObjectKeys(prop.value, &service_call.path_params, &service_call.path_params_dynamic);
+            } else if (std.mem.eql(u8, key, "query")) {
+                try self.extractServiceObjectKeys(prop.value, &service_call.query_keys, &service_call.query_dynamic);
+            } else if (std.mem.eql(u8, key, "headers")) {
+                try self.extractServiceObjectKeys(prop.value, &service_call.header_keys, &service_call.header_dynamic);
+            } else if (std.mem.eql(u8, key, "body")) {
+                const body_tag = self.ir_view.getTag(prop.value) orelse {
+                    service_call.has_body = true;
+                    service_call.body_dynamic = true;
+                    continue;
+                };
+                if (body_tag == .lit_null or body_tag == .lit_undefined) continue;
+                service_call.has_body = true;
+                if (body_tag != .lit_string) {
+                    service_call.body_dynamic = true;
+                }
+            }
+        }
+    }
+
+    fn extractServiceObjectKeys(
+        self: *ContractBuilder,
+        node_idx: NodeIndex,
+        target: *std.ArrayList([]const u8),
+        dynamic_flag: *bool,
+    ) !void {
+        const obj_idx = self.resolveObjectLiteralNode(node_idx) orelse {
+            dynamic_flag.* = true;
+            return;
+        };
+        const obj = self.ir_view.getObject(obj_idx) orelse {
+            dynamic_flag.* = true;
+            return;
+        };
+
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            const prop_tag = self.ir_view.getTag(prop_idx) orelse {
+                dynamic_flag.* = true;
+                continue;
+            };
+            if (prop_tag != .object_property) {
+                dynamic_flag.* = true;
+                continue;
+            }
+
+            const prop = self.ir_view.getProperty(prop_idx) orelse {
+                dynamic_flag.* = true;
+                continue;
+            };
+            const key = self.getObjectPropertyKey(prop.key) orelse {
+                dynamic_flag.* = true;
+                continue;
+            };
+
+            if (!containsString(target.items, key)) {
+                try target.append(self.allocator, try self.allocator.dupe(u8, key));
+            }
+        }
     }
 
     fn resolveObjectLiteralNode(self: *const ContractBuilder, node_idx: NodeIndex) ?NodeIndex {
@@ -2399,6 +2562,7 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
         .functions = .empty,
         .env = .{ .literal = .empty, .dynamic = false },
         .egress = .{ .hosts = .empty, .dynamic = false },
+        .service_calls = .empty,
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -2435,12 +2599,16 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
 
         if (std.mem.eql(u8, key, "handler")) {
             try parseHandlerLoc(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "version")) {
+            contract.version = parser.readU32() orelse contract.version;
         } else if (std.mem.eql(u8, key, "routes")) {
             try parseRoutes(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "env")) {
             try parseDynamicSection(&parser, allocator, "literal", &contract.env.literal, &contract.env.dynamic);
         } else if (std.mem.eql(u8, key, "egress")) {
             try parseEgressSection(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "serviceCalls")) {
+            try parseServiceCalls(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "cache")) {
             try parseDynamicSection(&parser, allocator, "namespaces", &contract.cache.namespaces, &contract.cache.dynamic);
         } else if (std.mem.eql(u8, key, "sql")) {
@@ -2790,6 +2958,76 @@ fn parseEgressSection(
         } else {
             parser.skipValue();
         }
+    }
+}
+
+fn parseServiceCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
+    parser.skipWhitespace();
+    if (!parser.consume('[')) return error.InvalidJson;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+
+        if (!parser.consume('{')) return error.InvalidJson;
+        var service_call = ServiceCallInfo{
+            .service = try allocator.dupe(u8, ""),
+            .route_pattern = try allocator.dupe(u8, ""),
+        };
+        errdefer service_call.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "service")) {
+                allocator.free(service_call.service);
+                service_call.service = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "route")) {
+                allocator.free(service_call.route_pattern);
+                service_call.route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "dynamic")) {
+                service_call.dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "pathParams")) {
+                try parseStringArray(parser, allocator, &service_call.path_params);
+            } else if (std.mem.eql(u8, key, "pathParamsDynamic")) {
+                service_call.path_params_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "queryKeys")) {
+                try parseStringArray(parser, allocator, &service_call.query_keys);
+            } else if (std.mem.eql(u8, key, "queryDynamic")) {
+                service_call.query_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "headerKeys")) {
+                try parseStringArray(parser, allocator, &service_call.header_keys);
+            } else if (std.mem.eql(u8, key, "headerDynamic")) {
+                service_call.header_dynamic = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "hasBody")) {
+                service_call.has_body = parser.readBool() orelse false;
+            } else if (std.mem.eql(u8, key, "bodyDynamic")) {
+                service_call.body_dynamic = parser.readBool() orelse false;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try contract.service_calls.append(allocator, service_call);
     }
 }
 
@@ -3867,6 +4105,48 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.print("    \"dynamic\": {s}\n", .{if (contract.egress.dynamic) "true" else "false"});
     try writer.writeAll("  },\n");
 
+    // serviceCalls
+    try writer.writeAll("  \"serviceCalls\": [");
+    for (contract.service_calls.items, 0..) |service_call, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    {\n");
+        try writer.writeAll("      \"service\": ");
+        try writeJsonString(writer, service_call.service);
+        try writer.writeAll(",\n");
+        try writer.writeAll("      \"route\": ");
+        try writeJsonString(writer, service_call.route_pattern);
+        try writer.writeAll(",\n");
+        try writer.print("      \"dynamic\": {s},\n", .{if (service_call.dynamic) "true" else "false"});
+        try writer.writeAll("      \"pathParams\": [");
+        for (service_call.path_params.items, 0..) |name, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, name);
+        }
+        try writer.writeAll("],\n");
+        try writer.print("      \"pathParamsDynamic\": {s},\n", .{if (service_call.path_params_dynamic) "true" else "false"});
+        try writer.writeAll("      \"queryKeys\": [");
+        for (service_call.query_keys.items, 0..) |name, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, name);
+        }
+        try writer.writeAll("],\n");
+        try writer.print("      \"queryDynamic\": {s},\n", .{if (service_call.query_dynamic) "true" else "false"});
+        try writer.writeAll("      \"headerKeys\": [");
+        for (service_call.header_keys.items, 0..) |name, j| {
+            if (j > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, name);
+        }
+        try writer.writeAll("],\n");
+        try writer.print("      \"headerDynamic\": {s},\n", .{if (service_call.header_dynamic) "true" else "false"});
+        try writer.print("      \"hasBody\": {s},\n", .{if (service_call.has_body) "true" else "false"});
+        try writer.print("      \"bodyDynamic\": {s}\n", .{if (service_call.body_dynamic) "true" else "false"});
+        try writer.writeAll("    }");
+    }
+    if (contract.service_calls.items.len > 0) {
+        try writer.writeAll("\n  ");
+    }
+    try writer.writeAll("],\n");
+
     // cache
     try writer.writeAll("  \"cache\": {\n");
     try writer.writeAll("    \"namespaces\": [");
@@ -4392,6 +4672,27 @@ test "parseFromJson roundtrip" {
     const path = try allocator.dupe(u8, "test.ts");
     var env_lit: std.ArrayList([]const u8) = .empty;
     try env_lit.append(allocator, try allocator.dupe(u8, "SECRET"));
+    var service_calls: std.ArrayList(ServiceCallInfo) = .empty;
+    try service_calls.append(allocator, .{
+        .service = try allocator.dupe(u8, "users"),
+        .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
+        .path_params = blk: {
+            var params: std.ArrayList([]const u8) = .empty;
+            try params.append(allocator, try allocator.dupe(u8, "id"));
+            break :blk params;
+        },
+        .query_keys = blk: {
+            var keys: std.ArrayList([]const u8) = .empty;
+            try keys.append(allocator, try allocator.dupe(u8, "expand"));
+            break :blk keys;
+        },
+        .header_keys = blk: {
+            var keys: std.ArrayList([]const u8) = .empty;
+            try keys.append(allocator, try allocator.dupe(u8, "x-auth"));
+            break :blk keys;
+        },
+        .has_body = false,
+    });
 
     var original = HandlerContract{
         .handler = .{ .path = path, .line = 10, .column = 5 },
@@ -4400,6 +4701,7 @@ test "parseFromJson roundtrip" {
         .functions = .empty,
         .env = .{ .literal = env_lit, .dynamic = true },
         .egress = .{ .hosts = .empty, .dynamic = false },
+        .service_calls = service_calls,
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
         .durable = .{
@@ -4434,6 +4736,11 @@ test "parseFromJson roundtrip" {
     try std.testing.expectEqual(@as(usize, 1), parsed.env.literal.items.len);
     try std.testing.expectEqualStrings("SECRET", parsed.env.literal.items[0]);
     try std.testing.expect(parsed.env.dynamic);
+    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items.len);
+    try std.testing.expectEqualStrings("users", parsed.service_calls.items[0].service);
+    try std.testing.expectEqualStrings("GET /api/users/:id", parsed.service_calls.items[0].route_pattern);
+    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items[0].path_params.items.len);
+    try std.testing.expectEqualStrings("id", parsed.service_calls.items[0].path_params.items[0]);
     try std.testing.expect(parsed.durable.used);
     try std.testing.expect(parsed.durable.keys.dynamic);
     try std.testing.expect(parsed.verification != null);
@@ -4606,9 +4913,10 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 11") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verification\": null") != null);

@@ -151,6 +151,9 @@ OPTIONS:
   --durable <DIR>       Enable durable run/step oplogs in a directory
                         Required for zigttp:durable
 
+  --system <FILE>       System registry for zigttp:service
+                        Required for named internal service calls
+
   --cors                Enable CORS headers on all responses
 
   --static <DIR>        Serve static files from directory
@@ -178,6 +181,9 @@ OPTIONS:
 
 # Durable execution with persisted oplogs
 ./zig-out/bin/zigttp serve --durable .zigttp-durable handler.js
+
+# Named internal service calls
+./zig-out/bin/zigttp serve --system examples/system/system.json examples/system/gateway.ts
 
 # Run declarative handler tests
 ./zig-out/bin/zigttp serve --test tests.jsonl handler.js
@@ -1222,6 +1228,60 @@ Current constraints:
 - Pending durable waits return `202 Accepted` with a JSON body of the form
   `{"pending":true,"durableKey":"...","wait":{...}}`
 
+### zigttp:service
+
+Named internal service-to-service calls backed by `system.json`. Requires
+`--system <FILE>` at runtime.
+
+```typescript
+import { serviceCall } from "zigttp:service";
+```
+
+**serviceCall(service, route, init?)** - Call another handler declared in
+`system.json` without hard-coding its base URL.
+
+```typescript
+import { serviceCall } from "zigttp:service";
+
+function handler(req) {
+    const user = serviceCall("users", "GET /api/users/:id", {
+        params: { id: req.query.id ?? "42" },
+        query: { verbose: "1" },
+        headers: { "x-client-id": "gateway" },
+    });
+
+    if (!user.ok) {
+        return Response.json({ error: "upstream unavailable" }, { status: 502 });
+    }
+
+    return Response.json(user.json());
+}
+```
+
+`route` must be an exact `"METHOD /path"` signature. `init` supports:
+
+- `params` for named `:path` placeholders
+- `query` for query-string keys
+- `headers` for request headers
+- `body` for string request bodies
+
+Minimal `system.json`:
+
+```json
+{
+  "version": 1,
+  "handlers": [
+    { "name": "gateway", "path": "examples/system/gateway.ts", "baseUrl": "https://gateway.internal" },
+    { "name": "users", "path": "examples/system/users.ts", "baseUrl": "https://users.internal" }
+  ]
+}
+```
+
+`zigts link <system.json>` resolves `serviceCall()` edges directly. The linker
+can prove that the named service exists, that the route exists on the target
+handler, and that required path/query/header/body inputs are present when the
+target route contract is statically known.
+
 ### zigttp:io
 
 Structured concurrent I/O without async/await. Handler code stays synchronous
@@ -2113,6 +2173,7 @@ The contract extracts from the handler's IR:
 - Which `zigttp:*` virtual modules are imported and which functions are used
 - Literal env var names from `env("NAME")` calls
 - Outbound hosts from `fetchSync("https://...")` URL arguments
+- Named internal service calls from `serviceCall("name", "METHOD /path", init)`
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Registered SQL query names, operations, and touched tables from `sql("name", "...")`
 - Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
@@ -2122,6 +2183,10 @@ The contract extracts from the handler's IR:
 
 Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an
 honest signal that static analysis cannot enumerate all values.
+
+For internal service composition, `system.json` entries must include `name`,
+`path`, and `baseUrl`. `serviceCall()` uses `name`; raw `fetchSync()` linking
+continues to match by `baseUrl`.
 
 ```bash
 # Combine verification and contract

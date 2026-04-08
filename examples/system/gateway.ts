@@ -1,6 +1,7 @@
 // Gateway handler - authenticates and routes to internal services
 import { parseBearer, jwtVerify } from "zigttp:auth";
 import { env } from "zigttp:env";
+import { serviceCall } from "zigttp:service";
 
 function handler(req) {
   // Authenticate
@@ -16,7 +17,9 @@ function handler(req) {
   }
 
   // Route to users service
-  const user = fetchSync("https://users.internal/api/users/" + auth.value.sub);
+  const user = serviceCall("users", "GET /api/users/:id", {
+    params: { id: auth.value.sub },
+  });
   if (!user.ok) {
     return Response.json({ error: "user service unavailable" }, { status: 502 });
   }

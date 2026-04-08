@@ -28,6 +28,7 @@ const log_mod = @import("modules/log.zig");
 const text_mod = @import("modules/text.zig");
 const time_mod = @import("modules/time.zig");
 const ratelimit_mod = @import("modules/ratelimit.zig");
+const service_mod = @import("modules/service.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -49,6 +50,7 @@ pub const builtins = [_]ModuleBinding{
     text_mod.binding,
     time_mod.binding,
     ratelimit_mod.binding,
+    service_mod.binding,
 };
 
 /// Unified module registry: core built-ins plus explicitly registered extensions.

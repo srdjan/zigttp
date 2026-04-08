@@ -333,6 +333,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         config.static_dir = cfg.static_dir;
         config.runtime_config.sqlite_path = cfg.sqlite;
         config.runtime_config.durable_oplog_dir = cfg.durable_dir;
+        config.runtime_config.system_config_path = cfg.system;
         config.runtime_config.outbound_http_enabled = cfg.outbound_http;
         if (cfg.outbound_hosts.len > 1) return error.UnsupportedMultipleOutboundHosts;
         if (cfg.outbound_hosts.len == 1) {
@@ -414,6 +415,10 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             i += 1;
             if (i >= argv.len) return error.MissingDurableDir;
             config.runtime_config.durable_oplog_dir = argv[i];
+        } else if (std.mem.eql(u8, arg, "--system")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingSystemFile;
+            config.runtime_config.system_config_path = argv[i];
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             config.handler = .{ .file_path = arg };
             handler_set = true;
@@ -480,6 +485,9 @@ fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !WatchS
         try paths.append(allocator, try std.fs.path.resolve(allocator, &.{ cfg.root_dir, "src" }));
         if (try cfg.resolvedStaticDir(allocator)) |static_dir| {
             try paths.append(allocator, static_dir);
+        }
+        if (try cfg.resolvedSystemPath(allocator)) |system_path| {
+            try paths.append(allocator, system_path);
         }
     } else if (explicit_path) |path| {
         if (looksLikeHandlerFile(path)) {
@@ -550,7 +558,8 @@ fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--trace") or
             std.mem.eql(u8, arg, "--replay") or
             std.mem.eql(u8, arg, "--test") or
-            std.mem.eql(u8, arg, "--durable"))
+            std.mem.eql(u8, arg, "--durable") or
+            std.mem.eql(u8, arg, "--system"))
         {
             skip_next = true;
             continue;
@@ -622,8 +631,12 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
             config.enable_cors = true;
         } else if (std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--quiet")) {
             config.log_requests = false;
+        } else if (std.mem.eql(u8, arg, "--system")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingSystemFile;
+            config.runtime_config.system_config_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--help")) {
-            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q]\n";
+            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q] [--system FILE]\n";
             _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
             return;
         }
@@ -855,6 +868,7 @@ fn printServeHelp() void {
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
+        \\  --system <FILE>       System registry for zigttp:service
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

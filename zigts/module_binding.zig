@@ -272,6 +272,7 @@ pub const ContractCategory = enum {
     cookie_name,
     cors_origin,
     rate_limit_key,
+    service_call,
 };
 
 /// Transform applied to extracted literal before storing.

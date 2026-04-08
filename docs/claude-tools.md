@@ -410,7 +410,7 @@ This works because virtual modules are the only I/O boundary. Handlers are deter
 
 **Use verification in CI.** Add `-Dverify` and `-Dtest-file=` to your build step. If the handler cannot be proven correct, the build fails. This catches regressions that unit tests might miss: unchecked Results, missing Response returns, state leaks.
 
-**Keep handlers small.** One handler per file. The compiler's proof unit is a single file. Smaller handlers produce tighter contracts and faster verification. Use `system.json` and `zigts link` for multi-handler architectures.
+**Keep handlers small.** One handler per file. The compiler's proof unit is a single file. Smaller handlers produce tighter contracts and faster verification. Use `system.json` with stable handler `name` fields, `serviceCall()` for internal edges, and `zigts link` for multi-handler architectures.
 
 ---
 
