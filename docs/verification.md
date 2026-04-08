@@ -196,6 +196,15 @@ Fix: use `const` for module-level declarations, or move mutable state to `zigttp
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing.
 
+### Runtime Optimizations from Verification
+
+Verified properties also control runtime behavior:
+
+- **Route pre-filtering**: proven routes reject non-matching requests at the HTTP layer before entering JS (`contract_runtime.zig`).
+- **Response memoization**: when a handler is proven `deterministic` (no Date.now or Math.random) and `read_only` (no write-classified virtual module calls), GET/HEAD responses are cached in memory and served without JS execution. Cached responses include an `X-Zigttp-Proof-Cache: hit` header (`proof_adapter.zig`).
+
+Both rely on the same property that makes verification tractable: the IR tree is the control flow graph, with no back-edges and no exceptions.
+
 ## Exhaustive Path Analysis (-Dgenerate-tests)
 
 The `-Dgenerate-tests=true` build option enables compile-time exhaustive path enumeration and fault coverage analysis.

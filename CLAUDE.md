@@ -37,7 +37,7 @@ zigts link system.json               # Cross-handler contract linking
 
 Two layers. Server (`src/`): HTTP, CLI, request routing, static files. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`. Engine (`zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `zigts/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`.
 
-Request flow: accept connection, check proven route table (contract-aware pre-filter), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, and property logging (`contract_runtime.zig`).
+Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
 Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`zigts/modules/compose.zig`).
 

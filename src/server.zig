@@ -25,6 +25,7 @@ const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
+const proof_adapter = @import("proof_adapter.zig");
 
 const RequestLine = http_parser.RequestLine;
 const QueryParseResult = http_parser.QueryParseResult;
@@ -240,6 +241,21 @@ const ConnectionPool = struct {
             }
         }
 
+        // Proof-driven response memoization: serve cached response without entering JS
+        var proof_cache_key: ?u64 = null;
+        if (self.server.proof_cache) |*cache| {
+            if (cache.enabled and proof_adapter.ProofCache.shouldCache(request.method, request.headers)) {
+                const key = proof_adapter.ProofCache.computeKey(request.method, request.url);
+                var cached_opt = cache.get(key, req_allocator);
+                if (cached_opt != null) {
+                    defer cached_opt.?.deinit();
+                    self.sendResponseSync(fd, &cached_opt.?, keep_alive) catch return false;
+                    return keep_alive;
+                }
+                proof_cache_key = key;
+            }
+        }
+
         // Invoke handler
         if (self.server.pool) |*pool| {
             var handle = pool.executeHandlerBorrowed(HttpRequestView{
@@ -261,6 +277,13 @@ const ConnectionPool = struct {
                 return false;
             };
             defer handle.deinit();
+
+            // Store response in proof cache on miss
+            if (proof_cache_key) |key| {
+                if (self.server.proof_cache) |*cache| {
+                    cache.put(key, &handle.response);
+                }
+            }
 
             // Send response
             self.sendResponseSync(fd, &handle.response, keep_alive) catch return false;
@@ -733,6 +756,7 @@ pub const Server = struct {
     request_count: std.atomic.Value(u64),
     conn_pool: ?*ConnectionPool,
     contract: ?RuntimeContract,
+    proof_cache: ?proof_adapter.ProofCache,
 
     const Self = @This();
     const ConnectionEvent = enum { done, timeout };
@@ -789,6 +813,7 @@ pub const Server = struct {
             .request_count = std.atomic.Value(u64).init(0),
             .conn_pool = null,
             .contract = null,
+            .proof_cache = null,
         };
     }
 
@@ -797,6 +822,7 @@ pub const Server = struct {
         if (self.conn_pool) |cp| cp.deinit();
 
         if (self.pool) |*p| p.deinit();
+        if (self.proof_cache) |*pc| pc.deinit();
         if (self.contract) |*c| c.deinit();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -858,6 +884,19 @@ pub const Server = struct {
                     }
                     return error.MissingEnvVars;
                 }
+            }
+        }
+
+        // Initialize proof-driven response cache if handler is deterministic + read_only
+        if (self.contract) |*contract| {
+            const p = contract.properties;
+            if (p.pure or (p.deterministic and p.read_only)) {
+                self.proof_cache = proof_adapter.ProofCache.init(
+                    self.allocator,
+                    contract.properties,
+                    .{},
+                );
+                std.log.info("   Proof cache: enabled (handler proven deterministic + read_only)", .{});
             }
         }
 
@@ -1069,6 +1108,27 @@ pub const Server = struct {
             }
         }
 
+        // Proof-driven response memoization: serve cached response without entering JS
+        var proof_cache_key: ?u64 = null;
+        if (self.proof_cache) |*cache| {
+            if (cache.enabled and proof_adapter.ProofCache.shouldCache(request.method, request.headers)) {
+                const key = proof_adapter.ProofCache.computeKey(request.method, request.url);
+                var cached_opt = cache.get(key, req_allocator);
+                if (cached_opt != null) {
+                    defer cached_opt.?.deinit();
+                    try self.sendResponse(stream, io, &cached_opt.?, keep_alive);
+                    if (self.config.log_requests) {
+                        const count = self.request_count.fetchAdd(1, .monotonic) + 1;
+                        std.log.info("[{d}] {s} {s} -> {d} [proof-cache hit]", .{
+                            count, request.method, request.url, cached_opt.?.status,
+                        });
+                    }
+                    return keep_alive;
+                }
+                proof_cache_key = key;
+            }
+        }
+
         // Invoke JS handler via pool
         if (self.pool) |*pool| {
             var handle = pool.executeHandlerBorrowed(HttpRequestView{
@@ -1095,6 +1155,13 @@ pub const Server = struct {
             };
             defer handle.deinit();
             var response = &handle.response;
+
+            // Store response in proof cache on miss
+            if (proof_cache_key) |key| {
+                if (self.proof_cache) |*cache| {
+                    cache.put(key, response);
+                }
+            }
 
             // Add CORS headers if enabled
             if (self.config.enable_cors) {

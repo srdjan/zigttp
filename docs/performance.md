@@ -126,6 +126,19 @@ Shapes:
 
 **HTTP String Cache** (`zigts/context.zig:111-135, 462+`): Pre-allocated status texts, content-type strings, and HTTP method strings.
 
+### Proof-Driven Response Caching
+
+When the compile-time contract proves a handler is `pure` or `deterministic`+`read_only`, the runtime caches GET/HEAD responses by request hash (method + URL including query string). Cache hits return the memoized response directly from Zig memory without acquiring a runtime or entering JS.
+
+- **Activation**: automatic when contract proves the required properties. No configuration needed.
+- **Cache key**: Wyhash of method + URL (path + query string).
+- **Thread safety**: RwLock allows concurrent cache reads; writes take an exclusive lock.
+- **Eviction**: FIFO with configurable capacity (default 1024 entries).
+- **TTL**: configurable per-entry expiry (default 5 minutes). Expired entries are lazily evicted.
+- **Max body**: responses larger than 256KB (default) are not cached.
+- **Visibility**: cached responses carry `X-Zigttp-Proof-Cache: hit` header.
+- **Implementation**: `src/proof_adapter.zig`, integrated into `src/server.zig` on both threaded and evented I/O paths.
+
 ### Pool and Request Optimizations
 
 **Pool Slot Hint** (`zigts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) to O(1).

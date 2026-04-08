@@ -88,11 +88,12 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 1. Server accepts HTTP connection (`server.zig`)
 2. Request parsed from HTTP bytes
 3. If contract is loaded, request method+path checked against proven routes - non-matching requests return 404 without entering JS (`contract_runtime.zig`)
-4. HandlerPool acquires an isolated runtime from LockFreePool (`zruntime.zig`)
-5. Request converted to JS Request object
-6. Handler function invoked with Request
-7. JS Response extracted and sent as HTTP response
-8. Runtime released back to pool
+4. If handler is proven deterministic+read_only, check proof cache by request hash - cache hit returns the memoized response with `X-Zigttp-Proof-Cache: hit` header, skipping JS entirely (`proof_adapter.zig`)
+5. HandlerPool acquires an isolated runtime from LockFreePool (`zruntime.zig`)
+6. Request converted to JS Request object
+7. Handler function invoked with Request
+8. JS Response extracted, stored in proof cache on miss, and sent as HTTP response
+9. Runtime released back to pool
 
 ## Key Patterns
 
@@ -271,6 +272,7 @@ zigttp/
 │   ├── zruntime.zig       # HandlerPool, JS context management
 │   ├── server.zig         # HTTP server implementation
 │   ├── contract_runtime.zig  # Runtime contract parser (env validation, route pre-filter)
+│   ├── proof_adapter.zig     # Proof-driven response cache (deterministic+read_only handlers)
 │   ├── self_extract.zig      # Self-extracting binary payload (bytecode + contract + policy)
 │   ├── test_runner.zig    # Declarative handler test runner
 │   ├── replay_runner.zig  # Deterministic replay runner
@@ -393,7 +395,7 @@ Each `FunctionBinding` carries an `effect` annotation (read, write, or none). Du
 - **deterministic** - no `Date.now()` or `Math.random()` calls detected in the IR
 - **has_egress** - handler uses fetchSync (conservatively classified as write)
 
-Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension).
+Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension). At runtime, `pure` or `deterministic`+`read_only` handlers get automatic response memoization: GET/HEAD responses are cached and served from Zig memory without entering JS (`proof_adapter.zig`).
 
 **Key files**:
 - `zigts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `validateBindings()`

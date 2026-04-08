@@ -10,4 +10,5 @@ test {
     _ = @import("project_config");
     _ = @import("zruntime.zig");
     _ = @import("server.zig");
+    _ = @import("proof_adapter.zig");
 }

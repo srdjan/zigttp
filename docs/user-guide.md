@@ -2465,6 +2465,13 @@ parses this contract and uses it for three things:
 3. **Property logging.** Proven handler properties (retry_safe, deterministic,
    injection_safe, etc.) are logged at startup for operator visibility.
 
+4. **Response memoization.** When the contract proves the handler is `pure` or
+   `deterministic`+`read_only`, GET/HEAD responses are cached in memory and
+   served without entering JS on subsequent identical requests. Cached responses
+   include an `X-Zigttp-Proof-Cache: hit` header. The cache uses FIFO eviction
+   (default 1024 entries, 5-minute TTL, 256KB max body). Requests with
+   `Cache-Control: no-cache` or `no-store` bypass the cache.
+
 ### Non-Precompiled Handlers
 
 Handlers run via `zig build run --` (dev mode) are not sandboxed. Sandboxing
