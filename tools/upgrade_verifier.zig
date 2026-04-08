@@ -489,33 +489,33 @@ pub fn writeUpgradeReport(manifest: *const UpgradeManifest, writer: anytype) !vo
 // -------------------------------------------------------------------------
 
 test "safe verdict for identical contracts" {
-    const empty = std.ArrayList(PropertyRegression){ .items = &.{}, .capacity = 0 };
+    const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.equivalent, &empty, null, null);
     try std.testing.expectEqual(UpgradeVerdict.safe, verdict);
 }
 
 test "safe_with_additions for additive classification" {
-    const empty = std.ArrayList(PropertyRegression){ .items = &.{}, .capacity = 0 };
+    const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.additive, &empty, null, null);
     try std.testing.expectEqual(UpgradeVerdict.safe_with_additions, verdict);
 }
 
 test "breaking for structural breaking" {
-    const empty = std.ArrayList(PropertyRegression){ .items = &.{}, .capacity = 0 };
+    const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.breaking, &empty, null, null);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
 
 test "breaking for behavioral removal" {
     const bd = BehaviorDiff{ .preserved = 2, .removed = 1 };
-    const empty = std.ArrayList(PropertyRegression){ .items = &.{}, .capacity = 0 };
+    const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.equivalent, &empty, bd, null);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
 
 test "breaking for behavioral response change" {
     const bd = BehaviorDiff{ .preserved = 2, .response_changed = 1 };
-    const empty = std.ArrayList(PropertyRegression){ .items = &.{}, .capacity = 0 };
+    const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.equivalent, &empty, bd, null);
     try std.testing.expectEqual(UpgradeVerdict.breaking, verdict);
 }
@@ -540,7 +540,7 @@ test "needs_review for warning property regression" {
 
 test "safe_with_additions for new behavioral paths" {
     const bd = BehaviorDiff{ .preserved = 3, .added = 2 };
-    const empty = std.ArrayList(PropertyRegression){ .items = &.{}, .capacity = 0 };
+    const empty: std.ArrayList(PropertyRegression) = .empty;
     const verdict = synthesizeVerdict(.equivalent, &empty, bd, null);
     try std.testing.expectEqual(UpgradeVerdict.safe_with_additions, verdict);
 }
