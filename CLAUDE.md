@@ -54,7 +54,10 @@ Import via `import { fn } from "zigttp:module"`. Implementations in `zigts/modul
 | `zigttp:router` | `routerMatch` |
 | `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` |
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` |
+| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` |
+| `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
+| `zigttp:service` | `serviceCall` |
 | `zigttp:io` | `parallel`, `race` |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
 | `zigttp:compose` | `guard`, `pipe` |

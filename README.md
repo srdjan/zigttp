@@ -173,6 +173,13 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:compose` | `guard`, `pipe` | Compile-time handler composition via pipe operator |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
+| `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | URL parsing and query string encoding |
+| `zigttp:id` | `uuid`, `ulid`, `nanoid` | ID generation (UUID v4, ULID, NanoID) |
+| `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | HTTP utilities for cookies, content negotiation, CORS |
+| `zigttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | Structured logging to stderr |
+| `zigttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | String utilities for HTML escaping, slugs, redaction |
+| `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | Time formatting and arithmetic |
+| `zigttp:ratelimit` | `rateCheck`, `rateReset` | Per-key rate limiting with sliding windows |
 
 Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `serviceCall`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
 
@@ -467,6 +474,8 @@ The linker now reports payload proof separately from route proof. `proofLevel` k
 - `payloadCompatible`
 - `payloadDetail`
 
+`zigts rollout <old-system.json> <new-system.json>` extends the same proof pipeline across time. It compiles and links both systems, checks mixed-version states, and emits `rollout-plan.json` plus `rollout-report.txt` with the smallest rollout phases it can prove. If a change only becomes safe when multiple handlers move together, the planner collapses them into one coordinated phase instead of pretending they can deploy independently.
+
 ## Compile-Time Toolchain
 
 zigttp's compile-time toolchain goes beyond precompilation. It verifies correctness, checks types, extracts a capability contract, auto-derives a runtime sandbox, and can generate platform-specific deployment configs - all at build time.
@@ -499,6 +508,9 @@ zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
 # Compare handler versions (equivalent, additive, or breaking)
 zig build -Dhandler=handler.ts -Dprove=old-contract.json:traces.jsonl
 
+# Plan a safe multi-handler rollout between two system definitions
+./zig-out/bin/zigts rollout old/system.json new/system.json
+
 # Combine all passes
 zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Ddeploy=aws
 
@@ -512,7 +524,7 @@ zig build -Dhandler=handler.ts -Dreport=json
 
 ### Handler Verification (`-Dverify`)
 
-The verifier statically proves six properties of your handler at compile time:
+The verifier statically proves seven properties of your handler at compile time:
 
 1. **Every code path returns a Response.** Missing `else` branches and paths that fall through without returning are caught.
 2. **Result values are checked before access.** Calls like `jwtVerify`, `decodeJson`, and `decodeQuery` return Result objects. The verifier ensures `.ok` is checked before `.value` is accessed.
@@ -520,6 +532,7 @@ The verifier statically proves six properties of your handler at compile time:
 4. **No unused variables.** Declared variables that are never referenced produce a warning. Suppress with an underscore prefix (`_unused`).
 5. **Match expressions have default arms.** A `match` without a default arm produces a warning.
 6. **Optional values are checked before use.** Values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed via `if (val)`, `val !== undefined`, `val ?? default`, or reassignment before use in expressions.
+7. **No cross-request state leakage.** Module-scope variables must not be mutated inside the handler body. This prevents one request from affecting another through shared mutable state.
 
 This works because zigttp's JS subset eliminates most non-trivial control flow - no `while`, no `switch`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 

@@ -72,7 +72,7 @@ Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode
 - `type_map.zig`, `type_pool.zig`, `type_env.zig`, `type_checker.zig` - TypeScript type checking
 
 #### Compile-Time Analysis
-- `handler_verifier.zig` - Six-check compile-time verification
+- `handler_verifier.zig` - Seven-check compile-time verification
 - `handler_contract.zig` - Contract extraction from IR
 - `handler_policy.zig` - Runtime policy derivation from contracts
 - `bytecode_verifier.zig` - Bytecode structural integrity validation
@@ -374,7 +374,7 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 
 ### Module Binding System
 
-Each virtual module declares a `pub const binding: ModuleBinding` struct that serves as the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. The `builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency).
+Each virtual module declares a `pub const binding: ModuleBinding` struct - the single source of truth for all compile-time consumers. The `FunctionBinding` struct captures effect class, return kind (for verification/type checking), param types, traceability, and declarative contract extraction rules. The `builtin_modules.zig` registry lists all bindings and runs comptime validation (unique specifiers, unique function names, state lifecycle consistency).
 
 Consumers that previously maintained separate hardcoded tables now read from the registry:
 - **Type checker** (`types.zig`): maps `ReturnKind` to `TypeIndex` via `mapReturnKind()`

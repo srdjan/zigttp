@@ -1285,6 +1285,13 @@ can prove that the named service exists, that the route exists on the target
 handler, and that required path/query/header/body inputs are present when the
 target route contract is statically known.
 
+`zigts rollout <old-system.json> <new-system.json>` compares two linked systems,
+checks mixed-version states, and emits `rollout-plan.json` plus
+`rollout-report.txt`. The planner prefers the smallest provably safe phase: one
+handler when possible, coordinated groups when the change only becomes safe if
+multiple handlers move together, and `NEEDS_REVIEW` when dynamic edges prevent a
+complete proof.
+
 For compile-time typing, run `zigts check --system <FILE>` or `zigts compile --system <FILE>`.
 When the service name and route are literal:
 
@@ -1359,42 +1366,116 @@ All existing guarantees are preserved:
 - **Determinism**: same inputs produce same output ordering. Results always
   match declaration order.
 
-### zigttp:sql
+### zigttp:url
 
-SQL query execution over SQLite with build-time schema validation. Requires `--sqlite <FILE>` at runtime.
-
-```typescript
-import { sql, sqlOne, sqlMany, sqlExec } from "zigttp:sql";
-```
-
-**sql(name, query)** - Register a named query at module scope (compile-time allowlisting):
+URL parsing and query string encoding.
 
 ```typescript
-sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
-sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
-sql("getTodo", "SELECT id, title, done FROM todos WHERE id = :id");
+import { urlParse, urlSearchParams, urlEncode, urlDecode } from "zigttp:url";
 ```
 
-**sqlMany(name, params?)** - Execute a registered query, return all rows as an array of objects.
+**urlParse(url)** - Parse a URL string into components: `{ protocol, host, pathname, search, hash }`.
 
-**sqlOne(name, params?)** - Execute a registered query, return the first row or `undefined`.
+**urlSearchParams(search)** - Parse a query string (without leading `?`) into an object of key-value pairs.
 
-**sqlExec(name, params?)** - Execute a registered query for side effects (INSERT, UPDATE, DELETE). Returns `{ changes: number, lastInsertRowId: number }`.
+**urlEncode(obj)** - Encode an object into a `key=value&...` query string.
+
+**urlDecode(str)** - Decode a query string into an object.
+
+### zigttp:id
+
+ID generation with three algorithms.
 
 ```typescript
-function handler(req: Request): Response {
-    if (req.method === "GET") {
-        return Response.json({ items: sqlMany("listTodos") });
-    }
-
-    const parsed = decodeJson("todo.create", req.body ?? "{}");
-    if (!parsed.ok) return Response.json({ errors: parsed.errors }, { status: 400 });
-
-    return Response.json(sqlExec("createTodo", { title: parsed.value.title }), { status: 201 });
-}
+import { uuid, ulid, nanoid } from "zigttp:id";
 ```
 
-All query names must be registered via `sql()` at module scope. The contract extractor captures registered query names, operations, and touched tables. At build time with `-Dverify`, queries are validated against the SQLite schema if `--sqlite` is configured.
+**uuid()** - Generate an RFC 4122 v4 UUID.
+
+**ulid()** - Generate a sortable ULID.
+
+**nanoid(length?)** - Generate a URL-safe NanoID. Default length is 21.
+
+### zigttp:http
+
+HTTP utilities for cookies, content negotiation, and CORS headers.
+
+```typescript
+import { parseCookies, setCookie, negotiate, parseContentType, cors } from "zigttp:http";
+```
+
+**parseCookies(header)** - Parse a Cookie header string into `{ name: "value", ... }`.
+
+**setCookie(name, value, opts?)** - Build a Set-Cookie header string. Options: `path`, `domain`, `maxAge`, `secure`, `httpOnly`, `sameSite`.
+
+**negotiate(acceptHeader, available)** - Content negotiation: pick the best match from available types, or `undefined` if none match.
+
+**parseContentType(header)** - Parse a Content-Type header into `{ type, subtype, charset }`.
+
+**cors(origin, opts?)** - Build CORS response headers. Options: `methods`, `headers`, `maxAge`, `credentials`.
+
+### zigttp:log
+
+Structured logging to stderr.
+
+```typescript
+import { logDebug, logInfo, logWarn, logError } from "zigttp:log";
+```
+
+Each function accepts a message string and an optional data object. The data object is JSON-serialized in the output.
+
+```typescript
+logInfo("request processed", { method: req.method, path: req.url, status: 200 });
+```
+
+### zigttp:text
+
+String utilities for HTML escaping, slugification, and redaction.
+
+```typescript
+import { escapeHtml, unescapeHtml, slugify, truncate, mask } from "zigttp:text";
+```
+
+**escapeHtml(str)** / **unescapeHtml(str)** - Escape and unescape HTML entities.
+
+**slugify(str)** - Convert to a URL-friendly slug.
+
+**truncate(str, length)** - Truncate with ellipsis.
+
+**mask(str, keepCount)** - Redact all but the last N characters. Useful for logging sensitive values.
+
+### zigttp:time
+
+Time formatting and arithmetic.
+
+```typescript
+import { formatIso, formatHttp, parseIso, addSeconds } from "zigttp:time";
+```
+
+**formatIso(timestampMs)** - Format a Unix timestamp (ms) as an ISO 8601 string.
+
+**formatHttp(timestampMs)** - Format a Unix timestamp (ms) as an HTTP date header.
+
+**parseIso(str)** - Parse an ISO 8601 string to a Unix timestamp in ms.
+
+**addSeconds(timestampMs, seconds)** - Add seconds to a timestamp, returning a new timestamp.
+
+### zigttp:ratelimit
+
+Per-key rate limiting with sliding windows. State lives in-process and resets on pool recycle.
+
+```typescript
+import { rateCheck, rateReset } from "zigttp:ratelimit";
+```
+
+**rateCheck(key, limit, windowSeconds)** - Check whether a key has exceeded its rate limit. Returns `{ ok: true, remaining }` when under the limit, or `{ ok: false }` when exceeded.
+
+```typescript
+const check = rateCheck(req.headers["x-forwarded-for"] ?? "unknown", 100, 60);
+if (!check.ok) return Response.json({ error: "rate limited" }, { status: 429 });
+```
+
+**rateReset(key)** - Reset the counter for a key.
 
 ---
 

@@ -499,7 +499,7 @@ For FaaS workloads, the JIT threshold is intentionally lower than a general-purp
 
 ## 5. Compile-Time Verification
 
-The `-Dverify` build flag enables the handler verifier, which statically proves six properties of your handler at compile time. If any check fails, the build fails with a precise error message pointing to the problematic code path.
+The `-Dverify` build flag enables the handler verifier, which statically proves seven properties of your handler at compile time. If any check fails, the build fails with a precise error message pointing to the problematic code path.
 
 ### Check 1: Exhaustive Response Returns
 
@@ -581,6 +581,21 @@ const safe = token ?? "default";  // safe is string
 let value = env("KEY");
 value = value ?? "fallback";  // value is string after reassignment
 ```
+
+### Check 7: State Isolation
+
+Module-scope variables must not be mutated inside the handler body. A `let` declared at the top level and reassigned inside the handler function means one request can affect another through shared mutable state - exactly the kind of bug that is invisible in testing and catastrophic in production.
+
+```typescript
+let counter = 0;
+
+function handler(req: Request): Response {
+    counter += 1;  // BUILD ERROR: module-scope mutation inside handler
+    return Response.json({ count: counter });
+}
+```
+
+Module-scope `const` bindings and schema registrations (`schemaCompile`, `sql`) are fine - they are initialized once and never mutated.
 
 ### Why This Works
 

@@ -100,6 +100,19 @@ pub fn build(b: *std.Build) void {
     const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
     prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
 
+    const rollout_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/system_rollout.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    rollout_tests.root_module.addImport("zigts", zigts_mod);
+    const run_rollout_tests = b.addRunArtifact(rollout_tests);
+    const rollout_test_step = b.step("test-rollout", "Run rollout planner tests");
+    rollout_test_step.dependOn(&run_rollout_tests.step);
+
     const zigts_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/zigts_cli.zig"),
         .target = target,
@@ -295,6 +308,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_precompile_tests.step);
     test_step.dependOn(&run_prop_expect_tests.step);
+    test_step.dependOn(&run_rollout_tests.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{

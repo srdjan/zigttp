@@ -5,6 +5,7 @@ const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");
+const system_rollout = @import("system_rollout.zig");
 const init_command = @import("init_command.zig");
 const edit_simulate = @import("edit_simulate.zig");
 const describe_rule = @import("describe_rule.zig");
@@ -51,6 +52,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "link")) {
         try system_build.runWithArgs(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "rollout")) {
+        try system_rollout.runWithArgs(allocator, argv[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "features")) {
@@ -317,6 +322,7 @@ fn printHelp() void {
         \\  zigts prove <old-contract.json> <new-contract.json> [output-dir/]
         \\  zigts mock <tests.jsonl> [--port PORT]
         \\  zigts link <system.json> [--output-dir <dir>]
+        \\  zigts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
         \\  zigts features [--json]
         \\  zigts modules [--json]
         \\  zigts init [--force]
