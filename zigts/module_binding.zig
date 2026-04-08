@@ -18,6 +18,7 @@ const value = @import("value.zig");
 const context = @import("context.zig");
 const compat = @import("compat.zig");
 const file_io = @import("file_io.zig");
+const sqlite_runtime = @import("sqlite.zig");
 const resolver = @import("modules/resolver.zig");
 
 // Re-export EffectClass from resolver for backward compatibility
@@ -148,12 +149,10 @@ pub fn extractString(val: value.JSValue) ?[]const u8 {
     return str.asSlice();
 }
 
-/// Extract an integer from a JSValue.
 pub fn extractInt(val: value.JSValue) ?i32 {
     return val.toInt();
 }
 
-/// Extract a float from a JSValue.
 pub fn extractFloat(val: value.JSValue) ?f64 {
     return val.toFloat();
 }
@@ -231,18 +230,19 @@ fn requireActiveCapability(capability: ModuleCapability) ActiveCapabilityError!v
 }
 
 fn panicCapabilityError(err: ActiveCapabilityError, capability: ModuleCapability) noreturn {
+    const spec = currentActiveModuleSpecifier();
     switch (err) {
         error.MissingModuleCapability => std.debug.panic(
             "module '{s}' used undeclared capability '{s}'",
-            .{ currentActiveModuleSpecifier(), @tagName(capability) },
+            .{ spec, @tagName(capability) },
         ),
         error.ClockUnavailable => std.debug.panic(
             "module '{s}' failed to access clock capability",
-            .{currentActiveModuleSpecifier()},
+            .{spec},
         ),
         error.StderrWriteFailed => std.debug.panic(
             "module '{s}' failed to write to stderr capability",
-            .{currentActiveModuleSpecifier()},
+            .{spec},
         ),
     }
 }
@@ -263,6 +263,10 @@ pub fn clockNowMsChecked() i64 {
 
 pub fn clockNowNsChecked() u64 {
     return nowNsForActiveModule() catch |err| panicCapabilityError(err, .clock);
+}
+
+pub fn clockNowSecsChecked() i64 {
+    return @divTrunc(clockNowMsChecked(), 1000);
 }
 
 pub fn fillRandomForActiveModule(buf: []u8) ActiveCapabilityError!void {
@@ -317,6 +321,37 @@ pub fn readFileChecked(
     return file_io.readFile(allocator, path, max_size);
 }
 
+pub fn readEnvForActiveModule(name_z: [:0]const u8) ActiveCapabilityError!?[]const u8 {
+    try requireActiveCapability(.env);
+    const result = std.c.getenv(name_z) orelse return null;
+    return std.mem.sliceTo(result, 0);
+}
+
+pub fn readEnvChecked(name_z: [:0]const u8) ?[]const u8 {
+    return readEnvForActiveModule(name_z) catch |err| panicCapabilityError(err, .env);
+}
+
+pub fn sqliteCapabilityChecked() void {
+    requireActiveCapability(.sqlite) catch |err| panicCapabilityError(err, .sqlite);
+}
+
+pub fn getSqliteStateChecked(
+    ctx: *context.Context,
+    comptime T: type,
+    slot: usize,
+) ?*T {
+    sqliteCapabilityChecked();
+    return ctx.getModuleState(T, slot);
+}
+
+pub fn openSqliteDbChecked(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) !sqlite_runtime.Db {
+    sqliteCapabilityChecked();
+    return sqlite_runtime.Db.openReadWriteCreate(allocator, path);
+}
+
 pub fn hmacSha256ForActiveModule(
     out: *[std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8,
     data: []const u8,
@@ -361,6 +396,30 @@ pub fn allowsCacheNamespaceForActiveModule(
 
 pub fn allowsCacheNamespaceChecked(ctx: *context.Context, ns: []const u8) bool {
     return allowsCacheNamespaceForActiveModule(ctx, ns) catch |err| panicCapabilityError(err, .policy_check);
+}
+
+pub fn allowsEnvForActiveModule(
+    ctx: *context.Context,
+    name: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    return ctx.capability_policy.allowsEnv(name);
+}
+
+pub fn allowsEnvChecked(ctx: *context.Context, name: []const u8) bool {
+    return allowsEnvForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
+}
+
+pub fn allowsSqlQueryForActiveModule(
+    ctx: *context.Context,
+    name: []const u8,
+) ActiveCapabilityError!bool {
+    try requireActiveCapability(.policy_check);
+    return ctx.capability_policy.allowsSqlQuery(name);
+}
+
+pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) bool {
+    return allowsSqlQueryForActiveModule(ctx, name) catch |err| panicCapabilityError(err, .policy_check);
 }
 
 pub export fn zigttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {

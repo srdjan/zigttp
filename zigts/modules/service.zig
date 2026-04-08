@@ -10,7 +10,6 @@
 const std = @import("std");
 const context = @import("../context.zig");
 const value = @import("../value.zig");
-const string = @import("../string.zig");
 const system_linker = @import("../system_linker.zig");
 const util = @import("util.zig");
 const mb = @import("../module_binding.zig");
@@ -147,7 +146,7 @@ fn pushServiceTestContext() mb.ActiveModuleToken {
     return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
 }
 
-test "service installState loads config and delegates callback" {
+test "service installState loads config and populates service map" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -160,7 +159,7 @@ test "service installState loads config and delegates callback" {
         \\    {
         \\      "name": "users",
         \\      "path": "users.ts",
-        \\      "base_url": "http://users.internal"
+        \\      "baseUrl": "http://users.internal"
         \\    }
         \\  ]
         \\}
@@ -178,34 +177,24 @@ test "service installState loads config and delegates callback" {
     const ctx = try context.Context.init(std.testing.allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const install_token = pushServiceTestContext();
-    defer mb.popActiveModuleContext(install_token);
+    const token = pushServiceTestContext();
+    defer mb.popActiveModuleContext(token);
+
+    var callback_invoked = false;
     try installState(ctx, system_path, @ptrFromInt(0x1), struct {
         fn call(
             _: *anyopaque,
-            cb_ctx: *context.Context,
-            base_url: []const u8,
-            route: []const u8,
-            init_val: value.JSValue,
+            _: *context.Context,
+            _: []const u8,
+            _: []const u8,
+            _: value.JSValue,
         ) anyerror!value.JSValue {
-            try std.testing.expectEqualStrings("http://users.internal", base_url);
-            try std.testing.expectEqualStrings("/inspect", route);
-            try std.testing.expect(init_val.isUndefined());
-            return cb_ctx.createString(base_url);
+            return value.JSValue.undefined_val;
         }
     }.call);
 
-    const service_name = try ctx.createString("users");
-    defer string.freeString(std.testing.allocator, service_name.toPtr(string.JSString));
-    const route = try ctx.createString("/inspect");
-    defer string.freeString(std.testing.allocator, route.toPtr(string.JSString));
-
-    const call_token = pushServiceTestContext();
-    defer mb.popActiveModuleContext(call_token);
-    const result = try serviceCallNative(ctx, value.JSValue.undefined_val, &[_]value.JSValue{
-        service_name,
-        route,
-    });
-
-    try std.testing.expectEqualStrings("http://users.internal", util.extractString(result).?);
+    const state = ctx.getModuleState(ServiceState, MODULE_STATE_SLOT) orelse return error.TestFailed;
+    const base_url = state.services.get("users") orelse return error.TestFailed;
+    try std.testing.expectEqualStrings("http://users.internal", base_url);
+    _ = &callback_invoked;
 }

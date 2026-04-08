@@ -31,12 +31,6 @@ const mb = @import("../module_binding.zig");
 
 const MODULE_STATE_SLOT = @intFromEnum(@import("../module_slots.zig").Slot.cache);
 
-/// Get current time in seconds (epoch)
-fn nowSeconds() i64 {
-    const ms = mb.clockNowMsChecked();
-    return @divTrunc(ms, 1000);
-}
-
 pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:cache",
     .name = "cache",
@@ -147,7 +141,7 @@ const CacheStore = struct {
 
         // Lazy TTL check
         if (entry.expires_at) |exp| {
-            if (nowSeconds() > exp) {
+            if (mb.clockNowSecsChecked() > exp) {
                 // Expired: remove
                 self.removeEntry(ns_cache, entry);
                 ns_cache.misses += 1;
@@ -169,7 +163,7 @@ const CacheStore = struct {
             self.allocator.free(existing.cache_value);
             existing.cache_value = try self.allocator.dupe(u8, val);
             existing.byte_size = existing.key.len + existing.ns.len + existing.cache_value.len;
-            existing.expires_at = if (ttl) |t| nowSeconds() + t else null;
+            existing.expires_at = if (ttl) |t| mb.clockNowSecsChecked() + t else null;
             self.total_bytes += existing.byte_size;
             self.promoteToHead(existing);
             return;
@@ -195,7 +189,7 @@ const CacheStore = struct {
             .key = key_owned,
             .ns = ns_owned,
             .cache_value = val_owned,
-            .expires_at = if (ttl) |t| nowSeconds() + t else null,
+            .expires_at = if (ttl) |t| mb.clockNowSecsChecked() + t else null,
             .byte_size = key_owned.len + ns_owned.len + val_owned.len,
             .prev = null,
             .next = null,

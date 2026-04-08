@@ -382,7 +382,7 @@ Consumers that previously maintained separate hardcoded tables now read from the
 - **Bool checker**: maps `ReturnKind` to `ExprType` via `returnKindToExprType()`
 - **Contract builder**: uses `GenericBinding` entries populated from `FunctionBinding.contract_extractions` and `contract_flags`
 
-Third-party modules use `ModuleFn` (opaque `*ModuleHandle`) instead of `NativeFn` (raw `*anyopaque`). The opaque handle prevents dereferencing - all interaction goes through SDK free functions. Capability-checked SDK helpers (for example clock/random/stderr access) run under the module's declared `required_capabilities`, so extension modules can only use that helper surface when the binding metadata allows it. Build-path isolation via a separate `zigttp-sdk` package prevents importing runtime internals.
+Third-party modules use `ModuleFn` (opaque `*ModuleHandle`) instead of `NativeFn` (raw `*anyopaque`). The opaque handle prevents dereferencing - all interaction goes through SDK free functions. Capability-checked SDK helpers (for example clock/random/stderr access) run under the module's declared `required_capabilities`, so extension modules can only use that helper surface when the binding metadata allows it. Built-in modules now route the same sensitive operations through shared checked helpers for clock/random/crypto/stderr, policy checks, filesystem, runtime callbacks, and SQLite access, failing fast if implementation behavior drifts from the declaration. Build-path isolation via a separate `zigttp-sdk` package prevents importing runtime internals.
 
 ### Handler Effect Classification
 
@@ -398,8 +398,10 @@ Each `FunctionBinding` carries an `effect` annotation (read, write, or none). Du
 Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension). At runtime, `pure` or `deterministic`+`read_only` handlers get automatic response memoization: GET/HEAD responses are cached and served from Zig memory without entering JS (`proof_adapter.zig`).
 
 **Key files**:
-- `zigts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `validateBindings()`
-- `zigts/builtin_modules.zig` - registry of all built-in bindings with comptime validation
+- `zigts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `ModuleCapability`, `validateBindings()`, capability-checked helpers (`clockNowMsChecked`, `fillRandomChecked`, `hmacSha256Checked`, `writeStderrChecked`, `readFileChecked`, etc.), threadlocal `ActiveModuleContext` push/pop for call-scoped enforcement
+- `zigts/builtin_modules.zig` - registry of all built-in bindings with comptime validation (unique specifiers, unique function names, duplicate capability detection)
+- `zigts/modules/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
+- `zigts/module_binding_adapter.zig` - adapts SDK `ModuleBinding` to internal types with ordinal-alignment comptime assertions for `ModuleCapability`
 - `zigts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension

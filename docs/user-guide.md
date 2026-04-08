@@ -2426,8 +2426,11 @@ only, like `guard`). During precompilation, the contract builder aggregates thes
 effects to derive handler-level properties:
 
 This handler-facing effect metadata is separate from module-level
-`required_capabilities`, which describe what a virtual module's Zig
-implementation consumes internally for governance and auditability.
+`required_capabilities`, which record what runtime resources (clock, crypto,
+stderr, etc.) a virtual module's Zig implementation actually uses. Built-in
+and extension modules route sensitive operations through shared checked
+helpers, so a mismatch between the declaration and the code panics
+at call time rather than silently misbehaving.
 
 | Property | Meaning |
 |----------|---------|

@@ -45,7 +45,7 @@ For detailed architecture: [docs/architecture.md](docs/architecture.md). For per
 
 ## Virtual Modules
 
-Import via `import { fn } from "zigttp:module"`. Implementations in `zigts/modules/`. Each module declares a `ModuleBinding` in `module_binding.zig` as single source of truth.
+Import via `import { fn } from "zigttp:module"`. Implementations in `zigts/modules/`. Each module declares a `ModuleBinding` in `module_binding.zig` as single source of truth. Bindings also declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by shared checked helpers in `module_binding.zig`. Modules with no capabilities skip the enforcement wrapper at compile time.
 
 | Module | Key Exports |
 |--------|-------------|

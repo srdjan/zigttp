@@ -94,7 +94,7 @@ const RateStore = struct {
 
     /// Check rate limit. Returns (allowed, remaining, reset_at).
     fn check(self: *RateStore, key: []const u8, limit: u32, window_sec: i64) !struct { allowed: bool, remaining: u32, reset_at: i64 } {
-        const now = nowSeconds();
+        const now = mb.clockNowSecsChecked();
 
         self.check_count +%= 1;
         if (self.check_count % EVICT_INTERVAL == 0) {
@@ -155,11 +155,6 @@ const RateStore = struct {
         return false;
     }
 };
-
-fn nowSeconds() i64 {
-    const ms = mb.clockNowMsChecked();
-    return @divTrunc(ms, 1000);
-}
 
 fn getOrCreateStore(ctx: *context.Context) !*RateStore {
     if (ctx.getModuleState(RateStore, MODULE_STATE_SLOT)) |store| {

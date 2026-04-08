@@ -43,7 +43,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
-**Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead.
+**Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead. Each module binding declares what runtime capabilities its implementation uses (clock, crypto, stderr, etc.); checked helpers enforce the declarations at call time, so implementation drift panics instead of silently misbehaving.
 
 ### Numbers
 
@@ -182,6 +182,25 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:ratelimit` | `rateCheck`, `rateReset` | Per-key rate limiting with sliding windows |
 
 Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `serviceCall`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
+
+Each module binding also declares the runtime capabilities its Zig implementation consumes (clock, random, crypto, stderr, filesystem, sqlite, env, runtime_callback, policy_check, network). These declarations are governance metadata for the module internals and do not affect the handler-facing effect classification or sandbox policy. Capability-checked helpers enforce them at call time: if a module reads the system clock but its binding omits `clock`, the call panics with a diagnostic naming the module and the missing capability.
+
+| Module | Runtime Capabilities |
+|--------|---------------------|
+| `zigttp:auth` | crypto, clock |
+| `zigttp:cache` | clock, policy_check |
+| `zigttp:crypto` | crypto |
+| `zigttp:env` | env, policy_check |
+| `zigttp:id` | clock, random |
+| `zigttp:io` | runtime_callback |
+| `zigttp:log` | clock, stderr |
+| `zigttp:ratelimit` | clock |
+| `zigttp:service` | filesystem, runtime_callback |
+| `zigttp:sql` | sqlite, policy_check |
+| `zigttp:durable` | runtime_callback |
+| `zigttp:compose`, `zigttp:decode`, `zigttp:http`, `zigttp:router`, `zigttp:text`, `zigttp:time`, `zigttp:url`, `zigttp:validate` | _(none)_ |
+
+Extension modules (via `zigttp-sdk`) declare capabilities the same way; the same checked helpers enforce them. Modules declaring no capabilities skip the enforcement wrapper at compile time.
 
 ### Auth Example
 
@@ -371,7 +390,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:service` (named internal service calls), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:service` (named internal service calls), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`. Module bindings declare runtime capabilities (clock, crypto, stderr, etc.) enforced by shared checked helpers, with a comptime short-circuit that skips the wrapper for modules declaring no capabilities.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
