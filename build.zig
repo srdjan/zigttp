@@ -113,6 +113,10 @@ pub fn build(b: *std.Build) void {
     const rollout_test_step = b.step("test-rollout", "Run rollout planner tests");
     rollout_test_step.dependOn(&run_rollout_tests.step);
 
+    const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
+    const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
+    capability_audit_step.dependOn(&capability_audit.step);
+
     const zigts_cli_mod = b.createModule(.{
         .root_source_file = b.path("tools/zigts_cli.zig"),
         .target = target,
@@ -309,6 +313,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_precompile_tests.step);
     test_step.dependOn(&run_prop_expect_tests.step);
     test_step.dependOn(&run_rollout_tests.step);
+    test_step.dependOn(&capability_audit.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{

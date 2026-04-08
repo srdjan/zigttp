@@ -352,7 +352,14 @@ test "base64url decode with padding" {
     try std.testing.expectEqualStrings("hello", d2);
 }
 
+fn pushAuthTestContext() mb.ActiveModuleToken {
+    return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+}
+
 test "HMAC-SHA256 sign and verify roundtrip" {
+    const token = pushAuthTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     const secret = "test-secret-key";
     const claims = "{\"sub\":\"1234567890\",\"name\":\"Test User\",\"iat\":1516239022}";
@@ -370,7 +377,7 @@ test "HMAC-SHA256 sign and verify roundtrip" {
     @memcpy(signing_input[header_b64.len + 1 ..], payload_b64);
 
     var mac: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&mac, signing_input, secret);
+    mb.hmacSha256Checked(&mac, signing_input, secret);
 
     const sig_b64 = try encodeBase64url(allocator, &mac);
     defer allocator.free(sig_b64);
@@ -383,24 +390,30 @@ test "HMAC-SHA256 sign and verify roundtrip" {
 }
 
 test "HMAC-SHA256 wrong key" {
+    const token = pushAuthTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const secret = "correct-key";
     const wrong_key = "wrong-key";
     const data = "header.payload";
 
     var mac1: [HmacSha256.mac_length]u8 = undefined;
     var mac2: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&mac1, data, secret);
-    HmacSha256.create(&mac2, data, wrong_key);
+    mb.hmacSha256Checked(&mac1, data, secret);
+    mb.hmacSha256Checked(&mac2, data, wrong_key);
 
     try std.testing.expect(!constTimeEql(&mac1, &mac2));
 }
 
 test "webhook signature verification" {
+    const token = pushAuthTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const payload = "test payload";
     const secret = "webhook-secret";
 
     var expected_mac: [HmacSha256.mac_length]u8 = undefined;
-    HmacSha256.create(&expected_mac, payload, secret);
+    mb.hmacSha256Checked(&expected_mac, payload, secret);
     const expected_hex = std.fmt.bytesToHex(expected_mac, .lower);
 
     // Without prefix

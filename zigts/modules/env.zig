@@ -38,7 +38,7 @@ fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
 
     // Get the variable name from the first argument
     const name_str = util.extractString(args[0]) orelse return value.JSValue.undefined_val;
-    if (!ctx.capability_policy.allowsEnv(name_str)) {
+    if (!mb.allowsEnvChecked(ctx, name_str)) {
         return util.throwCapabilityPolicyError(ctx, "env access", name_str);
     }
 
@@ -48,14 +48,18 @@ fn envNative(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue)
     @memcpy(name_buf[0..name_str.len], name_str);
     name_buf[name_str.len] = 0;
 
-    const c_result = std.c.getenv(name_buf[0..name_str.len :0]);
-    if (c_result == null) return value.JSValue.undefined_val;
-
-    const result = std.mem.sliceTo(c_result.?, 0);
+    const result = mb.readEnvChecked(name_buf[0..name_str.len :0]) orelse return value.JSValue.undefined_val;
     return ctx.createString(result) catch value.JSValue.undefined_val;
 }
 
+fn pushEnvTestContext() mb.ActiveModuleToken {
+    return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+}
+
 test "env policy rejects disallowed env access" {
+    const token = pushEnvTestContext();
+    defer mb.popActiveModuleContext(token);
+
     const allocator = std.testing.allocator;
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");

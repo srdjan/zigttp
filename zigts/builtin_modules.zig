@@ -166,10 +166,13 @@ fn bindingHasCapability(binding: *const ModuleBinding, capability: mb.ModuleCapa
     return false;
 }
 
-test "module capability annotations cover representative runtime dependencies" {
+test "module capability annotations cover audited helper-enforced built-ins" {
     const env_binding = fromSpecifier("zigttp:env").?;
     try std.testing.expect(bindingHasCapability(env_binding, .env));
     try std.testing.expect(bindingHasCapability(env_binding, .policy_check));
+
+    const crypto_binding = fromSpecifier("zigttp:crypto").?;
+    try std.testing.expect(bindingHasCapability(crypto_binding, .crypto));
 
     const auth_binding = fromSpecifier("zigttp:auth").?;
     try std.testing.expect(bindingHasCapability(auth_binding, .crypto));
@@ -178,6 +181,27 @@ test "module capability annotations cover representative runtime dependencies" {
     const id_binding = fromSpecifier("zigttp:id").?;
     try std.testing.expect(bindingHasCapability(id_binding, .random));
     try std.testing.expect(bindingHasCapability(id_binding, .clock));
+
+    const log_binding = fromSpecifier("zigttp:log").?;
+    try std.testing.expect(bindingHasCapability(log_binding, .stderr));
+    try std.testing.expect(bindingHasCapability(log_binding, .clock));
+
+    const cache_binding = fromSpecifier("zigttp:cache").?;
+    try std.testing.expect(bindingHasCapability(cache_binding, .clock));
+    try std.testing.expect(bindingHasCapability(cache_binding, .policy_check));
+
+    const sql_binding = fromSpecifier("zigttp:sql").?;
+    try std.testing.expect(bindingHasCapability(sql_binding, .sqlite));
+    try std.testing.expect(bindingHasCapability(sql_binding, .policy_check));
+
+    const io_binding = fromSpecifier("zigttp:io").?;
+    try std.testing.expect(bindingHasCapability(io_binding, .runtime_callback));
+
+    const durable_binding = fromSpecifier("zigttp:durable").?;
+    try std.testing.expect(bindingHasCapability(durable_binding, .runtime_callback));
+
+    const ratelimit_binding = fromSpecifier("zigttp:ratelimit").?;
+    try std.testing.expect(bindingHasCapability(ratelimit_binding, .clock));
 
     const service_binding = fromSpecifier("zigttp:service").?;
     try std.testing.expect(bindingHasCapability(service_binding, .filesystem));

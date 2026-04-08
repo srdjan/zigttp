@@ -97,14 +97,17 @@ pub const SqlStore = struct {
     fn ensureDb(self: *SqlStore) !*sqlite.Db {
         if (self.db == null) {
             const path = self.db_path orelse return error.MissingDatabasePath;
-            self.db = try sqlite.Db.openReadWriteCreate(self.allocator, path);
+            self.db = try mb.openSqliteDbChecked(self.allocator, path);
         }
         return &self.db.?;
     }
 };
 
 pub fn installStore(ctx: *context.Context, db_path: ?[]const u8) !void {
-    if (ctx.getModuleState(SqlStore, MODULE_STATE_SLOT)) |store| {
+    const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+    defer mb.popActiveModuleContext(token);
+
+    if (mb.getSqliteStateChecked(ctx, SqlStore, MODULE_STATE_SLOT)) |store| {
         try store.configure(db_path);
         return;
     }
@@ -115,7 +118,7 @@ pub fn installStore(ctx: *context.Context, db_path: ?[]const u8) !void {
 }
 
 fn getOrCreateStore(ctx: *context.Context) !*SqlStore {
-    if (ctx.getModuleState(SqlStore, MODULE_STATE_SLOT)) |store| return store;
+    if (mb.getSqliteStateChecked(ctx, SqlStore, MODULE_STATE_SLOT)) |store| return store;
 
     const store = try ctx.allocator.create(SqlStore);
     store.* = try SqlStore.init(ctx.allocator, null);
@@ -357,7 +360,7 @@ fn buildColumnValue(ctx: *context.Context, stmt: *sqlite.Stmt, column_idx: usize
 }
 
 fn ensureQueryAllowed(ctx: *context.Context, name: []const u8) bool {
-    if (ctx.capability_policy.allowsSqlQuery(name)) return true;
+    if (mb.allowsSqlQueryChecked(ctx, name)) return true;
     _ = util.throwCapabilityPolicyError(ctx, "sql query", name);
     return false;
 }
@@ -370,7 +373,14 @@ fn tryIntern(ctx: *context.Context, name: []const u8) !object.Atom {
     return object.lookupPredefinedAtom(name) orelse try ctx.atoms.intern(name);
 }
 
+fn pushSqlTestContext() mb.ActiveModuleToken {
+    return mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+}
+
 test "sql module register and execute queries" {
+    const token = pushSqlTestContext();
+    defer mb.popActiveModuleContext(token);
+
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
@@ -378,7 +388,7 @@ test "sql module register and execute queries" {
     const sqlite_path = try tmp.dir.realPathFileAlloc(std.testing.io, "test.sqlite", std.testing.allocator);
     defer std.testing.allocator.free(sqlite_path);
 
-    var db = try sqlite.Db.openReadWriteCreate(std.testing.allocator, sqlite_path);
+    var db = try mb.openSqliteDbChecked(std.testing.allocator, sqlite_path);
     defer db.close();
     try db.exec(std.testing.allocator, "CREATE TABLE todos(id TEXT PRIMARY KEY, text TEXT, done INTEGER NOT NULL DEFAULT 0);");
 
@@ -447,4 +457,42 @@ test "sql module register and execute queries" {
     const row = row_val.toPtr(object.JSObject);
     const text_val = row.getProperty(pool, try ctx.atoms.intern("text")) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("write tests", util.extractString(text_val).?);
+}
+
+test "sql policy rejects disallowed query" {
+    const token = pushSqlTestContext();
+    defer mb.popActiveModuleContext(token);
+
+    var gc_state = try @import("../gc.zig").GC.init(std.testing.allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var heap_state = @import("../heap.zig").Heap.init(std.testing.allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    const ctx = try context.Context.init(std.testing.allocator, &gc_state, .{});
+    defer ctx.deinit();
+    ctx.capability_policy = .{
+        .sql = .{
+            .enabled = true,
+            .values = &[_][]const u8{"allowedQuery"},
+        },
+    };
+
+    const name = try ctx.createString("blockedQuery");
+    defer string.freeString(std.testing.allocator, name.toPtr(string.JSString));
+    const stmt = try ctx.createString("SELECT 1");
+    defer string.freeString(std.testing.allocator, stmt.toPtr(string.JSString));
+    _ = try sqlRegisterNative(@ptrCast(ctx), value.JSValue.undefined_val, &[_]value.JSValue{
+        name,
+        stmt,
+    });
+
+    _ = try sqlOneNative(@ptrCast(ctx), value.JSValue.undefined_val, &[_]value.JSValue{name});
+    try std.testing.expect(ctx.hasException());
+
+    if (ctx.exception.isObject()) {
+        const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        ctx.exception.toPtr(object.JSObject).destroyBuiltin(std.testing.allocator, pool);
+        ctx.clearException();
+    }
 }
