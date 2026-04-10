@@ -154,6 +154,14 @@ OPTIONS:
   --system <FILE>       System registry for zigttp:service
                         Required for named internal service calls
 
+  --watch               Watch handler files, hot-swap on change
+                        Requires a file-based handler (not --eval)
+
+  --prove               With --watch: diff behavioral contracts before swapping
+                        Safe changes apply automatically; breaking changes block
+
+  --force-swap          With --watch --prove: apply breaking changes anyway
+
   --no-env-check        Skip startup env var validation from contract
                         Useful during development when env vars aren't set
 

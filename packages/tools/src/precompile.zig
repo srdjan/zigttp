@@ -1216,7 +1216,21 @@ pub fn runCheckOnly(
         return err;
     };
     defer allocator.free(source);
+    return runCheckOnlyFromSource(allocator, source, handler_path, sql_schema_path, json_mode, system_path, false);
+}
 
+/// Like runCheckOnly but operates on pre-read source. When skip_contract
+/// is true, stages 7-10 (verification, contract, paths, fault coverage)
+/// are skipped - only parse and type checking run, enough to detect errors.
+pub fn runCheckOnlyFromSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    handler_path: []const u8,
+    sql_schema_path: ?[]const u8,
+    json_mode: bool,
+    system_path: ?[]const u8,
+    skip_contract: bool,
+) !CheckResult {
     var result = CheckResult{};
     result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
 
@@ -1370,6 +1384,8 @@ pub fn runCheckOnly(
             return result;
         }
     }
+
+    if (skip_contract) return result;
 
     // Stage 7: Handler verification (7 checks)
     var verify_info: ?VerificationInfo = null;

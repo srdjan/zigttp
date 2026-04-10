@@ -19,6 +19,7 @@ zig build -Dhandler=handler.jsx -Dreplay=traces.jsonl   # Replay-verify
 zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at build time
 
 zig build run -- examples/handler/handler.ts -p 3000
+zig build run -- examples/handler/handler.ts --watch --prove  # Proven live reload
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
 
 zig build test                     # All tests
@@ -35,7 +36,7 @@ zigts link system.json               # Cross-handler contract linking
 
 ## Architecture
 
-Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
+Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reload.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
 
 Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
@@ -99,7 +100,7 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 ### zigttp (server)
 
-`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`.
+`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`.
 
 ### zigts (compiler/analyzer)
 

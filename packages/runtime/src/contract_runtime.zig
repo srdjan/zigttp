@@ -7,6 +7,9 @@
 //! route pre-filtering, and property-driven behavior.
 
 const std = @import("std");
+const zq = @import("zigts");
+const HandlerContract = zq.HandlerContract;
+const HandlerProperties = zq.handler_contract.HandlerProperties;
 
 /// Proven handler properties extracted from the contract.
 /// Each field is a mathematical proof, not an annotation.
@@ -229,6 +232,73 @@ pub fn validateEnvVars(allocator: std.mem.Allocator, contract: *const RuntimeCon
     return try missing.toOwnedSlice(allocator);
 }
 
+/// Build a RuntimeContract directly from an engine HandlerContract.
+/// Allocates all strings with the given allocator. Caller owns the result.
+pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContract) !RuntimeContract {
+    // Copy env vars
+    var env_vars: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (env_vars.items) |v| allocator.free(v);
+        env_vars.deinit(allocator);
+    }
+    for (hc.env.literal.items) |s| {
+        try env_vars.append(allocator, try allocator.dupe(u8, s));
+    }
+
+    // Copy API routes (method + path)
+    var routes: std.ArrayList(Route) = .empty;
+    errdefer {
+        for (routes.items) |r| {
+            allocator.free(r.method);
+            allocator.free(r.path);
+        }
+        routes.deinit(allocator);
+    }
+    for (hc.api.routes.items) |api_route| {
+        try routes.append(allocator, .{
+            .method = try allocator.dupe(u8, api_route.method),
+            .path = try allocator.dupe(u8, api_route.path),
+        });
+    }
+
+    // Convert properties
+    const hp = hc.properties orelse HandlerProperties{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = false,
+    };
+
+    return .{
+        .env_vars = try env_vars.toOwnedSlice(allocator),
+        .env_dynamic = hc.env.dynamic,
+        .routes = try routes.toOwnedSlice(allocator),
+        .routes_dynamic = hc.api.routes_dynamic,
+        .properties = .{
+            .pure = hp.pure,
+            .read_only = hp.read_only,
+            .stateless = hp.stateless,
+            .retry_safe = hp.retry_safe,
+            .deterministic = hp.deterministic,
+            .has_egress = hp.has_egress,
+            .no_secret_leakage = hp.no_secret_leakage,
+            .no_credential_leakage = hp.no_credential_leakage,
+            .input_validated = hp.input_validated,
+            .pii_contained = hp.pii_contained,
+            .injection_safe = hp.injection_safe,
+            .idempotent = hp.idempotent,
+            .state_isolated = hp.state_isolated,
+            .max_io_depth = hp.max_io_depth,
+            .fault_covered = hp.fault_covered,
+            .result_safe = hp.result_safe,
+            .optional_safe = hp.optional_safe,
+        },
+        .allocator = allocator,
+    };
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -401,4 +471,75 @@ test "matchesRoute with no routes passes everything" {
     };
 
     try std.testing.expect(contract.matchesRoute("GET", "/anything"));
+}
+
+test "fromHandlerContract converts properties and env vars" {
+    const allocator = std.testing.allocator;
+
+    // Build a minimal HandlerContract
+    var hc = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{
+            .literal = .empty,
+            .dynamic = false,
+        },
+        .egress = .{
+            .hosts = .empty,
+            .urls = .empty,
+            .dynamic = false,
+        },
+        .cache = .{
+            .namespaces = .empty,
+            .dynamic = false,
+        },
+        .sql = .{
+            .backend = "sqlite",
+            .queries = .empty,
+            .dynamic = false,
+        },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+            .timers = false,
+            .signals = .{ .literal = .empty, .dynamic = false },
+            .producer_keys = .{ .literal = .empty, .dynamic = false },
+        },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+        .properties = .{
+            .pure = false,
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+        },
+    };
+    defer hc.deinit(allocator);
+
+    // Add an env var
+    try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
+
+    var rc = try fromHandlerContract(allocator, &hc);
+    defer rc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), rc.env_vars.len);
+    try std.testing.expectEqualStrings("API_KEY", rc.env_vars[0]);
+    try std.testing.expect(!rc.env_dynamic);
+    try std.testing.expect(rc.properties.read_only);
+    try std.testing.expect(rc.properties.retry_safe);
+    try std.testing.expect(rc.properties.deterministic);
+    try std.testing.expect(!rc.properties.pure);
 }

@@ -14,6 +14,7 @@ const ProjectConfig = project_config_mod.ProjectConfig;
 const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
+const live_reload_mod = @import("live_reload.zig");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -103,6 +104,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    // Extract live reload flags before parsing server config
+    var watch_enabled = false;
+    var prove_enabled = false;
+    var force_swap = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--watch")) watch_enabled = true;
+        if (std.mem.eql(u8, arg, "--prove")) prove_enabled = true;
+        if (std.mem.eql(u8, arg, "--force-swap")) force_swap = true;
+    }
+
     const config = try parseServeArgs(allocator, argv);
 
     if (config.runtime_config.replay_file_path != null) {
@@ -144,10 +155,44 @@ fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     };
     defer server.deinit();
 
-    server.run() catch |err| {
-        std.log.err("Server error: {}", .{err});
-        return;
-    };
+    // Start with proven live reload if --watch was requested
+    if (watch_enabled) {
+        const handler_path = switch (config.handler) {
+            .file_path => |path| path,
+            else => {
+                std.log.err("--watch requires a file-based handler (not --eval or embedded)", .{});
+                return;
+            },
+        };
+
+        var watch_set = buildWatchSet(allocator, argv) catch |err| {
+            std.log.err("Failed to build watch set: {}", .{err});
+            return;
+        };
+        defer watch_set.deinit(allocator);
+
+        var live_reload = live_reload_mod.LiveReloadState.init(
+            allocator,
+            &server,
+            handler_path,
+            watch_set.paths,
+            .{
+                .prove = prove_enabled,
+                .force_swap = force_swap,
+            },
+        );
+        defer live_reload.deinit();
+
+        server.runWithBackgroundWork(&live_reload, watcherThread) catch |err| {
+            std.log.err("Server error: {}", .{err});
+            return;
+        };
+    } else {
+        server.run() catch |err| {
+            std.log.err("Server error: {}", .{err});
+            return;
+        };
+    }
 }
 
 fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -421,6 +466,12 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             config.runtime_config.system_config_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--no-env-check")) {
             config.skip_env_check = true;
+        } else if (std.mem.eql(u8, arg, "--watch") or
+            std.mem.eql(u8, arg, "--prove") or
+            std.mem.eql(u8, arg, "--force-swap"))
+        {
+            // Handled by serveCommand before parseServeArgs is called
+            continue;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             config.handler = .{ .file_path = arg };
             handler_set = true;
@@ -448,6 +499,15 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     try zigts_cli.run(allocator, check_args.items);
+}
+
+fn watcherThread(live_reload: *live_reload_mod.LiveReloadState) void {
+    var io_backend = std.Io.Threaded.init(live_reload.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+
+    live_reload.run(io_backend.io()) catch |err| {
+        std.log.err("Live reload error: {}", .{err});
+    };
 }
 
 const WatchSet = struct {
@@ -507,7 +567,7 @@ fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !WatchS
     return .{ .paths = try paths.toOwnedSlice(allocator) };
 }
 
-fn foldPathIntoHash(io: std.Io, hash: *std.hash.Wyhash, path: []const u8) !void {
+pub fn foldPathIntoHash(io: std.Io, hash: *std.hash.Wyhash, path: []const u8) !void {
     const stat = std.Io.Dir.statFile(std.Io.Dir.cwd(), io, path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return,
         else => return err,

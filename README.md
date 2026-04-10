@@ -41,6 +41,8 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Proven evolution.** `-Dprove=contract.json:traces.jsonl` compares two handler versions by diffing their contracts (surface and behavior) and replaying recorded traces. The upgrade verifier produces a four-value verdict: `safe`, `safe_with_additions`, `breaking`, or `needs_review`. It factors in behavioral path changes, property regressions with severity (critical/warning/info), and trace coverage gaps. Output: `proof.json`, `proof-report.txt`, and `upgrade-manifest.json`. The standalone `zigts prove old.json new.json` CLI compares contracts without rebuilding (exit 0 for safe, 1 for breaking, 2 for needs_review).
 
+**Proven live reload.** `--watch --prove` watches handler files and hot-swaps them in-process on every save. The server recompiles the handler, extracts its behavioral contract, diffs it against the running version, and applies the change only when the upgrade verdict is `safe` or `safe_with_additions`. Breaking changes (removed routes, lost critical properties) block the swap and print the diff. `--force-swap` overrides the block. Without `--prove`, `--watch` hot-reloads without contract proof. Compilation errors keep the old handler running. Durable handlers refuse live swap because replay state depends on handler identity.
+
 **Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead. Each module binding declares what runtime capabilities its implementation uses (clock, crypto, stderr, etc.); checked helpers enforce the declarations at call time, so implementation drift panics instead of silently misbehaving.
@@ -326,6 +328,9 @@ Options:
   --outbound-host <H>   Restrict outbound bridge to exact host H
   --outbound-timeout-ms Connect timeout for outbound bridge (ms)
   --outbound-max-response <SIZE>
+  --watch               Watch handler files and hot-swap on change
+  --prove               With --watch: diff behavioral contracts before swapping
+  --force-swap          With --watch --prove: apply breaking changes anyway
   --trace <FILE>        Record handler I/O traces to JSONL file
   --replay <FILE>       Replay recorded traces and verify handler output
   --sqlite <FILE>       SQLite database path for zigttp:sql
@@ -384,7 +389,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
-**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
+**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), proven live reload (`--watch --prove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
 
 **Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression, `assert` statement, `distinct type`, `readonly` fields, template literal types, type guards (`x is T`).
 

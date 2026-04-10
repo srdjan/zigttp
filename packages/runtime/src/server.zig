@@ -837,6 +837,29 @@ pub const Server = struct {
         }
     }
 
+    /// Replace the runtime contract and reconfigure the proof cache.
+    /// Called by live reload after a handler swap with a new contract.
+    pub fn updateContract(self: *Self, new_contract: contract_runtime.RuntimeContract) void {
+        if (self.contract) |*c| c.deinit();
+        self.contract = new_contract;
+
+        // Always rebuild: even if eligibility is unchanged, cached responses
+        // are from the old handler and must not be served after a swap.
+        if (self.proof_cache) |*pc| {
+            pc.deinit();
+            self.proof_cache = null;
+        }
+
+        const p = new_contract.properties;
+        if (p.pure or (p.deterministic and p.read_only)) {
+            self.proof_cache = proof_adapter.ProofCache.init(
+                self.allocator,
+                new_contract.properties,
+                .{},
+            );
+        }
+    }
+
     pub fn start(self: *Self) !void {
         try initIoBackend(&self.io_backend, self.allocator);
         self.evented_ready = true;
@@ -924,6 +947,20 @@ pub const Server = struct {
 
     pub fn run(self: *Self) !void {
         try self.start();
+        try self.acceptLoop();
+    }
+
+    /// Start the server, spawn work_fn on a background thread, then
+    /// block on the accept loop. The background thread is joined when
+    /// the accept loop exits (server.running becomes false).
+    pub fn runWithBackgroundWork(
+        self: *Self,
+        context: anytype,
+        comptime work_fn: fn (@TypeOf(context)) void,
+    ) !void {
+        try self.start();
+        const thread = try std.Thread.spawn(.{}, work_fn, .{context});
+        defer thread.join();
         try self.acceptLoop();
     }
 

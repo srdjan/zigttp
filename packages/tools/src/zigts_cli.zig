@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const precompile = @import("precompile.zig");
+pub const upgrade_verifier = @import("upgrade_verifier.zig");
 const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");

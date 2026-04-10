@@ -4389,6 +4389,42 @@ pub const HandlerPool = struct {
         if (self.trace_mutex) |m| self.allocator.destroy(m);
     }
 
+    /// Hot-swap handler code without restarting the server.
+    ///
+    /// Updates the handler source, clears the bytecode cache, and invalidates
+    /// all idle runtimes so they recompile on next acquire. In-flight requests
+    /// continue with the old handler and get the new code on their next cycle.
+    ///
+    /// `new_code` must be heap-allocated and owned by the caller. The pool
+    /// takes a reference but does not free it - the caller manages the
+    /// lifetime of both old and new code (keep the previous generation alive
+    /// until the next reload cycle to avoid use-after-free on in-flight
+    /// runtimes).
+    pub fn reloadHandler(self: *Self, new_code: []const u8, new_filename: []const u8) usize {
+        self.runtime_init_mutex.lock();
+        self.cache_mutex.lock();
+
+        self.handler_code = new_code;
+        self.handler_filename = new_filename;
+        self.cache.clear();
+        self.embedded_bytecode = null;
+
+        self.cache_mutex.unlock();
+        self.runtime_init_mutex.unlock();
+
+        // Checked-out runtimes (slot == null) are skipped here - they
+        // get reinitialized on next acquire because the cache is cleared.
+        var invalidated: usize = 0;
+        for (self.pool.slots) |*slot| {
+            if (slot.load(.acquire)) |base_rt| {
+                self.invalidateRuntime(base_rt);
+                invalidated += 1;
+            }
+        }
+
+        return invalidated;
+    }
+
     fn nextRequestId(self: *Self) u64 {
         return if (collect_pool_metrics) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
     }
@@ -7026,4 +7062,83 @@ test "HandlerPool high contention stress" {
     try std.testing.expectEqual(thread_count * iterations, total);
     // At least some requests should succeed (proves pool works under contention)
     try std.testing.expect(completed_count > 0);
+}
+
+test "reloadHandler swaps handler code and new requests use new handler" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const old_code = "function handler(req) { return Response.text('v1'); }";
+    var pool = try HandlerPool.init(allocator, .{}, old_code, "<handler>", 2, 0);
+    defer pool.deinit();
+
+    // Execute with old handler
+    var req = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer req.deinit(allocator);
+
+    {
+        var response = try pool.executeHandler(req.asView());
+        defer response.deinit();
+        try std.testing.expectEqualStrings("v1", response.body);
+    }
+
+    // Reload with new handler
+    const new_code = "function handler(req) { return Response.text('v2'); }";
+    const invalidated = pool.reloadHandler(new_code, "<handler>");
+    try std.testing.expect(invalidated > 0);
+
+    // Execute with new handler - should return v2
+    {
+        var response = try pool.executeHandler(req.asView());
+        defer response.deinit();
+        try std.testing.expectEqualStrings("v2", response.body);
+    }
+}
+
+test "reloadHandler clears bytecode cache" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const old_code = "function handler(req) { return Response.text('cached-v1'); }";
+    var pool = try HandlerPool.init(allocator, .{}, old_code, "<handler>", 2, 0);
+    defer pool.deinit();
+
+    // Execute to populate cache
+    var req = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer req.deinit(allocator);
+
+    {
+        var response = try pool.executeHandler(req.asView());
+        defer response.deinit();
+        try std.testing.expectEqualStrings("cached-v1", response.body);
+    }
+
+    // Cache should have entries
+    try std.testing.expect(pool.cache.count() > 0);
+
+    // Reload clears cache
+    _ = pool.reloadHandler(
+        "function handler(req) { return Response.text('cached-v2'); }",
+        "<handler>",
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.cache.count());
+
+    // New request uses new handler
+    {
+        var response = try pool.executeHandler(req.asView());
+        defer response.deinit();
+        try std.testing.expectEqualStrings("cached-v2", response.body);
+    }
 }
