@@ -173,6 +173,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
 | `zigttp:service` | `serviceCall` | Named internal service-to-service calls backed by `system.json` |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
+| `zigttp:scope` | `scope`, `using`, `ensure` | Structured lifecycle management with deterministic cleanup at scope exit |
 | `zigttp:compose` | `guard`, `pipe` | Compile-time handler composition via pipe operator |
 | `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
 | `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | URL parsing and query string encoding |
@@ -183,7 +184,7 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | Time formatting and arithmetic |
 | `zigttp:ratelimit` | `rateCheck`, `rateReset` | Per-key rate limiting with sliding windows |
 
-Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `serviceCall`, `parallel`/`race`, and all durable functions. `guard` has no runtime effect.
+Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `serviceCall`, `parallel`/`race`, `scope`/`using`/`ensure`, and all durable functions. `guard` has no runtime effect.
 
 Each module binding also declares the runtime capabilities its Zig implementation consumes (clock, random, crypto, stderr, filesystem, sqlite, env, runtime_callback, policy_check, network). These declarations are governance metadata for the module internals and do not affect the handler-facing effect classification or sandbox policy. Capability-checked helpers enforce them at call time: if a module reads the system clock but its binding omits `clock`, the call panics with a diagnostic naming the module and the missing capability.
 
@@ -197,6 +198,7 @@ Each module binding also declares the runtime capabilities its Zig implementatio
 | `zigttp:io` | runtime_callback |
 | `zigttp:log` | clock, stderr |
 | `zigttp:ratelimit` | clock |
+| `zigttp:scope` | runtime_callback |
 | `zigttp:service` | filesystem, runtime_callback |
 | `zigttp:sql` | sqlite, policy_check |
 | `zigttp:durable` | runtime_callback |
@@ -395,7 +397,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **JIT Compilation**: Baseline JIT for x86-64 and ARM64, inline cache integration, object literal shapes, type feedback, adaptive compilation.
 
-**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:service` (named internal service calls), `zigttp:io` (structured concurrent I/O), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`. Module bindings declare runtime capabilities (clock, crypto, stderr, etc.) enforced by shared checked helpers, with a comptime short-circuit that skips the wrapper for modules declaring no capabilities.
+**Virtual Modules**: Native `zigttp:auth` (JWT/HS256, webhook signatures), `zigttp:validate` (JSON Schema registry), `zigttp:decode` (typed request ingress), `zigttp:cache` (TTL/LRU key-value store), `zigttp:service` (named internal service calls), `zigttp:io` (structured concurrent I/O), `zigttp:scope` (deterministic cleanup tied to lexical scope), `zigttp:compose` (guard composition), `zigttp:durable` (crash recovery, timers, signals), plus `zigttp:env`, `zigttp:crypto`, `zigttp:router`. Module bindings declare runtime capabilities (clock, crypto, stderr, etc.) enforced by shared checked helpers, with a comptime short-circuit that skips the wrapper for modules declaring no capabilities.
 
 **Developer Experience**: Fetch-like HTTP surface (`Response.*`, `Response(body, init?)`, `Request(url, init?)`, `Headers(init?)`, `request.text()`, `request.json()`, `headers.get()`, `fetchSync()`), console methods (log, error, warn, info, debug), static file serving with LRU cache, CORS support, pool metrics.
 
@@ -584,23 +586,31 @@ Every precompilation automatically extracts a contract from the handler's IR. Th
 - **System-linked payload facts** for named internal edges - target response statuses, JSON payload proof, and payload-proof gaps are reported in system-level output
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")` - names, statement kinds, and touched tables are captured after schema validation
+- **Scope usage** from `scope("name", fn)` - literal scope names, whether scope callbacks stay dynamic, and the maximum nested scope depth are captured
 - **API surface** from proven routes: method/path, path/query/header params, JSON request bodies, response variants, and bearer auth metadata
-- **Handler properties** derived from the internal effect summary of virtual module calls, cache reads, egress, and nondeterministic builtins (pure, read_only, stateless, retry_safe, deterministic)
+- **Handler properties** derived from the internal effect summary of virtual module calls, cache reads, scope usage, egress, and nondeterministic builtins (pure, read_only, stateless, retry_safe, deterministic)
 - **Behavioral paths** - every execution path through the handler with route, branching conditions, I/O sequence, and response status (exhaustive when the path count stays below 1024)
 - **Verification results** (when combined with `-Dverify`)
 - **Route patterns** (when combined with `-Daot`)
 
 ```json
 {
-  "version": 11,
-  "modules": ["zigttp:auth", "zigttp:cache"],
+  "version": 12,
+  "modules": ["zigttp:auth", "zigttp:cache", "zigttp:scope"],
   "functions": {
     "zigttp:auth": ["jwtVerify", "parseBearer"],
-    "zigttp:cache": ["cacheGet", "cacheSet"]
+    "zigttp:cache": ["cacheGet", "cacheSet"],
+    "zigttp:scope": ["scope", "ensure"]
   },
   "env": { "literal": ["JWT_SECRET"], "dynamic": false },
   "egress": { "hosts": ["api.example.com"], "dynamic": false },
   "cache": { "namespaces": ["sessions"], "dynamic": false },
+  "scope": {
+    "used": true,
+    "names": ["request", "enrich-user"],
+    "dynamic": false,
+    "maxDepth": 2
+  },
   "sql": {
     "backend": "sqlite",
     "queries": [
@@ -707,7 +717,7 @@ Handler Properties:
   ---    pure            handler is a deterministic function of the request
   ---    read_only       no state mutations via virtual modules
   ---    stateless       independent of mutable state
-  ---    retry_safe      safe for Lambda auto-retry on timeout
+  ---    retry_safe      disabled when scope-managed cleanup or bare writes are present
   PROVEN deterministic   no Date.now() or Math.random()
 ```
 

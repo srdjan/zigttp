@@ -326,13 +326,13 @@ In-memory key-value cache with namespace isolation, LRU eviction, and lazy TTL e
 ### zigttp:sql
 
 ```typescript
-import { sqlQuery, sqlExecute } from "zigttp:sql";
+import { sql, sqlOne, sqlMany, sqlExec } from "zigttp:sql";
 
-// Read query (returns array of row objects)
-const users = sqlQuery("SELECT * FROM users WHERE active = ?", [1]);
+sql("listUsers", "SELECT id, email FROM users WHERE active = 1");
+sql("createUser", "INSERT INTO users (email) VALUES (:email)");
 
-// Write operation (returns { changes, lastInsertRowid })
-const result = sqlExecute("INSERT INTO users (name, email) VALUES (?, ?)", ["Alice", "alice@example.com"]);
+const users = sqlMany("listUsers");
+const created = sqlExec("createUser", { email: "alice@example.com" });
 ```
 
 SQLite queries with optional build-time schema validation. When a `-Dsql-schema` build option points to a schema snapshot, the compiler validates that query column references match the actual schema. Named query allowlisting restricts which SQL statements the handler can execute.
@@ -376,6 +376,24 @@ const fastest = race([
 ```
 
 Structured concurrent I/O. `parallel()` executes `fetchSync` calls on OS threads and returns results in declaration order. `race()` returns the first successful response. These are the only concurrency primitives in zigttp - there are no Promises, no async/await, no event loop. Concurrency is explicit and structured.
+
+### zigttp:scope
+
+```typescript
+import { scope, using, ensure } from "zigttp:scope";
+
+const result = scope("request", () => {
+    const lease = acquireLease("job-123");
+    using(lease, (held) => releaseLease(held.id));
+    ensure(() => logInfo("request complete"));
+    return Response.json({ ok: true });
+});
+```
+
+Structured lifecycle management. `scope()` creates a named child scope,
+`using()` registers a cleanup function for an acquired resource, and
+`ensure()` registers a plain exit callback. When the scope exits, cleanups run
+in reverse order. The handler itself is wrapped in an implicit root scope.
 
 ### zigttp:compose
 
@@ -428,7 +446,7 @@ Durable execution with crash recovery, timers, and inter-handler signaling. `run
 
 ### Effect Classification
 
-Every virtual module export carries an effect annotation: `read`, `write`, or `none`. The contract builder aggregates these across all imported functions to derive handler-level properties. A handler that only calls `env()` and `cacheGet()` is classified as `read_only`. A handler that calls `cacheSet()` but wraps it in a durable `step()` is classified as `retry_safe`. A handler that makes no virtual module calls at all is `pure`.
+Every virtual module export carries an effect annotation: `read`, `write`, or `none`. The contract builder aggregates these across all imported functions to derive handler-level properties. A handler that only calls `env()` and `cacheGet()` is classified as `read_only`. A handler that calls `cacheSet()` but wraps it in a durable `step()` is classified as `retry_safe`. A handler that uses `zigttp:scope` is conservatively not `retry_safe`, because cleanup callbacks are side effects tied to scope exit. A handler that makes no virtual module calls at all is `pure`.
 
 These classifications flow into deployment manifests as machine-readable tags, into sandbox policies as access restrictions, and into operational dashboards as safety guarantees.
 
@@ -619,6 +637,7 @@ The contract captures:
 - **Cache namespaces**: every literal namespace in cache operations
 - **Route patterns**: every route string passed to `routerMatch`
 - **SQL queries**: every SQL statement with operation type and table references
+- **Scope usage**: named scope literals, dynamic scope usage, and maximum nested scope depth
 - **Durable usage**: step names, timer usage, signal names
 
 Each section has a `dynamic` flag. When `dynamic: false`, the compiler has enumerated every possible value. When `dynamic: true`, at least one call site uses a computed argument that the compiler cannot resolve statically. This is an honest signal, not a failure - it tells operators exactly where manual review is needed.
@@ -632,7 +651,7 @@ The contract builder computes handler-level properties from effect classificatio
 | `pure` | No virtual module calls, no egress | Zero I/O of any kind |
 | `read_only` | Only read-classified functions | env, cacheGet, parseBearer, jwtVerify, routerMatch |
 | `stateless` | Read-only and no cache reads | No cacheGet calls |
-| `retry_safe` | Safe to retry on failure | Read-only, or writes are confined to durable-managed operations with no proven bare writes |
+| `retry_safe` | Safe to retry on failure | Read-only, or writes are confined to durable-managed operations with no proven bare writes, and no scope-managed cleanup is present |
 | `deterministic` | Same input always produces same output | No Date.now() or Math.random() |
 | `has_egress` | Makes outbound HTTP calls | Uses fetchSync |
 | `idempotent` | Safe for at-least-once delivery | Deterministic AND retry-safe |
@@ -997,11 +1016,12 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | read/write |
 | `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | read |
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | read/write |
-| `zigttp:sql` | `sqlQuery`, `sqlExecute` | read/write |
+| `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | read/write |
 | `zigttp:service` | `serviceCall` | write |
 | `zigttp:io` | `parallel`, `race` | read |
+| `zigttp:scope` | `scope`, `using`, `ensure` | write |
 | `zigttp:compose` | `guard` | none |
-| `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | write |
+| `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | write |
 
 ### Supported JavaScript Features
 

@@ -1181,6 +1181,7 @@ Requires `--durable <DIR>` at runtime.
 import {
   run,
   step,
+  stepWithTimeout,
   sleep,
   sleepUntil,
   waitSignal,
@@ -1196,6 +1197,9 @@ completed run already exists for that key, zigttp returns the recorded
 **step(name, fn)** - Memoize a named subcomputation inside `run()`. If the step
 already completed in a previous attempt, zigttp returns the recorded result and
 skips the callback body.
+
+**stepWithTimeout(name, timeoutMs, fn)** - Durable step variant that records
+both the step name and timeout budget in the workflow contract.
 
 **sleep(ms)** / **sleepUntil(unixMs)** - Suspend a durable run until the timer
 is due. Pending runs return a framework-owned `202 Accepted` response with a
@@ -1401,6 +1405,54 @@ All existing guarantees are preserved:
   `--outbound-host` allowlists and capability policies.
 - **Determinism**: same inputs produce same output ordering. Results always
   match declaration order.
+
+### zigttp:scope
+
+Structured lifecycle management for resources and cleanup callbacks tied to
+lexical scope boundaries. The handler itself runs inside an implicit root
+scope.
+
+```typescript
+import { scope, using, ensure } from "zigttp:scope";
+```
+
+**scope(name, fn)** - Run `fn` inside a named child scope. When `fn` returns,
+all `using()` registrations and `ensure()` callbacks created inside that scope
+run in reverse order.
+
+```typescript
+const result = scope("enrich-user", () => {
+  ensure(() => logInfo("leaving enrich-user"));
+  return Response.json({ ok: true });
+});
+```
+
+**using(resource, closeFn)** - Register a cleanup function for an already
+acquired resource. `using()` returns the same resource value unchanged.
+
+```typescript
+const lock = acquireLock(orderId);
+using(lock, (held) => releaseLock(held.id));
+```
+
+**ensure(fn)** - Register a zero-arg cleanup callback to run when the current
+scope exits.
+
+```typescript
+scope("request", () => {
+  ensure(() => logInfo("request complete"));
+  return Response.text("ok");
+});
+```
+
+Notes:
+
+- Cleanup runs on normal return and early return.
+- Cleanups run in reverse registration order.
+- Scope metadata is extracted into `contract.json` as `scope.used`,
+  `scope.names`, `scope.dynamic`, and `scope.maxDepth`.
+- Handlers that use `zigttp:scope` are conservatively not `retry_safe`.
+- `zigttp:scope` and `zigttp:durable` cannot be used in the same handler in v1.
 
 ### zigttp:url
 
@@ -2308,10 +2360,11 @@ The contract extracts from the handler's IR:
 - System-level payload proof for named internal links, including explicit payload-proof gaps
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Registered SQL query names, operations, and touched tables from `sql("name", "...")`
+- Scope names, whether any scope callback remains dynamic, and maximum nested scope depth from `scope("name", fn)`
 - Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
 - Durable workflow proof data: `workflowId`, `proofLevel`, extracted nodes, and extracted edges for `run()` callbacks when zigttp can recover them
 - API route facts: method/path, path params, query params, header params, JSON request bodies, response variants, and auth requirements when they are statically proven
-- Handler effect properties derived from virtual module effect classification (pure, read_only, stateless, retry_safe, deterministic, has_egress)
+- Handler effect properties derived from virtual module effect classification (pure, read_only, stateless, retry_safe, deterministic, has_egress). `retry_safe` is cleared when scope-managed cleanup is used.
 - Verification results (when combined with `-Dverify`)
 
 Non-literal arguments (e.g., `env(someVariable)`) set `"dynamic": true` as an
@@ -2475,7 +2528,7 @@ at call time rather than silently misbehaving.
 | `pure` | No virtual module calls and no fetchSync. Handler is a function of the request only. |
 | `readOnly` | All imported functions are read-classified. No state mutations through virtual modules. |
 | `stateless` | Read-only and no `cacheGet`. Handler does not depend on mutable external state. |
-| `retrySafe` | Read-only, or writes are confined to durable-managed operations with no proven bare writes. Safe for Lambda auto-retry on timeout. |
+| `retrySafe` | Read-only, or writes are confined to durable-managed operations with no proven bare writes, and no scope-managed cleanup is present. Safe for Lambda auto-retry on timeout. |
 | `deterministic` | No `Date.now()` or `Math.random()` calls detected. |
 | `hasEgress` | Handler uses `fetchSync` (conservatively classified as write). |
 
@@ -2486,7 +2539,7 @@ Handler Properties:
   PROVEN pure            handler is a deterministic function of the request
   PROVEN read_only       no state mutations via virtual modules
   PROVEN stateless       independent of mutable state
-  PROVEN retry_safe      safe for Lambda auto-retry on timeout
+  ---    retry_safe      disabled when scope-managed cleanup or bare writes are present
   ---    deterministic   no Date.now() or Math.random()
 ```
 
