@@ -2459,8 +2459,9 @@ inventing a broad type.
 
 Every virtual module function carries a compile-time effect annotation: read (does
 not modify external state), write (modifies external state), or none (compile-time
-only, like `guard`). During precompilation, the contract builder aggregates these
-effects to derive handler-level properties:
+only, like `guard`). During precompilation, the contract builder reduces those
+calls into an internal effect summary, then derives handler-level properties from
+that summary:
 
 This handler-facing effect metadata is separate from module-level
 `required_capabilities`, which record what runtime resources (clock, crypto,
@@ -2474,7 +2475,7 @@ at call time rather than silently misbehaving.
 | `pure` | No virtual module calls and no fetchSync. Handler is a function of the request only. |
 | `readOnly` | All imported functions are read-classified. No state mutations through virtual modules. |
 | `stateless` | Read-only and no `cacheGet`. Handler does not depend on mutable external state. |
-| `retrySafe` | Read-only, or all write-classified imports come from `zigttp:durable` (exactly-once semantics). Safe for Lambda auto-retry on timeout. |
+| `retrySafe` | Read-only, or writes are confined to durable-managed operations with no proven bare writes. Safe for Lambda auto-retry on timeout. |
 | `deterministic` | No `Date.now()` or `Math.random()` calls detected. |
 | `hasEgress` | Handler uses `fetchSync` (conservatively classified as write). |
 

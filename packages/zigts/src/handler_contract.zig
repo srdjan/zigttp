@@ -744,6 +744,36 @@ pub const ContractBuilder = struct {
     // Effect tracking
     has_nondeterministic_builtin: bool = false,
 
+    const EffectSummary = struct {
+        has_any_call: bool = false,
+        io: module_binding.EffectClass = .none,
+        has_bare_write: bool = false,
+        has_cache_read: bool = false,
+        has_egress: bool = false,
+
+        fn includeCall(self: *EffectSummary, effect: module_binding.EffectClass, is_durable: bool) void {
+            switch (effect) {
+                .write => {
+                    self.io = .write;
+                    if (!is_durable) self.has_bare_write = true;
+                },
+                .read => {
+                    if (self.io == .none) self.io = .read;
+                },
+                .none => {},
+            }
+        }
+
+        fn includeEgress(self: *EffectSummary) void {
+            // fetchSync is a conservative bare write because the HTTP method
+            // is not known during contract extraction.
+            self.has_egress = true;
+            self.has_any_call = true;
+            self.io = .write;
+            self.has_bare_write = true;
+        }
+    };
+
     /// A tracked binding from scanImports: maps a local variable slot to its
     /// FunctionBinding metadata from the module registry.
     const GenericBinding = struct {
@@ -2892,15 +2922,9 @@ pub const ContractBuilder = struct {
     // Phase 3: Effect classification
     // -----------------------------------------------------------------
 
-    /// Derive handler-level properties from the aggregate effect classification
-    /// of all imported virtual module functions. Single pass over functions_map
-    /// tracks both write effects and whether writes exist outside durable scope.
-    fn computeProperties(self: *const ContractBuilder) HandlerProperties {
-        var has_any_call = false;
-        var has_write = false;
-        var has_bare_write = false;
-        var has_cache_read = false;
-        const has_egress = self.egress_hosts.items.len > 0 or self.egress_dynamic;
+    /// Summarize the effect facts that handler property derivation depends on.
+    fn computeEffectSummary(self: *const ContractBuilder) EffectSummary {
+        var summary = EffectSummary{};
 
         for (self.functions_map.items) |entry| {
             const binding = builtin_modules.fromSpecifier(entry.module) orelse continue;
@@ -2908,45 +2932,42 @@ pub const ContractBuilder = struct {
             const is_cache = std.mem.eql(u8, binding.specifier, "zigttp:cache");
 
             for (entry.names.items) |func_name| {
-                has_any_call = true;
+                summary.has_any_call = true;
 
                 for (binding.exports) |exp| {
                     if (std.mem.eql(u8, exp.name, func_name)) {
-                        if (exp.effect == .write) {
-                            has_write = true;
-                            if (!is_durable) has_bare_write = true;
-                        }
+                        summary.includeCall(exp.effect, is_durable);
                         break;
                     }
                 }
 
                 if (is_cache and std.mem.eql(u8, func_name, "cacheGet")) {
-                    has_cache_read = true;
+                    summary.has_cache_read = true;
                 }
             }
         }
 
-        // fetchSync is a conservative bare write (method unknown at compile time)
-        if (has_egress) {
-            has_write = true;
-            has_bare_write = true;
-            has_any_call = true;
-        }
+        if (self.egress_hosts.items.len > 0 or self.egress_dynamic) summary.includeEgress();
 
-        const read_only = !has_write;
-        const durable_only_writes = has_write and self.durable_used and !has_bare_write;
+        return summary;
+    }
 
+    /// Derive handler-level properties from the aggregate effect summary.
+    fn computeProperties(self: *const ContractBuilder) HandlerProperties {
+        const s = self.computeEffectSummary();
+
+        const read_only = s.io != .write;
+        const durable_only_writes = s.io == .write and self.durable_used and !s.has_bare_write;
         const deterministic = !self.has_nondeterministic_builtin;
-
         const retry_safe = read_only or durable_only_writes;
 
         return .{
-            .pure = !has_any_call and !has_egress,
+            .pure = !s.has_any_call and !s.has_egress,
             .read_only = read_only,
-            .stateless = read_only and !has_cache_read,
+            .stateless = read_only and !s.has_cache_read,
             .retry_safe = retry_safe,
             .deterministic = deterministic,
-            .has_egress = has_egress,
+            .has_egress = s.has_egress,
             .idempotent = deterministic and retry_safe,
         };
     }
@@ -5912,4 +5933,125 @@ test "behaviors serialization roundtrip" {
     try std.testing.expectEqual(@as(u16, 401), path1.response_status);
     try std.testing.expect(path1.is_failure_path);
     try std.testing.expectEqual(PathCondition.Kind.io_fail, path1.conditions.items[0].kind);
+}
+
+fn appendTrackedFunction(
+    builder: *ContractBuilder,
+    module_name: []const u8,
+    func_name: []const u8,
+) !void {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (names.items) |name| builder.allocator.free(name);
+        names.deinit(builder.allocator);
+    }
+
+    try names.append(builder.allocator, try builder.allocator.dupe(u8, func_name));
+
+    try builder.functions_map.append(builder.allocator, .{
+        .module = try builder.allocator.dupe(u8, module_name),
+        .names = names,
+    });
+}
+
+test "computeProperties pure handler stays pure" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    const props = builder.computeProperties();
+
+    try std.testing.expect(props.pure);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.stateless);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(!props.has_egress);
+    try std.testing.expect(props.idempotent);
+}
+
+test "computeProperties cache read is read-only but not stateless" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    try appendTrackedFunction(&builder, "zigttp:cache", "cacheGet");
+
+    const props = builder.computeProperties();
+
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(!props.has_egress);
+    try std.testing.expect(props.idempotent);
+}
+
+test "computeProperties bare writes are not retry safe" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    try appendTrackedFunction(&builder, "zigttp:cache", "cacheSet");
+
+    const props = builder.computeProperties();
+
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(!props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(!props.has_egress);
+    try std.testing.expect(!props.idempotent);
+}
+
+test "computeProperties durable-only writes stay retry safe" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    try appendTrackedFunction(&builder, "zigttp:durable", "step");
+    builder.durable_used = true;
+
+    const props = builder.computeProperties();
+
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(!props.has_egress);
+    try std.testing.expect(props.idempotent);
+}
+
+test "computeProperties nondeterministic builtins clear idempotence" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    try appendTrackedFunction(&builder, "zigttp:cache", "cacheGet");
+    builder.has_nondeterministic_builtin = true;
+
+    const props = builder.computeProperties();
+
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(!props.deterministic);
+    try std.testing.expect(!props.has_egress);
+    try std.testing.expect(!props.idempotent);
+}
+
+test "computeProperties egress is conservative write" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    builder.egress_dynamic = true;
+
+    const props = builder.computeProperties();
+
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(!props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.has_egress);
+    try std.testing.expect(!props.idempotent);
 }

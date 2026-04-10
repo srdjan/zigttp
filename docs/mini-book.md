@@ -632,7 +632,7 @@ The contract builder computes handler-level properties from effect classificatio
 | `pure` | No virtual module calls, no egress | Zero I/O of any kind |
 | `read_only` | Only read-classified functions | env, cacheGet, parseBearer, jwtVerify, routerMatch |
 | `stateless` | Read-only and no cache reads | No cacheGet calls |
-| `retry_safe` | Safe to retry on failure | Read-only, or all writes inside durable steps |
+| `retry_safe` | Safe to retry on failure | Read-only, or writes are confined to durable-managed operations with no proven bare writes |
 | `deterministic` | Same input always produces same output | No Date.now() or Math.random() |
 | `has_egress` | Makes outbound HTTP calls | Uses fetchSync |
 | `idempotent` | Safe for at-least-once delivery | Deterministic AND retry-safe |

@@ -391,12 +391,12 @@ Third-party modules use `ModuleFn` (opaque `*ModuleHandle`) instead of `NativeFn
 
 ### Handler Effect Classification
 
-Each `FunctionBinding` carries an `effect` annotation (read, write, or none). During contract extraction, `computeProperties()` aggregates these across all imported functions to derive handler-level properties:
+Each `FunctionBinding` carries an `effect` annotation (read, write, or none). During contract extraction, `computeEffectSummary()` first reduces call facts into a compact internal summary: whether the handler makes any virtual-module calls, whether it performs reads or writes, whether any write is outside durable handling, whether it reads cache state, whether it uses egress, and whether nondeterministic builtins appear. `computeProperties()` then derives handler-level properties from that summary:
 
 - **pure** - no virtual module calls and no fetchSync; handler is a function of the request only
 - **read_only** - all imported functions are read-classified; no state mutations through virtual modules
 - **stateless** - read_only and no cacheGet; handler does not depend on mutable external state
-- **retry_safe** - read_only, or all write-classified imports come from `zigttp:durable` (exactly-once semantics via oplog)
+- **retry_safe** - read_only, or writes are confined to durable-managed operations with no proven bare writes
 - **deterministic** - no `Date.now()` or `Math.random()` calls detected in the IR
 - **has_egress** - handler uses fetchSync (conservatively classified as write)
 
@@ -407,7 +407,7 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 - `packages/zigts/src/builtin_modules.zig` - registry of all built-in bindings with comptime validation (unique specifiers, unique function names, duplicate capability detection)
 - `packages/zigts/src/modules/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
 - `packages/zigts/src/module_binding_adapter.zig` - adapts SDK `ModuleBinding` to internal types with ordinal-alignment comptime assertions for `ModuleCapability`
-- `packages/zigts/src/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
+- `packages/zigts/src/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeEffectSummary()`, `computeProperties()`
 - `packages/tools/src/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `packages/tools/src/openapi_manifest.zig` - `x-zigttp-properties` extension
 
