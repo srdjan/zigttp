@@ -351,7 +351,7 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 ### Build-Time Precompilation
 
-**Handler Precompilation** (`tools/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely.
+**Handler Precompilation** (`packages/tools/src/precompile.zig`, `build.zig`): The `-Dhandler=<path>` build option compiles JavaScript handlers at build time. Bytecode is embedded directly into the binary, eliminating runtime parsing entirely.
 
 Build flow: `precompile.zig` uses full zigts engine to compile, serialize bytecode with atoms and shapes, and generate `src/generated/embedded_handler.zig`. The server loads this bytecode directly via `loadFromCachedBytecode()`.
 
@@ -364,7 +364,7 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 **Key files**:
 - `packages/zigts/src/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
 - `packages/zigts/src/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
-- `tools/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
+- `packages/tools/src/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
 - `packages/zigts/src/modules/sql.zig` / `packages/zigts/src/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
 
 **Enforcement points** (activated by the embedded policy and contract):
@@ -406,8 +406,8 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 - `packages/zigts/src/modules/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
 - `packages/zigts/src/module_binding_adapter.zig` - adapts SDK `ModuleBinding` to internal types with ordinal-alignment comptime assertions for `ModuleCapability`
 - `packages/zigts/src/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
-- `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
-- `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
+- `packages/tools/src/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
+- `packages/tools/src/openapi_manifest.zig` - `x-zigttp-properties` extension
 
 ### Compile-Time Path Analysis and Behavioral Contract
 
@@ -419,7 +419,7 @@ Each enumerated path becomes a `BehaviorPath` (`packages/zigts/src/handler_contr
 
 ### Upgrade Verification
 
-`upgrade_verifier` (`tools/upgrade_verifier.zig`) combines surface diff, behavioral diff, property regressions, and coverage gap analysis into a four-value `UpgradeVerdict`:
+`upgrade_verifier` (`packages/tools/src/upgrade_verifier.zig`) combines surface diff, behavioral diff, property regressions, and coverage gap analysis into a four-value `UpgradeVerdict`:
 
 - **safe** - all behavioral paths preserved, no property regressions
 - **safe_with_additions** - new paths added, existing behavior preserved
@@ -436,7 +436,7 @@ The parser recognizes `guard()` calls within pipe operator chains and desugars t
 
 ### Proven Deployment Manifests
 
-The `-Ddeploy=<target>` build option generates platform-specific deployment configurations from compiler-proven contracts. The system extracts `ProvenFacts` (platform-agnostic) from the contract, then dispatches to a `DeployTarget` renderer. Currently supported: `aws` (generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata). Architecture is pluggable via `DeployTarget` enum in `tools/deploy_manifest.zig`.
+The `-Ddeploy=<target>` build option generates platform-specific deployment configurations from compiler-proven contracts. The system extracts `ProvenFacts` (platform-agnostic) from the contract, then dispatches to a `DeployTarget` renderer. Currently supported: `aws` (generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata). Architecture is pluggable via `DeployTarget` enum in `packages/tools/src/deploy_manifest.zig`.
 
 ## Deployment Patterns
 
