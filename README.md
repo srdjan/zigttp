@@ -773,6 +773,12 @@ Enable crash recovery with a write-ahead oplog:
 zigttp serve handler.ts --durable ./oplogs
 ```
 
+Enable `--durable-admin` to turn on the admin API:
+
+```bash
+./zig-out/bin/zigttp serve --durable .zigttp-durable --durable-admin examples/durable/approval.ts
+```
+
 Handlers opt into durability via the `zigttp:durable` virtual module:
 
 ```typescript
@@ -801,6 +807,24 @@ function handler(req: Request): Response {
 ```
 
 `run(key, fn)` wraps a unit of work with an idempotency key. Each `step(name, fn)` persists its result to the oplog before returning to the handler. `sleep(ms)` and `sleepUntil(unixMs)` suspend the run until a timer fires. `waitSignal(name)` suspends until a signal arrives via `signal(key, name, payload)` or `signalAt(key, name, unixMs, payload)`. Pending runs return `202 Accepted` with a JSON body describing the wait. On crash recovery, recorded results are replayed without touching the network. A background scheduler polls for ready timers and signals. Completed runs are deduplicated by key. `stepWithTimeout(name, timeoutMs, fn)` executes a step with a deadline - returns `{ ok: true, value }` on completion or `{ ok: false, error: "timeout" }` if the deadline is exceeded.
+
+With `--durable-admin`, zigttp also serves:
+
+- `GET /_zigttp/durable/contract`
+- `GET /_zigttp/durable/runs`
+- `GET /_zigttp/durable/runs/:key`
+- `POST /_zigttp/durable/runs/:key/signals/:name`
+
+Use it to inspect runs and enqueue signals without custom admin routes. The durable section of `contract.json` now also includes a workflow graph with `workflowId`, `proofLevel`, `nodes`, and `edges`. When this flag is enabled, zigttp reserves `/_zigttp/durable`. You can also set `durableAdmin: true` in `zigttp.json`. If the server binds to a non-loopback host, set `ZIGTTP_DURABLE_ADMIN_KEY` and send it as `x-zigttp-admin-key`.
+
+```bash
+curl http://127.0.0.1:8080/_zigttp/durable/contract
+curl http://127.0.0.1:8080/_zigttp/durable/runs
+curl -X POST \
+  http://127.0.0.1:8080/_zigttp/durable/runs/order%3A42/signals/approved \
+  -H 'content-type: application/json' \
+  -d '{"approvedBy":"ops"}'
+```
 
 ### Proven Evolution (`-Dprove`)
 

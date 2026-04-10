@@ -2952,6 +2952,7 @@ fn buildContract(
     return builder.build(
         filename,
         handler_loc,
+        handler_fn,
         dispatch,
         has_default,
         verify_info,
@@ -4155,6 +4156,88 @@ test "buildTestContractForSource keeps decodeQuery schemas out of request bodies
     try std.testing.expectEqualStrings("{\"type\":\"boolean\"}", route.query_params.items[0].schema_json);
     try std.testing.expectEqual(@as(usize, 0), route.request_bodies.items.len);
     try std.testing.expectEqual(@as(usize, 0), route.request_schema_refs.items.len);
+}
+
+test "buildTestContractForSource extracts durable workflow contract" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { run, step, waitSignal } from "zigttp:durable";
+        \\
+        \\function handler(req) {
+        \\  const isPost = req.method === "POST";
+        \\  return run("job:123", () => {
+        \\    const order = step("load", () => 1);
+        \\    if (isPost) {
+        \\      return Response.text(`loaded:${order}`, { status: 202 });
+        \\    }
+        \\    const payload = waitSignal("approved");
+        \\    return Response.json(payload);
+        \\  });
+        \\}
+    ;
+
+    var contract = try buildTestContractForSource(allocator, source, "durable-workflow.ts", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expect(contract.durable.used);
+    try std.testing.expectEqual(handler_contract.DurableWorkflowProofLevel.complete, contract.durable.workflow.proof_level);
+    try std.testing.expect(contract.durable.workflow.workflow_id != null);
+    try std.testing.expect(std.mem.startsWith(u8, contract.durable.workflow.workflow_id.?, "durable-workflow.ts:handler:"));
+
+    var saw_branch = false;
+    var saw_step = false;
+    var saw_wait_signal = false;
+    var saw_return = false;
+    for (contract.durable.workflow.nodes.items) |node| {
+        switch (node.kind) {
+            .branch => saw_branch = true,
+            .step => {
+                saw_step = true;
+                try std.testing.expectEqualStrings("load", node.label);
+            },
+            .wait_signal => {
+                saw_wait_signal = true;
+                try std.testing.expectEqualStrings("approved", node.label);
+            },
+            .return_response => saw_return = true,
+            else => {},
+        }
+    }
+    try std.testing.expect(saw_branch);
+    try std.testing.expect(saw_step);
+    try std.testing.expect(saw_wait_signal);
+    try std.testing.expect(saw_return);
+    try std.testing.expect(contract.durable.workflow.edges.items.len >= 3);
+}
+
+test "buildTestContractForSource marks durable workflow partial for dynamic signal name" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { run, waitSignal } from "zigttp:durable";
+        \\
+        \\function handler(req) {
+        \\  return run("job:123", () => {
+        \\    const signalName = req.method;
+        \\    const payload = waitSignal(signalName);
+        \\    return Response.json(payload);
+        \\  });
+        \\}
+    ;
+
+    var contract = try buildTestContractForSource(allocator, source, "durable-partial.ts", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expect(contract.durable.used);
+    try std.testing.expect(contract.durable.signals.dynamic);
+    try std.testing.expectEqual(handler_contract.DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
+
+    var saw_dynamic_signal = false;
+    for (contract.durable.workflow.nodes.items) |node| {
+        if (node.kind != .wait_signal) continue;
+        saw_dynamic_signal = true;
+        try std.testing.expectEqualStrings("<dynamic signal>", node.label);
+    }
+    try std.testing.expect(saw_dynamic_signal);
 }
 
 test "buildContractWithPolicy validates zigttp:sql queries against schema" {

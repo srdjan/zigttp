@@ -26,6 +26,7 @@ const QueryParam = http_types.QueryParam;
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const proof_adapter = @import("proof_adapter.zig");
+const durable_admin = @import("durable_admin.zig");
 
 const RequestLine = http_parser.RequestLine;
 const QueryParseResult = http_parser.QueryParseResult;
@@ -231,6 +232,10 @@ const ConnectionPool = struct {
                 };
                 return keep_alive;
             }
+        }
+
+        if (try self.handleDurableAdminSync(fd, request.asView(), keep_alive)) {
+            return keep_alive;
         }
 
         // Route pre-filtering (threaded path)
@@ -457,6 +462,25 @@ const ConnectionPool = struct {
         var buf: [512]u8 = undefined;
         const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ status, getStatusText(status), message.len, message }) catch return;
         try writeAllFd(fd, response);
+    }
+
+    fn handleDurableAdminSync(
+        self: *ConnectionPool,
+        fd: std.posix.fd_t,
+        request: HttpRequestView,
+        keep_alive: bool,
+    ) !bool {
+        var response = (try durable_admin.maybeHandle(self.server.allocator, self.server.config.durable_admin, request)) orelse return false;
+        defer response.deinit();
+
+        if (self.server.config.enable_cors) {
+            try response.putHeaderBorrowed("Access-Control-Allow-Origin", "*");
+            try response.putHeaderBorrowed("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+            try response.putHeaderBorrowed("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Zigttp-Admin-Key");
+        }
+
+        try self.sendResponseSync(fd, &response, keep_alive);
+        return true;
     }
 
     fn serveStaticFileSync(
@@ -714,6 +738,9 @@ pub const ServerConfig = struct {
 
     /// Skip startup env validation (for testing/development)
     skip_env_check: bool = false,
+
+    /// Opt-in durable admin API configuration.
+    durable_admin: durable_admin.Config = .{},
 };
 
 pub const HandlerSource = union(enum) {
@@ -894,6 +921,10 @@ pub const Server = struct {
         }
 
         if (self.contract) |*contract| {
+            if (self.config.durable_admin.enabled and durableAdminConflicts(contract)) {
+                return error.DurableAdminRouteConflict;
+            }
+
             // Log proven contract summary
             logContractSummary(contract);
 
@@ -1128,6 +1159,10 @@ pub const Server = struct {
                 try self.serveStaticFile(stream, io, static_dir, request.url[7..], keep_alive, request.headers.items);
                 return keep_alive;
             }
+        }
+
+        if (try self.handleDurableAdmin(stream, io, request.asView(), keep_alive, start_instant, request_num)) {
+            return keep_alive;
         }
 
         // Route pre-filtering: reject requests to unproven routes before JS execution.
@@ -1486,6 +1521,46 @@ pub const Server = struct {
         try writer.interface.flush();
     }
 
+    fn handleDurableAdmin(
+        self: *Self,
+        stream: *net.Stream,
+        io: Io,
+        request: HttpRequestView,
+        keep_alive: bool,
+        start_instant: ?compat.Instant,
+        request_num: u32,
+    ) !bool {
+        var response = (try durable_admin.maybeHandle(self.allocator, self.config.durable_admin, request)) orelse return false;
+        defer response.deinit();
+
+        if (self.config.enable_cors) {
+            try response.putHeaderBorrowed("Access-Control-Allow-Origin", "*");
+            try response.putHeaderBorrowed("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+            try response.putHeaderBorrowed("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Zigttp-Admin-Key");
+        }
+
+        try self.sendResponse(stream, io, &response, keep_alive);
+
+        if (self.config.log_requests) {
+            const elapsed_ms: i64 = if (start_instant) |start_time| blk: {
+                const now = compat.Instant.now() catch break :blk 0;
+                break :blk @intCast(now.since(start_time) / std.time.ns_per_ms);
+            } else 0;
+            const count = self.request_count.fetchAdd(1, .monotonic) + 1;
+            const ka_indicator: []const u8 = if (keep_alive and request_num > 0) " [ka]" else "";
+            std.log.info("[{d}] {s} {s} -> {d} ({d}ms){s}", .{
+                count,
+                request.method,
+                request.url,
+                response.status,
+                elapsed_ms,
+                ka_indicator,
+            });
+        }
+
+        return true;
+    }
+
     fn sendErrorResponse(self: *Self, stream: *net.Stream, io: Io, status: u16, message: []const u8) !void {
         _ = self;
         var out_buf: [1024]u8 = undefined;
@@ -1698,6 +1773,17 @@ const ParsedRequest = struct {
         if (self.query_decoded_storage) |ds| allocator.free(ds);
         // Headers list only - strings are in string_storage
         self.headers.deinit(allocator);
+    }
+
+    pub fn asView(self: *const ParsedRequest) HttpRequestView {
+        return .{
+            .method = self.method,
+            .url = self.url,
+            .path = self.path,
+            .query_params = self.query_params,
+            .headers = self.headers,
+            .body = self.body,
+        };
     }
 };
 
@@ -2077,6 +2163,14 @@ fn isCanonicalPathInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: 
     return boundary == '/' or boundary == '\\';
 }
 
+fn durableAdminConflicts(contract: *const RuntimeContract) bool {
+    if (contract.routes_dynamic) return false;
+    for (contract.routes) |route| {
+        if (durable_admin.handlesPath(route.path)) return true;
+    }
+    return false;
+}
+
 fn logContractSummary(contract: *const RuntimeContract) void {
     const p = &contract.properties;
     std.log.info("Contract loaded: {d} env vars{s}, {d} routes{s}", .{
@@ -2186,6 +2280,43 @@ test "path safety validation" {
 
     // Unsafe: empty path
     try std.testing.expect(!isPathSafe(""));
+}
+
+test "durable admin conflict detection reserves internal prefix" {
+    const allocator = std.testing.allocator;
+
+    var routes = try allocator.alloc(contract_runtime.Route, 2);
+    defer {
+        for (routes) |route| {
+            allocator.free(route.method);
+            allocator.free(route.path);
+        }
+        allocator.free(routes);
+    }
+    routes[0] = .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/health"),
+    };
+    routes[1] = .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/_zigttp/durable/runs"),
+    };
+
+    const env_vars = try allocator.alloc([]const u8, 0);
+    defer allocator.free(env_vars);
+
+    var contract = RuntimeContract{
+        .env_vars = env_vars,
+        .env_dynamic = false,
+        .routes = routes,
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = allocator,
+    };
+
+    try std.testing.expect(durableAdminConflicts(&contract));
+    contract.routes_dynamic = true;
+    try std.testing.expect(!durableAdminConflicts(&contract));
 }
 
 test "splitHeaderLine accepts no-space colon" {

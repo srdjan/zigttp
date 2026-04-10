@@ -102,6 +102,105 @@ pub const DurableKeyInfo = struct {
     dynamic: bool,
 };
 
+pub const DurableWorkflowProofLevel = enum {
+    none,
+    partial,
+    complete,
+
+    pub fn toString(self: DurableWorkflowProofLevel) []const u8 {
+        return switch (self) {
+            .none => "none",
+            .partial => "partial",
+            .complete => "complete",
+        };
+    }
+
+    pub fn fromString(raw: []const u8) DurableWorkflowProofLevel {
+        if (std.mem.eql(u8, raw, "complete")) return .complete;
+        if (std.mem.eql(u8, raw, "partial")) return .partial;
+        return .none;
+    }
+};
+
+pub const DurableWorkflowNodeKind = enum {
+    branch,
+    step,
+    step_with_timeout,
+    sleep,
+    sleep_until,
+    wait_signal,
+    signal,
+    signal_at,
+    return_response,
+
+    pub fn toString(self: DurableWorkflowNodeKind) []const u8 {
+        return switch (self) {
+            .branch => "branch",
+            .step => "step",
+            .step_with_timeout => "stepWithTimeout",
+            .sleep => "sleep",
+            .sleep_until => "sleepUntil",
+            .wait_signal => "waitSignal",
+            .signal => "signal",
+            .signal_at => "signalAt",
+            .return_response => "return",
+        };
+    }
+
+    pub fn fromString(raw: []const u8) DurableWorkflowNodeKind {
+        if (std.mem.eql(u8, raw, "branch")) return .branch;
+        if (std.mem.eql(u8, raw, "step")) return .step;
+        if (std.mem.eql(u8, raw, "stepWithTimeout")) return .step_with_timeout;
+        if (std.mem.eql(u8, raw, "sleep")) return .sleep;
+        if (std.mem.eql(u8, raw, "sleepUntil")) return .sleep_until;
+        if (std.mem.eql(u8, raw, "waitSignal")) return .wait_signal;
+        if (std.mem.eql(u8, raw, "signal")) return .signal;
+        if (std.mem.eql(u8, raw, "signalAt")) return .signal_at;
+        return .return_response;
+    }
+};
+
+pub const DurableWorkflowNode = struct {
+    id: []const u8,
+    kind: DurableWorkflowNodeKind,
+    label: []const u8,
+    detail: ?[]const u8 = null,
+    status: ?u16 = null,
+
+    pub fn deinit(self: *DurableWorkflowNode, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.label);
+        if (self.detail) |detail| allocator.free(detail);
+    }
+};
+
+pub const DurableWorkflowEdge = struct {
+    from: []const u8,
+    to: []const u8,
+    condition: ?[]const u8 = null,
+
+    pub fn deinit(self: *DurableWorkflowEdge, allocator: std.mem.Allocator) void {
+        allocator.free(self.from);
+        allocator.free(self.to);
+        if (self.condition) |condition| allocator.free(condition);
+    }
+};
+
+pub const DurableWorkflow = struct {
+    workflow_id: ?[]const u8 = null,
+    proof_level: DurableWorkflowProofLevel = .none,
+    nodes: std.ArrayList(DurableWorkflowNode) = .empty,
+    edges: std.ArrayList(DurableWorkflowEdge) = .empty,
+
+    pub fn deinit(self: *DurableWorkflow, allocator: std.mem.Allocator) void {
+        if (self.workflow_id) |workflow_id| allocator.free(workflow_id);
+        for (self.nodes.items) |*node| node.deinit(allocator);
+        self.nodes.deinit(allocator);
+        for (self.edges.items) |*edge| edge.deinit(allocator);
+        self.edges.deinit(allocator);
+    }
+};
+
 pub const DurableInfo = struct {
     used: bool,
     keys: DurableKeyInfo,
@@ -109,6 +208,7 @@ pub const DurableInfo = struct {
     timers: bool = false,
     signals: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
     producer_keys: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
+    workflow: DurableWorkflow = .{},
 
     pub fn deinit(self: *DurableInfo, allocator: std.mem.Allocator) void {
         for (self.keys.literal.items) |key| {
@@ -127,6 +227,7 @@ pub const DurableInfo = struct {
             allocator.free(key);
         }
         self.producer_keys.literal.deinit(allocator);
+        self.workflow.deinit(allocator);
     }
 };
 
@@ -629,6 +730,8 @@ pub const ContractBuilder = struct {
     durable_signal_dynamic: bool = false,
     durable_producer_key_literals: std.ArrayList([]const u8) = .empty,
     durable_producer_key_dynamic: bool = false,
+    durable_workflow: DurableWorkflow = .{},
+    durable_run_count: u32 = 0,
     api_schemas: std.ArrayList(ApiSchemaInfo),
     api_request_schema_refs: std.ArrayList([]const u8),
     api_request_schema_dynamic: bool,
@@ -645,6 +748,7 @@ pub const ContractBuilder = struct {
     /// FunctionBinding metadata from the module registry.
     const GenericBinding = struct {
         slot: u16,
+        binding_name: []const u8,
         extractions: []const module_binding.ContractExtraction,
         flags: module_binding.ContractFlags,
     };
@@ -715,6 +819,7 @@ pub const ContractBuilder = struct {
         self.durable_signal_names.deinit(self.allocator);
         for (self.durable_producer_key_literals.items) |s| self.allocator.free(s);
         self.durable_producer_key_literals.deinit(self.allocator);
+        self.durable_workflow.deinit(self.allocator);
         for (self.modules_list.items) |s| self.allocator.free(s);
         self.modules_list.deinit(self.allocator);
         for (self.functions_map.items) |*entry| {
@@ -744,6 +849,7 @@ pub const ContractBuilder = struct {
         self: *ContractBuilder,
         handler_path: []const u8,
         handler_loc: ?ir.SourceLocation,
+        handler_fn: ?NodeIndex,
         dispatch: ?*const PatternDispatchTable,
         default_response: bool,
         verification: ?VerificationInfo,
@@ -759,6 +865,10 @@ pub const ContractBuilder = struct {
 
         // Phase 3b: Detect rate limiting (guard composition + cacheIncr)
         const rate_limiting = self.detectRateLimiting();
+
+        if (handler_fn) |hf| {
+            try self.extractDurableWorkflow(handler_path, hf);
+        }
 
         // Build routes from dispatch table
         var routes: std.ArrayList(RouteInfo) = .empty;
@@ -859,6 +969,7 @@ pub const ContractBuilder = struct {
                     .literal = self.durable_producer_key_literals,
                     .dynamic = self.durable_producer_key_dynamic,
                 },
+                .workflow = self.durable_workflow,
             },
             .api = .{
                 .schemas = self.api_schemas,
@@ -893,6 +1004,7 @@ pub const ContractBuilder = struct {
         self.durable_step_names = .empty;
         self.durable_signal_names = .empty;
         self.durable_producer_key_literals = .empty;
+        self.durable_workflow = .{};
         self.api_schemas = .empty;
         self.api_request_schema_refs = .empty;
         self.api_routes = .empty;
@@ -950,6 +1062,7 @@ pub const ContractBuilder = struct {
                     if (has_extractions or has_flags) {
                         try self.generic_bindings.append(self.allocator, .{
                             .slot = spec.local_binding.slot,
+                            .binding_name = imported_name,
                             .extractions = entry.func.contract_extractions,
                             .flags = entry.func.contract_flags,
                         });
@@ -1150,6 +1263,419 @@ pub const ContractBuilder = struct {
             // Custom categories are dispatched directly, not via generic target
             .sql_registration, .schema_compile, .route_pattern, .service_call, .cookie_name, .cors_origin, .rate_limit_key => null,
         };
+    }
+
+    const WorkflowCursor = struct {
+        node_id: []const u8,
+        condition: ?[]const u8 = null,
+
+        fn deinit(self: *WorkflowCursor, allocator: std.mem.Allocator) void {
+            if (self.condition) |condition| allocator.free(condition);
+        }
+    };
+
+    fn extractDurableWorkflow(self: *ContractBuilder, handler_path: []const u8, handler_fn: NodeIndex) !void {
+        if (!self.durable_used) return;
+
+        const func = self.ir_view.getFunction(handler_fn) orelse return;
+        const run_call = self.findDurableRunCall(func.body) orelse {
+            self.durable_workflow.proof_level = .none;
+            return;
+        };
+
+        self.durable_workflow.workflow_id = try self.buildWorkflowId(handler_path, handler_fn, run_call.call_node);
+        self.durable_workflow.proof_level = if (self.durable_key_dynamic or self.durable_step_dynamic or self.durable_signal_dynamic or self.durable_run_count > 1)
+            .partial
+        else
+            .complete;
+
+        const callback_fn = self.ir_view.getFunction(run_call.callback_node) orelse {
+            self.markWorkflowPartial();
+            return;
+        };
+
+        var cursors: std.ArrayList(WorkflowCursor) = .empty;
+        defer self.deinitWorkflowCursors(&cursors);
+        try cursors.append(self.allocator, .{
+            .node_id = "start",
+            .condition = null,
+        });
+
+        try self.walkWorkflowBlock(callback_fn.body, &cursors);
+    }
+
+    const RunCallInfo = struct {
+        call_node: NodeIndex,
+        callback_node: NodeIndex,
+    };
+
+    fn findDurableRunCall(self: *ContractBuilder, node: NodeIndex) ?RunCallInfo {
+        if (node == null_node) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+
+        switch (tag) {
+            .block, .program => {
+                const block = self.ir_view.getBlock(node) orelse return null;
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
+                    if (self.findDurableRunCall(stmt_idx)) |info| return info;
+                }
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| {
+                    return self.findDurableRunCall(value);
+                }
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return null;
+                if (decl.init != null_node) {
+                    return self.findDurableRunCall(decl.init);
+                }
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return null;
+                if (self.findDurableRunCall(if_stmt.then_branch)) |info| return info;
+                if (if_stmt.else_branch != null_node) {
+                    if (self.findDurableRunCall(if_stmt.else_branch)) |info| return info;
+                }
+            },
+            .call => {
+                const call = self.ir_view.getCall(node) orelse return null;
+                if (self.isDurableBindingName(call.callee, "run")) {
+                    self.durable_run_count += 1;
+                    if (call.args_count >= 2) {
+                        const callback_node = self.ir_view.getListIndex(call.args_start, 1);
+                        if (self.ir_view.getTag(callback_node) == .function_expr or self.ir_view.getTag(callback_node) == .arrow_function) {
+                            return .{
+                                .call_node = node,
+                                .callback_node = callback_node,
+                            };
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+
+        return null;
+    }
+
+    fn walkWorkflowBlock(self: *ContractBuilder, node: NodeIndex, cursors: *std.ArrayList(WorkflowCursor)) anyerror!void {
+        if (node == null_node or cursors.items.len == 0) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        if (tag != .block and tag != .program) {
+            try self.walkWorkflowStatement(node, cursors);
+            return;
+        }
+
+        const block = self.ir_view.getBlock(node) orelse return;
+        var i: u16 = 0;
+        while (i < block.stmts_count and cursors.items.len > 0) : (i += 1) {
+            try self.walkWorkflowStatement(self.ir_view.getListIndex(block.stmts_start, i), cursors);
+        }
+    }
+
+    fn walkWorkflowStatement(self: *ContractBuilder, node: NodeIndex, cursors: *std.ArrayList(WorkflowCursor)) anyerror!void {
+        if (node == null_node or cursors.items.len == 0) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+
+        switch (tag) {
+            .block, .program => try self.walkWorkflowBlock(node, cursors),
+            .if_stmt => try self.walkWorkflowIf(node, cursors),
+            .return_stmt => try self.appendReturnWorkflowNode(node, cursors),
+            .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |expr| {
+                    _ = try self.appendWorkflowCall(expr, cursors);
+                }
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.init != null_node) {
+                    _ = try self.appendWorkflowCall(decl.init, cursors);
+                }
+            },
+            .match_expr, .switch_stmt, .for_stmt, .for_of_stmt, .for_in_stmt, .while_stmt, .do_while_stmt => {
+                self.markWorkflowPartial();
+            },
+            else => {},
+        }
+    }
+
+    fn walkWorkflowIf(self: *ContractBuilder, node: NodeIndex, cursors: *std.ArrayList(WorkflowCursor)) anyerror!void {
+        const if_stmt = self.ir_view.getIfStmt(node) orelse return;
+        const line = if (self.ir_view.getLoc(node)) |loc| loc.line else 0;
+        const column = if (self.ir_view.getLoc(node)) |loc| loc.column else 0;
+
+        const branch_node_id = try self.appendWorkflowNode(
+            .branch,
+            try std.fmt.allocPrint(self.allocator, "if:{d}:{d}", .{ line, column }),
+            null,
+            null,
+            cursors,
+        );
+
+        var then_cursors: std.ArrayList(WorkflowCursor) = .empty;
+        defer self.deinitWorkflowCursors(&then_cursors);
+        try then_cursors.append(self.allocator, .{
+            .node_id = branch_node_id,
+            .condition = try std.fmt.allocPrint(self.allocator, "then@{d}:{d}", .{ line, column }),
+        });
+        try self.walkWorkflowStatement(if_stmt.then_branch, &then_cursors);
+
+        var else_cursors: std.ArrayList(WorkflowCursor) = .empty;
+        defer self.deinitWorkflowCursors(&else_cursors);
+        try else_cursors.append(self.allocator, .{
+            .node_id = branch_node_id,
+            .condition = try std.fmt.allocPrint(self.allocator, "else@{d}:{d}", .{ line, column }),
+        });
+        if (if_stmt.else_branch != null_node) {
+            try self.walkWorkflowStatement(if_stmt.else_branch, &else_cursors);
+        }
+
+        self.deinitWorkflowCursors(cursors);
+        for (then_cursors.items) |cursor| {
+            try cursors.append(self.allocator, .{
+                .node_id = cursor.node_id,
+                .condition = if (cursor.condition) |condition| try self.allocator.dupe(u8, condition) else null,
+            });
+        }
+        for (else_cursors.items) |cursor| {
+            try cursors.append(self.allocator, .{
+                .node_id = cursor.node_id,
+                .condition = if (cursor.condition) |condition| try self.allocator.dupe(u8, condition) else null,
+            });
+        }
+    }
+
+    fn appendWorkflowCall(self: *ContractBuilder, expr: NodeIndex, cursors: *std.ArrayList(WorkflowCursor)) anyerror!bool {
+        const tag = self.ir_view.getTag(expr) orelse return false;
+        if (tag != .call) return false;
+
+        const call = self.ir_view.getCall(expr) orelse return false;
+        const workflow_call = self.describeWorkflowCall(call) orelse return false;
+        _ = try self.appendWorkflowNode(
+            workflow_call.kind,
+            workflow_call.label,
+            workflow_call.detail,
+            null,
+            cursors,
+        );
+        return true;
+    }
+
+    const WorkflowCall = struct {
+        kind: DurableWorkflowNodeKind,
+        label: []const u8,
+        detail: ?[]const u8 = null,
+    };
+
+    fn describeWorkflowCall(self: *ContractBuilder, call: Node.CallExpr) ?WorkflowCall {
+        if (self.isDurableBindingName(call.callee, "step")) {
+            const label = if (call.args_count > 0)
+                self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
+            else
+                self.allocator.dupe(u8, "step") catch return null;
+            return .{ .kind = .step, .label = label };
+        }
+        if (self.isDurableBindingName(call.callee, "stepWithTimeout")) {
+            const label = if (call.args_count > 0)
+                self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
+            else
+                self.allocator.dupe(u8, "stepWithTimeout") catch return null;
+            return .{
+                .kind = .step_with_timeout,
+                .label = label,
+                .detail = self.workflowNumberDetail(call.args_start, 1, "timeoutMs"),
+            };
+        }
+        if (self.isDurableBindingName(call.callee, "sleep")) {
+            return .{
+                .kind = .sleep,
+                .label = self.allocator.dupe(u8, "sleep") catch return null,
+                .detail = self.workflowNumberDetail(call.args_start, 0, "delayMs"),
+            };
+        }
+        if (self.isDurableBindingName(call.callee, "sleepUntil")) {
+            return .{
+                .kind = .sleep_until,
+                .label = self.allocator.dupe(u8, "sleepUntil") catch return null,
+                .detail = self.workflowNumberDetail(call.args_start, 0, "untilMs"),
+            };
+        }
+        if (self.isDurableBindingName(call.callee, "waitSignal")) {
+            const label = if (call.args_count > 0)
+                self.workflowStringLabel(call.args_start, 0, "<dynamic signal>")
+            else
+                self.allocator.dupe(u8, "waitSignal") catch return null;
+            return .{ .kind = .wait_signal, .label = label };
+        }
+        if (self.isDurableBindingName(call.callee, "signal")) {
+            const label = if (call.args_count > 1)
+                self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
+            else
+                self.allocator.dupe(u8, "signal") catch return null;
+            return .{ .kind = .signal, .label = label };
+        }
+        if (self.isDurableBindingName(call.callee, "signalAt")) {
+            const label = if (call.args_count > 1)
+                self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
+            else
+                self.allocator.dupe(u8, "signalAt") catch return null;
+            return .{
+                .kind = .signal_at,
+                .label = label,
+                .detail = self.workflowNumberDetail(call.args_start, 2, "atMs"),
+            };
+        }
+        return null;
+    }
+
+    fn appendReturnWorkflowNode(self: *ContractBuilder, node: NodeIndex, cursors: *std.ArrayList(WorkflowCursor)) !void {
+        const status = self.extractWorkflowReturnStatus(node);
+        const label = if (status) |code|
+            try std.fmt.allocPrint(self.allocator, "Response {d}", .{code})
+        else
+            try self.allocator.dupe(u8, "Response");
+        _ = try self.appendWorkflowNode(.return_response, label, null, status, cursors);
+        self.deinitWorkflowCursors(cursors);
+    }
+
+    fn appendWorkflowNode(
+        self: *ContractBuilder,
+        kind: DurableWorkflowNodeKind,
+        label: []const u8,
+        detail: ?[]const u8,
+        status: ?u16,
+        cursors: *std.ArrayList(WorkflowCursor),
+    ) ![]const u8 {
+        const id = try std.fmt.allocPrint(self.allocator, "n{d}", .{self.durable_workflow.nodes.items.len + 1});
+        for (cursors.items) |cursor| {
+            try self.durable_workflow.edges.append(self.allocator, .{
+                .from = try self.allocator.dupe(u8, cursor.node_id),
+                .to = try self.allocator.dupe(u8, id),
+                .condition = if (cursor.condition) |condition| try self.allocator.dupe(u8, condition) else null,
+            });
+        }
+        try self.durable_workflow.nodes.append(self.allocator, .{
+            .id = id,
+            .kind = kind,
+            .label = label,
+            .detail = detail,
+            .status = status,
+        });
+
+        self.deinitWorkflowCursors(cursors);
+        try cursors.append(self.allocator, .{
+            .node_id = id,
+            .condition = null,
+        });
+        return id;
+    }
+
+    fn deinitWorkflowCursors(self: *ContractBuilder, cursors: *std.ArrayList(WorkflowCursor)) void {
+        for (cursors.items) |*cursor| cursor.deinit(self.allocator);
+        cursors.clearRetainingCapacity();
+    }
+
+    fn workflowStringLabel(
+        self: *ContractBuilder,
+        args_start: NodeIndex,
+        arg_pos: u8,
+        fallback: []const u8,
+    ) []const u8 {
+        const arg_idx = self.ir_view.getListIndex(args_start, arg_pos);
+        if (self.getLiteralString(arg_idx)) |label| {
+            return self.allocator.dupe(u8, label) catch fallback;
+        }
+        self.markWorkflowPartial();
+        return self.allocator.dupe(u8, fallback) catch fallback;
+    }
+
+    fn workflowNumberDetail(self: *ContractBuilder, args_start: NodeIndex, arg_pos: u8, field_name: []const u8) ?[]const u8 {
+        const arg_idx = self.ir_view.getListIndex(args_start, arg_pos);
+        if (self.getLiteralNumber(arg_idx)) |num| {
+            return std.fmt.allocPrint(self.allocator, "{s}={d}", .{ field_name, num }) catch null;
+        }
+        self.markWorkflowPartial();
+        return null;
+    }
+
+    fn getLiteralNumber(self: *const ContractBuilder, node_idx: NodeIndex) ?i64 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        return switch (tag) {
+            .lit_int => if (self.ir_view.getIntValue(node_idx)) |value| @as(i64, value) else null,
+            .lit_float => blk: {
+                const float_idx = self.ir_view.getFloatIdx(node_idx) orelse break :blk null;
+                const value = self.ir_view.getFloat(float_idx) orelse break :blk null;
+                if (@floor(value) != value) break :blk null;
+                break :blk @intFromFloat(value);
+            },
+            else => null,
+        };
+    }
+
+    fn extractWorkflowReturnStatus(self: *const ContractBuilder, node: NodeIndex) ?u16 {
+        const ret_val = self.ir_view.getOptValue(node) orelse return null;
+        const ret_tag = self.ir_view.getTag(ret_val) orelse return null;
+        if (ret_tag != .call and ret_tag != .method_call) return null;
+
+        const call = self.ir_view.getCall(ret_val) orelse return null;
+        if (!self.isResponseHelper(call.callee)) return null;
+        if (call.args_count < 2) return 200;
+        const status = self.extractStatusFromOptionsNode(self.ir_view.getListIndex(call.args_start, 1)) orelse return 200;
+        return if (status >= 100 and status <= 599) status else 200;
+    }
+
+    fn isResponseHelper(self: *const ContractBuilder, callee: NodeIndex) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .member_access) return false;
+        const member = self.ir_view.getMember(callee) orelse return false;
+
+        const obj_tag = self.ir_view.getTag(member.object) orelse return false;
+        if (obj_tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(member.object) orelse return false;
+        if (binding.kind != .undeclared_global) return false;
+
+        const obj_name = self.resolveAtomName(binding.slot) orelse return false;
+        if (!std.mem.eql(u8, obj_name, "Response")) return false;
+
+        const method_name = self.resolveAtomName(member.property) orelse return false;
+        return std.mem.eql(u8, method_name, "json") or
+            std.mem.eql(u8, method_name, "text") or
+            std.mem.eql(u8, method_name, "html") or
+            std.mem.eql(u8, method_name, "redirect");
+    }
+
+    fn isDurableBindingName(self: *const ContractBuilder, callee: NodeIndex, expected: []const u8) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        for (self.generic_bindings.items) |gb| {
+            if (gb.slot != binding.slot) continue;
+            return std.mem.eql(u8, gb.binding_name, expected);
+        }
+        return false;
+    }
+
+    fn buildWorkflowId(self: *ContractBuilder, handler_path: []const u8, handler_fn: NodeIndex, run_call_node: NodeIndex) ![]const u8 {
+        const func = self.ir_view.getFunction(handler_fn) orelse return std.fmt.allocPrint(self.allocator, "{s}:workflow", .{handler_path});
+        const func_name = if (func.name_atom != 0)
+            (self.resolveAtomName(func.name_atom) orelse "handler")
+        else
+            "handler";
+        const line = if (self.ir_view.getLoc(run_call_node)) |loc| loc.line else 0;
+        const column = if (self.ir_view.getLoc(run_call_node)) |loc| loc.column else 0;
+        return std.fmt.allocPrint(self.allocator, "{s}:{s}:{d}:{d}", .{
+            handler_path,
+            func_name,
+            line,
+            column,
+        });
+    }
+
+    fn markWorkflowPartial(self: *ContractBuilder) void {
+        self.durable_workflow.proof_level = .partial;
     }
 
     fn resolveAtomName(self: *const ContractBuilder, atom_idx: u16) ?[]const u8 {
@@ -3175,9 +3701,157 @@ fn parseDurableSection(
                 &contract.durable.producer_keys.literal,
                 &contract.durable.producer_keys.dynamic,
             );
+        } else if (std.mem.eql(u8, key, "workflow")) {
+            try parseDurableWorkflow(parser, allocator, &contract.durable.workflow);
         } else {
             parser.skipValue();
         }
+    }
+}
+
+fn parseDurableWorkflow(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    workflow: *DurableWorkflow,
+) !void {
+    if (parser.readNull()) return;
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "workflowId")) {
+            if (workflow.workflow_id) |existing| allocator.free(existing);
+            workflow.workflow_id = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+        } else if (std.mem.eql(u8, key, "proofLevel")) {
+            workflow.proof_level = DurableWorkflowProofLevel.fromString(parser.readString() orelse "none");
+        } else if (std.mem.eql(u8, key, "nodes")) {
+            try parseDurableWorkflowNodes(parser, allocator, &workflow.nodes);
+        } else if (std.mem.eql(u8, key, "edges")) {
+            try parseDurableWorkflowEdges(parser, allocator, &workflow.edges);
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseDurableWorkflowNodes(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(DurableWorkflowNode),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var node = DurableWorkflowNode{
+            .id = try allocator.dupe(u8, ""),
+            .kind = .branch,
+            .label = try allocator.dupe(u8, ""),
+        };
+        errdefer node.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "id")) {
+                allocator.free(node.id);
+                node.id = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "kind")) {
+                node.kind = DurableWorkflowNodeKind.fromString(parser.readString() orelse "branch");
+            } else if (std.mem.eql(u8, key, "label")) {
+                allocator.free(node.label);
+                node.label = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "detail")) {
+                if (node.detail) |detail| allocator.free(detail);
+                node.detail = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "status")) {
+                node.status = if (parser.readNull()) null else parser.readU16() orelse return error.InvalidJson;
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, node);
+    }
+}
+
+fn parseDurableWorkflowEdges(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(DurableWorkflowEdge),
+) !void {
+    if (!parser.consume('[')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == ']') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+        if (!parser.consume('{')) return error.InvalidJson;
+
+        var edge = DurableWorkflowEdge{
+            .from = try allocator.dupe(u8, ""),
+            .to = try allocator.dupe(u8, ""),
+        };
+        errdefer edge.deinit(allocator);
+
+        while (true) {
+            parser.skipWhitespace();
+            if (parser.peek() == '}') {
+                _ = parser.advance();
+                break;
+            }
+            if (parser.peek() == ',') _ = parser.advance();
+            parser.skipWhitespace();
+
+            const key = parser.readString() orelse return error.InvalidJson;
+            parser.skipWhitespace();
+            if (!parser.consume(':')) return error.InvalidJson;
+
+            if (std.mem.eql(u8, key, "from")) {
+                allocator.free(edge.from);
+                edge.from = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "to")) {
+                allocator.free(edge.to);
+                edge.to = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "condition")) {
+                if (edge.condition) |condition| allocator.free(condition);
+                edge.condition = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else {
+                parser.skipValue();
+            }
+        }
+
+        try list.append(allocator, edge);
     }
 }
 
@@ -4223,6 +4897,72 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     }
     try writer.writeAll("],\n");
     try writer.print("      \"dynamic\": {s}\n", .{if (contract.durable.producer_keys.dynamic) "true" else "false"});
+    try writer.writeAll("    },\n");
+    try writer.writeAll("    \"workflow\": {\n");
+    try writer.writeAll("      \"workflowId\": ");
+    if (contract.durable.workflow.workflow_id) |workflow_id| {
+        try writeJsonString(writer, workflow_id);
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\n");
+    try writer.writeAll("      \"proofLevel\": ");
+    try writeJsonString(writer, contract.durable.workflow.proof_level.toString());
+    try writer.writeAll(",\n");
+    try writer.writeAll("      \"nodes\": [");
+    for (contract.durable.workflow.nodes.items, 0..) |node, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n        {\n");
+        try writer.writeAll("          \"id\": ");
+        try writeJsonString(writer, node.id);
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"kind\": ");
+        try writeJsonString(writer, node.kind.toString());
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"label\": ");
+        try writeJsonString(writer, node.label);
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"detail\": ");
+        if (node.detail) |detail| {
+            try writeJsonString(writer, detail);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"status\": ");
+        if (node.status) |status| {
+            try writer.print("{d}", .{status});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll("\n        }");
+    }
+    if (contract.durable.workflow.nodes.items.len > 0) {
+        try writer.writeAll("\n      ");
+    }
+    try writer.writeAll("],\n");
+    try writer.writeAll("      \"edges\": [");
+    for (contract.durable.workflow.edges.items, 0..) |edge, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n        {\n");
+        try writer.writeAll("          \"from\": ");
+        try writeJsonString(writer, edge.from);
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"to\": ");
+        try writeJsonString(writer, edge.to);
+        try writer.writeAll(",\n");
+        try writer.writeAll("          \"condition\": ");
+        if (edge.condition) |condition| {
+            try writeJsonString(writer, condition);
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll("\n        }");
+    }
+    if (contract.durable.workflow.edges.items.len > 0) {
+        try writer.writeAll("\n      ");
+    }
+    try writer.writeAll("]\n");
     try writer.writeAll("    }\n");
     try writer.writeAll("  },\n");
 
@@ -4748,6 +5488,83 @@ test "parseFromJson roundtrip" {
     try std.testing.expect(parsed.verification.?.exhaustive_returns);
     try std.testing.expect(!parsed.verification.?.results_safe);
     try std.testing.expect(parsed.verification.?.bytecode_verified);
+}
+
+test "parseFromJson roundtrip preserves durable workflow" {
+    const allocator = std.testing.allocator;
+
+    var workflow_nodes: std.ArrayList(DurableWorkflowNode) = .empty;
+    try workflow_nodes.append(allocator, .{
+        .id = try allocator.dupe(u8, "n1"),
+        .kind = .step,
+        .label = try allocator.dupe(u8, "charge"),
+        .detail = try allocator.dupe(u8, "timeoutMs=1000"),
+    });
+    try workflow_nodes.append(allocator, .{
+        .id = try allocator.dupe(u8, "n2"),
+        .kind = .return_response,
+        .label = try allocator.dupe(u8, "Response 202"),
+        .status = 202,
+    });
+
+    var workflow_edges: std.ArrayList(DurableWorkflowEdge) = .empty;
+    try workflow_edges.append(allocator, .{
+        .from = try allocator.dupe(u8, "start"),
+        .to = try allocator.dupe(u8, "n1"),
+    });
+    try workflow_edges.append(allocator, .{
+        .from = try allocator.dupe(u8, "n1"),
+        .to = try allocator.dupe(u8, "n2"),
+        .condition = try allocator.dupe(u8, "then@4:7"),
+    });
+
+    const path = try allocator.dupe(u8, "workflow.ts");
+
+    var original = HandlerContract{
+        .handler = .{ .path = path, .line = 3, .column = 1 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .service_calls = .empty,
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = true,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+            .workflow = .{
+                .workflow_id = try allocator.dupe(u8, "workflow.ts:handler:4:10"),
+                .proof_level = .complete,
+                .nodes = workflow_nodes,
+                .edges = workflow_edges,
+            },
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+    };
+    defer original.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&original, &aw.writer);
+    output = aw.toArrayList();
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("workflow.ts:handler:4:10", parsed.durable.workflow.workflow_id.?);
+    try std.testing.expectEqual(DurableWorkflowProofLevel.complete, parsed.durable.workflow.proof_level);
+    try std.testing.expectEqual(@as(usize, 2), parsed.durable.workflow.nodes.items.len);
+    try std.testing.expectEqual(DurableWorkflowNodeKind.step, parsed.durable.workflow.nodes.items[0].kind);
+    try std.testing.expectEqualStrings("charge", parsed.durable.workflow.nodes.items[0].label);
+    try std.testing.expectEqualStrings("timeoutMs=1000", parsed.durable.workflow.nodes.items[0].detail.?);
+    try std.testing.expectEqual(@as(u16, 202), parsed.durable.workflow.nodes.items[1].status.?);
+    try std.testing.expectEqual(@as(usize, 2), parsed.durable.workflow.edges.items.len);
+    try std.testing.expectEqualStrings("then@4:7", parsed.durable.workflow.edges.items[1].condition.?);
 }
 
 test "parseFromJson roundtrip preserves api route response schema" {

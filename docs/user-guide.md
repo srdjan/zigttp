@@ -151,6 +151,9 @@ OPTIONS:
   --durable <DIR>       Enable durable run/step oplogs in a directory
                         Required for zigttp:durable
 
+  --durable-admin       Enable the durable admin API
+                        Exposes contract and durable run endpoints
+
   --system <FILE>       System registry for zigttp:service
                         Required for named internal service calls
 
@@ -192,6 +195,9 @@ OPTIONS:
 
 # Durable execution with persisted oplogs
 ./zig-out/bin/zigttp serve --durable .zigttp-durable handler.js
+
+# Durable execution with the admin API
+./zig-out/bin/zigttp serve --durable .zigttp-durable --durable-admin examples/durable/approval.ts
 
 # Named internal service calls
 ./zig-out/bin/zigttp serve --system examples/system/system.json examples/system/gateway.ts
@@ -1205,21 +1211,43 @@ durable run. Returns `false` if `key` does not identify an incomplete run.
 becomes available at or after `atUnixMs`. Delivery uses the same replay-safe
 path as `signal()`.
 
+Turn on `--durable-admin` to expose `/_zigttp/durable`:
+
+- `GET /_zigttp/durable/contract` returns the current contract JSON
+- `GET /_zigttp/durable/runs` lists discovered durable runs
+- `GET /_zigttp/durable/runs/:key` inspects one durable run
+- `POST /_zigttp/durable/runs/:key/signals/:name` enqueues a signal payload
+
+zigttp reserves that prefix while the flag is enabled. If the server binds to a
+non-loopback host, set `ZIGTTP_DURABLE_ADMIN_KEY` and send the same value in
+the `x-zigttp-admin-key` request header. You can also set
+`durableAdmin: true` in `zigttp.json`.
+
+```bash
+./zig-out/bin/zigttp serve --durable .zigttp-durable --durable-admin examples/durable/approval.ts
+curl http://127.0.0.1:8080/_zigttp/durable/contract
+curl http://127.0.0.1:8080/_zigttp/durable/runs
+curl -X POST \
+  http://127.0.0.1:8080/_zigttp/durable/runs/order%3A42/signals/approved \
+  -H 'content-type: application/json' \
+  -d '{"approvedBy":"ops"}'
+```
+
 ```typescript
 import { run, step } from "zigttp:durable";
 
 function handler(req) {
     const key = req.headers.get("idempotency-key") ?? req.path;
 
-    return run(key, function() {
-        const auth = step("auth", function() {
+    return run(key, () => {
+        const auth = step("auth", () => {
             return req.headers.get("authorization") === "secret";
         });
         if (!auth) {
             return Response.json({ error: "unauthorized" }, { status: 401 });
         }
 
-        const charge = step("charge", function() {
+        const charge = step("charge", () => {
             return fetchSync("https://payments.internal/charge").json();
         });
 
@@ -2281,6 +2309,7 @@ The contract extracts from the handler's IR:
 - Cache namespace strings from `cacheGet`/`cacheSet`/etc.
 - Registered SQL query names, operations, and touched tables from `sql("name", "...")`
 - Durable run keys, whether durable keys are dynamic, literal `step()` names, timer usage, signal names, and producer keys (targets of `signal()`/`signalAt()`)
+- Durable workflow proof data: `workflowId`, `proofLevel`, extracted nodes, and extracted edges for `run()` callbacks when zigttp can recover them
 - API route facts: method/path, path params, query params, header params, JSON request bodies, response variants, and auth requirements when they are statically proven
 - Handler effect properties derived from virtual module effect classification (pure, read_only, stateless, retry_safe, deterministic, has_egress)
 - Verification results (when combined with `-Dverify`)
