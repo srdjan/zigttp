@@ -508,6 +508,12 @@ test "fromHandlerContract converts properties and env vars" {
             .signals = .{ .literal = .empty, .dynamic = false },
             .producer_keys = .{ .literal = .empty, .dynamic = false },
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },

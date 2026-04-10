@@ -16,6 +16,7 @@ pub const decode = @import("decode.zig");
 pub const cache = @import("cache.zig");
 pub const sql = @import("sql.zig");
 pub const io = @import("io.zig");
+pub const scope = @import("scope.zig");
 pub const compose = @import("compose.zig");
 pub const durable = @import("durable.zig");
 pub const util = @import("util.zig");

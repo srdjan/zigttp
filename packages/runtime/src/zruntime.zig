@@ -502,6 +502,7 @@ pub const Runtime = struct {
         // This ensures import bindings resolve correctly whether the handler
         // was parsed or loaded from bytecode cache.
         try self.installVirtualModules();
+        try self.installScopeModuleState();
         try self.installSqlModuleState();
         if (self.config.system_config_path) |_| {
             try self.installServiceModuleState();
@@ -857,6 +858,21 @@ pub const Runtime = struct {
             zq.modules.io.MODULE_STATE_SLOT,
             @ptrCast(io_state),
             &zq.modules.io.IoCallbacks.deinitOpaque,
+        );
+    }
+
+    fn installScopeModuleState(self: *Self) !void {
+        const scope_state = try self.allocator.create(zq.modules.scope.ScopeCallbacks);
+        scope_state.* = .{
+            .call0_fn = ioCallThunk,
+            .call1_fn = scopeCall1,
+            .runtime_ptr = self,
+            .current_state = null,
+        };
+        self.ctx.setModuleState(
+            zq.modules.scope.MODULE_STATE_SLOT,
+            @ptrCast(scope_state),
+            &zq.modules.scope.ScopeCallbacks.deinitOpaque,
         );
     }
 
@@ -1312,6 +1328,9 @@ pub const Runtime = struct {
         // Set callback for JSX function component rendering
         zq.http.setCallFunctionCallback(callFunctionWrapper);
         defer zq.http.clearCallFunctionCallback();
+
+        try zq.modules.scope.beginRequest(self.ctx);
+        defer zq.modules.scope.endRequest(self.ctx);
 
         const result = self.callFunction(handler_obj, args) catch |err| {
             std.log.err("Handler execution failed: {}", .{err});
@@ -3329,12 +3348,26 @@ fn collectFetchForParallel(rt: *Runtime, collector: *zq.modules.io.ParallelColle
     return zq.JSValue.undefined_val;
 }
 
-/// IoCallbacks.call_thunk_fn - call a zero-arg JS function via the interpreter.
+/// Call a zero-arg JS function via the interpreter.
+/// Used by IoCallbacks.call_thunk_fn and ScopeCallbacks.call0_fn.
 fn ioCallThunk(runtime_ptr: *anyopaque, thunk_val: zq.JSValue) anyerror!zq.JSValue {
+    return callJsThunk(runtime_ptr, thunk_val, &.{});
+}
+
+fn callJsThunk(runtime_ptr: *anyopaque, func_val: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
-    if (!thunk_val.isObject()) return error.NotCallable;
-    const func_obj = thunk_val.toPtr(zq.JSObject);
-    return rt.callFunction(func_obj, &.{});
+    if (!func_val.isObject()) return error.NotCallable;
+    const func_obj = func_val.toPtr(zq.JSObject);
+    return rt.callFunction(func_obj, args);
+}
+
+fn scopeCall1(
+    runtime_ptr: *anyopaque,
+    thunk_val: zq.JSValue,
+    arg: zq.JSValue,
+) anyerror!zq.JSValue {
+    const args = [_]zq.JSValue{arg};
+    return callJsThunk(runtime_ptr, thunk_val, &args);
 }
 
 fn durableRunCallback(

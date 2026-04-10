@@ -596,33 +596,5 @@ test "buildReport: minimal contract" {
 }
 
 fn emptyContract() HandlerContract {
-    return .{
-        .handler = .{ .path = &.{}, .line = 0, .column = 0 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = .{
-            .backend = "sqlite",
-            .queries = .empty,
-            .dynamic = false,
-        },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .api = .{
-            .schemas = .empty,
-            .requests = .{ .schema_refs = .empty, .dynamic = false },
-            .auth = .{ .bearer = false, .jwt = false },
-            .routes = .empty,
-            .schemas_dynamic = false,
-            .routes_dynamic = false,
-        },
-        .verification = null,
-        .aot = null,
-    };
+    return handler_contract.emptyContract(&.{});
 }

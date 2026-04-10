@@ -2986,6 +2986,10 @@ fn buildContractWithPolicy(
     );
     errdefer contract.deinit(allocator);
 
+    if (contract.scope.used and contract.durable.used) {
+        return error.ScopeDurableUnsupported;
+    }
+
     // Run data flow provenance analysis
     {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
@@ -3120,6 +3124,12 @@ fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8) !H
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -3187,6 +3197,13 @@ fn mergeModuleContract(
         try appendSqlQuery(allocator, &target.sql.queries, query);
     }
     target.sql.dynamic = target.sql.dynamic or source.sql.dynamic;
+
+    target.scope.used = target.scope.used or source.scope.used;
+    for (source.scope.names.items) |name| {
+        try appendUniqueString(allocator, &target.scope.names, name, false);
+    }
+    target.scope.dynamic = target.scope.dynamic or source.scope.dynamic;
+    target.scope.max_depth = @max(target.scope.max_depth, source.scope.max_depth);
 
     target.durable.used = target.durable.used or source.durable.used;
     for (source.durable.keys.literal.items) |key| {
@@ -4240,6 +4257,50 @@ test "buildTestContractForSource marks durable workflow partial for dynamic sign
     try std.testing.expect(saw_dynamic_signal);
 }
 
+test "buildTestContractForSource extracts scope metadata and clears retry safety" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { scope, ensure } from "zigttp:scope";
+        \\
+        \\function handler(req) {
+        \\  return scope("outer", () => {
+        \\    ensure(() => {});
+        \\    return scope("inner", () => {
+        \\      return Response.json({ ok: true });
+        \\    });
+        \\  });
+        \\}
+    ;
+
+    var contract = try buildTestContractForSource(allocator, source, "scope.ts", null);
+    defer contract.deinit(allocator);
+
+    try std.testing.expect(contract.scope.used);
+    try std.testing.expectEqual(@as(u32, 2), contract.scope.max_depth);
+    try std.testing.expect(!contract.properties.?.retry_safe);
+    try std.testing.expect(handler_contract.containsString(contract.scope.names.items, "outer"));
+    try std.testing.expect(handler_contract.containsString(contract.scope.names.items, "inner"));
+}
+
+test "buildTestContractForSource rejects scope and durable together" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { scope } from "zigttp:scope";
+        \\import { run } from "zigttp:durable";
+        \\
+        \\function handler(req) {
+        \\  return run("job:123", () => {
+        \\    return scope("inner", () => Response.json({ ok: true }));
+        \\  });
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.ScopeDurableUnsupported,
+        buildTestContractForSource(allocator, source, "scope-durable.ts", null),
+    );
+}
+
 test "buildContractWithPolicy validates zigttp:sql queries against schema" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4406,6 +4467,12 @@ test "writeSdkArtifact writes client sibling file" {
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
         },
         .api = .{
             .schemas = schemas,

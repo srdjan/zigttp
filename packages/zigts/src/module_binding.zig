@@ -587,6 +587,7 @@ pub const ContractCategory = enum {
     env,
     cache_namespace,
     sql_registration,
+    scope_name,
     durable_key,
     durable_step,
     durable_signal,
@@ -622,6 +623,7 @@ pub const ContractExtraction = struct {
 
 /// Boolean flags set on the contract when a function is imported or called.
 pub const ContractFlags = struct {
+    sets_scope_used: bool = false,
     sets_durable_used: bool = false,
     sets_durable_timers: bool = false,
     sets_bearer_auth: bool = false,

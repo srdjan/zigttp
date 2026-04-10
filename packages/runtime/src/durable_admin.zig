@@ -520,7 +520,7 @@ fn writeDurableOplog(
     key: []const u8,
     source: []const u8,
 ) !void {
-    try std.fs.cwd().makePath(durable_dir);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), std.testing.io, durable_dir);
     const path = try buildDurableOplogPath(allocator, durable_dir, key);
     defer allocator.free(path);
     try zq.file_io.writeFile(allocator, path, source);
@@ -629,7 +629,7 @@ test "durable admin enforces admin key and enqueues signals" {
     try std.testing.expect(std.mem.indexOf(u8, accepted.body, "\"signal\":\"approved\"") != null);
 
     var store = durable_store_mod.DurableStore.initFs(allocator, durable_dir);
-    var consumed = (try store.tryConsumeSignal("job:123", "approved", std.time.milliTimestamp())).?;
+    var consumed = (try store.tryConsumeSignal("job:123", "approved", zq.trace.unixMillis())).?;
     defer consumed.deinit();
     try std.testing.expectEqualStrings("{\"ok\":true}", consumed.payload_json);
 }

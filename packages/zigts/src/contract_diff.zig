@@ -1456,6 +1456,12 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = handler_contract.emptyApiInfo(),
         .verification = null,
         .aot = null,

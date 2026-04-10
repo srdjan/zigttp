@@ -12,4 +12,5 @@ pub const Slot = enum(u4) {
     trace = 7,
     ratelimit = 8,
     service = 9,
+    scope = 10,
 };

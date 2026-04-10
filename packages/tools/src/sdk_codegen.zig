@@ -1191,6 +1191,12 @@ test "writeTypeScriptClient renders typed route and skipped operation" {
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = .{
             .schemas = schemas,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -1253,6 +1259,12 @@ test "writeTypeScriptClient emits inline response alias" {
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
         },
         .api = .{
             .schemas = .empty,
@@ -1326,6 +1338,12 @@ test "writeTypeScriptClient emits discriminated union for multi-response route" 
             .used = false,
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
         },
         .api = .{
             .schemas = schemas,

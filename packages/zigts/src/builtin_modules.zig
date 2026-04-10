@@ -19,6 +19,7 @@ const decode_mod = @import("modules/decode.zig");
 const cache_mod = @import("modules/cache.zig");
 const sql_mod = @import("modules/sql.zig");
 const io_mod = @import("modules/io.zig");
+const scope_mod = @import("modules/scope.zig");
 const compose_mod = @import("modules/compose.zig");
 const durable_mod = @import("modules/durable.zig");
 const url_mod = @import("modules/url.zig");
@@ -41,6 +42,7 @@ pub const builtins = [_]ModuleBinding{
     cache_mod.binding,
     sql_mod.binding,
     io_mod.binding,
+    scope_mod.binding,
     compose_mod.binding,
     durable_mod.binding,
     url_mod.binding,

@@ -231,6 +231,18 @@ pub const DurableInfo = struct {
     }
 };
 
+pub const ScopeInfo = struct {
+    used: bool,
+    names: std.ArrayList([]const u8),
+    dynamic: bool = false,
+    max_depth: u32 = 0,
+
+    pub fn deinit(self: *ScopeInfo, allocator: std.mem.Allocator) void {
+        for (self.names.items) |name| allocator.free(name);
+        self.names.deinit(allocator);
+    }
+};
+
 pub const ApiSchemaInfo = struct {
     name: []const u8, // owned
     schema_json: []const u8, // owned JSON source
@@ -437,6 +449,12 @@ pub fn emptyContract(path: []const u8) HandlerContract {
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -616,7 +634,7 @@ pub const ServiceCallInfo = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 11,
+    version: u32 = 12,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -627,6 +645,7 @@ pub const HandlerContract = struct {
     cache: CacheInfo,
     sql: SqlInfo,
     durable: DurableInfo,
+    scope: ScopeInfo,
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,
@@ -681,6 +700,7 @@ pub const HandlerContract = struct {
         self.cache.namespaces.deinit(allocator);
         self.sql.deinit(allocator);
         self.durable.deinit(allocator);
+        self.scope.deinit(allocator);
         self.api.deinit(allocator);
         for (self.behaviors.items) |*b| {
             @constCast(b).deinit(allocator);
@@ -720,6 +740,10 @@ pub const ContractBuilder = struct {
     cache_dynamic: bool,
     sql_queries: std.ArrayList(SqlQueryInfo),
     sql_dynamic: bool,
+    scope_used: bool,
+    scope_names: std.ArrayList([]const u8),
+    scope_dynamic: bool,
+    scope_max_depth: u32 = 0,
     durable_used: bool,
     durable_key_literals: std.ArrayList([]const u8),
     durable_key_dynamic: bool,
@@ -809,6 +833,9 @@ pub const ContractBuilder = struct {
             .cache_dynamic = false,
             .sql_queries = .empty,
             .sql_dynamic = false,
+            .scope_used = false,
+            .scope_names = .empty,
+            .scope_dynamic = false,
             .durable_used = false,
             .durable_key_literals = .empty,
             .durable_key_dynamic = false,
@@ -841,6 +868,8 @@ pub const ContractBuilder = struct {
         self.cache_namespaces.deinit(self.allocator);
         for (self.sql_queries.items) |*query| query.deinit(self.allocator);
         self.sql_queries.deinit(self.allocator);
+        for (self.scope_names.items) |s| self.allocator.free(s);
+        self.scope_names.deinit(self.allocator);
         for (self.durable_key_literals.items) |s| self.allocator.free(s);
         self.durable_key_literals.deinit(self.allocator);
         for (self.durable_step_names.items) |s| self.allocator.free(s);
@@ -890,15 +919,16 @@ pub const ContractBuilder = struct {
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
 
+        if (handler_fn) |hf| {
+            try self.extractScopeUsage(hf);
+            try self.extractDurableWorkflow(handler_path, hf);
+        }
+
         // Phase 3: Compute handler effect properties
         const properties = self.computeProperties();
 
         // Phase 3b: Detect rate limiting (guard composition + cacheIncr)
         const rate_limiting = self.detectRateLimiting();
-
-        if (handler_fn) |hf| {
-            try self.extractDurableWorkflow(handler_path, hf);
-        }
 
         // Build routes from dispatch table
         var routes: std.ArrayList(RouteInfo) = .empty;
@@ -1001,6 +1031,12 @@ pub const ContractBuilder = struct {
                 },
                 .workflow = self.durable_workflow,
             },
+            .scope = .{
+                .used = self.scope_used,
+                .names = self.scope_names,
+                .dynamic = self.scope_dynamic,
+                .max_depth = self.scope_max_depth,
+            },
             .api = .{
                 .schemas = self.api_schemas,
                 .requests = .{
@@ -1030,6 +1066,7 @@ pub const ContractBuilder = struct {
         self.service_calls = .empty;
         self.cache_namespaces = .empty;
         self.sql_queries = .empty;
+        self.scope_names = .empty;
         self.durable_key_literals = .empty;
         self.durable_step_names = .empty;
         self.durable_signal_names = .empty;
@@ -1085,7 +1122,8 @@ pub const ContractBuilder = struct {
                 // contract extraction rules and flags for scanCallSites.
                 if (builtin_modules.findFunction(imported_name)) |entry| {
                     const has_extractions = entry.func.contract_extractions.len > 0;
-                    const has_flags = entry.func.contract_flags.sets_durable_used or
+                    const has_flags = entry.func.contract_flags.sets_scope_used or
+                        entry.func.contract_flags.sets_durable_used or
                         entry.func.contract_flags.sets_durable_timers or
                         entry.func.contract_flags.sets_bearer_auth or
                         entry.func.contract_flags.sets_jwt_auth;
@@ -1165,6 +1203,7 @@ pub const ContractBuilder = struct {
                     if (gb.slot != binding.slot) continue;
 
                     // Apply contract flags
+                    if (gb.flags.sets_scope_used) self.scope_used = true;
                     if (gb.flags.sets_durable_used) self.durable_used = true;
                     if (gb.flags.sets_durable_timers) self.durable_timers = true;
                     if (gb.flags.sets_bearer_auth) self.api_bearer_auth = true;
@@ -1285,6 +1324,7 @@ pub const ContractBuilder = struct {
         return switch (category) {
             .env => .{ .list = &self.env_literals, .dynamic = &self.env_dynamic },
             .cache_namespace => .{ .list = &self.cache_namespaces, .dynamic = &self.cache_dynamic },
+            .scope_name => .{ .list = &self.scope_names, .dynamic = &self.scope_dynamic },
             .durable_key => .{ .list = &self.durable_key_literals, .dynamic = &self.durable_key_dynamic },
             .durable_step => .{ .list = &self.durable_step_names, .dynamic = &self.durable_step_dynamic },
             .durable_signal => .{ .list = &self.durable_signal_names, .dynamic = &self.durable_signal_dynamic },
@@ -1293,6 +1333,153 @@ pub const ContractBuilder = struct {
             // Custom categories are dispatched directly, not via generic target
             .sql_registration, .schema_compile, .route_pattern, .service_call, .cookie_name, .cors_origin, .rate_limit_key => null,
         };
+    }
+
+    fn extractScopeUsage(self: *ContractBuilder, handler_fn: NodeIndex) !void {
+        const func = self.ir_view.getFunction(handler_fn) orelse return;
+        try self.walkScopeDepth(func.body, 0);
+    }
+
+    fn walkScopeDepth(self: *ContractBuilder, node_idx: NodeIndex, depth: u32) !void {
+        if (node_idx == null_node) return;
+
+        const tag = self.ir_view.getTag(node_idx) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node_idx) orelse return;
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    try self.walkScopeDepth(self.ir_view.getListIndex(block.stmts_start, i), depth);
+                }
+            },
+            .expr_stmt, .throw_stmt, .return_stmt, .assert_stmt => {
+                if (self.ir_view.getOptValue(node_idx)) |value_node| {
+                    try self.walkScopeDepth(value_node, depth);
+                }
+            },
+            .var_decl, .function_decl => {
+                const decl = self.ir_view.getVarDecl(node_idx) orelse return;
+                if (decl.init != null_node) try self.walkScopeDepth(decl.init, depth);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node_idx) orelse return;
+                try self.walkScopeDepth(if_stmt.condition, depth);
+                try self.walkScopeDepth(if_stmt.then_branch, depth);
+                try self.walkScopeDepth(if_stmt.else_branch, depth);
+            },
+            .switch_stmt => {
+                const switch_stmt = self.ir_view.getSwitchStmt(node_idx) orelse return;
+                try self.walkScopeDepth(switch_stmt.discriminant, depth);
+                var i: u8 = 0;
+                while (i < switch_stmt.cases_count) : (i += 1) {
+                    try self.walkScopeDepth(self.ir_view.getListIndex(switch_stmt.cases_start, i), depth);
+                }
+            },
+            .case_clause => {
+                const case_clause = self.ir_view.getCaseClause(node_idx) orelse return;
+                try self.walkScopeDepth(case_clause.test_expr, depth);
+                var i: u16 = 0;
+                while (i < case_clause.body_count) : (i += 1) {
+                    try self.walkScopeDepth(self.ir_view.getListIndex(case_clause.body_start, i), depth);
+                }
+            },
+            .for_of_stmt, .for_in_stmt => {
+                const for_iter = self.ir_view.getForIter(node_idx) orelse return;
+                try self.walkScopeDepth(for_iter.iterable, depth);
+                try self.walkScopeDepth(for_iter.body, depth);
+            },
+            .binary_op => {
+                const binary = self.ir_view.getBinary(node_idx) orelse return;
+                try self.walkScopeDepth(binary.left, depth);
+                try self.walkScopeDepth(binary.right, depth);
+            },
+            .unary_op => {
+                const unary = self.ir_view.getUnary(node_idx) orelse return;
+                try self.walkScopeDepth(unary.operand, depth);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node_idx) orelse return;
+                try self.walkScopeDepth(ternary.condition, depth);
+                try self.walkScopeDepth(ternary.then_branch, depth);
+                try self.walkScopeDepth(ternary.else_branch, depth);
+            },
+            .assignment => {
+                const assignment = self.ir_view.getAssignment(node_idx) orelse return;
+                try self.walkScopeDepth(assignment.target, depth);
+                try self.walkScopeDepth(assignment.value, depth);
+            },
+            .member_access, .computed_access, .optional_chain => {
+                const member = self.ir_view.getMember(node_idx) orelse return;
+                try self.walkScopeDepth(member.object, depth);
+                if (member.computed != null_node) try self.walkScopeDepth(member.computed, depth);
+            },
+            .array_literal => {
+                const array = self.ir_view.getArray(node_idx) orelse return;
+                var i: u16 = 0;
+                while (i < array.elements_count) : (i += 1) {
+                    try self.walkScopeDepth(self.ir_view.getListIndex(array.elements_start, i), depth);
+                }
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node_idx) orelse return;
+                var i: u16 = 0;
+                while (i < obj.properties_count) : (i += 1) {
+                    try self.walkScopeDepth(self.ir_view.getListIndex(obj.properties_start, i), depth);
+                }
+            },
+            .object_property => {
+                const prop = self.ir_view.getProperty(node_idx) orelse return;
+                if (prop.is_computed) try self.walkScopeDepth(prop.key, depth);
+                try self.walkScopeDepth(prop.value, depth);
+            },
+            .call, .method_call, .optional_call => {
+                const call = self.ir_view.getCall(node_idx) orelse return;
+
+                if (self.isModuleBindingName(call.callee, "scope")) {
+                    self.scope_used = true;
+
+                    const next_depth = depth + 1;
+                    if (next_depth > self.scope_max_depth) self.scope_max_depth = next_depth;
+
+                    if (call.args_count > 1) {
+                        const callback_idx = self.ir_view.getListIndex(call.args_start, 1);
+                        if (self.resolveFunctionNode(callback_idx)) |fn_node| {
+                            const fn_expr = self.ir_view.getFunction(fn_node) orelse return;
+                            try self.walkScopeDepth(fn_expr.body, next_depth);
+                        } else {
+                            self.scope_dynamic = true;
+                        }
+                    } else {
+                        self.scope_dynamic = true;
+                    }
+                    return;
+                }
+
+                try self.walkScopeDepth(call.callee, depth);
+                var i: u8 = 0;
+                while (i < call.args_count) : (i += 1) {
+                    try self.walkScopeDepth(self.ir_view.getListIndex(call.args_start, i), depth);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn isModuleBindingName(self: *const ContractBuilder, callee: NodeIndex, expected: []const u8) bool {
+        const tag = self.ir_view.getTag(callee) orelse return false;
+        if (tag != .identifier) return false;
+
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        for (self.generic_bindings.items) |gb| {
+            if (gb.slot == binding.slot and std.mem.eql(u8, gb.binding_name, expected)) return true;
+        }
+
+        if (binding.kind == .global or binding.kind == .undeclared_global) {
+            const name = self.resolveAtomName(binding.slot) orelse return false;
+            return std.mem.eql(u8, name, expected);
+        }
+
+        return false;
     }
 
     const WorkflowCursor = struct {
@@ -1372,7 +1559,7 @@ pub const ContractBuilder = struct {
             },
             .call => {
                 const call = self.ir_view.getCall(node) orelse return null;
-                if (self.isDurableBindingName(call.callee, "run")) {
+                if (self.isModuleBindingName(call.callee, "run")) {
                     self.durable_run_count += 1;
                     if (call.args_count >= 2) {
                         const callback_node = self.ir_view.getListIndex(call.args_start, 1);
@@ -1501,14 +1688,14 @@ pub const ContractBuilder = struct {
     };
 
     fn describeWorkflowCall(self: *ContractBuilder, call: Node.CallExpr) ?WorkflowCall {
-        if (self.isDurableBindingName(call.callee, "step")) {
+        if (self.isModuleBindingName(call.callee, "step")) {
             const label = if (call.args_count > 0)
                 self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
             else
                 self.allocator.dupe(u8, "step") catch return null;
             return .{ .kind = .step, .label = label };
         }
-        if (self.isDurableBindingName(call.callee, "stepWithTimeout")) {
+        if (self.isModuleBindingName(call.callee, "stepWithTimeout")) {
             const label = if (call.args_count > 0)
                 self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
             else
@@ -1519,35 +1706,35 @@ pub const ContractBuilder = struct {
                 .detail = self.workflowNumberDetail(call.args_start, 1, "timeoutMs"),
             };
         }
-        if (self.isDurableBindingName(call.callee, "sleep")) {
+        if (self.isModuleBindingName(call.callee, "sleep")) {
             return .{
                 .kind = .sleep,
                 .label = self.allocator.dupe(u8, "sleep") catch return null,
                 .detail = self.workflowNumberDetail(call.args_start, 0, "delayMs"),
             };
         }
-        if (self.isDurableBindingName(call.callee, "sleepUntil")) {
+        if (self.isModuleBindingName(call.callee, "sleepUntil")) {
             return .{
                 .kind = .sleep_until,
                 .label = self.allocator.dupe(u8, "sleepUntil") catch return null,
                 .detail = self.workflowNumberDetail(call.args_start, 0, "untilMs"),
             };
         }
-        if (self.isDurableBindingName(call.callee, "waitSignal")) {
+        if (self.isModuleBindingName(call.callee, "waitSignal")) {
             const label = if (call.args_count > 0)
                 self.workflowStringLabel(call.args_start, 0, "<dynamic signal>")
             else
                 self.allocator.dupe(u8, "waitSignal") catch return null;
             return .{ .kind = .wait_signal, .label = label };
         }
-        if (self.isDurableBindingName(call.callee, "signal")) {
+        if (self.isModuleBindingName(call.callee, "signal")) {
             const label = if (call.args_count > 1)
                 self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
             else
                 self.allocator.dupe(u8, "signal") catch return null;
             return .{ .kind = .signal, .label = label };
         }
-        if (self.isDurableBindingName(call.callee, "signalAt")) {
+        if (self.isModuleBindingName(call.callee, "signalAt")) {
             const label = if (call.args_count > 1)
                 self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
             else
@@ -1605,7 +1792,8 @@ pub const ContractBuilder = struct {
 
     fn deinitWorkflowCursors(self: *ContractBuilder, cursors: *std.ArrayList(WorkflowCursor)) void {
         for (cursors.items) |*cursor| cursor.deinit(self.allocator);
-        cursors.clearRetainingCapacity();
+        cursors.deinit(self.allocator);
+        cursors.* = .empty;
     }
 
     fn workflowStringLabel(
@@ -1675,17 +1863,6 @@ pub const ContractBuilder = struct {
             std.mem.eql(u8, method_name, "text") or
             std.mem.eql(u8, method_name, "html") or
             std.mem.eql(u8, method_name, "redirect");
-    }
-
-    fn isDurableBindingName(self: *const ContractBuilder, callee: NodeIndex, expected: []const u8) bool {
-        const tag = self.ir_view.getTag(callee) orelse return false;
-        if (tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(callee) orelse return false;
-        for (self.generic_bindings.items) |gb| {
-            if (gb.slot != binding.slot) continue;
-            return std.mem.eql(u8, gb.binding_name, expected);
-        }
-        return false;
     }
 
     fn buildWorkflowId(self: *ContractBuilder, handler_path: []const u8, handler_fn: NodeIndex, run_call_node: NodeIndex) ![]const u8 {
@@ -1907,6 +2084,8 @@ pub const ContractBuilder = struct {
     }
 
     fn getLiteralString(self: *const ContractBuilder, node_idx: NodeIndex) ?[]const u8 {
+        const tag = self.ir_view.getTag(node_idx) orelse return null;
+        if (tag != .lit_string) return null;
         const str_idx = self.ir_view.getStringIdx(node_idx) orelse return null;
         return self.ir_view.getString(str_idx);
     }
@@ -2959,7 +3138,9 @@ pub const ContractBuilder = struct {
         const read_only = s.io != .write;
         const durable_only_writes = s.io == .write and self.durable_used and !s.has_bare_write;
         const deterministic = !self.has_nondeterministic_builtin;
-        const retry_safe = read_only or durable_only_writes;
+        // Scope cleanup callbacks run exactly once on unwind; retrying the request
+        // would re-run them, violating at-most-once guarantees for resource cleanup.
+        const retry_safe = !self.scope_used and (read_only or durable_only_writes);
 
         return .{
             .pure = !s.has_any_call and !s.has_egress,
@@ -3118,6 +3299,12 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -3163,6 +3350,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             try parseSqlSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "durable")) {
             try parseDurableSection(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "scope")) {
+            try parseScopeSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "api")) {
             try parseApiSection(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "verification")) {
@@ -3724,6 +3913,39 @@ fn parseDurableSection(
             );
         } else if (std.mem.eql(u8, key, "workflow")) {
             try parseDurableWorkflow(parser, allocator, &contract.durable.workflow);
+        } else {
+            parser.skipValue();
+        }
+    }
+}
+
+fn parseScopeSection(
+    parser: *JsonParser,
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    if (!parser.consume('{')) return error.InvalidJson;
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+
+        if (std.mem.eql(u8, key, "used")) {
+            contract.scope.used = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "names")) {
+            try parseStringArray(parser, allocator, &contract.scope.names);
+        } else if (std.mem.eql(u8, key, "dynamic")) {
+            contract.scope.dynamic = parser.readBool() orelse false;
+        } else if (std.mem.eql(u8, key, "maxDepth")) {
+            contract.scope.max_depth = parser.readU32() orelse 0;
         } else {
             parser.skipValue();
         }
@@ -4987,6 +5209,19 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("    }\n");
     try writer.writeAll("  },\n");
 
+    // scope
+    try writer.writeAll("  \"scope\": {\n");
+    try writer.print("    \"used\": {s},\n", .{if (contract.scope.used) "true" else "false"});
+    try writer.writeAll("    \"names\": [");
+    for (contract.scope.names.items, 0..) |name, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, name);
+    }
+    try writer.writeAll("],\n");
+    try writer.print("    \"dynamic\": {s},\n", .{if (contract.scope.dynamic) "true" else "false"});
+    try writer.print("    \"maxDepth\": {d}\n", .{contract.scope.max_depth});
+    try writer.writeAll("  },\n");
+
     // api
     try writer.writeAll("  \"api\": {\n");
 
@@ -5471,6 +5706,12 @@ test "parseFromJson roundtrip" {
             .keys = .{ .literal = .empty, .dynamic = true },
             .steps = .empty,
         },
+        .scope = .{
+            .used = true,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 1,
+        },
         .api = emptyApiInfo(),
         .verification = .{
             .exhaustive_returns = true,
@@ -5505,6 +5746,8 @@ test "parseFromJson roundtrip" {
     try std.testing.expectEqualStrings("id", parsed.service_calls.items[0].path_params.items[0]);
     try std.testing.expect(parsed.durable.used);
     try std.testing.expect(parsed.durable.keys.dynamic);
+    try std.testing.expect(parsed.scope.used);
+    try std.testing.expectEqual(@as(u32, 1), parsed.scope.max_depth);
     try std.testing.expect(parsed.verification != null);
     try std.testing.expect(parsed.verification.?.exhaustive_returns);
     try std.testing.expect(!parsed.verification.?.results_safe);
@@ -5561,6 +5804,12 @@ test "parseFromJson roundtrip preserves durable workflow" {
                 .nodes = workflow_nodes,
                 .edges = workflow_edges,
             },
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
         },
         .api = emptyApiInfo(),
         .verification = null,
@@ -5661,6 +5910,12 @@ test "parseFromJson roundtrip preserves api route response schema" {
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -5738,6 +5993,12 @@ test "writeContractJson minimal" {
             .keys = .{ .literal = .empty, .dynamic = false },
             .steps = .empty,
         },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -5752,11 +6013,12 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 12") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"scope\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verification\": null") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"properties\": null") != null);
@@ -5822,6 +6084,12 @@ test "writeContractJson with data" {
             .used = true,
             .keys = .{ .literal = durable_keys, .dynamic = false },
             .steps = durable_steps,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
         },
         .api = .{
             .schemas = schemas,
