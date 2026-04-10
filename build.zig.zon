@@ -4,6 +4,15 @@
     .fingerprint = 0x610658c09272015b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.3073+28ae5d415",
     .dependencies = .{
+        .zigts = .{
+            .path = "packages/zigts",
+        },
+        .zigttp_tools = .{
+            .path = "packages/tools",
+        },
+        .zigttp_runtime = .{
+            .path = "packages/runtime",
+        },
         .zigttp_sdk = .{
             .path = "packages/zigttp-sdk",
         },
@@ -14,14 +23,10 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "deps",
         "docs",
         "examples",
         "packages",
         "scripts",
-        "src",
         "tests",
-        "tools",
-        "zigts",
     },
 }

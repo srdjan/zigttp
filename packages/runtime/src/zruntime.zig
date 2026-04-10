@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const compat = @import("compat.zig");
+const compat = @import("zigts").compat;
 const ascii = std.ascii;
 
 // Import zts module

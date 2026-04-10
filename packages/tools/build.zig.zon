@@ -1,0 +1,16 @@
+.{
+    .name = .zigttp_tools,
+    .version = "0.0.0",
+    .fingerprint = 0x1537569e2043a6cf,
+    .minimum_zig_version = "0.16.0-dev.3073+28ae5d415",
+    .dependencies = .{
+        .zigts = .{
+            .path = "../zigts",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

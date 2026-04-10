@@ -21,13 +21,13 @@ zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at buil
 zig build run -- examples/handler/handler.ts -p 3000
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
 
-zig build test                     # All src/ tests
+zig build test                     # All tests
 zig build test-zigts                 # Engine tests only
 zig build test-zruntime            # Runtime tests only
 zig build test -- --test-filter "name"  # Single test
 bash scripts/test-examples.sh      # All example handler tests
 
-zig build bench                    # Zig-native benchmarks (src/benchmark.zig)
+zig build bench                    # Zig-native benchmarks (packages/runtime/src/benchmark.zig)
 zig build prove -- old.json new.json  # Compare contracts (0=safe, 1=breaking)
 zig build mock -- tests.jsonl --port 3001  # Mock server from test cases
 zigts link system.json               # Cross-handler contract linking
@@ -35,17 +35,17 @@ zigts link system.json               # Cross-handler contract linking
 
 ## Architecture
 
-Two layers. Server (`src/`): HTTP, CLI, request routing, static files. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`. Engine (`zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `zigts/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`.
+Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
 
 Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
-Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`zigts/modules/compose.zig`).
+Key patterns: `Result(T)` for error handling (ok/err variants), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`packages/zigts/src/modules/compose.zig`).
 
 For detailed architecture: [docs/architecture.md](docs/architecture.md). For performance internals: [docs/performance.md](docs/performance.md).
 
 ## Virtual Modules
 
-Import via `import { fn } from "zigttp:module"`. Implementations in `zigts/modules/`. Each module declares a `ModuleBinding` in `module_binding.zig` as single source of truth. Bindings also declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by shared checked helpers in `module_binding.zig`. Modules with no capabilities skip the enforcement wrapper at compile time.
+Import via `import { fn } from "zigttp:module"`. Implementations in `packages/zigts/src/modules/`. Each module declares a `ModuleBinding` in `module_binding.zig` as single source of truth. Bindings also declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by shared checked helpers in `module_binding.zig`. Modules with no capabilities skip the enforcement wrapper at compile time.
 
 | Module | Key Exports |
 |--------|-------------|
@@ -82,18 +82,18 @@ Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Resp
 All documented in detail in their source files and in `docs/`:
 
 - **Verification** (`-Dverify`): Proves Response returns, Result checking, state isolation. See [docs/verification.md](docs/verification.md).
-- **Contracts** (`-Dcontract`): Extracts imports, env vars, routes, egress hosts, handler properties. See `zigts/handler_contract.zig`.
+- **Contracts** (`-Dcontract`): Extracts imports, env vars, routes, egress hosts, handler properties. See `packages/zigts/src/handler_contract.zig`.
 - **Sound mode**: Type-directed analysis across operators. See [docs/sound-mode.md](docs/sound-mode.md).
-- **Type checking**: Full TS annotation checking. See `zigts/type_checker.zig`, `zigts/type_map.zig`.
-- **Flow analysis**: Data label tracking (secret, credential, user_input). See `zigts/flow_checker.zig`.
-- **Fault coverage**: Path enumeration, failure severity. See `zigts/fault_coverage.zig`.
-- **Replay/durable**: Deterministic trace recording and crash recovery. See `zigts/trace.zig`, `src/durable_recovery.zig`.
-- **Deploy manifests**: Platform-specific configs from contracts. See `tools/deploy_manifest.zig`.
-- **System linking**: Cross-handler verification. See `zigts/system_linker.zig`.
+- **Type checking**: Full TS annotation checking. See `packages/zigts/src/type_checker.zig`, `packages/zigts/src/type_map.zig`.
+- **Flow analysis**: Data label tracking (secret, credential, user_input). See `packages/zigts/src/flow_checker.zig`.
+- **Fault coverage**: Path enumeration, failure severity. See `packages/zigts/src/fault_coverage.zig`.
+- **Replay/durable**: Deterministic trace recording and crash recovery. See `packages/zigts/src/trace.zig`, `packages/runtime/src/durable_recovery.zig`.
+- **Deploy manifests**: Platform-specific configs from contracts. See `packages/tools/src/deploy_manifest.zig`.
+- **System linking**: Cross-handler verification. See `packages/zigts/src/system_linker.zig`.
 
 ## TypeScript/JSX
 
-TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, rendered via `h()`/`renderToString()` in `zigts/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md), [docs/jsx-guide.md](docs/jsx-guide.md).
+TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, rendered via `h()`/`renderToString()` in `packages/zigts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md), [docs/jsx-guide.md](docs/jsx-guide.md).
 
 ## CLI Options
 

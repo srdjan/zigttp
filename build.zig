@@ -3,16 +3,33 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const zigts_dep = b.dependency("zigts", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zigts_mod = zigts_dep.module("zigts");
+
+    const tools_dep = b.dependency("zigttp_tools", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zigts_cli_mod = tools_dep.module("zigts_cli");
+    const project_config_mod = tools_dep.module("project_config");
+
+    const runtime_dep = b.dependency("zigttp_runtime", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Sub-dependencies needed for zigts test module construction
     const zigttp_sdk_dep = b.dependency("zigttp_sdk", .{
         .target = target,
         .optimize = optimize,
     });
-    const zigttp_sdk_mod = zigttp_sdk_dep.module("zigttp-sdk");
     const ext_demo_dep = b.dependency("zigttp_ext_demo", .{
         .target = target,
         .optimize = optimize,
     });
-    const ext_demo_mod = ext_demo_dep.module("zigttp-ext-demo");
 
     // Handler path option (required for main build)
     const handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)");
@@ -38,45 +55,30 @@ pub fn build(b: *std.Build) void {
     const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/data-label/replay/report wiring");
     const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
 
-    // zigts module (Zig TypeScript compiler - the primary JS engine)
-    const zigts_mod = b.addModule("zigts", .{
-        .root_source_file = b.path("zigts/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    zigts_mod.addCSourceFile(.{
-        .file = b.path("deps/sqlite/sqlite3.c"),
-        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
-    });
-    zigts_mod.addIncludePath(b.path("deps/sqlite"));
-    zigts_mod.addImport("zigttp-sdk", zigttp_sdk_mod);
-    zigts_mod.addImport("zigttp-ext-demo", ext_demo_mod);
-
     // zigts tests
     const zigts_tests_root = b.createModule(.{
-        .root_source_file = b.path("zigts/root.zig"),
+        .root_source_file = zigts_dep.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_mod);
-    zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_mod);
+    zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_dep.module("zigttp-sdk"));
+    zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
+    zigts_tests_root.addCSourceFile(.{
+        .file = zigts_dep.path("deps/sqlite/sqlite3.c"),
+        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+    });
+    zigts_tests_root.addIncludePath(zigts_dep.path("deps/sqlite"));
     const zigts_tests = b.addTest(.{
         .root_module = zigts_tests_root,
     });
-    zigts_tests.root_module.addCSourceFile(.{
-        .file = b.path("deps/sqlite/sqlite3.c"),
-        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
-    });
-    zigts_tests.root_module.addIncludePath(b.path("deps/sqlite"));
     const run_zigts_tests = b.addRunArtifact(zigts_tests);
     const zigts_test_step = b.step("test-zigts", "Run zigts unit tests");
     zigts_test_step.dependOn(&run_zigts_tests.step);
 
     const precompile_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/precompile.zig"),
+            .root_source_file = tools_dep.path("src/precompile.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .link_libc = true,
@@ -89,7 +91,7 @@ pub fn build(b: *std.Build) void {
 
     const prop_expect_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/property_expectations.zig"),
+            .root_source_file = tools_dep.path("src/property_expectations.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .link_libc = true,
@@ -102,7 +104,7 @@ pub fn build(b: *std.Build) void {
 
     const rollout_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/system_rollout.zig"),
+            .root_source_file = tools_dep.path("src/system_rollout.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .link_libc = true,
@@ -117,27 +119,11 @@ pub fn build(b: *std.Build) void {
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
 
-    const zigts_cli_mod = b.createModule(.{
-        .root_source_file = b.path("tools/zigts_cli.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    zigts_cli_mod.addImport("zigts", zigts_mod);
-    const project_config_mod = b.createModule(.{
-        .root_source_file = b.path("src/project_config.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    project_config_mod.addImport("zigts", zigts_mod);
-    zigts_cli_mod.addImport("project_config", project_config_mod);
-
     // Internal precompile tool used by build steps and the zigts CLI.
     const precompile_exe = b.addExecutable(.{
         .name = "precompile",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/precompile.zig"),
+            .root_source_file = tools_dep.path("src/precompile.zig"),
             .target = b.graph.host,
             .optimize = .ReleaseFast,
         }),
@@ -148,7 +134,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zigttp",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = runtime_dep.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -236,14 +222,14 @@ pub fn build(b: *std.Build) void {
             run_precompile.addArg(rf);
         }
         run_precompile.addArg(path);
-        run_precompile.addArg("src/generated/embedded_handler.zig");
+        run_precompile.addArg("packages/runtime/generated/embedded_handler.zig");
 
         // Create the generated directories if they don't exist
-        const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "src/generated" });
+        const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated" });
         run_precompile.step.dependOn(&mkdir_step.step);
 
         if (deploy_target != null) {
-            const mkdir_deploy = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "src/generated/deploy" });
+            const mkdir_deploy = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated/deploy" });
             run_precompile.step.dependOn(&mkdir_deploy.step);
         }
 
@@ -252,7 +238,7 @@ pub fn build(b: *std.Build) void {
 
         // Add the generated module (with zigts dependency for transpiled handlers)
         exe.root_module.addAnonymousImport("embedded_handler", .{
-            .root_source_file = b.path("src/generated/embedded_handler.zig"),
+            .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
             .imports = &.{
                 .{ .name = "zigts", .module = zigts_mod },
             },
@@ -260,7 +246,7 @@ pub fn build(b: *std.Build) void {
     } else {
         // No handler specified - create a stub module
         exe.root_module.addAnonymousImport("embedded_handler", .{
-            .root_source_file = b.path("src/embedded_handler_stub.zig"),
+            .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
             .imports = &.{
                 .{ .name = "zigts", .module = zigts_mod },
             },
@@ -290,7 +276,7 @@ pub fn build(b: *std.Build) void {
     // Tests
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = runtime_dep.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -301,7 +287,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
     unit_tests.root_module.addImport("project_config", project_config_mod);
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
             .{ .name = "zigts", .module = zigts_mod },
         },
@@ -318,14 +304,14 @@ pub fn build(b: *std.Build) void {
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/zruntime.zig"),
+            .root_source_file = runtime_dep.path("src/zruntime.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     zruntime_tests.root_module.addImport("zigts", zigts_mod);
     zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
             .{ .name = "zigts", .module = zigts_mod },
         },
@@ -338,7 +324,7 @@ pub fn build(b: *std.Build) void {
     const bench_exe = b.addExecutable(.{
         .name = "zigttp-bench",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/benchmark.zig"),
+            .root_source_file = runtime_dep.path("src/benchmark.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -346,7 +332,7 @@ pub fn build(b: *std.Build) void {
     });
     bench_exe.root_module.addImport("zigts", zigts_mod);
     bench_exe.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
             .{ .name = "zigts", .module = zigts_mod },
         },

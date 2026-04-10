@@ -5,7 +5,7 @@
 //! Usage: zig build bench
 
 const std = @import("std");
-const compat = @import("compat.zig");
+const compat = @import("zigts").compat;
 const zruntime = @import("zruntime.zig");
 const zq = @import("zigts");
 const Runtime = zruntime.Runtime;

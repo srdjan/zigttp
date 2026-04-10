@@ -4,7 +4,7 @@ zig-pkg/
 .DS_Store
 
 # Generated files (build-time precompilation)
-src/generated/
+packages/runtime/generated/
 
 # local scratch / experiments (should not be committed)
 size_check

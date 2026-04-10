@@ -11,7 +11,7 @@
 //! No configuration required. The proof IS the configuration.
 
 const std = @import("std");
-const compat = @import("compat.zig");
+const compat = @import("zigts").compat;
 const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
 

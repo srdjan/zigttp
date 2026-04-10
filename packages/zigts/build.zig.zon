@@ -1,0 +1,20 @@
+.{
+    .name = .zigts,
+    .version = "0.16.0",
+    .fingerprint = 0xfca9f62bd1c96176,
+    .minimum_zig_version = "0.16.0-dev.3073+28ae5d415",
+    .dependencies = .{
+        .zigttp_sdk = .{
+            .path = "../zigttp-sdk",
+        },
+        .zigttp_ext_demo = .{
+            .path = "../zigttp-ext-demo",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "deps",
+    },
+}

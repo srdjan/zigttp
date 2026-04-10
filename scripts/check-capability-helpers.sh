@@ -14,7 +14,7 @@ check_pattern() {
     local pattern="$2"
     local matches
 
-    matches="$(git ls-files -z 'zigts/modules/*.zig' | xargs -0 rg -n -H --color never "$pattern" || true)"
+    matches="$(git ls-files -z 'packages/zigts/src/modules/*.zig' | xargs -0 rg -n -H --color never "$pattern" || true)"
     if [ -n "$matches" ]; then
         echo ""
         echo "FAIL: $description"
@@ -35,8 +35,8 @@ check_pattern "direct callback/sql store state access in virtual modules" 'ctx\.
 
 if [ "$fail" -ne 0 ]; then
     echo ""
-    echo "Use shared checked helpers in zigts/module_binding.zig instead of direct sensitive operations."
+    echo "Use shared checked helpers in packages/zigts/src/module_binding.zig instead of direct sensitive operations."
     exit 1
 fi
 
-echo "PASS: no direct sensitive operations found in zigts/modules"
+echo "PASS: no direct sensitive operations found in packages/zigts/src/modules"
