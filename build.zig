@@ -349,22 +349,6 @@ pub fn build(b: *std.Build) void {
     // Release build step (with handler precompilation if provided)
     const release_step = b.step("release", "Build optimized release binaries (zigttp, zigts)");
     release_step.dependOn(b.getInstallStep());
-    if (handler_path) |_| {
-        const release_note = b.addSystemCommand(if (aot_enabled) &.{
-            "echo",
-            "Release build with embedded bytecode + AOT: zig-out/bin/zigttp",
-        } else &.{
-            "echo",
-            "Release build with embedded bytecode: zig-out/bin/zigttp",
-        });
-        release_note.step.dependOn(release_step);
-    } else {
-        const release_note = b.addSystemCommand(&.{
-            "echo",
-            "Release build: zig-out/bin/zigttp and zig-out/bin/zigts",
-        });
-        release_note.step.dependOn(release_step);
-    }
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
 

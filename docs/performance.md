@@ -100,7 +100,7 @@ HandlerPool reuses pre-warmed contexts for subsequent requests:
 
 ### Property Access Optimizations
 
-**Shape Preallocation** (`zigts/context.zig:352-434`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating transitions. Direct slot writes via `setSlot()` bypass property lookup.
+**Shape Preallocation** (`packages/zigts/src/context.zig:352-434`): HTTP Request and Response objects use preallocated hidden class shapes, eliminating transitions. Direct slot writes via `setSlot()` bypass property lookup.
 
 Shapes:
 - Request: method, url, path, query, body, headers (6 props)
@@ -108,23 +108,23 @@ Shapes:
 - Response headers: content-type, content-length, cache-control (3 props)
 - Request headers: authorization, content-type, accept, host, user-agent, accept-encoding, connection (7 props)
 
-**Polymorphic Inline Cache (PIC)** (`zigts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization. O(1) monomorphic lookups, megamorphic transition after 9th distinct shape.
+**Polymorphic Inline Cache (PIC)** (`packages/zigts/src/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization. O(1) monomorphic lookups, megamorphic transition after 9th distinct shape.
 
-**Binary Search for Large Objects** (`zigts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays (`BINARY_SEARCH_THRESHOLD = 8`).
+**Binary Search for Large Objects** (`packages/zigts/src/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays (`BINARY_SEARCH_THRESHOLD = 8`).
 
-**JIT Baseline IC Integration** (`zigts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 fast paths check PIC entry[0] inline, falling back to helper on miss.
+**JIT Baseline IC Integration** (`packages/zigts/src/jit/baseline.zig:1604-1765`): x86-64 and ARM64 fast paths check PIC entry[0] inline, falling back to helper on miss.
 
-**JIT Object Literal Shapes** (`zigts/context.zig:746-779`, `zigts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. `new_object_literal` creates objects with the final hidden class directly, and `set_slot` writes inline without lookup. Fast path uses arena bump allocation.
+**JIT Object Literal Shapes** (`packages/zigts/src/context.zig:746-779`, `packages/zigts/src/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. `new_object_literal` creates objects with the final hidden class directly, and `set_slot` writes inline without lookup. Fast path uses arena bump allocation.
 
-**Type Feedback** (`zigts/type_feedback.zig`): Call site and value type profiling for JIT decisions. Inlining threshold lowered to 5 calls (from 10) for faster FaaS warmup.
+**Type Feedback** (`packages/zigts/src/type_feedback.zig`): Call site and value type profiling for JIT decisions. Inlining threshold lowered to 5 calls (from 10) for faster FaaS warmup.
 
 ### String Optimizations
 
-**Lazy String Hashing** (`zigts/string.zig:18-24, 44-54`): Hash deferred until needed via `hash_computed` flag. Reduces overhead for strings never used as hash keys.
+**Lazy String Hashing** (`packages/zigts/src/string.zig:18-24, 44-54`): Hash deferred until needed via `hash_computed` flag. Reduces overhead for strings never used as hash keys.
 
-**Pre-interned HTTP Atoms** (`zigts/object.zig:237-264`): 27 common headers with O(1) lookup: content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, connection, accept-encoding, cookie, x-forwarded-for, x-request-id, content-encoding, transfer-encoding, vary.
+**Pre-interned HTTP Atoms** (`packages/zigts/src/object.zig:237-264`): 27 common headers with O(1) lookup: content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, connection, accept-encoding, cookie, x-forwarded-for, x-request-id, content-encoding, transfer-encoding, vary.
 
-**HTTP String Cache** (`zigts/context.zig:111-135, 462+`): Pre-allocated status texts, content-type strings, and HTTP method strings.
+**HTTP String Cache** (`packages/zigts/src/context.zig:111-135, 462+`): Pre-allocated status texts, content-type strings, and HTTP method strings.
 
 ### Proof-Driven Response Caching
 
@@ -137,22 +137,22 @@ When the compile-time contract proves a handler is `pure` or `deterministic`+`re
 - **TTL**: configurable per-entry expiry (default 5 minutes). Expired entries are lazily evicted.
 - **Max body**: responses larger than 256KB (default) are not cached.
 - **Visibility**: cached responses carry `X-Zigttp-Proof-Cache: hit` header.
-- **Implementation**: `src/proof_adapter.zig`, integrated into `src/server.zig` on both threaded and evented I/O paths.
+- **Implementation**: `packages/runtime/src/proof_adapter.zig`, integrated into `packages/runtime/src/server.zig` on both threaded and evented I/O paths.
 
 ### Pool and Request Optimizations
 
-**Pool Slot Hint** (`zigts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) to O(1).
+**Pool Slot Hint** (`packages/zigts/src/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) to O(1).
 
-**Relaxed Atomic Ordering** (`src/zruntime.zig`): `in_use` counter uses `.monotonic` ordering (metrics only, not synchronization).
+**Relaxed Atomic Ordering** (`packages/runtime/src/zruntime.zig`): `in_use` counter uses `.monotonic` ordering (metrics only, not synchronization).
 
-**LRU Static Cache** (`src/server.zig`): Doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
+**LRU Static Cache** (`packages/runtime/src/server.zig`): Doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
 
-**Adaptive Backoff** (`src/zruntime.zig`): Three-phase pool contention handling:
+**Adaptive Backoff** (`packages/runtime/src/zruntime.zig`): Three-phase pool contention handling:
 - Phase 1: 10 spin iterations using `spinLoopHint`
 - Phase 2: Sleep 10us-1ms with jitter (prevents thundering herd)
 - Phase 3: Circuit breaker fails fast after 100 retries
 
-**Zero-Copy Response** (`src/zruntime.zig`): Borrowed mode avoids memcpy when arena lifetime is guaranteed.
+**Zero-Copy Response** (`packages/runtime/src/zruntime.zig`): Borrowed mode avoids memcpy when arena lifetime is guaranteed.
 
 ### Type-Directed Code Generation
 
@@ -171,7 +171,7 @@ These opcodes also omit type feedback recording, providing faster cold-start exe
 
 ### Build-Time Precompilation
 
-**Handler Precompilation** (`tools/precompile.zig`, `build.zig`): `-Dhandler=<path>` compiles handlers at build time. Bytecode embedded in binary, eliminating runtime parsing.
+**Handler Precompilation** (`packages/tools/src/precompile.zig`, `build.zig`): `-Dhandler=<path>` compiles handlers at build time. Bytecode embedded in binary, eliminating runtime parsing.
 
 Build flow: `precompile.zig` compiles handler, serializes bytecode with atoms and shapes, generates `src/generated/embedded_handler.zig`. Server loads via `loadFromCachedBytecode()`.
 
@@ -185,7 +185,7 @@ The precompile pipeline also supports:
 
 ### Concurrent I/O
 
-**Structured concurrency** (`zigts/modules/io.zig`, `src/zruntime.zig`):
+**Structured concurrency** (`packages/zigts/src/modules/io.zig`, `packages/runtime/src/zruntime.zig`):
 `parallel()` and `race()` overlap outbound HTTP without async/await overhead.
 The three-phase model (collect descriptors, dispatch to OS threads, join results)
 avoids event loop machinery entirely.

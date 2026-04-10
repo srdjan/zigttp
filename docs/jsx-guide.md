@@ -22,7 +22,7 @@ Run it:
 
 ## JSX Runtime API
 
-The JSX runtime is provided by `zigts/http.zig` and includes:
+The JSX runtime is provided by `packages/zigts/src/http.zig` and includes:
 
 ### `h(tag, props, ...children)`
 

@@ -436,7 +436,7 @@ Timeout: 30 seconds. On timeout or missing binary, the hook exits silently.
 
 ### Hook Sources
 
-The canonical hook scripts live in `tools/hooks/` and are embedded into the `zigts` binary via `@embedFile`. Running `zigts init` copies them to `.claude/hooks/` with executable permissions. To update hooks after a zigts upgrade, run `zigts init --force`.
+The canonical hook scripts live in `packages/tools/src/hooks/` and are embedded into the `zigts` binary via `@embedFile`. Running `zigts init` copies them to `.claude/hooks/` with executable permissions. To update hooks after a zigts upgrade, run `zigts init --force`.
 
 ### Configuration
 

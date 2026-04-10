@@ -6,8 +6,8 @@ This document catalogs all unsupported JavaScript and TypeScript features detect
 
 zigttp uses a two-layer validation system:
 
-1. **TypeScript Stripper** (`zigts/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
-2. **Parser** (`zigts/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
+1. **TypeScript Stripper** (`packages/zigts/src/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
+2. **Parser** (`packages/zigts/src/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
 
 **Principle**: Each feature should be detected at exactly one layer to avoid duplicate error reporting and ensure consistent error messages regardless of file type.
 
@@ -225,8 +225,8 @@ When adding detection for a new unsupported feature:
    - Preserve source location for accurate error reporting
 
 3. **Add Tests**:
-   - Stripper: Add test in `zigts/stripper.zig` test section
-   - Parser: Add test in `zigts/parser/parse.zig` test section
+   - Stripper: Add test in `packages/zigts/src/stripper.zig` test section
+   - Parser: Add test in `packages/zigts/src/parser/parse.zig` test section
    - Verify error message content, not just error type
 
 4. **Update This Document**:

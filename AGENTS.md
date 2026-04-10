@@ -1,13 +1,14 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `build.zig` defines the build graph, executables, and test steps.
-- `src/` contains the runtime and server implementation (`main.zig`, `server.zig`, `zruntime.zig`).
-- `zigts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
-- `zigts/modules/` implements virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`).
-- `zigts/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
-- `zigts/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
-- `tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding).
+- `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
+- `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `zruntime.zig`).
+- `packages/zigts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
+- `packages/zigts/src/modules/` implements virtual modules (`zigttp:env`, `zigttp:crypto`, `zigttp:router`, `zigttp:auth`, `zigttp:validate`, `zigttp:cache`).
+- `packages/zigts/src/jit/` contains the baseline JIT compiler for x86-64 and ARM64.
+- `packages/zigts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
+- `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zigts_cli.zig` for the compiler CLI).
+- `packages/zigttp-sdk/` and `packages/zigttp-ext-demo/` are the extension SDK and demo.
 - `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `shopping-cart/`, `htmx-todo/`, `sql/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (7 files - see Documentation section below).
@@ -31,10 +32,10 @@
 - `zig build -Doptimize=ReleaseFast -Dhandler=handler.jsx` - production build with embedded bytecode.
 - `zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"` - run with inline handler.
 - `zig build run -- examples/handler/handler.ts -p 3000` - run a file-based handler.
-- `zig build test` - all src/ and zigts/ tests.
+- `zig build test` - all tests.
 - `zig build test-zigts` - JS engine tests only.
-- `zig build test-zruntime` - runtime tests only (`src/zruntime.zig`).
-- `zig build bench` - Zig-native benchmark suite (`src/benchmark.zig`).
+- `zig build test-zruntime` - runtime tests only.
+- `zig build bench` - Zig-native benchmark suite.
 
 ## Coding Style & Naming Conventions
 - Format Zig code with `zig fmt` and follow existing patterns.
@@ -46,12 +47,12 @@
 ## Testing Guidelines
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
-- Add tests near the feature you touched in `src/` or `zigts/` and run the relevant `zig build test*` step.
+- Add tests near the feature you touched in `packages/runtime/` or `packages/zigts/` and run the relevant `zig build test*` step.
 
 ## Commit & Pull Request Guidelines
 - Commit history is informal; keep subjects short and descriptive (lowercase is common). Use `WIP-#:` only for intentional multi-step series.
 - PRs should include: a clear summary, rationale, test commands run, and doc/example updates when behavior changes.
 
 ## Security & Configuration Notes
-- Preserve path traversal checks in `src/server.zig`.
+- Preserve path traversal checks in `packages/runtime/src/server.zig`.
 - Runtime isolation depends on `HandlerPool`/`LockFreePool`; avoid introducing shared mutable state between requests.

@@ -2090,7 +2090,7 @@ as an external baseline). See `benchmarks/*.json` for raw results.
 Run benchmarks: `./zig-out/bin/zigttp-bench`
 
 Note: Optional instrumentation (perf), parallel compiler, and JIT modules exist
-in `zigts/` but are not enabled by default.
+in `packages/zigts/src/` but are not enabled by default.
 
 ### Memory Configuration
 

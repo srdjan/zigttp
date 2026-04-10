@@ -27,13 +27,4 @@ pub fn build(b: *std.Build) void {
     });
     zigts_cli_mod.addImport("zigts", zigts_mod);
     zigts_cli_mod.addImport("project_config", project_config_mod);
-
-    // Precompile module (for root build to create precompile exe)
-    const precompile_mod = b.addModule("precompile", .{
-        .root_source_file = b.path("src/precompile.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    precompile_mod.addImport("zigts", zigts_mod);
 }

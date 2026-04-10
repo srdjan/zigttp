@@ -6,7 +6,7 @@ zigttp includes native TypeScript and TSX support through two features: a type s
 
 ## Type Stripper
 
-The type stripper (`zigts/stripper.zig`) removes TypeScript syntax before parsing, preserving line/column positions for error reporting by replacing stripped spans with spaces.
+The type stripper (`packages/zigts/src/stripper.zig`) removes TypeScript syntax before parsing, preserving line/column positions for error reporting by replacing stripped spans with spaces.
 
 ### Supported Subset
 
@@ -80,7 +80,7 @@ TSX is supported: JSX tags remain intact while type annotations inside `{ ... }`
 
 ## Type Checking
 
-The type checker (`zigts/type_checker.zig`) validates type annotations at build time. It runs after stripping and parsing, before bytecode generation.
+The type checker (`packages/zigts/src/type_checker.zig`) validates type annotations at build time. It runs after stripping and parsing, before bytecode generation.
 
 ### Checked Properties
 
@@ -220,7 +220,7 @@ Generic type aliases (`type Result<T> = { ok: boolean; value: T }`) are instanti
 
 ## Compile-Time Evaluation
 
-The `comptime()` function (`zigts/comptime.zig`) evaluates expressions at compile time and replaces them with literal values. It integrates with the type stripper as a pre-parse transformation.
+The `comptime()` function (`packages/zigts/src/comptime.zig`) evaluates expressions at compile time and replaces them with literal values. It integrates with the type stripper as a pre-parse transformation.
 
 ### Usage
 
@@ -283,8 +283,8 @@ Variables, arbitrary function calls, `Date.now()`, `Math.random()`, `new`, `this
 
 ### Files
 
-- `zigts/stripper.zig` - Type stripper with comptime integration
-- `zigts/comptime.zig` - Compile-time expression evaluator (~2000 lines)
+- `packages/zigts/src/stripper.zig` - Type stripper with comptime integration
+- `packages/zigts/src/comptime.zig` - Compile-time expression evaluator (~2000 lines)
 - `StripOptions` controls features: `tsx_mode`, `enable_comptime`, `comptime_env`
 
 ### Build-Time Integration

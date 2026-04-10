@@ -2,10 +2,10 @@
   "permissions": {
     "allow": [
       "Read(//Users/srdjans/Code/_skills/**)",
-      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/SKILL.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/SKILL.md)",
-      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/virtual-modules.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/virtual-modules.md)",
-      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/testing-replay.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/testing-replay.md)",
-      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/jsx-patterns.md /Users/srdjans/Code/ZigttpHome/zigttp/tools/skills/zigts-expert/references/jsx-patterns.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/SKILL.md /Users/srdjans/Code/ZigttpHome/zigttp/packages/tools/src/skills/zigts-expert/SKILL.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/virtual-modules.md /Users/srdjans/Code/ZigttpHome/zigttp/packages/tools/src/skills/zigts-expert/references/virtual-modules.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/testing-replay.md /Users/srdjans/Code/ZigttpHome/zigttp/packages/tools/src/skills/zigts-expert/references/testing-replay.md)",
+      "Bash(cp /Users/srdjans/.claude/skills/zigts-expert/references/jsx-patterns.md /Users/srdjans/Code/ZigttpHome/zigttp/packages/tools/src/skills/zigts-expert/references/jsx-patterns.md)",
       "Bash(/Users/srdjans/Code/ZigttpHome/zigttp/zig-out/bin/zigts init:*)",
       "Bash(zigts expert *)",
       "Bash(zigts check *)",
@@ -18,8 +18,8 @@
       "Bash(python *)",
       "Edit(./.claude/hooks/**)",
       "Write(./.claude/hooks/**)",
-      "Edit(./zigts/rule_registry.zig)",
-      "Write(./zigts/rule_registry.zig)"
+      "Edit(./packages/zigts/src/rule_registry.zig)",
+      "Write(./packages/zigts/src/rule_registry.zig)"
     ]
   },
   "hooks": {

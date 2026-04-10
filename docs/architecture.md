@@ -29,7 +29,7 @@ This document describes the architecture of zigttp, a serverless JavaScript runt
 
 ## Two-Layer Design
 
-### Server Layer (src/)
+### Server Layer (packages/runtime/src/)
 
 HTTP listener, CLI, request routing, static file serving, contract-aware startup.
 
@@ -40,13 +40,13 @@ HTTP listener, CLI, request routing, static file serving, contract-aware startup
 - `contract_runtime.zig` - Runtime contract parser for startup env validation, route pre-filtering, and property logging
 - `self_extract.zig` - Self-extracting binary format (bytecode, contract JSON, runtime policy)
 
-### Engine Layer (zigts/)
+### Engine Layer (packages/zigts/src/)
 
 Pure Zig JavaScript engine with two-pass compilation (parse to IR, then bytecode).
 
 **Key Components**:
 
-#### Parser (`zigts/parser/`)
+#### Parser (`packages/zigts/src/parser/`)
 - `parse.zig` - Pratt parser for JavaScript/TypeScript
 - `tokenizer.zig` - Lexical analysis
 - `codegen.zig` - Bytecode generation from IR
@@ -132,9 +132,9 @@ Quiet NaN patterns with prefix >= 0xFFFC are canonicalized to 0x7FF8 on storage.
 
 ### Hidden Classes
 
-V8-style hidden class transitions for inline caching. The index-based `HiddenClassPool` (`zigts/object.zig`) stores shapes as compact u32 indices with Structure-of-Arrays (SoA) layout for cache-friendly property lookups. Transitions use a hash map keyed on `(from_class << 32 | atom)` for O(1) lookup.
+V8-style hidden class transitions for inline caching. The index-based `HiddenClassPool` (`packages/zigts/src/object.zig`) stores shapes as compact u32 indices with Structure-of-Arrays (SoA) layout for cache-friendly property lookups. Transitions use a hash map keyed on `(from_class << 32 | atom)` for O(1) lookup.
 
-**Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`zigts/context.zig:352-434`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
+**Shape Preallocation**: HTTP Request and Response objects use preallocated hidden class shapes (`packages/zigts/src/context.zig:352-434`), eliminating hidden class transitions. Direct slot writes via `setSlot()` bypass property lookup entirely.
 
 ### Hybrid Arena Allocation
 
@@ -153,8 +153,8 @@ synchronous and linear. When a handler needs concurrent outbound HTTP, it uses
 `parallel()` or `race()` from `zigttp:io`. Concurrency happens entirely in the
 I/O layer, invisible to the JavaScript execution model.
 
-**Three-phase collect-execute-join model** (`zigts/modules/io.zig`,
-`src/zruntime.zig`):
+**Three-phase collect-execute-join model** (`packages/zigts/src/modules/io.zig`,
+`packages/runtime/src/zruntime.zig`):
 
 1. **Collect**: Each thunk is called sequentially on the main thread. A
    threadlocal `parallel_collector` intercepts `fetchSync` calls during thunk
@@ -220,78 +220,81 @@ The Result<T> pattern throughout makes error handling explicit and prevents sile
 
 ```
 zigttp/
-├── build.zig              # Zig build configuration
-├── zigts/                   # Pure Zig JavaScript engine
-│   ├── parser/            # Two-pass parser with IR
-│   │   ├── parse.zig      # Main parser (Pratt parser)
-│   │   ├── tokenizer.zig  # Tokenizer
-│   │   ├── codegen.zig    # Bytecode generation
-│   │   └── ir.zig         # Intermediate representation
-│   ├── interpreter.zig    # Stack-based bytecode VM
-│   ├── value.zig          # Type-prefix NaN-boxing value representation
-│   ├── object.zig         # Hidden classes, object system
-│   ├── gc.zig             # Generational GC (nursery + tenured)
-│   ├── heap.zig           # Size-class segregated allocator
-│   ├── arena.zig          # Request-scoped arena allocator
-│   ├── http.zig           # HTTP/JSX runtime for SSR
-│   ├── pool.zig           # Lock-free runtime pooling
-│   ├── builtins.zig       # Built-in JavaScript functions
-│   ├── stripper.zig       # TypeScript/TSX type stripper
-│   ├── comptime.zig       # Compile-time expression evaluator
-│   ├── handler_contract.zig # Contract extraction from IR
-│   ├── handler_policy.zig # Runtime policy + contract-to-policy conversion
-│   ├── modules/
-│   │   ├── io.zig         # Structured concurrent I/O (parallel, race)
-│   │   ├── auth.zig       # JWT, HMAC, webhook verification
-│   │   ├── cache.zig      # In-memory KV cache with LRU
-│   │   ├── validate.zig   # JSON Schema validation
-│   │   ├── env.zig        # Environment variable access
-│   │   ├── crypto.zig     # SHA-256, HMAC, base64
-│   │   ├── router.zig     # Pattern-matching HTTP router
-│   │   ├── sql.zig        # SQLite query execution with allowlisting
-│   │   ├── compose.zig    # Guard-based handler composition
-│   │   ├── durable.zig    # Durable execution (run, step, sleep, signal)
-│   │   ├── resolver.zig   # Module resolver and wiring
-│   │   └── root.zig       # Module registry
-│   ├── jit/
-│   │   └── baseline.zig   # Baseline JIT compiler (x86-64, ARM64)
-│   ├── type_feedback.zig  # Call site profiling
-│   ├── handler_verifier.zig   # Compile-time handler verification
-│   ├── handler_contract.zig   # Contract extraction from IR
-│   ├── handler_policy.zig     # Runtime policy from contracts
-│   ├── path_generator.zig     # Exhaustive path enumeration
-│   ├── fault_coverage.zig     # Fault coverage analysis
-│   ├── bool_checker.zig       # Sound mode type-directed analysis
-│   ├── type_map.zig           # TypeScript type annotation map
-│   ├── type_checker.zig       # TypeScript type checking
-│   ├── trace.zig              # Deterministic trace recording/replay
-│   ├── module_binding.zig     # ModuleBinding, FunctionBinding, ModuleHandle
-│   └── builtin_modules.zig    # Registry of all built-in module bindings
-├── src/
-│   ├── main.zig           # CLI entry point
-│   ├── zruntime.zig       # HandlerPool, JS context management
-│   ├── server.zig         # HTTP server implementation
-│   ├── contract_runtime.zig  # Runtime contract parser (env validation, route pre-filter)
-│   ├── proof_adapter.zig     # Proof-driven response cache (deterministic+read_only handlers)
-│   ├── self_extract.zig      # Self-extracting binary payload (bytecode + contract + policy)
-│   ├── test_runner.zig    # Declarative handler test runner
-│   ├── replay_runner.zig  # Deterministic replay runner
-│   ├── durable_recovery.zig  # Durable execution crash recovery
-│   ├── durable_store.zig     # Signal persistence backend
-│   └── durable_scheduler.zig # Background scheduler for durable waits
-├── tools/
-│   ├── precompile.zig         # Build-time bytecode compiler
-│   ├── zigts_cli.zig          # CLI dispatcher for zigts subcommands
-│   ├── expert.zig             # zigts expert namespace (meta, verify-paths, delegation)
-│   ├── edit_simulate.zig      # Diff-aware violation analysis
-│   ├── review_patch.zig       # Patch review with --diff-only filtering
-│   ├── deploy_manifest.zig    # Proven deployment manifest generator
-│   ├── openapi_manifest.zig   # OpenAPI spec generator
-│   ├── init_command.zig       # zigts init (installs skills + hooks)
-│   └── hooks/                 # Canonical hook scripts (embedded by init)
-│       ├── pre-edit-zts.sh    # PreToolUse: check before edits
-│       ├── post-edit-zts.sh   # PostToolUse: analyze after edits
-│       └── session-start.sh   # SessionStart: export policy env vars
+├── build.zig                    # Zig build configuration
+├── packages/
+│   ├── zigts/                   # Pure Zig JavaScript engine
+│   │   ├── src/
+│   │   │   ├── parser/          # Two-pass parser with IR
+│   │   │   │   ├── parse.zig    # Main parser (Pratt parser)
+│   │   │   │   ├── tokenizer.zig # Tokenizer
+│   │   │   │   ├── codegen.zig  # Bytecode generation
+│   │   │   │   └── ir.zig       # Intermediate representation
+│   │   │   ├── interpreter.zig  # Stack-based bytecode VM
+│   │   │   ├── value.zig        # Type-prefix NaN-boxing value representation
+│   │   │   ├── object.zig       # Hidden classes, object system
+│   │   │   ├── gc.zig           # Generational GC (nursery + tenured)
+│   │   │   ├── heap.zig         # Size-class segregated allocator
+│   │   │   ├── arena.zig        # Request-scoped arena allocator
+│   │   │   ├── http.zig         # HTTP/JSX runtime for SSR
+│   │   │   ├── pool.zig         # Lock-free runtime pooling
+│   │   │   ├── builtins.zig     # Built-in JavaScript functions
+│   │   │   ├── stripper.zig     # TypeScript/TSX type stripper
+│   │   │   ├── comptime.zig     # Compile-time expression evaluator
+│   │   │   ├── handler_contract.zig # Contract extraction from IR
+│   │   │   ├── handler_policy.zig # Runtime policy + contract-to-policy conversion
+│   │   │   ├── modules/
+│   │   │   │   ├── io.zig       # Structured concurrent I/O (parallel, race)
+│   │   │   │   ├── auth.zig     # JWT, HMAC, webhook verification
+│   │   │   │   ├── cache.zig    # In-memory KV cache with LRU
+│   │   │   │   ├── validate.zig # JSON Schema validation
+│   │   │   │   ├── env.zig      # Environment variable access
+│   │   │   │   ├── crypto.zig   # SHA-256, HMAC, base64
+│   │   │   │   ├── router.zig   # Pattern-matching HTTP router
+│   │   │   │   ├── sql.zig      # SQLite query execution with allowlisting
+│   │   │   │   ├── compose.zig  # Guard-based handler composition
+│   │   │   │   ├── durable.zig  # Durable execution (run, step, sleep, signal)
+│   │   │   │   ├── resolver.zig # Module resolver and wiring
+│   │   │   │   └── root.zig     # Module registry
+│   │   │   ├── jit/
+│   │   │   │   └── baseline.zig # Baseline JIT compiler (x86-64, ARM64)
+│   │   │   ├── type_feedback.zig    # Call site profiling
+│   │   │   ├── handler_verifier.zig # Compile-time handler verification
+│   │   │   ├── path_generator.zig   # Exhaustive path enumeration
+│   │   │   ├── fault_coverage.zig   # Fault coverage analysis
+│   │   │   ├── bool_checker.zig     # Sound mode type-directed analysis
+│   │   │   ├── type_map.zig         # TypeScript type annotation map
+│   │   │   ├── type_checker.zig     # TypeScript type checking
+│   │   │   ├── trace.zig            # Deterministic trace recording/replay
+│   │   │   ├── module_binding.zig   # ModuleBinding, FunctionBinding, ModuleHandle
+│   │   │   └── builtin_modules.zig  # Registry of all built-in module bindings
+│   │   └── deps/                # Engine dependencies (SQLite)
+│   ├── runtime/                 # HTTP server, CLI, request routing
+│   │   └── src/
+│   │       ├── main.zig             # CLI entry point
+│   │       ├── zruntime.zig         # HandlerPool, JS context management
+│   │       ├── server.zig           # HTTP server implementation
+│   │       ├── contract_runtime.zig # Runtime contract parser (env validation, route pre-filter)
+│   │       ├── proof_adapter.zig    # Proof-driven response cache (deterministic+read_only handlers)
+│   │       ├── self_extract.zig     # Self-extracting binary payload (bytecode + contract + policy)
+│   │       ├── test_runner.zig      # Declarative handler test runner
+│   │       ├── replay_runner.zig    # Deterministic replay runner
+│   │       ├── durable_recovery.zig # Durable execution crash recovery
+│   │       ├── durable_store.zig    # Signal persistence backend
+│   │       └── durable_scheduler.zig # Background scheduler for durable waits
+│   └── tools/                   # CLI tools and build-time utilities
+│       └── src/
+│           ├── precompile.zig       # Build-time bytecode compiler
+│           ├── zigts_cli.zig        # CLI dispatcher for zigts subcommands
+│           ├── expert.zig           # zigts expert namespace (meta, verify-paths, delegation)
+│           ├── edit_simulate.zig    # Diff-aware violation analysis
+│           ├── review_patch.zig     # Patch review with --diff-only filtering
+│           ├── deploy_manifest.zig  # Proven deployment manifest generator
+│           ├── openapi_manifest.zig # OpenAPI spec generator
+│           ├── init_command.zig     # zigts init (installs skills + hooks)
+│           └── hooks/               # Canonical hook scripts (embedded by init)
+│               ├── pre-edit-zts.sh  # PreToolUse: check before edits
+│               ├── post-edit-zts.sh # PostToolUse: analyze after edits
+│               └── session-start.sh # SessionStart: export policy env vars
 └── examples/
     ├── handler/           # Basic handler variants (TS, TSX)
     ├── jsx/               # JSX rendering demos
@@ -315,36 +318,36 @@ All allocations use `errdefer` for cleanup on failure paths. Header strings are 
 
 ### Property Access Optimizations
 
-**Polymorphic Inline Cache (PIC)** (`zigts/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
+**Polymorphic Inline Cache (PIC)** (`packages/zigts/src/interpreter.zig:259-335`): 8-entry cache per property access site with last-hit optimization for O(1) monomorphic lookups. Megamorphic transition after 9th distinct shape.
 
-**Binary Search for Large Objects** (`zigts/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
+**Binary Search for Large Objects** (`packages/zigts/src/object.zig:751, 831-835`): Objects with 8+ properties use binary search on sorted property arrays. Threshold: `BINARY_SEARCH_THRESHOLD = 8`.
 
-**JIT Baseline IC Integration** (`zigts/jit/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
+**JIT Baseline IC Integration** (`packages/zigts/src/jit/baseline.zig:1604-1765`): x86-64 and ARM64 JIT fast paths check PIC entry[0] inline, falling back to helper only on cache miss.
 
-**JIT Object Literal Shapes** (`zigts/context.zig:746-779`, `zigts/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead.
+**JIT Object Literal Shapes** (`packages/zigts/src/context.zig:746-779`, `packages/zigts/src/jit/baseline.zig:3646-3670`): Object literals with static keys use pre-compiled hidden class shapes. The `new_object_literal` opcode creates objects with the final hidden class directly (no transitions), and `set_slot` writes property values to inline slots without lookup overhead.
 
 ### String Optimizations
 
-**Lazy String Hashing** (`zigts/string.zig:18-24, 44-54`): Hash computation deferred until needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access.
+**Lazy String Hashing** (`packages/zigts/src/string.zig:18-24, 44-54`): Hash computation deferred until needed. `hash_computed` flag tracks state; `getHash()`/`getHashConst()` compute on first access.
 
-**Pre-interned HTTP Atoms** (`zigts/object.zig:237-264`): 27 common headers with O(1) lookup (content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, etc.).
+**Pre-interned HTTP Atoms** (`packages/zigts/src/object.zig:237-264`): 27 common headers with O(1) lookup (content-type, content-length, accept, host, user-agent, authorization, cache-control, CORS headers, etc.).
 
-**HTTP String Cache** (`zigts/context.zig:111-135, 462+`): Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
+**HTTP String Cache** (`packages/zigts/src/context.zig:111-135, 462+`): Pre-allocated status texts (OK, Created, Not Found, etc.), content-type strings (application/json, text/plain, text/html), and HTTP method strings (GET, POST, PUT, etc.).
 
 ### Pool and Request Optimizations
 
-**Pool Slot Hint** (`zigts/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
+**Pool Slot Hint** (`packages/zigts/src/pool.zig`): `free_hint` atomic reduces slot acquisition from O(N) linear scan to O(1) in the common case.
 
-**Relaxed Atomic Ordering** (`src/zruntime.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
+**Relaxed Atomic Ordering** (`packages/runtime/src/zruntime.zig`): The `in_use` counter uses `.monotonic` ordering since it's only for metrics/limits, not synchronization.
 
-**LRU Static Cache** (`src/server.zig`): Static file cache uses doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
+**LRU Static Cache** (`packages/runtime/src/server.zig`): Static file cache uses doubly-linked list LRU eviction instead of clear-all, eliminating latency spikes.
 
-**Adaptive Backoff** (`src/zruntime.zig`): Three-phase backoff for pool contention:
+**Adaptive Backoff** (`packages/runtime/src/zruntime.zig`): Three-phase backoff for pool contention:
 - Phase 1: 10 spin iterations using `spinLoopHint`
 - Phase 2: Sleep 10us-1ms with jitter (prevents thundering herd)
 - Phase 3: Circuit breaker fails fast after 100 retries
 
-**Zero-Copy Response** (`src/zruntime.zig`): Borrowed mode for both body and headers avoids memcpy when arena lifetime is guaranteed.
+**Zero-Copy Response** (`packages/runtime/src/zruntime.zig`): Borrowed mode for both body and headers avoids memcpy when arena lifetime is guaranteed.
 
 ### Build-Time Precompilation
 
@@ -359,18 +362,18 @@ Every precompilation extracts a handler contract by walking the IR for virtual m
 When no explicit `--policy` file is provided, the precompiler auto-derives a `RuntimePolicy` from the contract and embeds it in the generated code. Static sections are restricted to exactly the proven literals. Dynamic sections remain permissive. The result is zero-configuration least-privilege sandboxing for every precompiled handler.
 
 **Key files**:
-- `zigts/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
-- `zigts/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
+- `packages/zigts/src/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
+- `packages/zigts/src/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
 - `tools/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
-- `zigts/modules/sql.zig` / `zigts/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
+- `packages/zigts/src/modules/sql.zig` / `packages/zigts/src/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
 
 **Enforcement points** (activated by the embedded policy and contract):
-- `zigts/modules/env.zig` - `allowsEnv()` check on env var access
-- `zigts/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
-- `zigts/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
-- `src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
-- `src/contract_runtime.zig` - startup env var validation, route pre-filtering
-- `src/server.zig` - route pre-filter rejects unproven method+path at HTTP layer
+- `packages/zigts/src/modules/env.zig` - `allowsEnv()` check on env var access
+- `packages/zigts/src/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
+- `packages/zigts/src/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
+- `packages/runtime/src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
+- `packages/runtime/src/contract_runtime.zig` - startup env var validation, route pre-filtering
+- `packages/runtime/src/server.zig` - route pre-filter rejects unproven method+path at HTTP layer
 
 ### Module Binding System
 
@@ -398,21 +401,21 @@ Each `FunctionBinding` carries an `effect` annotation (read, write, or none). Du
 Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SAM tags (zigttp:retrySafe, zigttp:readOnly), and OpenAPI specs (x-zigttp-properties extension). At runtime, `pure` or `deterministic`+`read_only` handlers get automatic response memoization: GET/HEAD responses are cached and served from Zig memory without entering JS (`proof_adapter.zig`).
 
 **Key files**:
-- `zigts/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `ModuleCapability`, `validateBindings()`, capability-checked helpers (`clockNowMsChecked`, `fillRandomChecked`, `hmacSha256Checked`, `writeStderrChecked`, `readFileChecked`, etc.), threadlocal `ActiveModuleContext` push/pop for call-scoped enforcement
-- `zigts/builtin_modules.zig` - registry of all built-in bindings with comptime validation (unique specifiers, unique function names, duplicate capability detection)
-- `zigts/modules/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
-- `zigts/module_binding_adapter.zig` - adapts SDK `ModuleBinding` to internal types with ordinal-alignment comptime assertions for `ModuleCapability`
-- `zigts/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
+- `packages/zigts/src/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `ModuleCapability`, `validateBindings()`, capability-checked helpers (`clockNowMsChecked`, `fillRandomChecked`, `hmacSha256Checked`, `writeStderrChecked`, `readFileChecked`, etc.), threadlocal `ActiveModuleContext` push/pop for call-scoped enforcement
+- `packages/zigts/src/builtin_modules.zig` - registry of all built-in bindings with comptime validation (unique specifiers, unique function names, duplicate capability detection)
+- `packages/zigts/src/modules/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
+- `packages/zigts/src/module_binding_adapter.zig` - adapts SDK `ModuleBinding` to internal types with ordinal-alignment comptime assertions for `ModuleCapability`
+- `packages/zigts/src/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeProperties()`
 - `tools/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `tools/openapi_manifest.zig` - `x-zigttp-properties` extension
 
 ### Compile-Time Path Analysis and Behavioral Contract
 
-`PathGenerator` (`zigts/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
+`PathGenerator` (`packages/zigts/src/path_generator.zig`) walks the handler's IR tree, forking at every branch point (`if`/`match`) and I/O success/failure boundary. It produces one test case per execution path. PathGenerator runs when `-Dgenerate-tests=true` or `-Dcontract` is specified.
 
-Each enumerated path becomes a `BehaviorPath` (`zigts/handler_contract.zig`) in the contract's `behaviors` section. A `BehaviorPath` records route method/pattern, branching conditions (which I/O calls succeed or fail), the I/O call sequence, response status, I/O depth, and whether it represents a failure path. `behaviors_exhaustive` is true when PathGenerator did not hit the 1024-path cap.
+Each enumerated path becomes a `BehaviorPath` (`packages/zigts/src/handler_contract.zig`) in the contract's `behaviors` section. A `BehaviorPath` records route method/pattern, branching conditions (which I/O calls succeed or fail), the I/O call sequence, response status, I/O depth, and whether it represents a failure path. `behaviors_exhaustive` is true when PathGenerator did not hit the 1024-path cap.
 
-`FaultCoverageChecker` (`zigts/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response. Results flow into `contract.json`, `HandlerProperties.fault_covered`, and deployment manifest tags.
+`FaultCoverageChecker` (`packages/zigts/src/fault_coverage.zig`) analyzes these paths against `FailureSeverity` annotations on each virtual module function (`critical` for auth/validation, `expected` for cache/env, `upstream` for fetchSync). It warns when a critical I/O failure path produces a 2xx response. Results flow into `contract.json`, `HandlerProperties.fault_covered`, and deployment manifest tags.
 
 ### Upgrade Verification
 
@@ -429,7 +432,7 @@ Output: `upgrade-manifest.json` with verdict, justification, surface summary, be
 
 ### Guard Composition
 
-The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `zigts/parser/parse.zig` (pipe chain collection), `zigts/modules/compose.zig` (guard marker).
+The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `packages/zigts/src/parser/parse.zig` (pipe chain collection), `packages/zigts/src/modules/compose.zig` (guard marker).
 
 ### Proven Deployment Manifests
 

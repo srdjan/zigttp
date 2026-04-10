@@ -10,7 +10,7 @@ Rule review system and Claude Code integration, phased across minor versions.
 | v0.14.2 | `edit-simulate` subcommand with `--stdin-json`, `describe-rule` with `--json` and `--hash`, `search` subcommand |
 | v0.14.3 | `review-patch` with `--diff-only` and `ReviewFile` type, Claude Code PostToolUse hook in settings.json, `python3`/`python` deny list |
 | v0.15.0 | CI policy hash assertion in release workflow, threat model doc, `build.zig` included in release tarball, rollout doc |
-| v0.15.1 | `zigts expert` namespace (meta, verify-paths, delegation), PreToolUse/PostToolUse/SessionStart hook scripts in `tools/hooks/`, `zigts init` installs hooks with executable permissions, `.claude/settings.json` with deny rules for hooks and rule_registry, CI expert subsystem smoke test |
+| v0.15.1 | `zigts expert` namespace (meta, verify-paths, delegation), PreToolUse/PostToolUse/SessionStart hook scripts in `packages/tools/src/hooks/`, `zigts init` installs hooks with executable permissions, `.claude/settings.json` with deny rules for hooks and rule_registry, CI expert subsystem smoke test |
 
 ## Deliverable Details
 
