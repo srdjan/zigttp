@@ -355,15 +355,6 @@ fn envVarsContainKey(env_vars: []const plan_mod.EnvVar, key: []const u8) bool {
     return false;
 }
 
-fn freeRequestPreviews(allocator: std.mem.Allocator, requests: []const plan_mod.HttpRequestPreview) void {
-    for (requests) |request| {
-        allocator.free(request.method);
-        allocator.free(request.url);
-        if (request.body_json) |body| allocator.free(body);
-    }
-    allocator.free(requests);
-}
-
 test "evaluate reconciliation flags state drift" {
     const env_vars = [_]plan_mod.EnvVar{
         .{ .key = "KEEP", .value = "1" },
