@@ -2,11 +2,9 @@ const std = @import("std");
 const redact = @import("redact.zig");
 
 pub const Provider = enum {
-    render,
     northflank,
 
     pub fn fromString(raw: []const u8) ?Provider {
-        if (std.mem.eql(u8, raw, "render")) return .render;
         if (std.mem.eql(u8, raw, "northflank")) return .northflank;
         return null;
     }
@@ -401,7 +399,7 @@ test "mergeManagedEnvVars drops no keys when no managed list matches" {
 test "writePlanJson redacts env values and serializes reconcile action" {
     const env_vars = [_]EnvVar{.{ .key = "SECRET", .value = "hunter2" }};
     const deploy_plan = DeployPlan{
-        .provider = .render,
+        .provider = .northflank,
         .name = "demo",
         .handler_path = "src/handler.ts",
         .region = "oregon",

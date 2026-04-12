@@ -98,17 +98,29 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 printDeployHelp();
                 return;
             }
-            if (err == error.UnsupportedProvider) {
-                std.debug.print("Unsupported provider. Use --provider render or --provider northflank.\n\n", .{});
+            if (err == error.UnknownOption) {
+                std.debug.print("zigttp deploy takes no arguments.\n\n", .{});
                 printDeployHelp();
                 return;
             }
-            if (err == error.ConfirmRequired) {
+            if (err == error.HandlerNotFound) {
+                std.debug.print("Could not find a handler file. Create handler.ts in this directory and try again.\n", .{});
+                return;
+            }
+            if (err == error.NameUndetectable) {
+                std.debug.print("Could not determine a service name from package.json, git remote, or directory name.\n", .{});
+                return;
+            }
+            if (err == error.DeployDrift) {
                 return;
             }
             std.log.err("Deploy failed: {}", .{err});
             return err;
         };
+        return;
+    }
+    if (std.mem.eql(u8, command, "logout")) {
+        try deploy.logout(allocator);
         return;
     }
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
@@ -989,40 +1001,22 @@ fn printCompileHelp() void {
 
 fn printDeployHelp() void {
     const help =
-        \\zigttp deploy [options] <handler.ts>
-        \\zigttp deploy --provider render --name demo src/handler.ts --dry-run --json
+        \\zigttp deploy
         \\
-        \\Deploy a handler to Render or Northflank using a native OCI image built in Zig.
-        \\v1 validates linux/amd64 only; arm64 is accepted but unverified.
+        \\Deploy the handler in this directory to the zigttp runtime.
         \\
-        \\Options:
-        \\  --provider <render|northflank>   Target provider (required)
-        \\  --handler <PATH>                 Handler path (optional if passed positionally)
-        \\  --name <NAME>                    Service name (required)
-        \\  --region <REGION>                Provider region override
-        \\  --env-file <PATH>                Load KEY=VALUE runtime env vars
-        \\  --arch <amd64|arm64>             Target architecture (default: amd64)
-        \\  --dry-run                        Emit plan only, no network mutations
-        \\  --json                           Emit structured JSON output
-        \\  --confirm                        Allow replace-like updates
-        \\  --help                           Show this help
+        \\On first run, prints a device-code URL. Open it in your browser to sign in.
+        \\Zigttp remembers you after that.
         \\
-        \\Environment:
-        \\  ZIGTTP_OCI_REGISTRY              OCI registry host (e.g. ghcr.io)
-        \\  ZIGTTP_OCI_NAMESPACE             OCI repo namespace (e.g. acme/zigttp-handlers)
-        \\  ZIGTTP_OCI_USERNAME              Registry username (push only)
-        \\  ZIGTTP_OCI_PASSWORD              Registry password or token (push only)
-        \\  RENDER_API_KEY                   Render API token
-        \\  RENDER_WORKSPACE_ID              Render workspace id
-        \\  RENDER_PLAN                      Render service plan tier
-        \\  RENDER_REGISTRY_CREDENTIAL_ID    Optional Render registry credential
-        \\  NORTHFLANK_API_TOKEN             Northflank API token
-        \\  NORTHFLANK_PROJECT_ID            Northflank project id
-        \\  NORTHFLANK_PLAN_ID               Northflank billing plan id
-        \\  NORTHFLANK_REGISTRY_CREDENTIAL_ID  Optional Northflank registry credential
+        \\The command takes no arguments. It auto-detects:
+        \\  handler file - handler.ts, handler.tsx, handler.jsx, handler.js,
+        \\                 or the same under src/
+        \\  service name - package.json name field, then git origin remote,
+        \\                 then the current directory name
+        \\  runtime env  - read from .env in this directory if present
         \\
-        \\Image references are always content-addressed as
-        \\  {ZIGTTP_OCI_REGISTRY}/{ZIGTTP_OCI_NAMESPACE}/{name}@sha256:<manifest-digest>
+        \\Related:
+        \\  zigttp logout   Forget the saved sign-in credentials
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -1038,7 +1032,8 @@ fn printHelp() void {
         \\  zigttp dev [handler-or-project]         Watch mode
         \\  zigttp check [handler.ts] [--contract]  Verify handler
         \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
-        \\  zigttp deploy [options] <handler.ts>    Deploy to Render or Northflank
+        \\  zigttp deploy                           Deploy the handler in this directory
+        \\  zigttp logout                           Forget saved sign-in credentials
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check
         \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
         \\  zigttp link <system.json>               Cross-handler linking
