@@ -144,6 +144,45 @@ test "sanitize collapses and lowercases" {
     }
 }
 
+test "detectHandler finds handler.ts in cwd" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = "// stub" });
+
+    const tmp_path = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const cwd_before = try std.process.currentPathAlloc(io_backend.io(), allocator);
+    defer allocator.free(cwd_before);
+    try std.posix.chdir(tmp_path);
+    defer std.posix.chdir(cwd_before) catch {};
+
+    const found = try detectHandler(allocator);
+    defer allocator.free(found);
+    try std.testing.expectEqualStrings("handler.ts", found);
+}
+
+test "detectHandler errors when nothing matches" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
+    defer allocator.free(tmp_path);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const cwd_before = try std.process.currentPathAlloc(io_backend.io(), allocator);
+    defer allocator.free(cwd_before);
+    try std.posix.chdir(tmp_path);
+    defer std.posix.chdir(cwd_before) catch {};
+
+    try std.testing.expectError(error.HandlerNotFound, detectHandler(allocator));
+}
+
 test "basenameFromGitUrl handles ssh and https" {
     const cases = [_]struct { in: []const u8, out: []const u8 }{
         .{ .in = "git@github.com:acme/demo.git", .out = "demo" },
