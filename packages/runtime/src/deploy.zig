@@ -126,10 +126,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     );
     defer if (reconciliation.warning) |warning| allocator.free(warning);
     if (reconciliation.action == .replace_requires_confirm) {
-        if (reconciliation.warning) |warning| {
-            _ = std.c.write(std.c.STDERR_FILENO, warning.ptr, warning.len);
-            _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
-        }
+        if (reconciliation.warning) |warning| stderrLine(warning);
         return error.DeployDrift;
     }
 
@@ -177,6 +174,11 @@ fn stdoutLine(prefix: []const u8, value: []const u8) void {
     _ = std.c.write(std.c.STDOUT_FILENO, prefix.ptr, prefix.len);
     if (value.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, value.ptr, value.len);
     _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+}
+
+fn stderrLine(line: []const u8) void {
+    _ = std.c.write(std.c.STDERR_FILENO, line.ptr, line.len);
+    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
 }
 
 fn managedEnvKeys(allocator: std.mem.Allocator, env_vars: []const plan_mod.EnvVar) ![]const []const u8 {
