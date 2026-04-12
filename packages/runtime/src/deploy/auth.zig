@@ -10,12 +10,6 @@ pub const Credentials = struct {
     }
 };
 
-pub const Error = error{
-    NotSignedIn,
-    HomeDirMissing,
-    InvalidCredentials,
-};
-
 const rel_dir = ".zigttp";
 const rel_file = ".zigttp/credentials";
 
