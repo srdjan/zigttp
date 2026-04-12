@@ -14,19 +14,6 @@ pub const ProviderContext = struct {
     state_entry: ?*const state.Entry,
 };
 
-pub fn buildPlan(allocator: std.mem.Allocator, ctx: *const ProviderContext) !plan.ProviderPlan {
-    const requests = try allocator.alloc(plan.HttpRequestPreview, 1);
-    requests[0] = .{
-        .method = try allocator.dupe(u8, "PUT"),
-        .url = try std.fmt.allocPrint(allocator, "https://api.northflank.com/v1/projects/{s}/services/deployment", .{ctx.project_id}),
-        .body_json = try putBodyJson(allocator, ctx),
-    };
-    return .{
-        .action = if (ctx.state_entry != null) .update else .create,
-        .requests = requests,
-    };
-}
-
 pub fn execute(
     allocator: std.mem.Allocator,
     ctx: *const ProviderContext,
@@ -130,9 +117,9 @@ fn parseOptionalStringField(allocator: std.mem.Allocator, body: []const u8, path
     return try allocator.dupe(u8, current.string);
 }
 
-test "northflank plan builds put request" {
+test "putBodyJson serializes deployment request" {
     const env_vars = [_]plan.EnvVar{.{ .key = "PORT", .value = "3000" }};
-    const provider_plan = try buildPlan(std.testing.allocator, &.{
+    const body = try putBodyJson(std.testing.allocator, &.{
         .name = "demo",
         .region = "us-east",
         .image_ref = "ghcr.io/acme/demo@sha256:abc",
@@ -142,13 +129,7 @@ test "northflank plan builds put request" {
         .registry_credential_id = null,
         .state_entry = null,
     });
-    defer {
-        for (provider_plan.requests) |req| {
-            std.testing.allocator.free(req.method);
-            std.testing.allocator.free(req.url);
-            if (req.body_json) |body| std.testing.allocator.free(body);
-        }
-        std.testing.allocator.free(provider_plan.requests);
-    }
-    try std.testing.expectEqual(plan.ProviderAction.create, provider_plan.action);
+    defer std.testing.allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"imagePath\":\"ghcr.io/acme/demo@sha256:abc\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"PORT\":\"3000\"") != null);
 }
