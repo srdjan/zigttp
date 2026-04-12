@@ -2270,42 +2270,72 @@ const config = ServerConfig{
 
 #### Native Deploy CLI
 
-`zigttp deploy` compiles the handler to a Linux binary, builds an OCI image in
-Zig, pushes it to a registry, and then creates or updates a service on Render
-or Northflank. No Docker daemon is required.
+`zigttp deploy` cross-compiles the handler to a Linux binary, packages it as
+an OCI image built in Zig, pushes the image to any OCI registry, and then
+creates or updates a service on Render or Northflank that pulls the image by
+digest. The only external tool invoked is `zig`, for cross-compilation.
 
 ```bash
-zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
+RENDER_WORKSPACE_ID=ws_demo RENDER_PLAN=starter \
+zigttp deploy --provider render --name demo --region oregon \
   examples/handler/handler.ts --dry-run --json
 ```
 
-Supported flags:
+Flags:
 
-- `--provider render|northflank`
-- `--name <service>`
-- `--registry <host/repo>`
-- `--tag <tag>`
+- `--provider render|northflank` (required)
+- `--name <service>` (required)
 - `--region <region>`
-- `--env-file <path>`
-- `--arch amd64|arm64`
-- `--dry-run`
-- `--json`
-- `--confirm`
+- `--env-file <path>`, a dotenv file of runtime env vars for the service
+- `--arch amd64|arm64`, default amd64; only amd64 is validated in v1
+- `--dry-run`, plan only, no registry push, no provider calls
+- `--json`, structured output
+- `--confirm`, allow replace-like reconciliation
 
-Required environment variables:
+Everything else is read from environment variables.
 
-- Render: `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, `RENDER_PLAN`
-- Northflank: `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`, `NORTHFLANK_PLAN_ID`
-- Registry push: `ZIGTTP_REGISTRY_USER`, `ZIGTTP_REGISTRY_TOKEN`
+OCI push:
 
-Use `--dry-run --json` first. The command emits the resolved build command,
-image digests, registry upload plan, and provider API payloads without mutating
-remote state. If the local deploy state indicates a replace-like change
-(provider scope, region, plan, or managed env-key removal), rerun with
-`--confirm`.
+- `ZIGTTP_OCI_REGISTRY` for the host (e.g. `ghcr.io`)
+- `ZIGTTP_OCI_NAMESPACE` for the repo namespace (e.g. `acme/zigttp-handlers`)
+- `ZIGTTP_OCI_USERNAME`, `ZIGTTP_OCI_PASSWORD` for the registry credentials (push only)
 
-`zigttp deploy` is the supported deployment path. The old build-time
-`-Ddeploy=aws` manifest generator has been removed.
+Render:
+
+- `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, `RENDER_PLAN`
+- `RENDER_REGISTRY_CREDENTIAL_ID` for private registries (optional)
+
+Northflank:
+
+- `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`, `NORTHFLANK_PLAN_ID`
+- `NORTHFLANK_REGISTRY_CREDENTIAL_ID` for private registries (optional)
+
+Image references are always content-addressed; tags are never user-supplied.
+
+```
+{ZIGTTP_OCI_REGISTRY}/{ZIGTTP_OCI_NAMESPACE}/{sanitized-name}@sha256:<manifest-digest>
+```
+
+Dry-run requires the OCI registry/namespace and the provider scope/plan
+vars. Push credentials and the provider API token are only required for a
+real deploy. Any missing variables are listed together in a single error.
+
+Reconciliation uses a local state file, `.zigttp/deploy-state.json`, that
+stores non-secret provider identifiers. A second run for the same
+`(provider, name)` reuses the stored `service_id` and patches in place.
+A change to scope, region, plan, or removal of a previously managed env
+var triggers a `replace_requires_confirm` action that fails unless
+`--confirm` is passed. Even with `--confirm`, v1 never deletes the old
+remote service; it rebinds and updates state.
+
+The same compiler-proven contract used for sandboxing drives the deploy.
+The dry-run output prints the proof level, proven env vars, egress hosts,
+routes, and OWASP Top 10 coverage. The same facts go into OCI image labels
+so provenance survives in the registry.
+
+The old build-time `-Ddeploy=aws` manifest generator has been removed; this
+is now the only supported deployment path.
 
 #### Docker Container
 

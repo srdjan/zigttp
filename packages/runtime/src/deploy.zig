@@ -18,6 +18,111 @@ const Reconciliation = struct {
     warning: ?[]u8 = null,
 };
 
+const Environment = struct {
+    registry_host: []u8,
+    namespace: []u8,
+    registry_username: ?[]u8,
+    registry_password: ?[]u8,
+    scope_id: []u8,
+    plan_id: []u8,
+    provider_api_token: ?[]u8,
+    registry_credential_id: ?[]u8,
+
+    fn deinit(self: *Environment, allocator: std.mem.Allocator) void {
+        allocator.free(self.registry_host);
+        allocator.free(self.namespace);
+        if (self.registry_username) |value| allocator.free(value);
+        if (self.registry_password) |value| allocator.free(value);
+        allocator.free(self.scope_id);
+        allocator.free(self.plan_id);
+        if (self.provider_api_token) |value| allocator.free(value);
+        if (self.registry_credential_id) |value| allocator.free(value);
+    }
+};
+
+const ProviderEnvNames = struct {
+    scope: []const u8,
+    plan: []const u8,
+    token: []const u8,
+    credential: []const u8,
+};
+
+fn providerEnvNames(provider: plan_mod.Provider) ProviderEnvNames {
+    return switch (provider) {
+        .render => .{
+            .scope = "RENDER_WORKSPACE_ID",
+            .plan = "RENDER_PLAN",
+            .token = "RENDER_API_KEY",
+            .credential = "RENDER_REGISTRY_CREDENTIAL_ID",
+        },
+        .northflank => .{
+            .scope = "NORTHFLANK_PROJECT_ID",
+            .plan = "NORTHFLANK_PLAN_ID",
+            .token = "NORTHFLANK_API_TOKEN",
+            .credential = "NORTHFLANK_REGISTRY_CREDENTIAL_ID",
+        },
+    };
+}
+
+fn resolveEnvironment(allocator: std.mem.Allocator, config: *const config_mod.DeployConfig) !Environment {
+    const names = providerEnvNames(config.provider);
+
+    const registry_host = try optionalEnvOwned(allocator, "ZIGTTP_OCI_REGISTRY");
+    errdefer if (registry_host) |value| allocator.free(value);
+    const namespace = try optionalEnvOwned(allocator, "ZIGTTP_OCI_NAMESPACE");
+    errdefer if (namespace) |value| allocator.free(value);
+    const registry_user = try optionalEnvOwned(allocator, "ZIGTTP_OCI_USERNAME");
+    errdefer if (registry_user) |value| allocator.free(value);
+    const registry_pass = try optionalEnvOwned(allocator, "ZIGTTP_OCI_PASSWORD");
+    errdefer if (registry_pass) |value| allocator.free(value);
+    const scope = try optionalEnvOwned(allocator, names.scope);
+    errdefer if (scope) |value| allocator.free(value);
+    const plan_id = try optionalEnvOwned(allocator, names.plan);
+    errdefer if (plan_id) |value| allocator.free(value);
+    const api_token = try optionalEnvOwned(allocator, names.token);
+    errdefer if (api_token) |value| allocator.free(value);
+    const credential_id = try optionalEnvOwned(allocator, names.credential);
+    errdefer if (credential_id) |value| allocator.free(value);
+
+    var missing = std.ArrayList([]const u8).empty;
+    defer missing.deinit(allocator);
+
+    if (registry_host == null) try missing.append(allocator, "ZIGTTP_OCI_REGISTRY");
+    if (namespace == null) try missing.append(allocator, "ZIGTTP_OCI_NAMESPACE");
+    if (scope == null) try missing.append(allocator, names.scope);
+    if (plan_id == null) try missing.append(allocator, names.plan);
+    if (!config.dry_run) {
+        if (registry_user == null) try missing.append(allocator, "ZIGTTP_OCI_USERNAME");
+        if (registry_pass == null) try missing.append(allocator, "ZIGTTP_OCI_PASSWORD");
+        if (api_token == null) try missing.append(allocator, names.token);
+    }
+
+    if (missing.items.len > 0) {
+        var report: std.Io.Writer.Allocating = .init(allocator);
+        defer report.deinit();
+        try report.writer.writeAll("Missing required environment variables:\n");
+        for (missing.items) |name| {
+            try report.writer.writeAll("  - ");
+            try report.writer.writeAll(name);
+            try report.writer.writeAll("\n");
+        }
+        const bytes = report.writer.buffered();
+        _ = std.c.write(std.c.STDERR_FILENO, bytes.ptr, bytes.len);
+        return error.MissingEnvironmentVariable;
+    }
+
+    return .{
+        .registry_host = registry_host.?,
+        .namespace = namespace.?,
+        .registry_username = registry_user,
+        .registry_password = registry_pass,
+        .scope_id = scope.?,
+        .plan_id = plan_id.?,
+        .provider_api_token = api_token,
+        .registry_credential_id = credential_id,
+    };
+}
+
 pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var config = config_mod.parse(allocator, argv) catch |err| switch (err) {
         error.HelpRequested => return error.HelpRequested,
@@ -25,7 +130,16 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     };
     defer config.deinit(allocator);
 
-    const registry_value = config.registry orelse return error.MissingRegistry;
+    var env = try resolveEnvironment(allocator, &config);
+    defer env.deinit(allocator);
+
+    const sanitized_name = try sanitizeRepoName(allocator, config.name);
+    defer allocator.free(sanitized_name);
+    const image_repo = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ env.namespace, sanitized_name });
+    defer allocator.free(image_repo);
+    const registry_display = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ env.registry_host, image_repo });
+    defer allocator.free(registry_display);
+
     const env_vars = try config_mod.loadEnvFile(allocator, config.env_file);
     defer {
         for (env_vars) |item| {
@@ -82,12 +196,6 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         proof_report = try renderProofReport(allocator, &proven_extract.?.facts, config.provider.toString());
     }
 
-    const tag = if (config.tag) |value|
-        try allocator.dupe(u8, value)
-    else
-        try defaultTag(allocator, compiled.bytecode);
-    defer allocator.free(tag);
-
     var build_result = try builder.buildLinuxArtifact(allocator, config.handler_path, config.arch.targetTriple());
     defer build_result.deinit(allocator);
 
@@ -97,10 +205,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try allocator.alloc(oci_config.Label, 0);
     defer freeLabels(allocator, image_labels);
 
-    var image = try oci_image.buildImage(allocator, registry_value, tag, config.arch, build_result.binary_bytes, image_labels);
+    var image = try oci_image.buildImage(allocator, env.registry_host, image_repo, config.arch, build_result.binary_bytes, image_labels);
     defer image.deinit(allocator);
 
-    var registry_ref = try registry.parseRegistryRef(allocator, registry_value);
+    var registry_ref = try registry.makeRegistryRef(allocator, env.registry_host, image_repo);
     defer registry_ref.deinit(allocator);
     const registry_requests = try registry.buildRequestPreviews(allocator, &registry_ref, &image);
     defer freeRequestPreviews(allocator, registry_requests);
@@ -114,23 +222,12 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         .northflank => "us-east",
     };
 
-    const scope_id = switch (config.provider) {
-        .render => try readEnv(allocator, "RENDER_WORKSPACE_ID"),
-        .northflank => try readEnv(allocator, "NORTHFLANK_PROJECT_ID"),
-    };
-    defer allocator.free(scope_id);
-    const plan_id = switch (config.provider) {
-        .render => try readEnv(allocator, "RENDER_PLAN"),
-        .northflank => try readEnv(allocator, "NORTHFLANK_PLAN_ID"),
-    };
-    defer allocator.free(plan_id);
-
-    const reconciliation = try evaluateReconciliation(allocator, previous, scope_id, region, plan_id, env_vars);
+    const reconciliation = try evaluateReconciliation(allocator, previous, env.scope_id, region, env.plan_id, env_vars);
     defer if (reconciliation.warning) |warning| allocator.free(warning);
 
     var provider_plan = switch (config.provider) {
-        .render => try buildRenderPlan(allocator, config.name, region, image.image_digest_ref, env_vars, scope_id, plan_id, previous),
-        .northflank => try buildNorthflankPlan(allocator, config.name, region, image.image_digest_ref, env_vars, scope_id, plan_id, previous),
+        .render => try buildRenderPlan(allocator, config.name, region, image.image_digest_ref, env_vars, &env, previous),
+        .northflank => try buildNorthflankPlan(allocator, config.name, region, image.image_digest_ref, env_vars, &env, previous),
     };
     defer freeRequestPreviews(allocator, provider_plan.requests);
     provider_plan.action = reconciliation.action;
@@ -140,7 +237,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         .name = config.name,
         .handler_path = config.handler_path,
         .region = region,
-        .registry = registry_value,
+        .registry = registry_display,
         .arch = config.arch,
         .dry_run = config.dry_run,
         .json = config.json,
@@ -151,7 +248,6 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
             .target_triple = config.arch.targetTriple(),
             .binary_path = build_result.binary_path,
             .binary_sha256 = build_result.binary_sha256,
-            .image_tag_ref = image.image_tag_ref,
             .image_digest_ref = image.image_digest_ref,
             .config_digest = image.config_blob.digest,
             .layer_digest = image.layer_blob.digest,
@@ -166,21 +262,26 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         .proof_report = proof_report,
     };
 
-    if (config.json) {
-        emitPlanJson(allocator, &deploy_plan) catch |err| return err;
-        if (config.dry_run) return;
-    } else if (config.dry_run) {
-        std.debug.print("Provider: {s}\n", .{config.provider.toString()});
-        std.debug.print("Image:    {s}\n", .{image.image_digest_ref});
-        std.debug.print("Build:    {s}\n", .{build_result.build_command});
-        std.debug.print("Action:   {s}\n", .{provider_plan.action.toString()});
-        if (reconciliation.warning) |warning| {
-            std.debug.print("Warning:  {s}\n", .{warning});
-        }
-        if (proof_report) |report| {
-            std.debug.print("\n{s}\n", .{report});
+    if (config.dry_run) {
+        if (config.json) {
+            try emitPlanJson(allocator, &deploy_plan);
+        } else {
+            std.debug.print("Provider: {s}\n", .{config.provider.toString()});
+            std.debug.print("Image:    {s}\n", .{image.image_digest_ref});
+            std.debug.print("Build:    {s}\n", .{build_result.build_command});
+            std.debug.print("Action:   {s}\n", .{provider_plan.action.toString()});
+            if (reconciliation.warning) |warning| {
+                std.debug.print("Warning:  {s}\n", .{warning});
+            }
+            if (proof_report) |report| {
+                std.debug.print("\n{s}\n", .{report});
+            }
         }
         return;
+    }
+
+    if (config.json) {
+        try emitPlanJson(allocator, &deploy_plan);
     }
 
     if (reconciliation.action == .replace_requires_confirm and !config.confirm) {
@@ -192,15 +293,11 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         return error.ConfirmRequired;
     }
 
-    const registry_user = try requireEnvOwned(allocator, "ZIGTTP_REGISTRY_USER");
-    defer allocator.free(registry_user);
-    const registry_token = try requireEnvOwned(allocator, "ZIGTTP_REGISTRY_TOKEN");
-    defer allocator.free(registry_token);
-    try registry.push(allocator, &registry_ref, &image, registry_user, registry_token);
+    try registry.push(allocator, &registry_ref, &image, env.registry_username.?, env.registry_password.?);
 
     const result = switch (config.provider) {
-        .render => try executeRender(allocator, config.name, region, image.image_digest_ref, env_vars, previous),
-        .northflank => try executeNorthflank(allocator, config.name, region, image.image_digest_ref, env_vars, previous),
+        .render => try executeRender(allocator, config.name, region, image.image_digest_ref, env_vars, &env, previous),
+        .northflank => try executeNorthflank(allocator, config.name, region, image.image_digest_ref, env_vars, &env, previous),
     };
     defer {
         allocator.free(result.service_id);
@@ -213,16 +310,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     try store.put(allocator, .{
         .provider = config.provider,
         .name = try allocator.dupe(u8, config.name),
-        .scope_id = try allocator.dupe(u8, switch (config.provider) {
-            .render => try readEnv(allocator, "RENDER_WORKSPACE_ID"),
-            .northflank => try readEnv(allocator, "NORTHFLANK_PROJECT_ID"),
-        }),
+        .scope_id = try allocator.dupe(u8, env.scope_id),
         .service_id = try allocator.dupe(u8, result.service_id),
         .region = try allocator.dupe(u8, region),
-        .plan_id = try allocator.dupe(u8, switch (config.provider) {
-            .render => try readEnv(allocator, "RENDER_PLAN"),
-            .northflank => try readEnv(allocator, "NORTHFLANK_PLAN_ID"),
-        }),
+        .plan_id = try allocator.dupe(u8, env.plan_id),
         .url = if (result.url) |value| try allocator.dupe(u8, value) else null,
         .last_image_digest = try allocator.dupe(u8, image.image_digest_ref),
         .managed_env_keys = try managedEnvKeys(allocator, env_vars),
@@ -245,20 +336,17 @@ fn buildRenderPlan(
     region: []const u8,
     image_ref: []const u8,
     env_vars: []const plan_mod.EnvVar,
-    scope_id: []const u8,
-    plan_id: []const u8,
+    env: *const Environment,
     previous: ?*const state.Entry,
 ) !plan_mod.ProviderPlan {
-    const registry_credential_id = optionalEnvOwned(allocator, "RENDER_REGISTRY_CREDENTIAL_ID") catch null;
-    defer if (registry_credential_id) |value| allocator.free(value);
     return render_adapter.buildPlan(allocator, &.{
         .name = name,
         .region = region,
         .image_ref = image_ref,
         .env_vars = env_vars,
-        .scope_id = scope_id,
-        .plan_id = plan_id,
-        .registry_credential_id = registry_credential_id,
+        .scope_id = env.scope_id,
+        .plan_id = env.plan_id,
+        .registry_credential_id = env.registry_credential_id,
         .state_entry = previous,
     });
 }
@@ -269,20 +357,17 @@ fn buildNorthflankPlan(
     region: []const u8,
     image_ref: []const u8,
     env_vars: []const plan_mod.EnvVar,
-    project_id: []const u8,
-    plan_id: []const u8,
+    env: *const Environment,
     previous: ?*const state.Entry,
 ) !plan_mod.ProviderPlan {
-    const registry_credential_id = optionalEnvOwned(allocator, "NORTHFLANK_REGISTRY_CREDENTIAL_ID") catch null;
-    defer if (registry_credential_id) |value| allocator.free(value);
     return northflank_adapter.buildPlan(allocator, &.{
         .name = name,
         .region = region,
         .image_ref = image_ref,
         .env_vars = env_vars,
-        .project_id = project_id,
-        .plan_id = plan_id,
-        .registry_credential_id = registry_credential_id,
+        .project_id = env.scope_id,
+        .plan_id = env.plan_id,
+        .registry_credential_id = env.registry_credential_id,
         .state_entry = previous,
     });
 }
@@ -293,26 +378,19 @@ fn executeRender(
     region: []const u8,
     image_ref: []const u8,
     env_vars: []const plan_mod.EnvVar,
+    env: *const Environment,
     previous: ?*const state.Entry,
 ) !plan_mod.DeployResult {
-    const scope_id = try requireEnvOwned(allocator, "RENDER_WORKSPACE_ID");
-    defer allocator.free(scope_id);
-    const plan_id = try requireEnvOwned(allocator, "RENDER_PLAN");
-    defer allocator.free(plan_id);
-    const api_key = try requireEnvOwned(allocator, "RENDER_API_KEY");
-    defer allocator.free(api_key);
-    const registry_credential_id = optionalEnvOwned(allocator, "RENDER_REGISTRY_CREDENTIAL_ID") catch null;
-    defer if (registry_credential_id) |value| allocator.free(value);
     return render_adapter.execute(allocator, &.{
         .name = name,
         .region = region,
         .image_ref = image_ref,
         .env_vars = env_vars,
-        .scope_id = scope_id,
-        .plan_id = plan_id,
-        .registry_credential_id = registry_credential_id,
+        .scope_id = env.scope_id,
+        .plan_id = env.plan_id,
+        .registry_credential_id = env.registry_credential_id,
         .state_entry = previous,
-    }, api_key);
+    }, env.provider_api_token.?);
 }
 
 fn executeNorthflank(
@@ -321,26 +399,19 @@ fn executeNorthflank(
     region: []const u8,
     image_ref: []const u8,
     env_vars: []const plan_mod.EnvVar,
+    env: *const Environment,
     previous: ?*const state.Entry,
 ) !plan_mod.DeployResult {
-    const project_id = try requireEnvOwned(allocator, "NORTHFLANK_PROJECT_ID");
-    defer allocator.free(project_id);
-    const plan_id = try requireEnvOwned(allocator, "NORTHFLANK_PLAN_ID");
-    defer allocator.free(plan_id);
-    const api_token = try requireEnvOwned(allocator, "NORTHFLANK_API_TOKEN");
-    defer allocator.free(api_token);
-    const registry_credential_id = optionalEnvOwned(allocator, "NORTHFLANK_REGISTRY_CREDENTIAL_ID") catch null;
-    defer if (registry_credential_id) |value| allocator.free(value);
     return northflank_adapter.execute(allocator, &.{
         .name = name,
         .region = region,
         .image_ref = image_ref,
         .env_vars = env_vars,
-        .project_id = project_id,
-        .plan_id = plan_id,
-        .registry_credential_id = registry_credential_id,
+        .project_id = env.scope_id,
+        .plan_id = env.plan_id,
+        .registry_credential_id = env.registry_credential_id,
         .state_entry = previous,
-    }, api_token);
+    }, env.provider_api_token.?);
 }
 
 fn managedEnvKeys(allocator: std.mem.Allocator, env_vars: []const plan_mod.EnvVar) ![]const []const u8 {
@@ -568,15 +639,55 @@ fn freeRequestPreviews(allocator: std.mem.Allocator, requests: []const plan_mod.
     allocator.free(requests);
 }
 
-fn defaultTag(allocator: std.mem.Allocator, bytecode: []const u8) ![]u8 {
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytecode, &digest, .{});
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return std.fmt.allocPrint(allocator, "sha256-{s}", .{hex[0..12]});
+fn sanitizeRepoName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var buf = try allocator.alloc(u8, name.len);
+    errdefer allocator.free(buf);
+
+    var len: usize = 0;
+    var last_was_separator = true;
+    for (name) |raw| {
+        const c: u8 = switch (raw) {
+            'A'...'Z' => raw - 'A' + 'a',
+            'a'...'z', '0'...'9' => raw,
+            '-', '_', '.' => '-',
+            else => '-',
+        };
+        if (c == '-') {
+            if (last_was_separator) continue;
+            last_was_separator = true;
+        } else {
+            last_was_separator = false;
+        }
+        buf[len] = c;
+        len += 1;
+    }
+    while (len > 0 and buf[len - 1] == '-') len -= 1;
+
+    if (len == 0) {
+        allocator.free(buf);
+        return error.InvalidServiceName;
+    }
+
+    return allocator.realloc(buf, len);
 }
 
-fn requireEnvOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    return (try optionalEnvOwned(allocator, name)) orelse error.MissingEnvironmentVariable;
+test "sanitizeRepoName lowercases, collapses separators, and trims" {
+    const cases = [_]struct { in: []const u8, out: []const u8 }{
+        .{ .in = "My-Demo", .out = "my-demo" },
+        .{ .in = "--Name--", .out = "name" },
+        .{ .in = "weird__name", .out = "weird-name" },
+        .{ .in = "a..b", .out = "a-b" },
+        .{ .in = "already-ok", .out = "already-ok" },
+    };
+    for (cases) |case| {
+        const got = try sanitizeRepoName(std.testing.allocator, case.in);
+        defer std.testing.allocator.free(got);
+        try std.testing.expectEqualStrings(case.out, got);
+    }
+}
+
+test "sanitizeRepoName rejects names that collapse to empty" {
+    try std.testing.expectError(error.InvalidServiceName, sanitizeRepoName(std.testing.allocator, "..."));
 }
 
 fn optionalEnvOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
@@ -584,11 +695,6 @@ fn optionalEnvOwned(allocator: std.mem.Allocator, name: []const u8) !?[]u8 {
     defer allocator.free(name_z);
     const raw = std.c.getenv(name_z) orelse return null;
     return try allocator.dupe(u8, std.mem.sliceTo(raw, 0));
-}
-
-fn readEnv(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    const value = try requireEnvOwned(allocator, name);
-    return value;
 }
 
 fn writeResultJson(writer: *std.Io.Writer, result: *const plan_mod.DeployResult) !void {

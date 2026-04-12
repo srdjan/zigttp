@@ -103,7 +103,6 @@ pub const ArtifactPlan = struct {
     target_triple: []const u8,
     binary_path: []const u8,
     binary_sha256: []const u8,
-    image_tag_ref: []const u8,
     image_digest_ref: []const u8,
     config_digest: []const u8,
     layer_digest: []const u8,
@@ -190,8 +189,6 @@ pub fn writePlanJson(writer: *std.Io.Writer, plan: *const DeployPlan) !void {
     try json.write(plan.artifact.binary_path);
     try json.objectField("binarySha256");
     try json.write(plan.artifact.binary_sha256);
-    try json.objectField("imageTagRef");
-    try json.write(plan.artifact.image_tag_ref);
     try json.objectField("imageDigestRef");
     try json.write(plan.artifact.image_digest_ref);
     try json.objectField("configDigest");
@@ -317,4 +314,126 @@ fn writeStringArray(json: *std.json.Stringify, values: []const []const u8) !void
     try json.beginArray();
     for (values) |value| try json.write(value);
     try json.endArray();
+}
+
+pub fn mergeManagedEnvVars(
+    allocator: std.mem.Allocator,
+    managed_keys: []const []const u8,
+    remote: []const EnvVar,
+    requested: []const EnvVar,
+) ![]EnvVar {
+    var out = std.ArrayList(EnvVar).empty;
+    errdefer {
+        for (out.items) |item| {
+            allocator.free(item.key);
+            allocator.free(item.value);
+        }
+        out.deinit(allocator);
+    }
+
+    for (remote) |entry| {
+        if (keyContains(managed_keys, entry.key)) continue;
+        try out.append(allocator, .{
+            .key = try allocator.dupe(u8, entry.key),
+            .value = try allocator.dupe(u8, entry.value),
+        });
+    }
+    for (requested) |entry| {
+        try out.append(allocator, .{
+            .key = try allocator.dupe(u8, entry.key),
+            .value = try allocator.dupe(u8, entry.value),
+        });
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn keyContains(keys: []const []const u8, key: []const u8) bool {
+    for (keys) |candidate| {
+        if (std.mem.eql(u8, candidate, key)) return true;
+    }
+    return false;
+}
+
+test "mergeManagedEnvVars preserves unmanaged remote keys and overwrites managed" {
+    const managed = [_][]const u8{"FOO"};
+    const remote = [_]EnvVar{
+        .{ .key = "FOO", .value = "old" },
+        .{ .key = "BAR", .value = "keep" },
+    };
+    const requested = [_]EnvVar{
+        .{ .key = "FOO", .value = "new" },
+    };
+
+    const merged = try mergeManagedEnvVars(std.testing.allocator, &managed, &remote, &requested);
+    defer {
+        for (merged) |item| {
+            std.testing.allocator.free(item.key);
+            std.testing.allocator.free(item.value);
+        }
+        std.testing.allocator.free(merged);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), merged.len);
+    try std.testing.expectEqualStrings("BAR", merged[0].key);
+    try std.testing.expectEqualStrings("keep", merged[0].value);
+    try std.testing.expectEqualStrings("FOO", merged[1].key);
+    try std.testing.expectEqualStrings("new", merged[1].value);
+}
+
+test "mergeManagedEnvVars drops no keys when no managed list matches" {
+    const managed = [_][]const u8{};
+    const remote = [_]EnvVar{.{ .key = "KEEP", .value = "yes" }};
+    const requested = [_]EnvVar{.{ .key = "NEW", .value = "val" }};
+
+    const merged = try mergeManagedEnvVars(std.testing.allocator, &managed, &remote, &requested);
+    defer {
+        for (merged) |item| {
+            std.testing.allocator.free(item.key);
+            std.testing.allocator.free(item.value);
+        }
+        std.testing.allocator.free(merged);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), merged.len);
+}
+
+test "writePlanJson redacts env values and serializes reconcile action" {
+    const env_vars = [_]EnvVar{.{ .key = "SECRET", .value = "hunter2" }};
+    const deploy_plan = DeployPlan{
+        .provider = .render,
+        .name = "demo",
+        .handler_path = "src/handler.ts",
+        .region = "oregon",
+        .registry = "ghcr.io/acme/demo",
+        .arch = .amd64,
+        .dry_run = true,
+        .json = true,
+        .confirm = false,
+        .env_vars = &env_vars,
+        .artifact = .{
+            .build_command = "zig build -Dhandler=src/handler.ts",
+            .target_triple = "x86_64-linux-musl",
+            .binary_path = "/tmp/zigttp",
+            .binary_sha256 = "sha256:abc",
+            .image_digest_ref = "ghcr.io/acme/demo@sha256:def",
+            .config_digest = "sha256:c",
+            .layer_digest = "sha256:l",
+            .manifest_digest = "sha256:m",
+            .layer_size = 100,
+            .manifest_size = 200,
+        },
+        .registry_requests = &.{},
+        .provider_plan = .{ .action = .replace_requires_confirm, .requests = &.{} },
+    };
+
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    try writePlanJson(&aw.writer, &deploy_plan);
+    const bytes = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"replace_requires_confirm\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"SECRET\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "hunter2") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "<redacted>") != null);
 }

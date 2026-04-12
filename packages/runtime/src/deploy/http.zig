@@ -1,5 +1,4 @@
 const std = @import("std");
-const redact = @import("redact.zig");
 
 pub const Header = struct {
     name: []const u8,
@@ -121,7 +120,6 @@ pub fn requestJson(
         const header_value = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token});
         defer allocator.free(header_value);
         try headers.append(allocator, .{ .name = "authorization", .value = header_value });
-        _ = redact.redactSecret(token);
     }
 
     return request(allocator, method, url, headers.items, body_json);
@@ -155,4 +153,10 @@ fn snapshotHeaders(allocator: std.mem.Allocator, iter: anytype) ![]Header {
         });
     }
     return try list.toOwnedSlice(allocator);
+}
+
+test "basicAuthHeader base64 encodes user:password per RFC 7617" {
+    const header = try basicAuthHeader(std.testing.allocator, "Aladdin", "open sesame");
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==", header);
 }

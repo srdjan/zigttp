@@ -990,16 +990,15 @@ fn printCompileHelp() void {
 fn printDeployHelp() void {
     const help =
         \\zigttp deploy [options] <handler.ts>
-        \\zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo src/handler.ts --dry-run --json
+        \\zigttp deploy --provider render --name demo src/handler.ts --dry-run --json
         \\
         \\Deploy a handler to Render or Northflank using a native OCI image built in Zig.
+        \\v1 validates linux/amd64 only; arm64 is accepted but unverified.
         \\
         \\Options:
         \\  --provider <render|northflank>   Target provider (required)
         \\  --handler <PATH>                 Handler path (optional if passed positionally)
         \\  --name <NAME>                    Service name (required)
-        \\  --registry <HOST/REPO>           OCI registry repository
-        \\  --tag <TAG>                      Image tag override
         \\  --region <REGION>                Provider region override
         \\  --env-file <PATH>                Load KEY=VALUE runtime env vars
         \\  --arch <amd64|arm64>             Target architecture (default: amd64)
@@ -1007,6 +1006,23 @@ fn printDeployHelp() void {
         \\  --json                           Emit structured JSON output
         \\  --confirm                        Allow replace-like updates
         \\  --help                           Show this help
+        \\
+        \\Environment:
+        \\  ZIGTTP_OCI_REGISTRY              OCI registry host (e.g. ghcr.io)
+        \\  ZIGTTP_OCI_NAMESPACE             OCI repo namespace (e.g. acme/zigttp-handlers)
+        \\  ZIGTTP_OCI_USERNAME              Registry username (push only)
+        \\  ZIGTTP_OCI_PASSWORD              Registry password or token (push only)
+        \\  RENDER_API_KEY                   Render API token
+        \\  RENDER_WORKSPACE_ID              Render workspace id
+        \\  RENDER_PLAN                      Render service plan tier
+        \\  RENDER_REGISTRY_CREDENTIAL_ID    Optional Render registry credential
+        \\  NORTHFLANK_API_TOKEN             Northflank API token
+        \\  NORTHFLANK_PROJECT_ID            Northflank project id
+        \\  NORTHFLANK_PLAN_ID               Northflank billing plan id
+        \\  NORTHFLANK_REGISTRY_CREDENTIAL_ID  Optional Northflank registry credential
+        \\
+        \\Image references are always content-addressed as
+        \\  {ZIGTTP_OCI_REGISTRY}/{ZIGTTP_OCI_NAMESPACE}/{name}@sha256:<manifest-digest>
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

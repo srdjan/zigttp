@@ -453,7 +453,13 @@ The parser recognizes `guard()` calls within pipe operator chains and desugars t
 
 ### Proven Deployment Planning
 
-Runtime `zigttp deploy` consumes compiler-proven contracts to build a provider-agnostic deploy plan. The system extracts `ProvenFacts` from the contract, renders a human proof report, maps those facts into OCI image labels, and then composes provider payloads for Render or Northflank. The portable proof extraction/reporting logic lives in `packages/tools/src/deploy_manifest.zig`; live deployment orchestration lives under `packages/runtime/src/deploy/`.
+`zigttp deploy` turns the compiler-proven contract into a running service on Render or Northflank in one command. The pipeline runs `precompile.compileHandler()` in-process for a fast verification pre-check, shells out to `zig build -Dhandler=... -Dtarget=x86_64-linux-musl` for the cross-compiled self-extracting binary, packages the binary as an OCI image in Zig (`deploy/oci/{tar,layer,config,manifest,image}.zig`), pushes it to any OCI-compliant registry via the distribution protocol over `std.http.Client` (`deploy/oci/registry.zig`), and hands the resulting digest reference to the provider adapter (`deploy/render_adapter.zig` or `deploy/northflank_adapter.zig`) to create or update the service. The only external tool invoked is `zig` itself.
+
+One `DeployPlan` value (`deploy/plan.zig`) holds the resolved config, env inputs with secrets redacted, compiled contract summary, OCI artifact metadata, registry push URLs, and provider payload. `--dry-run --json` serializes this value and the executor consumes it, so human and JSON output stay in sync.
+
+Reconciliation is driven by `.zigttp/deploy-state.json`, which stores only non-secret provider identifiers (`service_id`, `scope_id`, `plan_id`, `managed_env_keys`, `last_image_digest`). A second run for the same `(provider, name)` reuses the stored service id and patches in place. A change to scope, region, plan, or removal of a previously managed env var raises a `replace_requires_confirm` action that refuses to mutate without `--confirm`. Even with `--confirm`, v1 never deletes the old remote service; it rebinds and updates state.
+
+Proof facts from the contract (proof level, env vars, egress hosts, routes, handler properties, OWASP Top 10 coverage) go to two places: OCI image labels on the config blob, so provenance survives in the registry, and the human proof report in the dry-run output. The portable extraction logic is reused from `packages/tools/src/deploy_manifest.zig`; the live orchestration lives under `packages/runtime/src/deploy/`.
 
 ## Deployment Patterns
 

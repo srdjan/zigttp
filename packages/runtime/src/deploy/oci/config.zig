@@ -29,7 +29,7 @@ pub fn build(allocator: std.mem.Allocator, arch: plan.Arch, diff_id: []const u8,
     try json.beginObject();
     try json.objectField("Entrypoint");
     try json.beginArray();
-    const entrypoint = [_][]const u8{ "/zigttp-handler", "serve", "-q", "-h", "0.0.0.0", "-p", "3000" };
+    const entrypoint = [_][]const u8{ "/zigttp-handler", "-q", "-h", "0.0.0.0", "-p", "3000" };
     for (&entrypoint) |item| try json.write(item);
     try json.endArray();
     if (labels.len > 0) {

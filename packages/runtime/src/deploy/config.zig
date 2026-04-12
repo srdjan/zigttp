@@ -6,8 +6,6 @@ pub const DeployConfig = struct {
     provider: plan.Provider,
     handler_path: []const u8,
     name: []const u8,
-    registry: ?[]const u8 = null,
-    tag: ?[]const u8 = null,
     region: ?[]const u8 = null,
     env_file: ?[]const u8 = null,
     arch: plan.Arch = .amd64,
@@ -18,8 +16,6 @@ pub const DeployConfig = struct {
     pub fn deinit(self: *DeployConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_path);
         allocator.free(self.name);
-        if (self.registry) |value| allocator.free(value);
-        if (self.tag) |value| allocator.free(value);
         if (self.region) |value| allocator.free(value);
         if (self.env_file) |value| allocator.free(value);
     }
@@ -29,8 +25,6 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !DeployConf
     var provider: ?plan.Provider = null;
     var handler_path: ?[]const u8 = null;
     var name: ?[]const u8 = null;
-    var registry: ?[]const u8 = null;
-    var tag: ?[]const u8 = null;
     var region: ?[]const u8 = null;
     var env_file: ?[]const u8 = null;
     var arch: plan.Arch = .amd64;
@@ -53,14 +47,6 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !DeployConf
             i += 1;
             if (i >= argv.len) return error.MissingName;
             name = argv[i];
-        } else if (std.mem.eql(u8, arg, "--registry")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingRegistry;
-            registry = argv[i];
-        } else if (std.mem.eql(u8, arg, "--tag")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingTag;
-            tag = argv[i];
         } else if (std.mem.eql(u8, arg, "--region")) {
             i += 1;
             if (i >= argv.len) return error.MissingRegion;
@@ -95,14 +81,11 @@ pub fn parse(allocator: std.mem.Allocator, argv: []const []const u8) !DeployConf
     const parsed_provider = provider orelse return error.MissingProvider;
     const parsed_handler = handler_path orelse return error.MissingHandler;
     const parsed_name = name orelse return error.MissingName;
-    if (!dry_run and registry == null) return error.MissingRegistry;
 
     return .{
         .provider = parsed_provider,
         .handler_path = try allocator.dupe(u8, parsed_handler),
         .name = try allocator.dupe(u8, parsed_name),
-        .registry = if (registry) |value| try allocator.dupe(u8, value) else null,
-        .tag = if (tag) |value| try allocator.dupe(u8, value) else null,
         .region = if (region) |value| try allocator.dupe(u8, value) else null,
         .env_file = if (env_file) |value| try allocator.dupe(u8, value) else null,
         .arch = arch,
@@ -149,8 +132,6 @@ test "parse deploy config supports positional handler" {
         "render",
         "--name",
         "demo",
-        "--registry",
-        "ghcr.io/acme/demo",
         "src/handler.ts",
     });
     defer cfg.deinit(std.testing.allocator);
@@ -165,35 +146,43 @@ test "parse deploy config rejects unsupported provider" {
         "bogus",
         "--name",
         "demo",
-        "--registry",
-        "ghcr.io/acme/demo",
         "src/handler.ts",
     }));
 }
 
-test "parse deploy config requires registry for non dry run" {
-    try std.testing.expectError(error.MissingRegistry, parse(std.testing.allocator, &.{
+test "parse deploy config requires name" {
+    try std.testing.expectError(error.MissingName, parse(std.testing.allocator, &.{
         "--provider",
         "render",
-        "--name",
-        "demo",
         "src/handler.ts",
     }));
 }
 
-test "parse deploy config allows dry run without registry" {
+test "parse deploy config parses arch flag" {
     var cfg = try parse(std.testing.allocator, &.{
         "--provider",
         "render",
         "--name",
         "demo",
-        "--dry-run",
+        "--arch",
+        "amd64",
         "src/handler.ts",
     });
     defer cfg.deinit(std.testing.allocator);
 
-    try std.testing.expect(cfg.dry_run);
-    try std.testing.expect(cfg.registry == null);
+    try std.testing.expectEqual(plan.Arch.amd64, cfg.arch);
+}
+
+test "parse deploy config rejects unknown option" {
+    try std.testing.expectError(error.UnknownOption, parse(std.testing.allocator, &.{
+        "--provider",
+        "render",
+        "--name",
+        "demo",
+        "--registry",
+        "ghcr.io/acme/demo",
+        "src/handler.ts",
+    }));
 }
 
 test "load env file parses key value pairs" {

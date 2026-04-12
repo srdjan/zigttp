@@ -343,9 +343,10 @@ Options:
 
 ### `zigttp deploy`
 
-Native deploy packaging builds a Linux self-extracting binary, wraps it in an
-OCI image in Zig, and pushes that image without Docker or other container
-tooling.
+Cross-compiles the handler to a Linux binary, packages it as an OCI image
+built in Zig, pushes the image to any OCI registry, then creates or updates
+a service on Render or Northflank that pulls the image by digest. `zig`
+itself is the only external tool invoked, for cross-compilation.
 
 ```bash
 zigttp deploy [options] <handler.ts>
@@ -353,36 +354,67 @@ zigttp deploy [options] <handler.ts>
 Options:
   --provider <render|northflank>   Target provider (required)
   --name <NAME>                    Service name (required)
-  --registry <HOST/REPO>           OCI registry repository
-  --tag <TAG>                      Image tag override
   --region <REGION>                Provider region override
   --env-file <PATH>                Load KEY=VALUE runtime env vars
   --arch <amd64|arm64>             Target architecture (default: amd64)
   --dry-run                        Emit plan only, no network mutations
   --json                           Emit structured JSON output
-  --confirm                        Required for replace-like updates
+  --confirm                        Allow replace-like updates
 ```
 
-Provider auth and scope come from env vars:
+Everything else comes from environment variables.
 
-- Render: `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, `RENDER_PLAN`
-- Northflank: `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`, `NORTHFLANK_PLAN_ID`
-- Registry push: `ZIGTTP_REGISTRY_USER`, `ZIGTTP_REGISTRY_TOKEN`
+```
+ZIGTTP_OCI_REGISTRY              OCI registry host (e.g. ghcr.io)
+ZIGTTP_OCI_NAMESPACE             OCI repo namespace (e.g. acme/zigttp-handlers)
+ZIGTTP_OCI_USERNAME              Registry push username
+ZIGTTP_OCI_PASSWORD              Registry push token
 
-Examples:
+RENDER_API_KEY                   Render API token
+RENDER_WORKSPACE_ID              Render workspace id
+RENDER_PLAN                      Render service plan tier
+RENDER_REGISTRY_CREDENTIAL_ID    Optional private-registry credential
+
+NORTHFLANK_API_TOKEN             Northflank API token
+NORTHFLANK_PROJECT_ID            Northflank project id
+NORTHFLANK_PLAN_ID               Northflank billing plan id
+NORTHFLANK_REGISTRY_CREDENTIAL_ID  Optional private-registry credential
+```
+
+Image references are always content-addressed as
+`{ZIGTTP_OCI_REGISTRY}/{ZIGTTP_OCI_NAMESPACE}/{sanitized-name}@sha256:<manifest-digest>`;
+tags are never user-supplied.
+
+Dry-run requires the OCI registry, namespace, and provider scope/plan vars;
+push credentials and the provider API token are required only for a real
+deploy. Any missing variables are listed together in a single error.
 
 ```bash
-RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
-zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
+RENDER_WORKSPACE_ID=ws_demo RENDER_PLAN=starter \
+zigttp deploy --provider render --name demo --region oregon \
   examples/handler/handler.ts --dry-run --json
 
-NORTHFLANK_PROJECT_ID=proj-demo NORTHFLANK_PLAN_ID=nf-standard \
-zigttp deploy --provider northflank --name demo --registry ghcr.io/acme/demo \
+ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
+NORTHFLANK_PROJECT_ID=proj_demo NORTHFLANK_PLAN_ID=nf-standard \
+zigttp deploy --provider northflank --name demo --region us-east \
   examples/handler/handler.ts --dry-run --json
 ```
 
-`zigttp deploy` is the supported deployment path. The old build-time
-`-Ddeploy=aws` manifest generator has been removed.
+Reconciliation uses a local state file, `.zigttp/deploy-state.json`, that
+stores non-secret provider identifiers. Rerunning the command for the same
+`(provider, name)` reuses the stored `service_id` and patches in place.
+Changes to scope, region, plan, or removal of a previously managed env var
+trigger a `replace_requires_confirm` action that fails unless `--confirm`
+is passed. Even with `--confirm`, v1 never deletes the old remote service.
+
+`zigttp deploy` reads the same compiler-proven contract used for sandboxing
+and live reload. It writes the proof level, env vars, egress hosts, routes,
+and OWASP Top 10 coverage into OCI image labels and prints them in the
+dry-run output.
+
+The old build-time `-Ddeploy=aws` manifest generator has been removed; this
+is now the only supported deployment path.
 
 ### zigts CLI (compiler and analyzer)
 
@@ -569,8 +601,9 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 zig build -Dhandler=handler.ts -Dpolicy=policy.json
 
 # Plan a deployment without network mutations
+ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
 RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
-./zig-out/bin/zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+./zig-out/bin/zigttp deploy --provider render --name demo --region oregon \
   handler.ts --dry-run --json
 
 # Replay-verify handler against recorded traces before embedding
@@ -796,8 +829,9 @@ Dry-run output includes:
 - provider API payloads
 
 ```bash
+ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
 RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
-./zig-out/bin/zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+./zig-out/bin/zigttp deploy --provider render --name demo --region oregon \
   handler.ts --dry-run --json
 ```
 

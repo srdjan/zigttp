@@ -8,22 +8,20 @@ pub const OciImage = struct {
     config_blob: config.Blob,
     layer_blob: layer.Layer,
     manifest_blob: manifest.Blob,
-    image_tag_ref: []const u8,
     image_digest_ref: []const u8,
 
     pub fn deinit(self: *OciImage, allocator: std.mem.Allocator) void {
         self.config_blob.deinit(allocator);
         self.layer_blob.deinit(allocator);
         self.manifest_blob.deinit(allocator);
-        allocator.free(self.image_tag_ref);
         allocator.free(self.image_digest_ref);
     }
 };
 
 pub fn buildImage(
     allocator: std.mem.Allocator,
-    registry: []const u8,
-    tag: []const u8,
+    registry_host: []const u8,
+    image_repo: []const u8,
     arch: plan.Arch,
     binary: []const u8,
     labels: []const config.Label,
@@ -43,15 +41,17 @@ pub fn buildImage(
         .config_blob = config_blob,
         .layer_blob = layer_blob,
         .manifest_blob = manifest_blob,
-        .image_tag_ref = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ registry, tag }),
-        .image_digest_ref = try std.fmt.allocPrint(allocator, "{s}@{s}", .{ registry, manifest_blob.digest }),
+        .image_digest_ref = try std.fmt.allocPrint(allocator, "{s}/{s}@{s}", .{
+            registry_host,
+            image_repo,
+            manifest_blob.digest,
+        }),
     };
 }
 
-test "image builder returns digest and tag refs" {
-    var image = try buildImage(std.testing.allocator, "ghcr.io/acme/demo", "sha256-123456", .amd64, "binary", &.{});
+test "image builder returns digest ref" {
+    var image = try buildImage(std.testing.allocator, "ghcr.io", "acme/demo", .amd64, "binary", &.{});
     defer image.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.endsWith(u8, image.image_tag_ref, ":sha256-123456"));
-    try std.testing.expect(std.mem.indexOf(u8, image.image_digest_ref, "@sha256:") != null);
+    try std.testing.expect(std.mem.startsWith(u8, image.image_digest_ref, "ghcr.io/acme/demo@sha256:"));
 }

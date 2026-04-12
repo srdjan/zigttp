@@ -4,12 +4,10 @@ const plan = @import("../plan.zig");
 const image = @import("image.zig");
 
 pub const RegistryRef = struct {
-    raw: []const u8,
     host: []const u8,
     repo: []const u8,
 
     pub fn deinit(self: *RegistryRef, allocator: std.mem.Allocator) void {
-        allocator.free(self.raw);
         allocator.free(self.host);
         allocator.free(self.repo);
     }
@@ -19,13 +17,10 @@ pub const PushResult = struct {
     requests: []const plan.HttpRequestPreview,
 };
 
-pub fn parseRegistryRef(allocator: std.mem.Allocator, raw: []const u8) !RegistryRef {
-    const slash = std.mem.indexOfScalar(u8, raw, '/') orelse return error.InvalidRegistryRef;
-    if (slash == 0 or slash == raw.len - 1) return error.InvalidRegistryRef;
+pub fn makeRegistryRef(allocator: std.mem.Allocator, host: []const u8, repo: []const u8) !RegistryRef {
     return .{
-        .raw = try allocator.dupe(u8, raw),
-        .host = try allocator.dupe(u8, raw[0..slash]),
-        .repo = try allocator.dupe(u8, raw[slash + 1 ..]),
+        .host = try allocator.dupe(u8, host),
+        .repo = try allocator.dupe(u8, repo),
     };
 }
 
@@ -58,7 +53,7 @@ pub fn buildRequestPreviews(
     const manifest_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/manifests/{s}", .{
         registry_ref.host,
         registry_ref.repo,
-        lastSegment(oci_image.image_tag_ref, ':'),
+        oci_image.manifest_blob.digest,
     });
     defer allocator.free(manifest_url);
 
@@ -93,11 +88,10 @@ pub fn push(
     try uploadBlobIfMissing(allocator, registry_ref, bearer_token, oci_image.config_blob.digest, oci_image.config_blob.bytes, "application/vnd.oci.image.config.v1+json");
     try uploadBlobIfMissing(allocator, registry_ref, bearer_token, oci_image.layer_blob.digest, oci_image.layer_blob.gzip_bytes, "application/vnd.oci.image.layer.v1.tar+gzip");
 
-    const manifest_tag = lastSegment(oci_image.image_tag_ref, ':');
     const manifest_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/manifests/{s}", .{
         registry_ref.host,
         registry_ref.repo,
-        manifest_tag,
+        oci_image.manifest_blob.digest,
     });
     defer allocator.free(manifest_url);
     var headers = std.ArrayList(http.Header).empty;
@@ -234,18 +228,19 @@ fn uploadBlobIfMissing(
     var put_headers = std.ArrayList(http.Header).empty;
     defer put_headers.deinit(allocator);
     try put_headers.append(allocator, .{ .name = "content-type", .value = media_type });
-    if (bearer_token) |token| {
-        const auth = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token});
-        defer allocator.free(auth);
-        try put_headers.append(allocator, .{ .name = "authorization", .value = auth });
-        const put = try http.request(allocator, .PUT, put_url, put_headers.items, bytes);
-        defer put.deinit(allocator);
-        if (put.status != 201 and put.status != 202) return error.BlobUploadFailed;
-    } else {
-        const put = try http.request(allocator, .PUT, put_url, put_headers.items, bytes);
-        defer put.deinit(allocator);
-        if (put.status != 201 and put.status != 202) return error.BlobUploadFailed;
+
+    const auth_value: ?[]u8 = if (bearer_token) |token|
+        try std.fmt.allocPrint(allocator, "Bearer {s}", .{token})
+    else
+        null;
+    defer if (auth_value) |value| allocator.free(value);
+    if (auth_value) |value| {
+        try put_headers.append(allocator, .{ .name = "authorization", .value = value });
     }
+
+    const put = try http.request(allocator, .PUT, put_url, put_headers.items, bytes);
+    defer put.deinit(allocator);
+    if (put.status != 201 and put.status != 202) return error.BlobUploadFailed;
 }
 
 fn absoluteUrl(allocator: std.mem.Allocator, host: []const u8, location: []const u8) ![]u8 {
@@ -258,14 +253,9 @@ fn absoluteUrl(allocator: std.mem.Allocator, host: []const u8, location: []const
     return std.fmt.allocPrint(allocator, "https://{s}/{s}", .{ host, location });
 }
 
-fn lastSegment(input: []const u8, delimiter: u8) []const u8 {
-    const idx = std.mem.lastIndexOfScalar(u8, input, delimiter) orelse return input;
-    return input[idx + 1 ..];
-}
-
-test "parse registry ref splits host and repo" {
-    var parsed = try parseRegistryRef(std.testing.allocator, "ghcr.io/acme/demo");
-    defer parsed.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("ghcr.io", parsed.host);
-    try std.testing.expectEqualStrings("acme/demo", parsed.repo);
+test "make registry ref holds structured host and repo" {
+    var ref = try makeRegistryRef(std.testing.allocator, "ghcr.io", "acme/demo");
+    defer ref.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("ghcr.io", ref.host);
+    try std.testing.expectEqualStrings("acme/demo", ref.repo);
 }
