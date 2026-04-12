@@ -194,7 +194,7 @@ test "state store round trips entries" {
     defer store.deinit(std.testing.allocator);
 
     try store.put(std.testing.allocator, .{
-        .provider = .render,
+        .provider = .northflank,
         .name = try std.testing.allocator.dupe(u8, "demo"),
         .scope_id = try std.testing.allocator.dupe(u8, "owner-1"),
         .service_id = try std.testing.allocator.dupe(u8, "srv-1"),
@@ -213,5 +213,5 @@ test "state store round trips entries" {
     var loaded = try load(std.testing.allocator);
     defer loaded.deinit(std.testing.allocator);
 
-    try std.testing.expect(loaded.get(.render, "demo") != null);
+    try std.testing.expect(loaded.get(.northflank, "demo") != null);
 }
