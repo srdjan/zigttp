@@ -118,3 +118,56 @@ pub fn clear(allocator: std.mem.Allocator) !void {
         else => return err,
     };
 }
+
+test "save → load → clear round trip" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const fake_home = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
+    defer allocator.free(fake_home);
+    const home_z = try allocator.dupeZ(u8, fake_home);
+    defer allocator.free(home_z);
+    const previous_home = std.c.getenv("HOME");
+    _ = std.c.setenv("HOME", home_z.ptr, 1);
+    defer if (previous_home) |p| {
+        _ = std.c.setenv("HOME", p, 1);
+    } else {
+        _ = std.c.unsetenv("HOME");
+    };
+
+    try save(allocator, .{
+        .token = @constCast("tok-abc"),
+        .email = @constCast("me@example.com"),
+    });
+
+    var loaded = try load(allocator);
+    defer loaded.deinit(allocator);
+    try std.testing.expectEqualStrings("tok-abc", loaded.token);
+    try std.testing.expectEqualStrings("me@example.com", loaded.email.?);
+
+    try clear(allocator);
+    try std.testing.expectError(error.NotSignedIn, load(allocator));
+}
+
+test "load returns NotSignedIn when credentials missing" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const fake_home = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
+    defer allocator.free(fake_home);
+    const home_z = try allocator.dupeZ(u8, fake_home);
+    defer allocator.free(home_z);
+    const previous_home = std.c.getenv("HOME");
+    _ = std.c.setenv("HOME", home_z.ptr, 1);
+    defer if (previous_home) |p| {
+        _ = std.c.setenv("HOME", p, 1);
+    } else {
+        _ = std.c.unsetenv("HOME");
+    };
+
+    try std.testing.expectError(error.NotSignedIn, load(allocator));
+}
