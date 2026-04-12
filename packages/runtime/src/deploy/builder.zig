@@ -1,5 +1,6 @@
 const std = @import("std");
 const zigts = @import("zigts");
+const io_util = @import("io_util.zig");
 
 pub const BuildResult = struct {
     project_root: []const u8,
@@ -22,7 +23,7 @@ pub fn buildLinuxArtifact(
     handler_path: []const u8,
     target_triple: []const u8,
 ) !BuildResult {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 

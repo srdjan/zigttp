@@ -1,6 +1,7 @@
 const std = @import("std");
 const auth = @import("auth.zig");
 const control_plane = @import("control_plane.zig");
+const io_util = @import("io_util.zig");
 
 pub fn ensureSignedIn(allocator: std.mem.Allocator) !auth.Credentials {
     if (auth.load(allocator)) |creds| {
@@ -12,7 +13,7 @@ pub fn ensureSignedIn(allocator: std.mem.Allocator) !auth.Credentials {
 }
 
 fn interactiveLogin(allocator: std.mem.Allocator) !auth.Credentials {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
