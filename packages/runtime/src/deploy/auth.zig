@@ -1,5 +1,6 @@
 const std = @import("std");
 const io_util = @import("io_util.zig");
+const json_util = @import("json_util.zig");
 
 pub const Credentials = struct {
     token: []u8,
@@ -48,17 +49,11 @@ pub fn load(allocator: std.mem.Allocator) !Credentials {
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidCredentials;
     const root = parsed.value.object;
-    const token_value = root.get("token") orelse return error.InvalidCredentials;
-    if (token_value != .string) return error.InvalidCredentials;
 
-    const token = try allocator.dupe(u8, token_value.string);
+    const token = json_util.dupeRequired(allocator, root, "token") catch return error.InvalidCredentials;
     errdefer allocator.free(token);
 
-    var email: ?[]u8 = null;
-    if (root.get("email")) |value| {
-        if (value == .string) email = try allocator.dupe(u8, value.string);
-    }
-
+    const email = try json_util.dupeOptional(allocator, root, "email");
     return .{ .token = token, .email = email };
 }
 

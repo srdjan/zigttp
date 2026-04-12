@@ -1,6 +1,8 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const plan = @import("plan.zig");
+const io_util = @import("io_util.zig");
+const json_util = @import("json_util.zig");
 
 pub const Entry = struct {
     provider: plan.Provider,
@@ -139,7 +141,7 @@ pub fn save(allocator: std.mem.Allocator, store: *const Store) !void {
 }
 
 fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
-    const provider_raw = getString(obj, "provider") orelse return error.InvalidDeployState;
+    const provider_raw = json_util.getString(obj, "provider") orelse return error.InvalidDeployState;
     const provider = plan.Provider.fromString(provider_raw) orelse return error.InvalidDeployState;
     const managed_value = obj.get("managedEnvKeys") orelse return error.InvalidDeployState;
     if (managed_value != .array) return error.InvalidDeployState;
@@ -154,25 +156,19 @@ fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
     }
     return .{
         .provider = provider,
-        .name = try allocator.dupe(u8, getString(obj, "name") orelse return error.InvalidDeployState),
-        .scope_id = try allocator.dupe(u8, getString(obj, "scopeId") orelse return error.InvalidDeployState),
-        .service_id = try allocator.dupe(u8, getString(obj, "serviceId") orelse return error.InvalidDeployState),
-        .region = if (getString(obj, "region")) |value| try allocator.dupe(u8, value) else null,
-        .plan_id = if (getString(obj, "planId")) |value| try allocator.dupe(u8, value) else null,
-        .url = if (getString(obj, "url")) |value| try allocator.dupe(u8, value) else null,
-        .last_image_digest = if (getString(obj, "lastImageDigest")) |value| try allocator.dupe(u8, value) else null,
+        .name = json_util.dupeRequired(allocator, obj, "name") catch return error.InvalidDeployState,
+        .scope_id = json_util.dupeRequired(allocator, obj, "scopeId") catch return error.InvalidDeployState,
+        .service_id = json_util.dupeRequired(allocator, obj, "serviceId") catch return error.InvalidDeployState,
+        .region = try json_util.dupeOptional(allocator, obj, "region"),
+        .plan_id = try json_util.dupeOptional(allocator, obj, "planId"),
+        .url = try json_util.dupeOptional(allocator, obj, "url"),
+        .last_image_digest = try json_util.dupeOptional(allocator, obj, "lastImageDigest"),
         .managed_env_keys = try managed.toOwnedSlice(allocator),
     };
 }
 
-fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    if (value != .string) return null;
-    return value.string;
-}
-
 fn ensureStateDir() !void {
-    var io_backend = std.Io.Threaded.init(std.heap.smp_allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(std.heap.smp_allocator);
     defer io_backend.deinit();
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ".zigttp");
 }

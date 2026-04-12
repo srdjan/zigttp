@@ -1,6 +1,7 @@
 const std = @import("std");
 const http = @import("http.zig");
 const plan = @import("plan.zig");
+const json_util = @import("json_util.zig");
 
 pub const default_base_url = "https://api.zigttp.dev";
 
@@ -149,37 +150,31 @@ fn parseSession(allocator: std.mem.Allocator, body: []const u8) !DeploySession {
     if (parsed.value != .object) return error.InvalidSessionResponse;
     const root = parsed.value.object;
 
-    const provider_str = requireString(root, "provider") orelse return error.InvalidSessionResponse;
+    const provider_str = json_util.getString(root, "provider") orelse return error.InvalidSessionResponse;
     const provider = plan.Provider.fromString(provider_str) orelse return error.InvalidSessionResponse;
 
-    const registry_host = try dupeField(allocator, root, "registryHost");
+    const registry_host = try json_util.dupeRequired(allocator, root, "registryHost");
     errdefer allocator.free(registry_host);
-    const namespace = try dupeField(allocator, root, "namespace");
+    const namespace = try json_util.dupeRequired(allocator, root, "namespace");
     errdefer allocator.free(namespace);
-    const registry_username = try dupeField(allocator, root, "registryUsername");
+    const registry_username = try json_util.dupeRequired(allocator, root, "registryUsername");
     errdefer allocator.free(registry_username);
-    const registry_password = try dupeField(allocator, root, "registryPassword");
+    const registry_password = try json_util.dupeRequired(allocator, root, "registryPassword");
     errdefer allocator.free(registry_password);
-    const scope_id = try dupeField(allocator, root, "scopeId");
+    const scope_id = try json_util.dupeRequired(allocator, root, "scopeId");
     errdefer allocator.free(scope_id);
-    const plan_id = try dupeField(allocator, root, "planId");
+    const plan_id = try json_util.dupeRequired(allocator, root, "planId");
     errdefer allocator.free(plan_id);
-    const provider_api_token = try dupeField(allocator, root, "providerApiToken");
+    const provider_api_token = try json_util.dupeRequired(allocator, root, "providerApiToken");
     errdefer allocator.free(provider_api_token);
-    const region = try dupeField(allocator, root, "region");
+    const region = try json_util.dupeRequired(allocator, root, "region");
     errdefer allocator.free(region);
 
-    var registry_credential_id: ?[]u8 = null;
-    if (root.get("registryCredentialId")) |value| {
-        if (value == .string) registry_credential_id = try allocator.dupe(u8, value.string);
-    }
+    const registry_credential_id = try json_util.dupeOptional(allocator, root, "registryCredentialId");
     errdefer if (registry_credential_id) |value| allocator.free(value);
 
-    var url_hint: ?[]u8 = null;
+    const url_hint = try json_util.dupeOptional(allocator, root, "urlHint");
     errdefer if (url_hint) |value| allocator.free(value);
-    if (root.get("urlHint")) |value| {
-        if (value == .string) url_hint = try allocator.dupe(u8, value.string);
-    }
 
     return .{
         .provider = provider,
@@ -202,9 +197,9 @@ fn parseChallenge(allocator: std.mem.Allocator, body: []const u8) !LoginChalleng
     if (parsed.value != .object) return error.InvalidChallengeResponse;
     const root = parsed.value.object;
 
-    const device_code = try dupeField(allocator, root, "deviceCode");
+    const device_code = try json_util.dupeRequired(allocator, root, "deviceCode");
     errdefer allocator.free(device_code);
-    const verification_url = try dupeField(allocator, root, "verificationUrl");
+    const verification_url = try json_util.dupeRequired(allocator, root, "verificationUrl");
     errdefer allocator.free(verification_url);
 
     const interval: u32 = if (root.get("intervalSeconds")) |value| switch (value) {
@@ -230,26 +225,11 @@ fn parseLoginResult(allocator: std.mem.Allocator, body: []const u8) !LoginResult
     if (parsed.value != .object) return error.InvalidLoginResponse;
     const root = parsed.value.object;
 
-    const token = try dupeField(allocator, root, "token");
+    const token = try json_util.dupeRequired(allocator, root, "token");
     errdefer allocator.free(token);
 
-    var email: ?[]u8 = null;
-    if (root.get("email")) |value| {
-        if (value == .string) email = try allocator.dupe(u8, value.string);
-    }
+    const email = try json_util.dupeOptional(allocator, root, "email");
     return .{ .token = token, .email = email };
-}
-
-fn dupeField(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]u8 {
-    const value = obj.get(key) orelse return error.MissingField;
-    if (value != .string) return error.InvalidFieldType;
-    return allocator.dupe(u8, value.string);
-}
-
-fn requireString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    if (value != .string) return null;
-    return value.string;
 }
 
 test "baseUrl falls back to default" {
