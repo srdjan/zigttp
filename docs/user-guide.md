@@ -2268,6 +2268,45 @@ const config = ServerConfig{
 ./zig-out/bin/zigttp serve -q -h 0.0.0.0 -p 8080 handler.js
 ```
 
+#### Native Deploy CLI
+
+`zigttp deploy` compiles the handler to a Linux binary, builds an OCI image in
+Zig, pushes it to a registry, and then creates or updates a service on Render
+or Northflank. No Docker daemon is required.
+
+```bash
+zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+  examples/handler/handler.ts --dry-run --json
+```
+
+Supported flags:
+
+- `--provider render|northflank`
+- `--name <service>`
+- `--registry <host/repo>`
+- `--tag <tag>`
+- `--region <region>`
+- `--env-file <path>`
+- `--arch amd64|arm64`
+- `--dry-run`
+- `--json`
+- `--confirm`
+
+Required environment variables:
+
+- Render: `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, `RENDER_PLAN`
+- Northflank: `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`, `NORTHFLANK_PLAN_ID`
+- Registry push: `ZIGTTP_REGISTRY_USER`, `ZIGTTP_REGISTRY_TOKEN`
+
+Use `--dry-run --json` first. The command emits the resolved build command,
+image digests, registry upload plan, and provider API payloads without mutating
+remote state. If the local deploy state indicates a replace-like change
+(provider scope, region, plan, or managed env-key removal), rerun with
+`--confirm`.
+
+`zigttp deploy` is the supported deployment path. The old build-time
+`-Ddeploy=aws` manifest generator has been removed.
+
 #### Docker Container
 
 ```dockerfile

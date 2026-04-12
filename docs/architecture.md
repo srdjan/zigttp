@@ -451,9 +451,9 @@ Without `--prove`, `--watch` recompiles and swaps without contract diffing. Comp
 
 The parser recognizes `guard()` calls within pipe operator chains and desugars the entire chain into a single flat arrow function at compile time. `guard(g1) |> guard(g2) |> handler |> guard(post)` becomes sequential if-checks: pre-guards receive `req` and short-circuit on non-undefined return, the main handler runs if all pre-guards pass, and post-guards receive the response and can replace it. Zero runtime overhead - pure compile-time macro. Implementation: `packages/zigts/src/parser/parse.zig` (pipe chain collection), `packages/zigts/src/modules/compose.zig` (guard marker).
 
-### Proven Deployment Manifests
+### Proven Deployment Planning
 
-The `-Ddeploy=<target>` build option generates platform-specific deployment configurations from compiler-proven contracts. The system extracts `ProvenFacts` (platform-agnostic) from the contract, then dispatches to a `DeployTarget` renderer. Currently supported: `aws` (generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, and proof level metadata). Architecture is pluggable via `DeployTarget` enum in `packages/tools/src/deploy_manifest.zig`.
+Runtime `zigttp deploy` consumes compiler-proven contracts to build a provider-agnostic deploy plan. The system extracts `ProvenFacts` from the contract, renders a human proof report, maps those facts into OCI image labels, and then composes provider payloads for Render or Northflank. The portable proof extraction/reporting logic lives in `packages/tools/src/deploy_manifest.zig`; live deployment orchestration lives under `packages/runtime/src/deploy/`.
 
 ## Deployment Patterns
 

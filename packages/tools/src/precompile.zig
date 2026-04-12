@@ -22,7 +22,6 @@ const ServiceResponseVariant = zigts.service_types.ResponseVariant;
 const system_linker = zigts.system_linker;
 const handler_policy = zigts.handler_policy;
 const HandlerPolicy = handler_policy.HandlerPolicy;
-const deploy_manifest = @import("deploy_manifest.zig");
 const manifest_alignment = @import("manifest_alignment.zig");
 const openapi_manifest = @import("openapi_manifest.zig");
 const sdk_codegen = @import("sdk_codegen.zig");
@@ -340,7 +339,6 @@ const PrecompileOptions = struct {
     sql_schema_path: ?[]const u8 = null,
     system_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
-    deploy_target_str: ?[]const u8 = null,
     replay_trace_path: ?[]const u8 = null,
     test_file_path: ?[]const u8 = null,
     prove_spec: ?[]const u8 = null,
@@ -419,14 +417,6 @@ fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             index += 1;
             opts.policy_path = if (index < argv.len) argv[index] else {
                 std.debug.print("Missing path after --policy\n", .{});
-                return error.MissingArgument;
-            };
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--deploy")) {
-            index += 1;
-            opts.deploy_target_str = if (index < argv.len) argv[index] else {
-                std.debug.print("Missing target after --deploy\n", .{});
                 return error.MissingArgument;
             };
             continue;
@@ -661,7 +651,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     const sql_schema_path = opts.sql_schema_path;
     const system_path = opts.system_path;
     const policy_path = opts.policy_path;
-    const deploy_target_str = opts.deploy_target_str;
     const replay_trace_path = opts.replay_trace_path;
     const test_file_path = opts.test_file_path;
     const prove_spec = opts.prove_spec;
@@ -912,80 +901,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         } else if (compiled.violations_summary) |summary| {
             // Violations from flow or verifier analysis (no counterexample JSONL).
             std.debug.print("{s}", .{summary});
-        }
-
-        // Generate deployment manifest if --deploy was passed
-        if (deploy_target_str) |dt_str| {
-            const deploy_target = deploy_manifest.DeployTarget.fromString(dt_str) orelse {
-                std.debug.print("Unknown deploy target: {s} (supported: aws)\n", .{dt_str});
-                return error.InvalidArgument;
-            };
-
-            const extract = deploy_manifest.extractProvenFacts(allocator, contract) catch |err| {
-                std.debug.print("Error extracting proven facts: {}\n", .{err});
-                return err;
-            };
-            defer allocator.free(extract.checks_buf);
-            defer allocator.free(extract.routes_buf);
-
-            const outputs = deploy_manifest.render(allocator, deploy_target, &extract.facts) catch |err| {
-                std.debug.print("Error rendering deploy manifest: {}\n", .{err});
-                return err;
-            };
-            defer {
-                for (outputs) |o| allocator.free(o.content);
-                allocator.free(outputs);
-            }
-
-            // Derive deploy output directory from the output path
-            const deploy_dir = deriveSiblingPath(allocator, output_path_final, "deploy/") catch |err| {
-                std.debug.print("Error deriving deploy dir: {}\n", .{err});
-                return err;
-            };
-            defer allocator.free(deploy_dir);
-
-            for (outputs) |output| {
-                const deploy_path = std.fmt.allocPrint(allocator, "{s}{s}", .{ deploy_dir, output.filename }) catch |err| {
-                    std.debug.print("Error creating deploy path: {}\n", .{err});
-                    return err;
-                };
-                defer allocator.free(deploy_path);
-
-                writeFilePosix(deploy_path, output.content, allocator) catch |err| {
-                    std.debug.print("Error writing deploy file '{s}': {}\n", .{ deploy_path, err });
-                    return err;
-                };
-
-                std.debug.print("Wrote deploy manifest to: {s}\n", .{deploy_path});
-            }
-
-            // Write deploy report
-            const report_path = std.fmt.allocPrint(allocator, "{s}deploy-report.txt", .{deploy_dir}) catch |err| {
-                std.debug.print("Error creating report path: {}\n", .{err});
-                return err;
-            };
-            defer allocator.free(report_path);
-
-            var report_output: std.ArrayList(u8) = .empty;
-            defer report_output.deinit(allocator);
-            var report_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &report_output);
-
-            deploy_manifest.writeDeployReport(&report_aw.writer, &extract.facts, deploy_target) catch |err| {
-                std.debug.print("Error generating deploy report: {}\n", .{err});
-                return err;
-            };
-            report_output = report_aw.toArrayList();
-
-            writeFilePosix(report_path, report_output.items, allocator) catch |err| {
-                std.debug.print("Error writing deploy report '{s}': {}\n", .{ report_path, err });
-                return err;
-            };
-
-            std.debug.print("Wrote deploy report to: {s}\n", .{report_path});
-            std.debug.print("Deploy target: {s}, proof level: {s}\n", .{
-                deploy_target.toString(),
-                extract.facts.proof_level.toString(),
-            });
         }
 
         // Run proven evolution pipeline if --prove was passed

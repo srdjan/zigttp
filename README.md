@@ -29,7 +29,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**Proven deployment manifests.** `-Ddeploy=aws` generates platform-specific deployment configurations (AWS SAM templates) directly from compiler-proven contracts. Env vars become parameters, routes become API events, egress hosts become tags and conditional VPC SecurityGroup resources. The deploy report includes OWASP Top 10 compliance mapping, cost estimation from proven I/O depth, and handler properties. Proof levels (complete/partial/none) signal what was statically verified vs what needs manual review.
+**Proven deploy planning.** `zigttp deploy --dry-run --json` emits compiler-proven deployment facts directly from the handler contract: env vars, egress hosts, cache namespaces, routes, verification checks, handler properties, OCI metadata labels, registry upload requests, and provider API payloads. Proof levels (complete/partial/none) signal what was statically verified vs what still needs manual review.
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
@@ -341,6 +341,49 @@ Options:
   --no-env-check        Skip startup env var validation (development use)
 ```
 
+### `zigttp deploy`
+
+Native deploy packaging builds a Linux self-extracting binary, wraps it in an
+OCI image in Zig, and pushes that image without Docker or other container
+tooling.
+
+```bash
+zigttp deploy [options] <handler.ts>
+
+Options:
+  --provider <render|northflank>   Target provider (required)
+  --name <NAME>                    Service name (required)
+  --registry <HOST/REPO>           OCI registry repository
+  --tag <TAG>                      Image tag override
+  --region <REGION>                Provider region override
+  --env-file <PATH>                Load KEY=VALUE runtime env vars
+  --arch <amd64|arm64>             Target architecture (default: amd64)
+  --dry-run                        Emit plan only, no network mutations
+  --json                           Emit structured JSON output
+  --confirm                        Required for replace-like updates
+```
+
+Provider auth and scope come from env vars:
+
+- Render: `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, `RENDER_PLAN`
+- Northflank: `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`, `NORTHFLANK_PLAN_ID`
+- Registry push: `ZIGTTP_REGISTRY_USER`, `ZIGTTP_REGISTRY_TOKEN`
+
+Examples:
+
+```bash
+RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
+zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+  examples/handler/handler.ts --dry-run --json
+
+NORTHFLANK_PROJECT_ID=proj-demo NORTHFLANK_PLAN_ID=nf-standard \
+zigttp deploy --provider northflank --name demo --registry ghcr.io/acme/demo \
+  examples/handler/handler.ts --dry-run --json
+```
+
+`zigttp deploy` is the supported deployment path. The old build-time
+`-Ddeploy=aws` manifest generator has been removed.
+
 ### zigts CLI (compiler and analyzer)
 
 Standalone analysis and compilation without starting a server.
@@ -391,7 +434,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
-**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), proven deployment manifests (`-Ddeploy=aws`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), proven live reload (`--watch --prove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
+**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), runtime deploy proof planning (`zigttp deploy --dry-run --json`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), proven live reload (`--watch --prove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
 
 **Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression, `assert` statement, `distinct type`, `readonly` fields, template literal types, type guards (`x is T`).
 
@@ -525,8 +568,10 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 # Override auto-derived sandbox with an explicit capability policy
 zig build -Dhandler=handler.ts -Dpolicy=policy.json
 
-# Generate proven AWS SAM deployment manifest
-zig build -Dhandler=handler.ts -Ddeploy=aws
+# Plan a deployment without network mutations
+RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
+./zig-out/bin/zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+  handler.ts --dry-run --json
 
 # Replay-verify handler against recorded traces before embedding
 zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
@@ -537,8 +582,8 @@ zig build -Dhandler=handler.ts -Dprove=old-contract.json:traces.jsonl
 # Plan a safe multi-handler rollout between two system definitions
 ./zig-out/bin/zigts rollout old/system.json new/system.json
 
-# Combine all passes
-zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract -Ddeploy=aws
+# Combine build-time verification passes
+zig build -Doptimize=ReleaseFast -Dhandler=handler.ts -Dverify -Dcontract
 
 # External enrichment flags (optional, for code generator integration)
 zig build -Dhandler=handler.ts -Dmanifest=governance-manifest.json
@@ -736,18 +781,28 @@ To override auto-derived sandboxing with a stricter or different policy, pass an
 
 Omit a section to leave that capability unrestricted. If a section is present, dynamic access in that category is rejected because zigttp cannot fully enumerate it.
 
-### Proven Deployment Manifests (`-Ddeploy`)
+### Native Deploy Planning
 
-Generate platform-specific deployment configurations from compiler-proven contracts:
+`zigttp deploy` consumes the same compiler-proven contract used for sandboxing
+and verification, then turns it into a live deploy plan for Render or
+Northflank.
+
+Dry-run output includes:
+
+- proof facts: env vars, egress hosts, cache namespaces, routes, verification checks, handler properties
+- a human-readable proof report with `PROVEN` and `NEEDS MANUAL REVIEW` sections
+- OCI image digests and labels derived from the proof facts
+- registry upload requests
+- provider API payloads
 
 ```bash
-zig build -Dhandler=handler.ts -Ddeploy=aws
+RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
+./zig-out/bin/zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+  handler.ts --dry-run --json
 ```
 
-Currently supported targets:
-- **aws**: Generates AWS SAM `template.json` with proven env vars as parameters, routes as HttpApi events, egress hosts as tags, handler effect properties (zigttp:retrySafe, zigttp:readOnly), and proof level metadata.
-
-Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some verification but dynamic access detected), `none` (no verification ran). A deploy report shows PROVEN vs NEEDS MANUAL REVIEW sections.
+Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some
+verification but dynamic access detected), `none` (no verification ran).
 
 ### Deterministic Replay (`--trace` / `--replay` / `-Dreplay`)
 

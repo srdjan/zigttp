@@ -15,6 +15,7 @@ const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
 const live_reload_mod = @import("live_reload.zig");
+const deploy = @import("deploy.zig");
 const precompile = zigts_cli.precompile;
 
 const embedded_handler = @import("embedded_handler");
@@ -89,6 +90,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "compile")) {
         try compileCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "deploy")) {
+        deploy.run(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printDeployHelp();
+                return;
+            }
+            if (err == error.UnsupportedProvider) {
+                std.debug.print("Unsupported provider. Use --provider render or --provider northflank.\n\n", .{});
+                printDeployHelp();
+                return;
+            }
+            if (err == error.ConfirmRequired) {
+                return;
+            }
+            std.log.err("Deploy failed: {}", .{err});
+            return err;
+        };
         return;
     }
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
@@ -967,6 +987,31 @@ fn printCompileHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+fn printDeployHelp() void {
+    const help =
+        \\zigttp deploy [options] <handler.ts>
+        \\zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo src/handler.ts --dry-run --json
+        \\
+        \\Deploy a handler to Render or Northflank using a native OCI image built in Zig.
+        \\
+        \\Options:
+        \\  --provider <render|northflank>   Target provider (required)
+        \\  --handler <PATH>                 Handler path (optional if passed positionally)
+        \\  --name <NAME>                    Service name (required)
+        \\  --registry <HOST/REPO>           OCI registry repository
+        \\  --tag <TAG>                      Image tag override
+        \\  --region <REGION>                Provider region override
+        \\  --env-file <PATH>                Load KEY=VALUE runtime env vars
+        \\  --arch <amd64|arm64>             Target architecture (default: amd64)
+        \\  --dry-run                        Emit plan only, no network mutations
+        \\  --json                           Emit structured JSON output
+        \\  --confirm                        Allow replace-like updates
+        \\  --help                           Show this help
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
 fn printHelp() void {
     const help =
         \\zigttp - serverless TypeScript runtime
@@ -977,6 +1022,7 @@ fn printHelp() void {
         \\  zigttp dev [handler-or-project]         Watch mode
         \\  zigttp check [handler.ts] [--contract]  Verify handler
         \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
+        \\  zigttp deploy [options] <handler.ts>    Deploy to Render or Northflank
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check
         \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
         \\  zigttp link <system.json>               Cross-handler linking

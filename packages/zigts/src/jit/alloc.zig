@@ -9,11 +9,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Page size (typically 4KB, but 16KB on Apple Silicon)
-pub const PAGE_SIZE: usize = if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64)
-    16384
-else
-    4096;
+/// Minimum page alignment required by the Zig stdlib page APIs.
+pub const PAGE_SIZE: usize = std.heap.page_size_min;
 
 /// Error types for code allocation
 pub const AllocError = error{
@@ -25,7 +22,7 @@ pub const AllocError = error{
 /// A region of executable memory (may span multiple OS pages)
 pub const CodePage = struct {
     /// Base address of the memory region
-    memory: []align(PAGE_SIZE) u8,
+    memory: []align(std.heap.page_size_min) u8,
     /// Current write offset within the region
     offset: usize,
     /// Whether the region is currently writable (vs executable)
@@ -182,7 +179,7 @@ pub const CodeAllocator = struct {
 // Platform-specific implementation
 // ============================================================================
 
-fn allocExecutableRegion(size: usize) ![]align(PAGE_SIZE) u8 {
+fn allocExecutableRegion(size: usize) ![]align(std.heap.page_size_min) u8 {
     if (builtin.os.tag == .macos) {
         return allocExecutableRegionMacOS(size);
     } else if (builtin.os.tag == .linux) {
@@ -192,13 +189,13 @@ fn allocExecutableRegion(size: usize) ![]align(PAGE_SIZE) u8 {
     }
 }
 
-fn freeExecutableRegion(memory: []align(PAGE_SIZE) u8) void {
+fn freeExecutableRegion(memory: []align(std.heap.page_size_min) u8) void {
     if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
         _ = std.posix.munmap(memory);
     }
 }
 
-fn makeRegionExecutable(memory: []align(PAGE_SIZE) u8) !void {
+fn makeRegionExecutable(memory: []align(std.heap.page_size_min) u8) !void {
     if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64) {
         // Apple Silicon MAP_JIT: toggle to execute mode, then flush icache.
         // No mprotect needed - MAP_JIT with PROT_RWX handles permissions.
@@ -208,21 +205,19 @@ fn makeRegionExecutable(memory: []align(PAGE_SIZE) u8) !void {
         if (builtin.cpu.arch == .aarch64) {
             flushIcache(memory.ptr, memory.len);
         }
-        const prot_rx: std.c.PROT = .{ .READ = true, .EXEC = true };
-        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rx) != 0) return error.MprotectFailed;
+        try std.process.protectMemory(memory, .{ .read = true, .execute = true });
     }
 }
 
-fn makeRegionWritable(memory: []align(PAGE_SIZE) u8) !void {
+fn makeRegionWritable(memory: []align(std.heap.page_size_min) u8) !void {
     if (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64) {
         pthread_jit_write_protect_np(false);
     } else {
-        const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
-        if (std.c.mprotect(@ptrCast(memory.ptr), memory.len, prot_rw) != 0) return error.MprotectFailed;
+        try std.process.protectMemory(memory, .{ .read = true, .write = true });
     }
 }
 
-fn allocExecutableRegionMacOS(size: usize) ![]align(PAGE_SIZE) u8 {
+fn allocExecutableRegionMacOS(size: usize) ![]align(std.heap.page_size_min) u8 {
     // On macOS, we use MAP_JIT which allows JIT code to be written and executed
     // with proper W^X handling via pthread_jit_write_protect_np.
     const flags: std.posix.MAP = .{
@@ -256,7 +251,7 @@ fn allocExecutableRegionMacOS(size: usize) ![]align(PAGE_SIZE) u8 {
     return @alignCast(result[0..size]);
 }
 
-fn allocExecutableRegionLinux(size: usize) ![]align(PAGE_SIZE) u8 {
+fn allocExecutableRegionLinux(size: usize) ![]align(std.heap.page_size_min) u8 {
     const prot_rw: std.c.PROT = .{ .READ = true, .WRITE = true };
     const result = std.posix.mmap(
         null,

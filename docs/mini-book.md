@@ -671,19 +671,26 @@ When a handler is precompiled, the compiler automatically generates a `RuntimePo
 
 The policy is embedded as a constant in the generated binary. There is no configuration file to drift out of sync, no runtime lookup, no way for the handler to bypass its sandbox. An explicit `--policy` file can override the auto-derived policy when needed.
 
-### Proven Deployment Manifests
+### Proven Deploy Planning
 
-The `-Ddeploy=aws` build option generates a complete AWS SAM deployment template from the compiler-proven contract. The system extracts platform-agnostic `ProvenFacts` from the contract and renders them into target-specific configuration:
+Runtime `zigttp deploy` uses the compiler-proven contract directly. The system
+extracts platform-agnostic `ProvenFacts`, renders a deploy proof report, adds
+proof metadata to the OCI image, and builds provider payloads for Render or
+Northflank:
 
 ```bash
-zig build -Dhandler=handler.ts -Ddeploy=aws
+RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
+./zig-out/bin/zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
+  handler.ts --dry-run --json
 ```
 
-This produces `src/generated/deploy/template.json` (AWS SAM template) and `src/generated/deploy/deploy-report.txt`. The template includes:
+The dry-run output includes:
 
-- Proven environment variables as CloudFormation parameters
-- Route patterns as HttpApi events
-- Egress hosts as tags and conditional VPC SecurityGroup (activated via `VpcSubnetIds` parameter)
+- proven environment variables and whether env access is fully proven
+- proven routes, egress hosts, cache namespaces, and verification checks
+- handler properties like `retry_safe`, `read_only`, and `idempotent`
+- a `PROVEN` vs `NEEDS MANUAL REVIEW` report
+- OCI digests and provider API payloads
 - Handler properties as metadata tags (retrySafe, readOnly, injectionSafe, idempotent, stateIsolated, maxIoDepth)
 - Proof level (complete/partial/none) as a top-level field
 
@@ -986,7 +993,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `-Dverify` | Enable compile-time verification |
 | `-Dcontract` | Emit contract.json |
 | `-Dsystem=<path>` | Thread system.json into compile-time `serviceCall()` typing |
-| `-Ddeploy=aws` | Generate deployment manifest |
+| `zigttp deploy --dry-run --json` | Generate deploy plan from proven contract |
 | `-Dreplay=<traces>` | Replay-verify before embedding |
 | `-Dtest-file=<tests>` | Run handler tests at build time |
 | `-Dgenerate-tests=true` | Generate exhaustive test cases |

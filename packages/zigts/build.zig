@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     });
     mod.addCSourceFile(.{
         .file = b.path("deps/sqlite/sqlite3.c"),
-        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+        .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
     });
     mod.addIncludePath(b.path("deps/sqlite"));
     mod.addImport("zigttp-sdk", sdk_dep.module("zigttp-sdk"));

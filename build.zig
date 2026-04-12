@@ -8,6 +8,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const zigts_mod = zigts_dep.module("zigts");
+    const zigts_host_dep = b.dependency("zigts", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const zigts_host_mod = zigts_host_dep.module("zigts");
 
     const tools_dep = b.dependency("zigttp_tools", .{
         .target = target,
@@ -41,7 +46,6 @@ pub fn build(b: *std.Build) void {
     const sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zigttp:sql validation");
     const policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers");
     const system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking");
-    const deploy_target = b.option([]const u8, "deploy", "Generate deployment manifest (values: aws)");
     const replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time");
     const test_file_path = b.option([]const u8, "test-file", "Run handler tests from JSONL file at build time");
     const prove_spec = b.option([]const u8, "prove", "Prove upgrade safety (format: contract.json or contract.json:traces.jsonl)");
@@ -66,7 +70,7 @@ pub fn build(b: *std.Build) void {
     zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
     zigts_tests_root.addCSourceFile(.{
         .file = zigts_dep.path("deps/sqlite/sqlite3.c"),
-        .flags = &.{ "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+        .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
     });
     zigts_tests_root.addIncludePath(zigts_dep.path("deps/sqlite"));
     const zigts_tests = b.addTest(.{
@@ -84,7 +88,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    precompile_tests.root_module.addImport("zigts", zigts_mod);
+    precompile_tests.root_module.addImport("zigts", zigts_host_mod);
     const run_precompile_tests = b.addRunArtifact(precompile_tests);
     const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
     precompile_test_step.dependOn(&run_precompile_tests.step);
@@ -97,7 +101,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    prop_expect_tests.root_module.addImport("zigts", zigts_mod);
+    prop_expect_tests.root_module.addImport("zigts", zigts_host_mod);
     const run_prop_expect_tests = b.addRunArtifact(prop_expect_tests);
     const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
     prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
@@ -110,7 +114,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    rollout_tests.root_module.addImport("zigts", zigts_mod);
+    rollout_tests.root_module.addImport("zigts", zigts_host_mod);
     const run_rollout_tests = b.addRunArtifact(rollout_tests);
     const rollout_test_step = b.step("test-rollout", "Run rollout planner tests");
     rollout_test_step.dependOn(&run_rollout_tests.step);
@@ -128,7 +132,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    precompile_exe.root_module.addImport("zigts", zigts_mod);
+    precompile_exe.root_module.addImport("zigts", zigts_host_mod);
 
     // Runtime/project CLI
     const exe = b.addExecutable(.{
@@ -171,12 +175,8 @@ pub fn build(b: *std.Build) void {
             run_precompile.addArg("--system");
             run_precompile.addArg(system);
         }
-        if (contract_enabled or deploy_target != null) {
+        if (contract_enabled) {
             run_precompile.addArg("--contract");
-        }
-        if (deploy_target) |dt| {
-            run_precompile.addArg("--deploy");
-            run_precompile.addArg(dt);
         }
         if (policy_path) |policy| {
             run_precompile.addArg("--policy");
@@ -227,11 +227,6 @@ pub fn build(b: *std.Build) void {
         // Create the generated directories if they don't exist
         const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated" });
         run_precompile.step.dependOn(&mkdir_step.step);
-
-        if (deploy_target != null) {
-            const mkdir_deploy = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated/deploy" });
-            run_precompile.step.dependOn(&mkdir_deploy.step);
-        }
 
         // Main exe depends on precompile completing
         exe.step.dependOn(&run_precompile.step);
