@@ -1,5 +1,6 @@
 const std = @import("std");
 const file_io = @import("zigts").file_io;
+const io_util = @import("io_util.zig");
 
 const handler_candidates = [_][]const u8{
     "handler.ts",
@@ -91,7 +92,7 @@ fn basenameFromGitUrl(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
 }
 
 fn cwdBasename(allocator: std.mem.Allocator) !?[]u8 {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const cwd = std.process.currentPathAlloc(io_backend.io(), allocator) catch return null;
     defer allocator.free(cwd);
@@ -153,7 +154,7 @@ test "detectHandler finds handler.ts in cwd" {
     const tmp_path = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
     defer allocator.free(tmp_path);
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const cwd_before = try std.process.currentPathAlloc(io_backend.io(), allocator);
     defer allocator.free(cwd_before);
@@ -173,7 +174,7 @@ test "detectHandler errors when nothing matches" {
     const tmp_path = try tmp.dir.realpathAlloc(std.testing.io, allocator, ".");
     defer allocator.free(tmp_path);
 
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const cwd_before = try std.process.currentPathAlloc(io_backend.io(), allocator);
     defer allocator.free(cwd_before);

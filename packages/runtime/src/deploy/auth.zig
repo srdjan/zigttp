@@ -1,4 +1,5 @@
 const std = @import("std");
+const io_util = @import("io_util.zig");
 
 pub const Credentials = struct {
     token: []u8,
@@ -25,7 +26,7 @@ fn openHome(allocator: std.mem.Allocator, io: std.Io) !std.Io.Dir {
 }
 
 pub fn load(allocator: std.mem.Allocator) !Credentials {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
@@ -62,7 +63,7 @@ pub fn load(allocator: std.mem.Allocator) !Credentials {
 }
 
 pub fn save(allocator: std.mem.Allocator, creds: Credentials) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
@@ -100,7 +101,7 @@ pub fn save(allocator: std.mem.Allocator, creds: Credentials) !void {
 }
 
 pub fn clear(allocator: std.mem.Allocator) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
