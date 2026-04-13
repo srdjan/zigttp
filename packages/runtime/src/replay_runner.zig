@@ -16,6 +16,7 @@ const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
+const handler_loader = @import("handler_loader.zig");
 
 const trace = zq.trace;
 
@@ -31,7 +32,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         return;
     }
 
-    const handler_source = try resolveHandlerSource(allocator, config);
+    const handler_source = try handler_loader.load(allocator, config.handler, "Replay");
     defer allocator.free(handler_source.code);
 
     // Build replay runtime config: keep replay_file_path set so Runtime
@@ -258,11 +259,6 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return zq.file_io.readFile(allocator, path, 100 * 1024 * 1024);
 }
 
-const HandlerSource = struct {
-    code: []const u8,
-    filename: []const u8,
-};
-
 fn loadTraceGroups(allocator: std.mem.Allocator, replay_path: []const u8) ![]trace.RequestTraceGroup {
     const trace_source = readFile(allocator, replay_path) catch |err| {
         std.log.err("Failed to read trace file '{s}': {}", .{ replay_path, err });
@@ -276,30 +272,6 @@ fn loadTraceGroups(allocator: std.mem.Allocator, replay_path: []const u8) ![]tra
 fn freeTraceGroups(allocator: std.mem.Allocator, groups: []trace.RequestTraceGroup) void {
     for (groups) |group| allocator.free(group.io_calls);
     allocator.free(groups);
-}
-
-fn resolveHandlerSource(allocator: std.mem.Allocator, config: ServerConfig) !HandlerSource {
-    return switch (config.handler) {
-        .file_path => |path| .{
-            .code = readFile(allocator, path) catch |err| {
-                std.log.err("Failed to read handler '{s}': {}", .{ path, err });
-                return err;
-            },
-            .filename = path,
-        },
-        .inline_code => |code| .{
-            .code = try allocator.dupe(u8, code),
-            .filename = "eval",
-        },
-        .embedded_bytecode => {
-            std.log.err("Replay with embedded bytecode not yet supported", .{});
-            return error.UnsupportedReplaySource;
-        },
-        .appended_payload => {
-            std.log.err("Replay with appended payload not yet supported", .{});
-            return error.UnsupportedReplaySource;
-        },
-    };
 }
 
 fn printReplaySummary(handler_filename: []const u8, summary: ReplaySummary) void {

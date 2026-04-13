@@ -157,7 +157,7 @@ pub fn mathExp(ctx: *context.Context, this: value.JSValue, args: []const value.J
     return allocFloat(ctx, @exp(n));
 }
 
-var prng: ?std.Random.DefaultPrng = null;
+threadlocal var prng: ?std.Random.DefaultPrng = null;
 
 fn getRandomFloat() f64 {
     if (prng == null) {

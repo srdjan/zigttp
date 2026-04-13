@@ -22,6 +22,7 @@ const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const ServerConfig = @import("server.zig").ServerConfig;
+const handler_loader = @import("handler_loader.zig");
 
 const trace = zq.trace;
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
@@ -60,27 +61,10 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         return;
     }
 
-    const handler_code = switch (config.handler) {
-        .file_path => |path| readFile(allocator, path) catch |err| {
-            std.log.err("Failed to read handler '{s}': {}", .{ path, err });
-            return err;
-        },
-        .inline_code => |code| try allocator.dupe(u8, code),
-        .embedded_bytecode => {
-            std.log.err("Testing with embedded bytecode not yet supported", .{});
-            return error.UnsupportedTestSource;
-        },
-        .appended_payload => {
-            std.log.err("Testing with appended payload not yet supported", .{});
-            return error.UnsupportedTestSource;
-        },
-    };
+    const loaded = try handler_loader.load(allocator, config.handler, "Testing");
+    const handler_code = loaded.code;
+    const handler_filename = loaded.filename;
     defer allocator.free(handler_code);
-
-    const handler_filename = switch (config.handler) {
-        .file_path => |path| path,
-        else => "eval",
-    };
 
     // Set replay_file_path sentinel so Runtime installs replay stubs
     // instead of real virtual module functions.
