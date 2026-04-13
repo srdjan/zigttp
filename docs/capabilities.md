@@ -1,8 +1,8 @@
 # Module Capabilities
 
-Virtual modules exposed through `zigttp:*` imports run inside the handler's JavaScript context but often need to touch external resources: the real clock, the OS RNG, the filesystem, the network. Capabilities are the governance metadata that records exactly which resources each module's Zig implementation is allowed to reach, and enforcement is wired so that an implementation that reaches outside its declaration panics rather than silently misbehaves.
+Virtual modules exposed through `zigttp:*` imports run inside the handler's JavaScript context but often need to touch external resources (clock, RNG, filesystem, network). Capabilities record exactly which resources each module's Zig implementation is allowed to reach; an implementation that reaches outside its declaration panics at build time rather than silently misbehaving.
 
-This document is the source-of-truth map between the capability enum, the modules that declare each capability, and the helpers that enforce them. If you are adding a new virtual module, read this end-to-end before writing any Zig code.
+Read this end-to-end before adding a new virtual module.
 
 ## The capability enum
 

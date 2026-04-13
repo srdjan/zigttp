@@ -1,6 +1,6 @@
 # Control Plane Contract
 
-`zigttp deploy` and `zigttp login` are client-side binaries that talk to a hosted control plane. The hosted plane itself is out of this repository, but the wire contract the client depends on is reconstructable from the deploy subsystem source. This document is that reconstruction: if you want to run a self-hosted control plane via `ZIGTTP_CONTROL_PLANE_URL`, the endpoints, payloads, and status codes here are the surface you must implement.
+`zigttp deploy` and `zigttp login` are client-side binaries that talk to a hosted control plane. The plane itself is not in this repo; the wire contract below is reconstructed from the deploy subsystem source. To run a self-hosted plane via `ZIGTTP_CONTROL_PLANE_URL`, implement the endpoints, payloads, and status codes here.
 
 ## Source of truth
 

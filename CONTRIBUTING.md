@@ -1,8 +1,6 @@
 # Contributing
 
-Thanks for your interest in zigttp. This document covers the practical bits: how to build, how to test, and the conventions a PR needs to respect before merge.
-
-For agent-facing conventions (Claude Code, hooks, skills) see [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
+How to build, how to test, and the conventions a PR must respect before merge. For agent-facing conventions (Claude Code, hooks, skills) see [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
 
 ## Toolchain
 

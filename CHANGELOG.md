@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes to zigttp are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to Semantic Versioning once it ships 1.0. Until then, minor version bumps may include breaking changes; the release notes will call them out.
+Changes to zigttp. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). SemVer kicks in at 1.0; until then, minor bumps may include breaking changes (called out in the release notes).
 
-Prior to v0.16 the project had no CHANGELOG. For historical releases (v0.7 through v0.15) consult `git log` between tags and the checklist entries in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
+For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
 ## [Unreleased]
 
@@ -26,7 +26,9 @@ Prior to v0.16 the project had no CHANGELOG. For historical releases (v0.7 throu
 ### Fixed
 
 - Removed an unsafe `catch unreachable` on the outbound `fetch` hot path in `zruntime.zig`; malformed URI hosts now return a typed `InvalidUrl` fetch error instead of panicking the worker.
-- Three genuinely-racy VM module-level variables are now `threadlocal`: `interpreter.zig:call_trace_count` (debug trace counter incremented on every call), `builtins/math.zig:prng` (`Math.random` state mutated on every use), and `builtins/json.zig:json_shape_cache` (the comment already called it "Thread-local" but the declaration had drifted). The remaining idempotent env-var caches in `interpreter.zig:22-50` are unchanged - their races are benign same-value writes.
+- `builtins/math.zig:prng` is now `threadlocal`. The `Math.random` PRNG state was shared across all pool workers with no synchronization; each worker now owns its own stream. Trace recording and replay semantics are unchanged.
+- `builtins/json.zig:json_shape_cache` is now `threadlocal`. The comment already called it "Thread-local JSON shape cache" but the declaration had drifted to a plain global. Per-thread is what the comment promised and what `clearJsonShapeCache` (called during per-context setup) assumed.
+- `interpreter.zig:call_trace_count` is now `threadlocal`. This is a debug-only counter (`ZTS_CALL_TRACE`) that gates how many call-trace lines get printed; as a global it could drop increments under concurrent traced calls. The semantics are now a per-worker print budget instead of a global one - acceptable because the feature is opt-in diagnostic output. The remaining env-var caches at `interpreter.zig:22-50` are unchanged: their races are benign same-value writes.
 
 ## [0.16.0-rc2] - 2026
 
