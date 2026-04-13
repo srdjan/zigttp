@@ -346,7 +346,7 @@ pub const FlowChecker = struct {
 
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
-            if (!std.mem.startsWith(u8, module_str, "zigttp:")) continue;
+            if (builtin_modules.fromSpecifier(module_str) == null) continue;
 
             var j: u8 = 0;
             while (j < import_decl.specifiers_count) : (j += 1) {
@@ -354,7 +354,7 @@ pub const FlowChecker = struct {
                 const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
 
-                if (builtin_modules.findFunction(imported_name)) |entry| {
+                if (builtin_modules.findExport(module_str, imported_name)) |entry| {
                     if (!entry.func.return_labels.isEmpty()) {
                         self.module_fn_labels.put(
                             self.allocator,

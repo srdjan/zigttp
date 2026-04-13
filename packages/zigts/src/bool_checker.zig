@@ -1593,20 +1593,13 @@ pub const BoolChecker = struct {
 
     /// Look up a function's return type from the module binding registry.
     fn findModuleReturnEntry(module_str: []const u8, func_name: []const u8) ?ModuleReturnEntry {
-        for (builtin_modules.all) |binding| {
-            if (!std.mem.eql(u8, binding.specifier, module_str)) continue;
-            for (binding.exports) |func| {
-                if (std.mem.eql(u8, func.name, func_name)) {
-                    return .{
-                        .module = binding.specifier,
-                        .name = func.name,
-                        .ret = returnKindToExprType(func.returns),
-                        .is_result = func.returns == .result,
-                    };
-                }
-            }
-        }
-        return null;
+        const entry = builtin_modules.findExport(module_str, func_name) orelse return null;
+        return .{
+            .module = entry.binding.specifier,
+            .name = entry.func.name,
+            .ret = returnKindToExprType(entry.func.returns),
+            .is_result = entry.func.returns == .result,
+        };
     }
 
     fn returnKindToExprType(kind: mb.ReturnKind) ExprType {
@@ -1634,8 +1627,7 @@ pub const BoolChecker = struct {
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Only process zigttp:* virtual modules
-            if (!std.mem.startsWith(u8, module_str, "zigttp:")) continue;
+            if (builtin_modules.fromSpecifier(module_str) == null) continue;
 
             var j: u8 = 0;
             while (j < import_decl.specifiers_count) : (j += 1) {
@@ -2488,6 +2480,14 @@ test "sound: x !== undefined on non-optional is tautological" {
         \\import { sha256 } from "zigttp:crypto";
         \\const h = sha256("data");
         \\const r = h !== undefined;
+    , 0, 1);
+}
+
+test "sound: zigttp-ext import return type participates in undefined tautology checks" {
+    try checkSourceFull(
+        \\import { double } from "zigttp-ext:math";
+        \\const value = double(21);
+        \\const r = value !== undefined;
     , 0, 1);
 }
 

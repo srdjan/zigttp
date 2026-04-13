@@ -277,9 +277,7 @@ pub const PathGenerator = struct {
 
             const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
             const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
-            if (!std.mem.startsWith(u8, module_str, "zigttp:")) continue;
-
-            const mod_name = module_str[7..];
+            const binding = builtin_modules.fromSpecifier(module_str) orelse continue;
 
             var j: u8 = 0;
             while (j < import_decl.specifiers_count) : (j += 1) {
@@ -287,9 +285,9 @@ pub const PathGenerator = struct {
                 const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
 
-                if (builtin_modules.findFunction(imported_name)) |entry| {
+                if (builtin_modules.findExport(module_str, imported_name)) |entry| {
                     self.module_fn_bindings.put(self.allocator, spec.local_binding.slot, .{
-                        .module = mod_name,
+                        .module = binding.name,
                         .func = entry.func.name,
                         .returns = entry.func.returns,
                     }) catch {};
@@ -970,3 +968,43 @@ test "stubValueForType falsy" {
     try std.testing.expectEqualStrings("false", stubValueForType(.boolean, false));
 }
 
+test "scanImports tracks zigttp-ext functions with binding names" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { double } from "zigttp-ext:math";
+        \\const value = double(21);
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var generator = PathGenerator.init(allocator, ir_view, &atoms);
+    defer generator.deinit();
+    generator.scanImports();
+
+    var tracked_slot: ?u16 = null;
+    const node_count = ir_view.nodeCount();
+    for (0..node_count) |idx_usize| {
+        const idx: NodeIndex = @intCast(idx_usize);
+        const tag = ir_view.getTag(idx) orelse continue;
+        if (tag != .import_decl) continue;
+        const import_decl = ir_view.getImportDecl(idx) orelse continue;
+        const module_str = ir_view.getString(import_decl.module_idx) orelse continue;
+        if (!std.mem.eql(u8, module_str, "zigttp-ext:math")) continue;
+        const spec_idx = ir_view.getListIndex(import_decl.specifiers_start, 0);
+        const spec = ir_view.getImportSpec(spec_idx) orelse continue;
+        tracked_slot = spec.local_binding.slot;
+        break;
+    }
+
+    const meta = generator.module_fn_bindings.get(tracked_slot orelse return error.ExpectedTrackedSlot) orelse return error.ExpectedTrackedMeta;
+    try std.testing.expectEqualStrings("ext_math", meta.module);
+    try std.testing.expectEqualStrings("double", meta.func);
+    try std.testing.expectEqual(mb.ReturnKind.number, meta.returns);
+}

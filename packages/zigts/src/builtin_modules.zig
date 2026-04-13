@@ -75,6 +75,20 @@ pub fn fromSpecifier(specifier: []const u8) ?*const ModuleBinding {
     return null;
 }
 
+/// Get the binding for a specific export from a specific module.
+pub fn findExport(
+    specifier: []const u8,
+    func_name: []const u8,
+) ?struct { binding: *const ModuleBinding, func: *const mb.FunctionBinding } {
+    const binding = fromSpecifier(specifier) orelse return null;
+    for (binding.exports) |*f| {
+        if (std.mem.eql(u8, f.name, func_name)) {
+            return .{ .binding = binding, .func = f };
+        }
+    }
+    return null;
+}
+
 /// Get the binding for a function name (searches all modules).
 pub fn findFunction(func_name: []const u8) ?struct { binding: *const ModuleBinding, func: *const mb.FunctionBinding } {
     for (&all) |*b| {
@@ -111,6 +125,20 @@ test "findFunction finds known functions" {
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("zigttp:crypto", result.?.binding.specifier);
     try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
+}
+
+test "findExport finds known module export" {
+    const result = findExport("zigttp:crypto", "sha256");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("zigttp:crypto", result.?.binding.specifier);
+    try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
+}
+
+test "findExport finds extension module export" {
+    const result = findExport("zigttp-ext:math", "double");
+    try std.testing.expect(result != null);
+    try std.testing.expectEqualStrings("zigttp-ext:math", result.?.binding.specifier);
+    try std.testing.expectEqual(mb.ReturnKind.number, result.?.func.returns);
 }
 
 test "findFunction finds extension functions" {
