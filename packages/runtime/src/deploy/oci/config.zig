@@ -1,5 +1,5 @@
 const std = @import("std");
-const plan = @import("../plan.zig");
+const types = @import("../types.zig");
 
 pub const Blob = struct {
     bytes: []u8,
@@ -16,7 +16,7 @@ pub const Label = struct {
     value: []const u8,
 };
 
-pub fn build(allocator: std.mem.Allocator, arch: plan.Arch, diff_id: []const u8, labels: []const Label) !Blob {
+pub fn build(allocator: std.mem.Allocator, arch: types.Arch, diff_id: []const u8, labels: []const Label) !Blob {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var json: std.json.Stringify = .{ .writer = &aw.writer };

@@ -2,17 +2,20 @@ const std = @import("std");
 const auth = @import("auth.zig");
 const control_plane = @import("control_plane.zig");
 const io_util = @import("io_util.zig");
+const printer_mod = @import("printer.zig");
 
-pub fn ensureSignedIn(allocator: std.mem.Allocator) !auth.Credentials {
+const Printer = printer_mod.Printer;
+
+pub fn ensureSignedIn(allocator: std.mem.Allocator, printer: Printer) !auth.Credentials {
     if (auth.load(allocator)) |creds| {
         return creds;
     } else |err| switch (err) {
-        error.NotSignedIn => return try interactiveLogin(allocator),
+        error.NotSignedIn => return try interactiveLogin(allocator, printer),
         else => return err,
     }
 }
 
-fn interactiveLogin(allocator: std.mem.Allocator) !auth.Credentials {
+fn interactiveLogin(allocator: std.mem.Allocator, printer: Printer) !auth.Credentials {
     var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
@@ -26,7 +29,7 @@ fn interactiveLogin(allocator: std.mem.Allocator) !auth.Credentials {
         .{challenge.verification_url},
     );
     defer allocator.free(stderr_msg);
-    _ = std.c.write(std.c.STDERR_FILENO, stderr_msg.ptr, stderr_msg.len);
+    printer.write(stderr_msg);
 
     const interval_s = std.math.clamp(challenge.interval_seconds, 1, 60);
     const deadline_s = std.math.clamp(challenge.expires_in_seconds, 60, 3600);
@@ -52,7 +55,7 @@ fn interactiveLogin(allocator: std.mem.Allocator) !auth.Credentials {
                 if (r.email) |email| {
                     const ok_msg = try std.fmt.allocPrint(allocator, "Signed in as {s}.\n", .{email});
                     defer allocator.free(ok_msg);
-                    _ = std.c.write(std.c.STDERR_FILENO, ok_msg.ptr, ok_msg.len);
+                    printer.write(ok_msg);
                 }
                 return try auth.load(allocator);
             },

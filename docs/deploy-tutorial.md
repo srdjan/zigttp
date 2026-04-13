@@ -1,31 +1,69 @@
 # Deploy
 
-Put a `handler.ts` in your project directory. Write and test it locally with `zigttp serve handler.ts`.
-
-When you are ready to ship, run:
+Put a `handler.ts` in your project directory. Test it locally with `zigttp serve handler.ts`. When it works, ship it:
 
 ```
 zigttp deploy
 ```
 
-That is the whole command. No flags, no arguments, no config files, no cloud accounts to create, no registry to set up. On the first run, `zigttp deploy` prints a URL. Open it in a browser to sign in. After that, it remembers you. Future runs build your handler, upload it, and print the public URL where it is live.
+That is the whole command. No flags, no positional arguments, no config files, no cloud account, no registry to set up. The first run prints a sign-in URL; open it in a browser and the CLI takes it from there. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
 
 ## What it deploys
 
-Your handler, and whatever it reads from `.env` in the current directory as runtime secrets. Nothing else. Zigttp figures out the rest by looking at your project:
+The handler, plus whatever sits in `.env` in the current directory as runtime variables. Nothing else. zigttp picks the rest out of the project:
 
-- Handler file: the first match of `handler.ts`, `handler.tsx`, `handler.jsx`, `handler.js`, or the same under `src/`.
-- Service name: the `name` field in `package.json`, or the basename of your git origin remote, or the current directory name. Slugified to lowercase with dashes.
-- Runtime environment: key/value pairs in `.env` (one per line, `KEY=value`). Missing file is fine.
+- **Handler file**: the first match of `handler.ts`, `handler.tsx`, `handler.jsx`, `handler.js`, or the same paths under `src/`.
+- **Service name**: the `name` field in `package.json`, then the basename of the git origin remote, then the current directory name. Slugified to lowercase with dashes.
+- **Runtime environment**: `KEY=value` lines in `.env`. Missing file is fine. Malformed lines abort the deploy with a `path:line` diagnostic so you can find them.
+- **Region**: `--region <name>` if you pass it, then the region from the previous deploy of this service, then `us-central`.
+
+## What gets shipped
+
+zigttp cross-compiles the handler to a Linux musl binary, packages it as an OCI image, and tags every image with compiler-proven facts from the handler contract: env var names, egress hosts, cache namespaces, route patterns, and boolean properties like `retry-safe`, `read-only`, and `idempotent`. The image manifest digest is content-addressed, so identical handlers produce identical digests. The CLI prints the digest alongside the public URL on success; rerunning a deploy that produces the same digest is a no-op.
 
 ## Updates
 
-Re-run `zigttp deploy` any time. Zigttp reuses the same service and only rolls out if the built image changed. Image references are content-addressed, so rebuilding identical code is a no-op.
+Re-run `zigttp deploy` any time. zigttp reuses the same service and only rolls out when the built image changes.
 
-## Sign out
+If something about the service has shifted since the last deploy (different scope, different region, different plan, or you removed a previously managed env var), the CLI prints a drift warning and exits with code 2 instead of mutating the service. Re-run with `--confirm` to acknowledge the warning and proceed:
+
+```
+zigttp deploy --confirm
+```
+
+`--confirm` rebinds and updates state; it never deletes the old service.
+
+## Wait for ready
+
+By default, `zigttp deploy` waits up to 120 seconds for the new service to come up before exiting. Pass `--no-wait` to skip the poll and return immediately after the deploy is accepted:
+
+```
+zigttp deploy --no-wait
+```
+
+Exit codes:
+
+- `0` success
+- `2` drift detected, re-run with `--confirm`
+- `3` timed out waiting for the service to report ready
+- `4` service failed to start
+
+## Sign in and out
+
+Credentials live at `~/.zigttp/credentials` after the first sign-in. To forget them:
 
 ```
 zigttp logout
 ```
 
-Forgets the saved credentials. The next `zigttp deploy` will prompt you to sign in again.
+The next `zigttp deploy` will prompt for a fresh sign-in.
+
+## Self-hosted control plane
+
+By default the CLI talks to `https://api.zigttp.dev`. Point it at a self-hosted control plane by exporting `ZIGTTP_CONTROL_PLANE_URL`:
+
+```
+ZIGTTP_CONTROL_PLANE_URL=https://control.example.com zigttp deploy
+```
+
+The control plane provisions short-lived OCI registry credentials per deploy and forwards the image to the upstream provider, so the CLI never needs registry or provider tokens of its own.

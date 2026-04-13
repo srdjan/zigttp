@@ -95,18 +95,25 @@ pub fn save(allocator: std.mem.Allocator, creds: Credentials) !void {
     try writer.interface.flush();
 }
 
-pub fn clear(allocator: std.mem.Allocator) !void {
+// Returns true if credentials existed and were deleted, false if nothing was
+// there. Callers rely on the distinction to pick between "Signed out." and
+// "Already signed out." without a separate stat check.
+pub fn clear(allocator: std.mem.Allocator) !bool {
     var io_backend = io_util.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    var home = openHome(allocator, io) catch return;
+    var home = openHome(allocator, io) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
     defer home.close(io);
 
     home.deleteFile(io, rel_file) catch |err| switch (err) {
-        error.FileNotFound => {},
+        error.FileNotFound => return false,
         else => return err,
     };
+    return true;
 }
 
 test "save → load → clear round trip" {
@@ -137,8 +144,9 @@ test "save → load → clear round trip" {
     try std.testing.expectEqualStrings("tok-abc", loaded.token);
     try std.testing.expectEqualStrings("me@example.com", loaded.email.?);
 
-    try clear(allocator);
+    try std.testing.expect(try clear(allocator));
     try std.testing.expectError(error.NotSignedIn, load(allocator));
+    try std.testing.expect(!try clear(allocator));
 }
 
 test "load returns NotSignedIn when credentials missing" {

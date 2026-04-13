@@ -1,11 +1,11 @@
 const std = @import("std");
 const zigts = @import("zigts");
-const plan = @import("plan.zig");
+const types = @import("types.zig");
 const io_util = @import("io_util.zig");
 const json_util = @import("json_util.zig");
 
 pub const Entry = struct {
-    provider: plan.Provider,
+    provider: types.Provider,
     name: []const u8,
     scope_id: []const u8,
     service_id: []const u8,
@@ -36,7 +36,7 @@ pub const Store = struct {
         allocator.free(self.entries);
     }
 
-    pub fn get(self: *const Store, provider: plan.Provider, name: []const u8) ?*const Entry {
+    pub fn get(self: *const Store, provider: types.Provider, name: []const u8) ?*const Entry {
         for (self.entries) |*entry| {
             if (entry.provider == provider and std.mem.eql(u8, entry.name, name)) return entry;
         }
@@ -142,7 +142,7 @@ pub fn save(allocator: std.mem.Allocator, store: *const Store) !void {
 
 fn parseEntry(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !Entry {
     const provider_raw = json_util.getString(obj, "provider") orelse return error.InvalidDeployState;
-    const provider = plan.Provider.fromString(provider_raw) orelse return error.InvalidDeployState;
+    const provider = types.Provider.fromString(provider_raw) orelse return error.InvalidDeployState;
     const managed_value = obj.get("managedEnvKeys") orelse return error.InvalidDeployState;
     if (managed_value != .array) return error.InvalidDeployState;
     var managed = std.ArrayList([]const u8).empty;

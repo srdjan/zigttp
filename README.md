@@ -29,7 +29,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**Proven deploy planning.** `zigttp deploy --dry-run --json` emits compiler-proven deployment facts directly from the handler contract: env vars, egress hosts, cache namespaces, routes, verification checks, handler properties, OCI metadata labels, registry upload requests, and provider API payloads. Proof levels (complete/partial/none) signal what was statically verified vs what still needs manual review.
+**One-command deploy.** `zigttp deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run signs you in through the browser; subsequent runs reuse the saved session. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
@@ -343,78 +343,72 @@ Options:
 
 ### `zigttp deploy`
 
-Cross-compiles the handler to a Linux binary, packages it as an OCI image
-built in Zig, pushes the image to any OCI registry, then creates or updates
-a service on Render or Northflank that pulls the image by digest. `zig`
-itself is the only external tool invoked, for cross-compilation.
+Cross-compiles the handler to a Linux musl binary, packages it as an OCI
+image, pushes it through the zigttp control plane, and provisions the
+service. The control plane mints short-lived registry credentials per
+deploy and forwards the image to the upstream provider, so there is no
+account to create, no registry to configure, and no API token to manage
+on the client.
 
 ```bash
-zigttp deploy [options] <handler.ts>
+zigttp deploy [options]
 
 Options:
-  --provider <render|northflank>   Target provider (required)
-  --name <NAME>                    Service name (required)
-  --region <REGION>                Provider region override
-  --env-file <PATH>                Load KEY=VALUE runtime env vars
-  --arch <amd64|arm64>             Target architecture (default: amd64)
-  --dry-run                        Emit plan only, no network mutations
-  --json                           Emit structured JSON output
-  --confirm                        Allow replace-like updates
+  --region <name>   Override the deployment region for this run
+  --confirm         Acknowledge drift and proceed with a replace-like update
+  --wait            Block until the service reports ready (default)
+  --no-wait         Return immediately after the deploy is accepted
+  -h, --help        Show usage
 ```
 
-Everything else comes from environment variables.
+First run prints a sign-in URL. Open it in a browser; the CLI polls until
+the device flow completes and stores the token at `~/.zigttp/credentials`.
+`zigttp logout` clears it. The control plane base URL defaults to
+`https://api.zigttp.dev`; set `ZIGTTP_CONTROL_PLANE_URL` to point at a
+self-hosted instance.
 
-```
-ZIGTTP_OCI_REGISTRY              OCI registry host (e.g. ghcr.io)
-ZIGTTP_OCI_NAMESPACE             OCI repo namespace (e.g. acme/zigttp-handlers)
-ZIGTTP_OCI_USERNAME              Registry push username
-ZIGTTP_OCI_PASSWORD              Registry push token
+Everything else is auto-detected from the current directory:
 
-RENDER_API_KEY                   Render API token
-RENDER_WORKSPACE_ID              Render workspace id
-RENDER_PLAN                      Render service plan tier
-RENDER_REGISTRY_CREDENTIAL_ID    Optional private-registry credential
-
-NORTHFLANK_API_TOKEN             Northflank API token
-NORTHFLANK_PROJECT_ID            Northflank project id
-NORTHFLANK_PLAN_ID               Northflank billing plan id
-NORTHFLANK_REGISTRY_CREDENTIAL_ID  Optional private-registry credential
-```
-
-Image references are always content-addressed as
-`{ZIGTTP_OCI_REGISTRY}/{ZIGTTP_OCI_NAMESPACE}/{sanitized-name}@sha256:<manifest-digest>`;
-tags are never user-supplied.
-
-Dry-run requires the OCI registry, namespace, and provider scope/plan vars;
-push credentials and the provider API token are required only for a real
-deploy. Any missing variables are listed together in a single error.
+- **Handler file**: first match of `handler.ts`, `handler.tsx`,
+  `handler.jsx`, `handler.js`, or the same paths under `src/`.
+- **Service name**: the `name` field in `package.json`, then the basename
+  of the git origin remote, then the current directory name. Slugified to
+  lowercase with dashes.
+- **Runtime environment**: `KEY=value` pairs from `.env` in the current
+  directory, one per line. Missing file is fine; a malformed line aborts
+  the deploy with a `path:line` diagnostic.
+- **Region**: `--region` if given, then the region from the previous
+  deploy of this service, then `us-central`.
 
 ```bash
-ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
-RENDER_WORKSPACE_ID=ws_demo RENDER_PLAN=starter \
-zigttp deploy --provider render --name demo --region oregon \
-  examples/handler/handler.ts --dry-run --json
-
-ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
-NORTHFLANK_PROJECT_ID=proj_demo NORTHFLANK_PLAN_ID=nf-standard \
-zigttp deploy --provider northflank --name demo --region us-east \
-  examples/handler/handler.ts --dry-run --json
+zigttp deploy
+zigttp deploy --region eu-west
+zigttp deploy --no-wait
 ```
 
-Reconciliation uses a local state file, `.zigttp/deploy-state.json`, that
-stores non-secret provider identifiers. Rerunning the command for the same
-`(provider, name)` reuses the stored `service_id` and patches in place.
-Changes to scope, region, plan, or removal of a previously managed env var
-trigger a `replace_requires_confirm` action that fails unless `--confirm`
-is passed. Even with `--confirm`, v1 never deletes the old remote service.
+Reconciliation reads `.zigttp/deploy-state.json`, which stores non-secret
+identifiers (scope, region, plan, managed env keys, last image digest)
+from the last successful deploy of each service. A change to scope,
+region, plan, or removal of a previously managed env var is flagged as
+drift; the CLI prints the warning and exits with code 2. Re-run with
+`--confirm` to acknowledge and proceed. Even with `--confirm`, the
+old service is rebound and updated, never deleted.
 
-`zigttp deploy` reads the same compiler-proven contract used for sandboxing
-and live reload. It writes the proof level, env vars, egress hosts, routes,
-and OWASP Top 10 coverage into OCI image labels and prints them in the
-dry-run output.
+After the push the CLI polls the provider until the service reports
+ready (120s default). `--no-wait` skips the poll. Exit codes:
 
-The old build-time `-Ddeploy=aws` manifest generator has been removed; this
-is now the only supported deployment path.
+- `0` success
+- `2` drift detected, re-run with `--confirm`
+- `3` timed out waiting for the service to report ready
+- `4` service failed to start
+
+OCI image references are content-addressed by the manifest digest, which
+is printed alongside the public URL on success. Identical handlers
+produce identical digests, so rerunning the deploy is a no-op when
+nothing changed. Proof facts from the handler contract (proof level,
+env var names, egress hosts, cache namespaces, routes, handler
+properties) are encoded as JSON arrays in OCI image labels so
+provenance survives in the registry.
 
 ### zigts CLI (compiler and analyzer)
 
@@ -466,7 +460,7 @@ Code ranges: ZTS0xx (parser), ZTS1xx (sound mode), ZTS2xx (type checker), ZTS3xx
 
 **Structured Concurrency**: `parallel()` and `race()` overlap outbound HTTP using OS threads. No async/await, no event loop - handler code stays synchronous and linear.
 
-**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), runtime deploy proof planning (`zigttp deploy --dry-run --json`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), proven live reload (`--watch --prove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
+**Deployment Pipeline**: Contract manifests with behavioral paths (`-Dcontract`), one-command runtime deploy (`zigttp deploy`), auto-derived runtime sandboxing, deterministic replay (`--trace`/`--replay`/`-Dreplay`), proven evolution with upgrade verdicts (`-Dprove`), proven live reload (`--watch --prove`), and durable execution (`--durable`) form a pipeline from source analysis to production deployment with crash recovery.
 
 **Language Support**: ES5 + select ES6 features (for...of with break/continue, typed arrays, exponentiation, pipe operator, compound assignments), native TypeScript/TSX stripping with type checking, compile-time evaluation with `comptime()`, direct JSX parsing, `match` expression, `assert` statement, `distinct type`, `readonly` fields, template literal types, type guards (`x is T`).
 
@@ -599,12 +593,6 @@ zig build -Dhandler=examples/sql/sql-crud.ts -Dsql-schema=examples/sql/schema.sq
 
 # Override auto-derived sandbox with an explicit capability policy
 zig build -Dhandler=handler.ts -Dpolicy=policy.json
-
-# Plan a deployment without network mutations
-ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
-RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
-./zig-out/bin/zigttp deploy --provider render --name demo --region oregon \
-  handler.ts --dry-run --json
 
 # Replay-verify handler against recorded traces before embedding
 zig build -Dhandler=handler.ts -Dreplay=traces.jsonl
@@ -814,29 +802,22 @@ To override auto-derived sandboxing with a stricter or different policy, pass an
 
 Omit a section to leave that capability unrestricted. If a section is present, dynamic access in that category is rejected because zigttp cannot fully enumerate it.
 
-### Native Deploy Planning
+### Native Deploy
 
-`zigttp deploy` consumes the same compiler-proven contract used for sandboxing
-and verification, then turns it into a live deploy plan for Render or
-Northflank.
+`zigttp deploy` consumes the same compiler-proven contract used for
+sandboxing and verification, then ships the handler through the zigttp
+control plane in one command. The full flow lives in
+[docs/deploy-tutorial.md](docs/deploy-tutorial.md); the short version is
+above under [`zigttp deploy`](#zigttp-deploy).
 
-Dry-run output includes:
-
-- proof facts: env vars, egress hosts, cache namespaces, routes, verification checks, handler properties
-- a human-readable proof report with `PROVEN` and `NEEDS MANUAL REVIEW` sections
-- OCI image digests and labels derived from the proof facts
-- registry upload requests
-- provider API payloads
-
-```bash
-ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
-RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
-./zig-out/bin/zigttp deploy --provider render --name demo --region oregon \
-  handler.ts --dry-run --json
-```
-
-Proof levels: `complete` (all checks pass, no dynamic flags), `partial` (some
-verification but dynamic access detected), `none` (no verification ran).
+Proof facts from the contract are encoded as JSON arrays in OCI image
+labels (`zigttp.proof-level`, `zigttp.env-vars`, `zigttp.egress-hosts`,
+`zigttp.cache-namespaces`, `zigttp.routes`, plus boolean labels for
+`retry-safe`, `read-only`, `idempotent`, and so on) so registries and
+downstream tooling can audit what the binary is allowed to do without
+running it. Proof levels: `complete` (all checks pass, no dynamic
+flags), `partial` (some verification but dynamic access detected),
+`none` (no verification ran).
 
 ### Deterministic Replay (`--trace` / `--replay` / `-Dreplay`)
 

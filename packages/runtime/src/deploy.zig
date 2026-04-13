@@ -2,7 +2,7 @@ const std = @import("std");
 const zigts = @import("zigts");
 const zigts_cli = @import("zigts_cli");
 const config_mod = @import("deploy/config.zig");
-const plan_mod = @import("deploy/plan.zig");
+const types_mod = @import("deploy/types.zig");
 const builder = @import("deploy/builder.zig");
 const state = @import("deploy/state.zig");
 const northflank_adapter = @import("deploy/northflank_adapter.zig");
@@ -13,20 +13,30 @@ const auth = @import("deploy/auth.zig");
 const control_plane = @import("deploy/control_plane.zig");
 const autodetect = @import("deploy/autodetect.zig");
 const first_run = @import("deploy/first_run.zig");
+const printer_mod = @import("deploy/printer.zig");
+
+const Printer = printer_mod.Printer;
 
 const precompile = zigts_cli.precompile;
 const deploy_manifest = zigts_cli.deploy_manifest;
 
 const Reconciliation = struct {
-    action: plan_mod.ProviderAction,
+    action: types_mod.ProviderAction,
     warning: ?[]u8 = null,
 };
 
 pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    try config_mod.parse(argv);
+    const options = try config_mod.parse(argv);
 
-    var credentials = try first_run.ensureSignedIn(allocator);
-    defer credentials.deinit(allocator);
+    var stdout_buf: [256]u8 = undefined;
+    var stderr_buf: [256]u8 = undefined;
+    var stdout_writer = printer_mod.FdWriter.init(std.c.STDOUT_FILENO, stdout_buf[0..]);
+    var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+    const printer = Printer{
+        .stdout = &stdout_writer.interface,
+        .stderr = &stderr_writer.interface,
+    };
+    var progress = printer_mod.Progress{ .printer = printer };
 
     const handler_path = try autodetect.detectHandler(allocator);
     defer allocator.free(handler_path);
@@ -34,7 +44,19 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const service_name = try autodetect.detectName(allocator);
     defer allocator.free(service_name);
 
-    var session = try control_plane.fetchDeploySession(allocator, credentials.token, service_name);
+    // When a second provider lands, the lookup will need to iterate providers.
+    var store = try state.load(allocator);
+    defer store.deinit(allocator);
+    const previous = store.get(.northflank, service_name);
+
+    const effective_region: []const u8 = options.region orelse blk: {
+        if (previous) |entry| {
+            if (entry.region) |region| break :blk region;
+        }
+        break :blk control_plane.default_region;
+    };
+
+    var session = try fetchDeploySessionWithAuthRetry(allocator, service_name, effective_region, printer);
     defer session.deinit(allocator);
 
     const image_repo = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ session.namespace, service_name });
@@ -49,8 +71,8 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         allocator.free(env_vars);
     }
 
-    stdoutLine("  Handler:    ", handler_path);
-    stdoutLine("  Name:       ", service_name);
+    printer.line("  Handler:    ", handler_path);
+    printer.line("  Name:       ", service_name);
 
     const source = try zigts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024);
     defer allocator.free(source);
@@ -69,11 +91,11 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     defer compiled.deinit(allocator);
     if (compiled.verify_failed) {
         if (compiled.violations_summary) |summary| {
-            _ = std.c.write(std.c.STDERR_FILENO, summary.ptr, summary.len);
+            printer.write(summary);
         }
         return error.VerificationFailed;
     }
-    stdoutLine("  Verifying.. ok", "");
+    printer.line("  Verifying.. ok", "");
 
     var proven_extract: ?struct {
         facts: deploy_manifest.ProvenFacts,
@@ -94,10 +116,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         };
     }
 
-    const arch: plan_mod.Arch = .amd64;
+    const arch: types_mod.Arch = .amd64;
     var build_result = try builder.buildLinuxArtifact(allocator, handler_path, arch.targetTriple());
     defer build_result.deinit(allocator);
-    stdoutLine("  Building... ok", "");
+    printer.line("  Building... ok", "");
 
     const image_labels = if (proven_extract) |*extract|
         try buildProofLabels(allocator, &extract.facts)
@@ -107,14 +129,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
     var image = try oci_image.buildImage(allocator, session.registry_host, image_repo, arch, build_result.binary_bytes, image_labels);
     defer image.deinit(allocator);
-    stdoutLine("  Packaging.. ok", "");
+    printer.line("  Packaging.. ok", "");
 
     var registry_ref = try registry.makeRegistryRef(allocator, session.registry_host, image_repo);
     defer registry_ref.deinit(allocator);
-
-    var store = try state.load(allocator);
-    defer store.deinit(allocator);
-    const previous = store.get(session.provider, service_name);
 
     const reconciliation = try evaluateReconciliation(
         allocator,
@@ -126,12 +144,13 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     );
     defer if (reconciliation.warning) |warning| allocator.free(warning);
     if (reconciliation.action == .replace_requires_confirm) {
-        if (reconciliation.warning) |warning| stderrLine(warning);
-        return error.DeployDrift;
+        if (reconciliation.warning) |warning| printer.warn(warning);
+        if (!options.confirm) return error.DeployDrift;
     }
 
-    try registry.push(allocator, &registry_ref, &image, session.registry_username, session.registry_password);
-    stdoutLine("  Uploading.. ok", "");
+    try pushWithAuthRetry(allocator, &registry_ref, &image, &session, service_name, effective_region, &progress);
+    printer.line("  Uploading.. ok", "");
+    printer.line("  Digest:     ", image.image_digest_ref);
 
     const provider_ctx = northflank_adapter.ProviderContext{
         .name = service_name,
@@ -143,7 +162,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         .registry_credential_id = session.registry_credential_id,
         .state_entry = previous,
     };
-    const result = try northflank_adapter.execute(allocator, &provider_ctx, session.provider_api_token);
+    const result = try executeWithAuthRetry(allocator, &provider_ctx, &session, service_name, effective_region, &progress);
     defer {
         allocator.free(result.service_id);
         if (result.deployment_id) |value| allocator.free(value);
@@ -151,7 +170,30 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         allocator.free(result.status);
         allocator.free(result.image_digest_ref);
     }
-    stdoutLine("  Deploying.. ok", "");
+    printer.line("  Deploying.. ok", "");
+
+    var readiness_error: ?anyerror = null;
+    if (options.wait) {
+        const readiness = try northflank_adapter.waitForReadyDefault(
+            allocator,
+            &provider_ctx,
+            result.service_id,
+            session.provider_api_token,
+            northflank_adapter.default_deadline_seconds,
+            printer,
+        );
+        switch (readiness) {
+            .running => printer.line("  Running.", ""),
+            .failed => {
+                printer.warn("Service failed to start. See your provider dashboard for logs.");
+                readiness_error = error.ServiceDidNotStart;
+            },
+            .timed_out => {
+                printer.warn("Timed out waiting for service to become ready after 120s. The deploy was accepted; check the URL in a moment.");
+                readiness_error = error.ServiceReadyTimeout;
+            },
+        }
+    }
 
     try store.put(allocator, .{
         .provider = session.provider,
@@ -167,21 +209,163 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     try state.save(allocator, &store);
 
     const public_url = result.url orelse session.url_hint;
-    if (public_url) |url| stdoutLine("  ", url);
+    if (public_url) |url| printer.line("  ", url);
+
+    if (readiness_error) |err| return err;
 }
 
-fn stdoutLine(prefix: []const u8, value: []const u8) void {
-    _ = std.c.write(std.c.STDOUT_FILENO, prefix.ptr, prefix.len);
-    if (value.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, value.ptr, value.len);
-    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+fn fetchDeploySessionWithAuthRetry(
+    allocator: std.mem.Allocator,
+    service_name: []const u8,
+    region: []const u8,
+    printer: Printer,
+) !control_plane.DeploySession {
+    return fetchDeploySessionWithAuthRetryFns(
+        allocator,
+        service_name,
+        region,
+        printer,
+        first_run.ensureSignedIn,
+        control_plane.fetchDeploySession,
+        auth.clear,
+    );
 }
 
-fn stderrLine(line: []const u8) void {
-    _ = std.c.write(std.c.STDERR_FILENO, line.ptr, line.len);
-    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
+fn fetchDeploySessionWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    service_name: []const u8,
+    region: []const u8,
+    printer: Printer,
+    ensure_signed_in: anytype,
+    fetch_session: anytype,
+    clear_auth: anytype,
+) !control_plane.DeploySession {
+    var credentials = try ensure_signed_in(allocator, printer);
+    defer credentials.deinit(allocator);
+
+    return fetch_session(allocator, credentials.token, service_name, region) catch |err| switch (err) {
+        error.NotSignedIn => {
+            _ = try clear_auth(allocator);
+
+            var refreshed_credentials = try ensure_signed_in(allocator, printer);
+            defer refreshed_credentials.deinit(allocator);
+
+            return fetch_session(allocator, refreshed_credentials.token, service_name, region);
+        },
+        else => return err,
+    };
 }
 
-fn managedEnvKeys(allocator: std.mem.Allocator, env_vars: []const plan_mod.EnvVar) ![]const []const u8 {
+const refresh_skew_seconds: i64 = 120;
+
+fn pushWithAuthRetry(
+    allocator: std.mem.Allocator,
+    registry_ref: *registry.RegistryRef,
+    image: *oci_image.OciImage,
+    session: *control_plane.DeploySession,
+    project_name: []const u8,
+    region: []const u8,
+    progress: *printer_mod.Progress,
+) !void {
+    return pushWithAuthRetryFns(
+        allocator,
+        registry_ref,
+        image,
+        session,
+        project_name,
+        region,
+        progress,
+        registry.push,
+        control_plane.fetchDeploySession,
+        control_plane.defaultNowSec,
+    );
+}
+
+fn pushWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    registry_ref: *registry.RegistryRef,
+    image: *oci_image.OciImage,
+    session: *control_plane.DeploySession,
+    project_name: []const u8,
+    region: []const u8,
+    progress: *printer_mod.Progress,
+    push_fn: anytype,
+    fetch_session: anytype,
+    now_fn: *const fn () i64,
+) !void {
+    _ = try control_plane.sessionRefreshIfExpiringFns(
+        allocator,
+        session,
+        project_name,
+        region,
+        refresh_skew_seconds,
+        now_fn,
+        fetch_session,
+    );
+
+    push_fn(allocator, registry_ref, image, session.registry_username, session.registry_password, progress) catch |err| switch (err) {
+        error.RegistryUnauthorized => {
+            const fresh = try fetch_session(allocator, session.token, project_name, region);
+            try control_plane.swapRefreshedSession(allocator, session, fresh);
+            return push_fn(allocator, registry_ref, image, session.registry_username, session.registry_password, progress);
+        },
+        else => return err,
+    };
+}
+
+fn executeWithAuthRetry(
+    allocator: std.mem.Allocator,
+    ctx: *const northflank_adapter.ProviderContext,
+    session: *control_plane.DeploySession,
+    project_name: []const u8,
+    region: []const u8,
+    progress: *printer_mod.Progress,
+) !types_mod.DeployResult {
+    return executeWithAuthRetryFns(
+        allocator,
+        ctx,
+        session,
+        project_name,
+        region,
+        progress,
+        northflank_adapter.execute,
+        control_plane.fetchDeploySession,
+        control_plane.defaultNowSec,
+    );
+}
+
+fn executeWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    ctx: *const northflank_adapter.ProviderContext,
+    session: *control_plane.DeploySession,
+    project_name: []const u8,
+    region: []const u8,
+    progress: *printer_mod.Progress,
+    execute_fn: anytype,
+    fetch_session: anytype,
+    now_fn: *const fn () i64,
+) !types_mod.DeployResult {
+    _ = try control_plane.sessionRefreshIfExpiringFns(
+        allocator,
+        session,
+        project_name,
+        region,
+        refresh_skew_seconds,
+        now_fn,
+        fetch_session,
+    );
+
+    return execute_fn(allocator, ctx, session.provider_api_token, progress) catch |err| switch (err) {
+        error.ProviderUnauthorized => {
+            const fresh = try fetch_session(allocator, session.token, project_name, region);
+            try control_plane.swapRefreshedSession(allocator, session, fresh);
+            return execute_fn(allocator, ctx, session.provider_api_token, progress);
+        },
+        else => return err,
+    };
+}
+
+fn managedEnvKeys(allocator: std.mem.Allocator, env_vars: []const types_mod.EnvVar) ![]const []const u8 {
     const keys = try allocator.alloc([]const u8, env_vars.len);
     errdefer allocator.free(keys);
     for (env_vars, 0..) |env_var, idx| keys[idx] = try allocator.dupe(u8, env_var.key);
@@ -212,20 +396,23 @@ fn buildProofLabels(
     try appendBoolLabel(allocator, &labels, "zigttp.env-proven", facts.env_proven);
     try appendBoolLabel(allocator, &labels, "zigttp.egress-proven", facts.egress_proven);
     try appendBoolLabel(allocator, &labels, "zigttp.cache-proven", facts.cache_proven);
-    if (facts.env_vars.len > 0) try appendJoinedLabel(allocator, &labels, "zigttp.env-vars", facts.env_vars);
-    if (facts.egress_hosts.len > 0) try appendJoinedLabel(allocator, &labels, "zigttp.egress-hosts", facts.egress_hosts);
-    if (facts.cache_namespaces.len > 0) try appendJoinedLabel(allocator, &labels, "zigttp.cache-namespaces", facts.cache_namespaces);
+    // Label carries env var names only; values live in the provider runtime, never the image.
+    if (facts.env_vars.len > 0) try appendJsonArrayLabel(allocator, &labels, "zigttp.env-vars", facts.env_vars);
+    if (facts.egress_hosts.len > 0) try appendJsonArrayLabel(allocator, &labels, "zigttp.egress-hosts", facts.egress_hosts);
+    if (facts.cache_namespaces.len > 0) try appendJsonArrayLabel(allocator, &labels, "zigttp.cache-namespaces", facts.cache_namespaces);
     if (facts.routes.len > 0) {
         var route_strings = std.ArrayList([]const u8).empty;
-        defer route_strings.deinit(allocator);
+        defer {
+            for (route_strings.items) |value| allocator.free(value);
+            route_strings.deinit(allocator);
+        }
         for (facts.routes) |route| {
             try route_strings.append(allocator, try std.fmt.allocPrint(allocator, "{s}{s}", .{
                 route.pattern,
                 if (route.is_prefix) "*" else "",
             }));
         }
-        defer for (route_strings.items) |value| allocator.free(value);
-        try appendJoinedLabel(allocator, &labels, "zigttp.routes", route_strings.items);
+        try appendJsonArrayLabel(allocator, &labels, "zigttp.routes", route_strings.items);
     }
     if (facts.max_io_depth) |depth| {
         try appendLabelOwned(allocator, &labels, "zigttp.max-io-depth", try std.fmt.allocPrint(allocator, "{d}", .{depth}));
@@ -242,14 +429,20 @@ fn appendBoolLabel(
     try appendLabel(allocator, labels, key, if (value) "true" else "false");
 }
 
-fn appendJoinedLabel(
+fn appendJsonArrayLabel(
     allocator: std.mem.Allocator,
     labels: *std.ArrayList(oci_config.Label),
     key: []const u8,
     values: []const []const u8,
 ) !void {
-    const joined = try std.mem.join(allocator, ",", values);
-    try appendLabelOwned(allocator, labels, key, joined);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+    try json.beginArray();
+    for (values) |value| try json.write(value);
+    try json.endArray();
+    const encoded = try allocator.dupe(u8, aw.writer.buffered());
+    try appendLabelOwned(allocator, labels, key, encoded);
 }
 
 fn appendLabel(
@@ -290,7 +483,7 @@ fn evaluateReconciliation(
     scope_id: []const u8,
     region: []const u8,
     plan_id: []const u8,
-    env_vars: []const plan_mod.EnvVar,
+    env_vars: []const types_mod.EnvVar,
 ) !Reconciliation {
     const entry = previous orelse return .{ .action = .create };
 
@@ -323,14 +516,14 @@ fn evaluateReconciliation(
     defer allocator.free(joined);
     return .{
         .action = .replace_requires_confirm,
-        .warning = try std.fmt.allocPrint(allocator, "This service was created with different settings ({s}). Run `zigttp logout` and contact support.", .{joined}),
+        .warning = try std.fmt.allocPrint(allocator, "This service was created with different settings ({s}). Re-run `zigttp deploy --confirm` to continue.", .{joined}),
     };
 }
 
 fn removedManagedEnvKeysWarning(
     allocator: std.mem.Allocator,
     previous_keys: []const []const u8,
-    env_vars: []const plan_mod.EnvVar,
+    env_vars: []const types_mod.EnvVar,
 ) !?[]u8 {
     var removed = std.ArrayList([]const u8).empty;
     defer {
@@ -350,7 +543,7 @@ fn removedManagedEnvKeysWarning(
     return try std.fmt.allocPrint(allocator, "managed env keys would be removed: {s}", .{joined});
 }
 
-fn envVarsContainKey(env_vars: []const plan_mod.EnvVar, key: []const u8) bool {
+fn envVarsContainKey(env_vars: []const types_mod.EnvVar, key: []const u8) bool {
     for (env_vars) |env_var| {
         if (std.mem.eql(u8, env_var.key, key)) return true;
     }
@@ -358,7 +551,7 @@ fn envVarsContainKey(env_vars: []const plan_mod.EnvVar, key: []const u8) bool {
 }
 
 test "evaluate reconciliation flags state drift" {
-    const env_vars = [_]plan_mod.EnvVar{
+    const env_vars = [_]types_mod.EnvVar{
         .{ .key = "KEEP", .value = "1" },
     };
     const managed = try std.testing.allocator.alloc([]const u8, 2);
@@ -380,14 +573,14 @@ test "evaluate reconciliation flags state drift" {
     const reconciliation = try evaluateReconciliation(std.testing.allocator, &entry, "owner-2", "eu-west", "pro", &env_vars);
     defer if (reconciliation.warning) |warning| std.testing.allocator.free(warning);
 
-    try std.testing.expectEqual(plan_mod.ProviderAction.replace_requires_confirm, reconciliation.action);
+    try std.testing.expectEqual(types_mod.ProviderAction.replace_requires_confirm, reconciliation.action);
     try std.testing.expect(reconciliation.warning != null);
     try std.testing.expect(std.mem.indexOf(u8, reconciliation.warning.?, "scope changed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, reconciliation.warning.?, "zigttp logout") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reconciliation.warning.?, "--confirm") != null);
 }
 
 test "evaluate reconciliation stays update when state matches" {
-    const env_vars = [_]plan_mod.EnvVar{
+    const env_vars = [_]types_mod.EnvVar{
         .{ .key = "KEEP", .value = "1" },
     };
     const managed = try std.testing.allocator.alloc([]const u8, 1);
@@ -408,12 +601,306 @@ test "evaluate reconciliation stays update when state matches" {
     const reconciliation = try evaluateReconciliation(std.testing.allocator, &entry, "owner-1", "us-east", "starter", &env_vars);
     defer if (reconciliation.warning) |warning| std.testing.allocator.free(warning);
 
-    try std.testing.expectEqual(plan_mod.ProviderAction.update, reconciliation.action);
+    try std.testing.expectEqual(types_mod.ProviderAction.update, reconciliation.action);
     try std.testing.expect(reconciliation.warning == null);
 }
 
+// Test stubs in this file rely on module-static counters reset at each test
+// entry; Zig runs tests serially so the pattern is race-free.
+
+test "fetchDeploySessionWithAuthRetry retries after rejected saved token" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var fetch_calls: usize = 0;
+        var clear_calls: usize = 0;
+        var received_region: []const u8 = "";
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, if (ensure_calls == 1) "expired-token" else "fresh-token"),
+                .email = null,
+            };
+        }
+
+        fn fetchSession(
+            allocator: std.mem.Allocator,
+            token: []const u8,
+            service_name: []const u8,
+            region: []const u8,
+        ) !control_plane.DeploySession {
+            fetch_calls += 1;
+            received_region = region;
+            try std.testing.expectEqualStrings("demo", service_name);
+            if (std.mem.eql(u8, token, "expired-token")) return error.NotSignedIn;
+            try std.testing.expectEqualStrings("fresh-token", token);
+            return .{
+                .provider = .northflank,
+                .registry_host = try allocator.dupe(u8, "registry.zigttp.dev"),
+                .namespace = try allocator.dupe(u8, "u-42"),
+                .registry_username = try allocator.dupe(u8, "tok"),
+                .registry_password = try allocator.dupe(u8, "pw"),
+                .scope_id = try allocator.dupe(u8, "proj-1"),
+                .plan_id = try allocator.dupe(u8, "plan-basic"),
+                .provider_api_token = try allocator.dupe(u8, "nf-token"),
+                .registry_credential_id = null,
+                .region = try allocator.dupe(u8, control_plane.default_region),
+                .url_hint = null,
+                .token = try allocator.dupe(u8, token),
+                .expires_at = null,
+            };
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.fetch_calls = 0;
+    TestCtx.clear_calls = 0;
+    TestCtx.received_region = "";
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var session = try fetchDeploySessionWithAuthRetryFns(
+        std.testing.allocator,
+        "demo",
+        "eu-west",
+        buffered.printer(),
+        TestCtx.ensureSignedIn,
+        TestCtx.fetchSession,
+        TestCtx.clearAuth,
+    );
+    defer session.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.fetch_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.clear_calls);
+    try std.testing.expectEqualStrings("eu-west", TestCtx.received_region);
+    try std.testing.expectEqualStrings(control_plane.default_region, session.region);
+    try std.testing.expectEqualStrings("fresh-token", session.token);
+}
+
+test "fetchDeploySessionWithAuthRetry does not clear auth for other fetch errors" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var fetch_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, "token"),
+                .email = null,
+            };
+        }
+
+        fn fetchSession(_: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !control_plane.DeploySession {
+            fetch_calls += 1;
+            return error.ControlPlaneError;
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.fetch_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    try std.testing.expectError(
+        error.ControlPlaneError,
+        fetchDeploySessionWithAuthRetryFns(
+            std.testing.allocator,
+            "demo",
+            control_plane.default_region,
+            buffered.printer(),
+            TestCtx.ensureSignedIn,
+            TestCtx.fetchSession,
+            TestCtx.clearAuth,
+        ),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
+    try std.testing.expectEqual(@as(usize, 0), TestCtx.clear_calls);
+}
+
+fn freshSessionForTest(allocator: std.mem.Allocator, token: []const u8) !control_plane.DeploySession {
+    return .{
+        .provider = .northflank,
+        .registry_host = try allocator.dupe(u8, "registry.zigttp.dev"),
+        .namespace = try allocator.dupe(u8, "u-42"),
+        .registry_username = try allocator.dupe(u8, "tok"),
+        .registry_password = try allocator.dupe(u8, "pw"),
+        .scope_id = try allocator.dupe(u8, "proj-1"),
+        .plan_id = try allocator.dupe(u8, "plan-basic"),
+        .provider_api_token = try allocator.dupe(u8, "nf-token"),
+        .registry_credential_id = null,
+        .region = try allocator.dupe(u8, control_plane.default_region),
+        .url_hint = null,
+        .token = try allocator.dupe(u8, token),
+        .expires_at = null,
+    };
+}
+
+test "pushWithAuthRetry refreshes on RegistryUnauthorized" {
+    const TestCtx = struct {
+        var push_calls: usize = 0;
+        var fetch_calls: usize = 0;
+
+        fn pushStub(
+            _: std.mem.Allocator,
+            _: *const registry.RegistryRef,
+            _: *const oci_image.OciImage,
+            _: []const u8,
+            _: []const u8,
+            _: ?*printer_mod.Progress,
+        ) !void {
+            push_calls += 1;
+            if (push_calls == 1) return error.RegistryUnauthorized;
+        }
+
+        fn fetchSession(
+            allocator: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+            _: []const u8,
+        ) !control_plane.DeploySession {
+            fetch_calls += 1;
+            return freshSessionForTest(allocator, "rotated-token");
+        }
+
+        fn nowStub() i64 {
+            return 1000;
+        }
+    };
+    TestCtx.push_calls = 0;
+    TestCtx.fetch_calls = 0;
+
+    var session = try freshSessionForTest(std.testing.allocator, "initial-token");
+    defer session.deinit(std.testing.allocator);
+
+    var registry_ref = try registry.makeRegistryRef(std.testing.allocator, "registry.zigttp.dev", "u-42/demo");
+    defer registry_ref.deinit(std.testing.allocator);
+
+    var image: oci_image.OciImage = undefined;
+    // pushStub never touches image fields; zero-init is fine.
+    @memset(std.mem.asBytes(&image), 0);
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+    var progress = printer_mod.Progress{ .printer = buffered.printer() };
+
+    try pushWithAuthRetryFns(
+        std.testing.allocator,
+        &registry_ref,
+        &image,
+        &session,
+        "demo",
+        "us-east",
+        &progress,
+        TestCtx.pushStub,
+        TestCtx.fetchSession,
+        TestCtx.nowStub,
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.push_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
+    try std.testing.expectEqualStrings("rotated-token", session.token);
+}
+
+test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
+    const TestCtx = struct {
+        var execute_calls: usize = 0;
+        var fetch_calls: usize = 0;
+
+        fn executeStub(
+            allocator: std.mem.Allocator,
+            ctx: *const northflank_adapter.ProviderContext,
+            _: []const u8,
+            _: ?*printer_mod.Progress,
+        ) !types_mod.DeployResult {
+            execute_calls += 1;
+            if (execute_calls == 1) return error.ProviderUnauthorized;
+            return .{
+                .provider = .northflank,
+                .name = ctx.name,
+                .service_id = try allocator.dupe(u8, "srv-1"),
+                .deployment_id = null,
+                .url = null,
+                .status = try allocator.dupe(u8, "created"),
+                .image_digest_ref = try allocator.dupe(u8, ctx.image_ref),
+            };
+        }
+
+        fn fetchSession(
+            allocator: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+            _: []const u8,
+        ) !control_plane.DeploySession {
+            fetch_calls += 1;
+            return freshSessionForTest(allocator, "rotated-token");
+        }
+
+        fn nowStub() i64 {
+            return 1000;
+        }
+    };
+    TestCtx.execute_calls = 0;
+    TestCtx.fetch_calls = 0;
+
+    var session = try freshSessionForTest(std.testing.allocator, "initial-token");
+    defer session.deinit(std.testing.allocator);
+
+    const ctx = northflank_adapter.ProviderContext{
+        .name = "demo",
+        .region = "us-central",
+        .image_ref = "img",
+        .env_vars = &.{},
+        .project_id = "proj-1",
+        .plan_id = "plan",
+        .registry_credential_id = null,
+        .state_entry = null,
+    };
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+    var progress = printer_mod.Progress{ .printer = buffered.printer() };
+
+    const result = try executeWithAuthRetryFns(
+        std.testing.allocator,
+        &ctx,
+        &session,
+        "demo",
+        "us-east",
+        &progress,
+        TestCtx.executeStub,
+        TestCtx.fetchSession,
+        TestCtx.nowStub,
+    );
+    defer {
+        std.testing.allocator.free(result.service_id);
+        std.testing.allocator.free(result.status);
+        std.testing.allocator.free(result.image_digest_ref);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.execute_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
+    try std.testing.expectEqualStrings("rotated-token", session.token);
+}
+
 pub fn logout(allocator: std.mem.Allocator) !void {
-    try auth.clear(allocator);
-    const msg = "Signed out.\n";
+    const had_creds = try auth.clear(allocator);
+    const msg = if (had_creds) "Signed out.\n" else "Already signed out.\n";
     _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
 }

@@ -671,30 +671,32 @@ When a handler is precompiled, the compiler automatically generates a `RuntimePo
 
 The policy is embedded as a constant in the generated binary. There is no configuration file to drift out of sync, no runtime lookup, no way for the handler to bypass its sandbox. An explicit `--policy` file can override the auto-derived policy when needed.
 
-### Proven Deploy Planning
+### One-Command Deploy
 
-Runtime `zigttp deploy` uses the compiler-proven contract directly. The system
-extracts platform-agnostic `ProvenFacts`, renders a deploy proof report, adds
-proof metadata to the OCI image, and builds provider payloads for Render or
-Northflank:
+`zigttp deploy` ships the handler in one command. It auto-detects the
+handler file, service name, and `.env`, signs the user in via device
+flow on first run, fetches a short-lived session from the zigttp
+control plane, cross-compiles the handler to a Linux musl binary,
+packages it as an OCI image with proven-fact labels, pushes through the
+control plane, and provisions the service:
 
 ```bash
-RENDER_WORKSPACE_ID=owner-demo RENDER_PLAN=starter \
-./zig-out/bin/zigttp deploy --provider render --name demo --registry ghcr.io/acme/demo \
-  handler.ts --dry-run --json
+zigttp deploy
 ```
 
-The dry-run output includes:
+Flags are optional: `--region <name>` overrides the region, `--confirm`
+acknowledges detected drift, `--no-wait` skips the wait-for-ready poll.
+First-run sign-in stores credentials at `~/.zigttp/credentials`;
+`zigttp logout` clears them. Reconciliation state lives at
+`.zigttp/deploy-state.json`.
 
-- proven environment variables and whether env access is fully proven
-- proven routes, egress hosts, cache namespaces, and verification checks
-- handler properties like `retry_safe`, `read_only`, and `idempotent`
-- a `PROVEN` vs `NEEDS MANUAL REVIEW` report
-- OCI digests and provider API payloads
-- Handler properties as metadata tags (retrySafe, readOnly, injectionSafe, idempotent, stateIsolated, maxIoDepth)
-- Proof level (complete/partial/none) as a top-level field
-
-The deploy report includes: PROVEN/NEEDS MANUAL REVIEW sections, FLOW ANALYSIS (secret/credential leakage, input validation), FAULT COVERAGE, HANDLER PROPERTIES, OWASP TOP 10 COVERAGE (A01-A07 mapped to proven properties), VPC EGRESS (when egress hosts exist), and COST ESTIMATE (AWS Lambda pricing derived from proven I/O depth).
+OCI image labels carry compiler-proven facts as JSON arrays:
+`zigttp.proof-level`, `zigttp.env-vars`, `zigttp.egress-hosts`,
+`zigttp.cache-namespaces`, `zigttp.routes`, plus boolean labels for
+`retry-safe`, `read-only`, `idempotent`, `state-isolated`,
+`injection-safe`, `fault-covered`, `env-proven`, `egress-proven`, and
+`cache-proven`. The image manifest digest is printed alongside the
+public URL on success.
 
 Two standalone tools support the deployment workflow:
 - `zigts prove old.json new.json` compares two contracts and classifies the change (exit 0 for safe, 1 for breaking)
@@ -993,7 +995,7 @@ For detailed benchmark methodology and results, see the separate `zigttp-bench` 
 | `-Dverify` | Enable compile-time verification |
 | `-Dcontract` | Emit contract.json |
 | `-Dsystem=<path>` | Thread system.json into compile-time `serviceCall()` typing |
-| `zigttp deploy --dry-run --json` | Generate deploy plan from proven contract |
+| `zigttp deploy` | Cross-compile, package, push, and provision in one command |
 | `-Dreplay=<traces>` | Replay-verify before embedding |
 | `-Dtest-file=<tests>` | Run handler tests at build time |
 | `-Dgenerate-tests=true` | Generate exhaustive test cases |

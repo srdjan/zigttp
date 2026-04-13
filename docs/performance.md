@@ -178,7 +178,7 @@ Build flow: `precompile.zig` compiles handler, serializes bytecode with atoms an
 The precompile pipeline also supports:
 - `-Dverify` - compile-time handler verification (see [verification.md](verification.md))
 - `-Dcontract` - emit contract.json with handler properties and proven capabilities
-- `zigttp deploy --dry-run --json` - generate runtime deploy plans from proven contracts
+- `zigttp deploy` - one-command cross-compile, package, push, and provision via the zigttp control plane
 - `-Dtest-file=tests.jsonl` - run declarative handler tests at build time
 - `-Dreplay=traces.jsonl` - replay-verify recorded traces before embedding
 - `-Dgenerate-tests=true` - exhaustive path enumeration and fault coverage analysis
