@@ -61,7 +61,13 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         return;
     }
 
-    const loaded = try handler_loader.load(allocator, config.handler, "Testing");
+    const loaded = handler_loader.load(allocator, config.handler) catch |err| {
+        switch (err) {
+            error.UnsupportedHandlerSource => std.log.err("Handler tests require a file_path or inline_code handler source", .{}),
+            else => std.log.err("Handler tests failed to load handler: {}", .{err}),
+        }
+        return err;
+    };
     const handler_code = loaded.code;
     const handler_filename = loaded.filename;
     defer allocator.free(handler_code);

@@ -7,12 +7,12 @@
 set -e
 
 ZIG="${ZIG:-zig}"
+ZIGTTP="${ZIGTTP:-zig-out/bin/zigttp}"
 PASS=0
 FAIL=0
 
-# Ensure the runtime binary is built before running any suite. `zig build run`
-# compiles incrementally, but if the build itself is broken we want a single
-# clear failure up-front rather than N cryptic per-suite errors.
+# Build once up front, then invoke the produced binary directly. Going through
+# `zig build run --` per suite would re-walk the build graph 14 times per CI run.
 echo "Building runtime..."
 $ZIG build
 echo ""
@@ -24,7 +24,7 @@ run_tests() {
     name=$(echo "$handler" | sed 's|examples/||')
 
     local output
-    output=$($ZIG build run -- "$handler" --test "$tests" 2>&1) || true
+    output=$("$ZIGTTP" "$handler" --test "$tests" 2>&1) || true
 
     local results
     results=$(echo "$output" | grep "^Results:" || echo "Results: ? passed, ? failed, ? total")

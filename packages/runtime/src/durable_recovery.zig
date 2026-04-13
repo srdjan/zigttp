@@ -121,8 +121,13 @@ fn recoverOne(
     const rt = try Runtime.init(allocator, recovery_config);
     defer rt.deinit();
 
-    // Load handler code via the shared loader.
-    const loaded = try handler_loader.load(allocator, config.handler, "Durable recovery");
+    const loaded = handler_loader.load(allocator, config.handler) catch |err| {
+        switch (err) {
+            error.UnsupportedHandlerSource => std.log.err("Durable recovery requires a file_path or inline_code handler source", .{}),
+            else => std.log.err("Durable recovery failed to load handler: {}", .{err}),
+        }
+        return err;
+    };
     const handler_code = loaded.code;
     const handler_filename = loaded.filename;
     defer allocator.free(handler_code);

@@ -10,7 +10,7 @@ Report suspected vulnerabilities privately via GitHub Security Advisories:
 
 https://github.com/srdjan/zigttp/security/advisories/new
 
-Please do not open public issues for security reports. Expect an initial acknowledgment within a few business days. After triage you will receive a remediation plan or a rationale for closing the report.
+Do not open public issues for security reports. After triage you will receive a remediation plan or a rationale for closing the report.
 
 Include, where possible:
 

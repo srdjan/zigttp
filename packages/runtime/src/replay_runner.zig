@@ -32,7 +32,13 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         return;
     }
 
-    const handler_source = try handler_loader.load(allocator, config.handler, "Replay");
+    const handler_source = handler_loader.load(allocator, config.handler) catch |err| {
+        switch (err) {
+            error.UnsupportedHandlerSource => std.log.err("Replay requires a file_path or inline_code handler source", .{}),
+            else => std.log.err("Replay failed to load handler: {}", .{err}),
+        }
+        return err;
+    };
     defer allocator.free(handler_source.code);
 
     // Build replay runtime config: keep replay_file_path set so Runtime
