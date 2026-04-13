@@ -1,0 +1,13 @@
+# CODEOWNERS
+#
+# GitHub uses this file to request reviews automatically. The last matching
+# pattern wins, so order matters: put broader rules first, narrower rules last.
+
+*                               @srdjan
+
+# Security-sensitive surfaces
+/SECURITY.md                    @srdjan
+/packages/zigts/src/module_binding.zig  @srdjan
+/packages/runtime/src/deploy/   @srdjan
+/.github/workflows/             @srdjan
+/policy-hash.txt                @srdjan

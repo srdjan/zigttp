@@ -2,6 +2,8 @@
 
 Rule review system and Claude Code integration, phased across minor versions.
 
+> **Historical record.** This document covers the rollout that shipped through v0.15.1. It is kept as an appendix for the rule review / Claude Code integration work. For user-visible changes in v0.16 and later, see [CHANGELOG.md](../CHANGELOG.md).
+
 ## Milestones
 
 | Version | Deliverables |

@@ -11,7 +11,7 @@
 - `packages/zigttp-sdk/` and `packages/zigttp-ext-demo/` are the extension SDK and demo.
 - `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `shopping-cart/`, `htmx-todo/`, `sql/`).
 - `scripts/` contains shell scripts for build and setup.
-- `docs/` contains user-facing documentation (7 files - see Documentation section below).
+- `docs/` contains user-facing documentation (see Documentation section below).
 - `zig-out/` and `.zig-cache/` are generated outputs; don't edit or commit them.
 
 ## Documentation
@@ -20,11 +20,20 @@
 |------|---------|
 | `docs/user-guide.md` | Complete handler API reference, routing, virtual modules, CLI options |
 | `docs/architecture.md` | System design, runtime model, project structure |
-| `docs/jsx-guide.md` | JSX/TSX usage and server-side rendering |
-| `docs/typescript.md` | Type stripping, compile-time evaluation (`comptime()`) |
 | `docs/performance.md` | Benchmarks, cold starts, optimizations, deployment patterns |
-| `docs/feature-detection.md` | Unsupported feature detection matrix (53 parser features, 1 stripper feature) |
 | `docs/api-reference.md` | Zig embedding API, extending with native functions |
+| `docs/typescript.md` | Type stripping, compile-time evaluation (`comptime()`) |
+| `docs/jsx-guide.md` | JSX/TSX usage and server-side rendering |
+| `docs/feature-detection.md` | Unsupported feature detection matrix |
+| `docs/verification.md` | `-Dverify` compile-time proof of handler correctness |
+| `docs/sound-mode.md` | Type-directed analysis across operators (arithmetic, comparison, boolean) |
+| `docs/extension-model.md` | Design note for third-party virtual modules via `zigttp-sdk` |
+| `docs/deploy-tutorial.md` | `zigttp deploy`, `zigttp login`, drift detection, self-hosted control plane |
+| `docs/threat-model.md` | Threat model for the rule review system and Claude Code integration |
+| `docs/claude-tools.md` | Developer workflow using zigts in Claude Code sessions |
+| `docs/rollout.md` | Historical rollout record for the v0.14-v0.15 rule review system |
+| `docs/mini-book.md` | Narrative guide covering runtime, verification, and sandboxing |
+| `docs/blog/` | Long-form posts (e.g., `url-shortener-in-133-lines.md`) |
 
 ## Build, Test, and Development Commands
 - `zig build` - debug build.
