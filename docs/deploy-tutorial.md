@@ -6,7 +6,19 @@ Put a `handler.ts` in your project directory. Test it locally with `zigttp serve
 zigttp deploy
 ```
 
-That is the whole command. No flags, no positional arguments, no config files, no cloud account, no registry to set up. The first run prints a sign-in URL; open it in a browser and the CLI takes it from there. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
+That is the whole command. No flags, no positional arguments, no config files, no cloud account, no registry to set up. If you are not signed in yet, the CLI first prompts for a Zigttp access token directly in the terminal. Press Enter on an empty token to fall back to browser-based device login. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
+
+If you want to sign in before the first deploy, use:
+
+```
+zigttp login
+```
+
+For scripting and CI, pass the token over stdin:
+
+```bash
+printf '%s\n' "$ZIGTTP_TOKEN" | zigttp login --token-stdin
+```
 
 ## What it deploys
 
@@ -19,11 +31,11 @@ The handler, plus whatever sits in `.env` in the current directory as runtime va
 
 ## What gets shipped
 
-zigttp cross-compiles the handler to a Linux musl binary, packages it as an OCI image, and tags every image with compiler-proven facts from the handler contract: env var names, egress hosts, cache namespaces, route patterns, and boolean properties like `retry-safe`, `read-only`, and `idempotent`. The image manifest digest is content-addressed, so identical handlers produce identical digests. The CLI prints the digest alongside the public URL on success; rerunning a deploy that produces the same digest is a no-op.
+zigttp cross-compiles the handler to a Linux musl binary, packages it as an OCI image, and tags every image with compiler-proven facts from the handler contract: env var names, egress hosts, cache namespaces, route patterns, and boolean properties like `retry-safe`, `read-only`, and `idempotent`. The image manifest digest is content-addressed, and the CLI prints the digest alongside the public URL on success.
 
 ## Updates
 
-Re-run `zigttp deploy` any time. zigttp reuses the same service and only rolls out when the built image changes.
+Re-run `zigttp deploy` any time. zigttp reuses the same service and updates it in place to the newly built image digest.
 
 If something about the service has shifted since the last deploy (different scope, different region, different plan, or you removed a previously managed env var), the CLI prints a drift warning and exits with code 2 instead of mutating the service. Re-run with `--confirm` to acknowledge the warning and proceed:
 
@@ -50,7 +62,7 @@ Exit codes:
 
 ## Sign in and out
 
-Credentials live at `~/.zigttp/credentials` after the first sign-in. To forget them:
+Credentials live at `~/.zigttp/credentials` after sign-in. To forget them:
 
 ```
 zigttp logout

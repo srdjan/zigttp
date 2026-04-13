@@ -11,6 +11,11 @@ pub const Options = struct {
     wait: bool = true,
 };
 
+pub const LoginOptions = struct {
+    token_stdin: bool = false,
+    device: bool = false,
+};
+
 pub fn parse(argv: []const []const u8) !Options {
     var options = Options{};
     var i: usize = 0;
@@ -41,6 +46,26 @@ pub fn parse(argv: []const []const u8) !Options {
         }
         return error.UnknownOption;
     }
+    return options;
+}
+
+pub fn parseLogin(argv: []const []const u8) !LoginOptions {
+    var options = LoginOptions{};
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+        if (std.mem.eql(u8, arg, "--token-stdin")) {
+            options.token_stdin = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--device")) {
+            options.device = true;
+            continue;
+        }
+        return error.UnknownOption;
+    }
+    if (options.token_stdin and options.device) return error.InvalidOptionCombination;
     return options;
 }
 
@@ -165,6 +190,32 @@ test "parse accepts --region and --confirm together" {
     const b = try parse(&.{ "--confirm", "--region", "eu-west" });
     try std.testing.expect(b.confirm);
     try std.testing.expectEqualStrings("eu-west", b.region.?);
+}
+
+test "parseLogin accepts empty args" {
+    const options = try parseLogin(&.{});
+    try std.testing.expect(!options.token_stdin);
+    try std.testing.expect(!options.device);
+}
+
+test "parseLogin accepts token stdin" {
+    const options = try parseLogin(&.{"--token-stdin"});
+    try std.testing.expect(options.token_stdin);
+    try std.testing.expect(!options.device);
+}
+
+test "parseLogin accepts device mode" {
+    const options = try parseLogin(&.{"--device"});
+    try std.testing.expect(!options.token_stdin);
+    try std.testing.expect(options.device);
+}
+
+test "parseLogin rejects conflicting modes" {
+    try std.testing.expectError(error.InvalidOptionCombination, parseLogin(&.{ "--device", "--token-stdin" }));
+}
+
+test "parseLogin rejects unknown option" {
+    try std.testing.expectError(error.UnknownOption, parseLogin(&.{"--token"}));
 }
 
 test "loadEnvFile parses key value pairs" {

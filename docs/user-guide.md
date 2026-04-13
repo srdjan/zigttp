@@ -2294,11 +2294,14 @@ Flags (all optional):
 - `--no-wait` returns immediately after the deploy is accepted.
 - `-h` / `--help` prints usage.
 
-First run prints a sign-in URL. Open it in a browser; the CLI polls
-until the device flow completes and stores the token at
-`~/.zigttp/credentials`. `zigttp logout` clears it. Set
-`ZIGTTP_CONTROL_PLANE_URL` to point at a self-hosted control plane;
-the default is `https://api.zigttp.dev`.
+If credentials are missing, the CLI first prompts for a Zigttp access
+token directly in the terminal. Submit an empty token to fall back to
+browser-based device login. Tokens are stored at
+`~/.zigttp/credentials`; `zigttp logout` clears them. You can also
+sign in ahead of time with `zigttp login` or
+`zigttp login --token-stdin`. Set `ZIGTTP_CONTROL_PLANE_URL` to point
+at a self-hosted control plane; the default is
+`https://api.zigttp.dev`.
 
 Auto-detection from the current directory:
 
@@ -2315,8 +2318,7 @@ Auto-detection from the current directory:
 
 Image references are content-addressed by the manifest digest, which
 is printed alongside the public URL on success. Identical handlers
-produce identical digests, so rerunning the deploy is a no-op when
-nothing changed.
+produce identical digests.
 
 Reconciliation reads `.zigttp/deploy-state.json`, which stores non-secret
 identifiers (`service_id`, `scope_id`, `plan_id`, `region`,

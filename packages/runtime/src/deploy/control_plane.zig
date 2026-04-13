@@ -63,7 +63,11 @@ pub fn swapRefreshedSession(
 }
 
 pub fn defaultNowSec() i64 {
-    return std.time.timestamp();
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.REALTIME, &ts))) {
+        .SUCCESS => return @intCast(ts.sec),
+        else => return 0,
+    }
 }
 
 // sessionRefreshIfExpiring re-fetches the session if it is within skew_seconds
@@ -124,6 +128,14 @@ pub const LoginResult = struct {
 
     pub fn deinit(self: *LoginResult, allocator: std.mem.Allocator) void {
         allocator.free(self.token);
+        if (self.email) |value| allocator.free(value);
+    }
+};
+
+pub const TokenIdentity = struct {
+    email: ?[]u8,
+
+    pub fn deinit(self: *TokenIdentity, allocator: std.mem.Allocator) void {
         if (self.email) |value| allocator.free(value);
     }
 };
@@ -209,6 +221,23 @@ pub fn pollLogin(
 
     const result = try parseLoginResult(allocator, response.body);
     return .{ .done = result };
+}
+
+pub fn validateToken(
+    allocator: std.mem.Allocator,
+    token: []const u8,
+) !TokenIdentity {
+    const base = try baseUrl(allocator);
+    defer allocator.free(base);
+    const url = try std.fmt.allocPrint(allocator, "{s}/v1/auth/token/verify", .{base});
+    defer allocator.free(url);
+
+    var response = try http.requestJson(allocator, .POST, url, token, "{}");
+    defer response.deinit(allocator);
+
+    if (response.status == 401 or response.status == 403) return error.InvalidToken;
+    if (response.status >= 400) return error.ControlPlaneError;
+    return try parseTokenIdentity(allocator, response.body);
 }
 
 fn buildSessionBody(allocator: std.mem.Allocator, project_name: []const u8, region: []const u8) ![]u8 {
@@ -319,6 +348,19 @@ fn parseLoginResult(allocator: std.mem.Allocator, body: []const u8) !LoginResult
 
     const email = try json_util.dupeOptional(allocator, root, "email");
     return .{ .token = token, .email = email };
+}
+
+fn parseTokenIdentity(allocator: std.mem.Allocator, body: []const u8) !TokenIdentity {
+    if (body.len == 0) return .{ .email = null };
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch return error.InvalidLoginResponse;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidLoginResponse;
+    const root = parsed.value.object;
+
+    return .{
+        .email = try json_util.dupeOptional(allocator, root, "email"),
+    };
 }
 
 test "baseUrl falls back to default" {
@@ -522,4 +564,16 @@ test "parseLoginResult captures token and email" {
     defer result.deinit(allocator);
     try std.testing.expectEqualStrings("t-abc", result.token);
     try std.testing.expectEqualStrings("me@example.com", result.email.?);
+}
+
+test "parseTokenIdentity captures optional email" {
+    var identity = try parseTokenIdentity(std.testing.allocator, "{\"email\":\"me@example.com\"}");
+    defer identity.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("me@example.com", identity.email.?);
+}
+
+test "parseTokenIdentity accepts empty object" {
+    var identity = try parseTokenIdentity(std.testing.allocator, "{}");
+    defer identity.deinit(std.testing.allocator);
+    try std.testing.expect(identity.email == null);
 }
