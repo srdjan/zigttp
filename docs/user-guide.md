@@ -2295,10 +2295,11 @@ Flags (all optional):
 - `-h` / `--help` prints usage.
 
 If credentials are missing, the CLI first prompts for a Zigttp access
-token directly in the terminal. Submit an empty token to fall back to
-browser-based device login. Tokens are stored at
-`~/.zigttp/credentials`; `zigttp logout` clears them. You can also
-sign in ahead of time with `zigttp login` or
+token directly in the terminal. The intended hosted flow is to create
+that token in `zigttp-admin`, then paste it into the CLI. Submit an
+empty token to fall back to browser-based device login. Tokens are
+stored at `~/.zigttp/credentials`; `zigttp logout` clears them. You can
+also sign in ahead of time with `zigttp login` or
 `zigttp login --token-stdin`. Set `ZIGTTP_CONTROL_PLANE_URL` to point
 at a self-hosted control plane; the default is
 `https://api.zigttp.dev`.

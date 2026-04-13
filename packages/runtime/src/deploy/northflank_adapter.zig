@@ -105,6 +105,7 @@ pub fn fetchStatusReal(
 ) !ServiceStatus {
     const response = try http.requestJson(allocator, .GET, url, api_token, null);
     defer response.deinit(allocator);
+    if (response.status == 401 or response.status == 403) return error.ProviderUnauthorized;
     if (response.status != 200) return error.NorthflankStatusFailed;
     return parseServiceStatus(allocator, response.body);
 }

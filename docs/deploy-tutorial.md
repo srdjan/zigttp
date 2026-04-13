@@ -6,7 +6,7 @@ Put a `handler.ts` in your project directory. Test it locally with `zigttp serve
 zigttp deploy
 ```
 
-That is the whole command. No flags, no positional arguments, no config files, no cloud account, no registry to set up. If you are not signed in yet, the CLI first prompts for a Zigttp access token directly in the terminal. Press Enter on an empty token to fall back to browser-based device login. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
+That is the whole command. No flags, no positional arguments, no config files, no cloud account, no registry to set up. If you are not signed in yet, the CLI first prompts for a Zigttp access token directly in the terminal. The intended hosted flow is to create that token in the Zigttp web control plane, then paste it into the CLI. Press Enter on an empty token to fall back to browser-based device login. Future runs reuse the saved session, build the handler, push the image, and print the public URL.
 
 If you want to sign in before the first deploy, use:
 
