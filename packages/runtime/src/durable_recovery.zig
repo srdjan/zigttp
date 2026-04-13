@@ -16,6 +16,7 @@ const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const ServerConfig = @import("server.zig").ServerConfig;
+const handler_loader = @import("handler_loader.zig");
 
 const c = @cImport({
     @cInclude("dirent.h");
@@ -120,28 +121,11 @@ fn recoverOne(
     const rt = try Runtime.init(allocator, recovery_config);
     defer rt.deinit();
 
-    // Load handler code
-    const handler_code = switch (config.handler) {
-        .file_path => |path| readFile(allocator, path) catch |err| {
-            std.log.err("Failed to read handler '{s}': {}", .{ path, err });
-            return err;
-        },
-        .inline_code => |code| try allocator.dupe(u8, code),
-        .embedded_bytecode => {
-            std.log.err("Durable recovery with embedded bytecode not yet supported", .{});
-            return error.UnsupportedRecoverySource;
-        },
-        .appended_payload => {
-            std.log.err("Durable recovery with appended payload not yet supported", .{});
-            return error.UnsupportedRecoverySource;
-        },
-    };
+    // Load handler code via the shared loader.
+    const loaded = try handler_loader.load(allocator, config.handler, "Durable recovery");
+    const handler_code = loaded.code;
+    const handler_filename = loaded.filename;
     defer allocator.free(handler_code);
-
-    const handler_filename = switch (config.handler) {
-        .file_path => |path| path,
-        else => "eval",
-    };
 
     try rt.loadCode(handler_code, handler_filename);
     rt.setPendingDurableRecovery(

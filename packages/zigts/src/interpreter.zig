@@ -25,7 +25,7 @@ var call_trace_limit_cache: usize = 0;
 var call_trace_limit_cached = false;
 var call_guard_cache: usize = 0;
 var call_guard_cached = false;
-var call_trace_count: usize = 0;
+threadlocal var call_trace_count: usize = 0;
 
 // ============================================================================
 // JIT Policy Configuration

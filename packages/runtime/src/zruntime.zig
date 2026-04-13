@@ -3113,7 +3113,9 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
     const init_obj = fetch_args.init_obj;
 
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch unreachable; // already validated by parseFetchArgs
+    const host = uri.getHost(&host_buf) catch {
+        return createFetchErrorResponse(rt, "InvalidUrl", "url host is required");
+    };
 
     var method = std.http.Method.GET;
     var body: ?[]const u8 = null;
@@ -5336,6 +5338,14 @@ fn seedIncompleteDurableRandomStep(
     state.persistStepStart(step_name);
     state.persistIO("builtin", "Math.random", rt.ctx, &.{}, result);
     state.persistStepResult(step_name, rt.ctx, result);
+}
+
+// Pull tests from sibling files that are not otherwise reachable from this
+// module's import graph. Zig's test runner only analyzes files transitively
+// reached from the test root, so handler_loader.zig (used by replay_runner,
+// test_runner, and durable_recovery) needs an explicit hook here.
+test {
+    _ = @import("handler_loader.zig");
 }
 
 test "Runtime creation" {

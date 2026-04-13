@@ -94,7 +94,7 @@ const JSONShapeCacheEntry = struct {
 /// Thread-local JSON shape cache
 /// Maps property-atom-sequence to pre-built HiddenClassIndex
 /// IMPORTANT: Must be cleared when creating a new Context to avoid stale class indices
-var json_shape_cache: [JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
+threadlocal var json_shape_cache: [JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
 
 /// Clear the JSON shape cache. Must be called when creating a new Context
 /// to avoid stale HiddenClassIndex references from previous contexts.
