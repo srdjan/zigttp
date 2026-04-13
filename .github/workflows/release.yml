@@ -15,7 +15,11 @@ env:
 jobs:
   test:
     timeout-minutes: 30
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
@@ -24,8 +28,11 @@ jobs:
       - name: Run all tests
         run: zig build test test-zigts test-zruntime
 
-      - name: Build zigts for policy hash check
+      - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
+
+      - name: Run example handler tests
+        run: bash scripts/test-examples.sh
 
       - name: Assert policy hash unchanged
         run: |
