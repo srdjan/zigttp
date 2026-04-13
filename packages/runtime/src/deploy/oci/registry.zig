@@ -1,7 +1,9 @@
 const std = @import("std");
 const http = @import("../http.zig");
-const plan = @import("../plan.zig");
 const image = @import("image.zig");
+const printer_mod = @import("../printer.zig");
+
+const Progress = printer_mod.Progress;
 
 pub const RegistryRef = struct {
     host: []const u8,
@@ -13,58 +15,11 @@ pub const RegistryRef = struct {
     }
 };
 
-pub const PushResult = struct {
-    requests: []const plan.HttpRequestPreview,
-};
-
 pub fn makeRegistryRef(allocator: std.mem.Allocator, host: []const u8, repo: []const u8) !RegistryRef {
     return .{
         .host = try allocator.dupe(u8, host),
         .repo = try allocator.dupe(u8, repo),
     };
-}
-
-pub fn buildRequestPreviews(
-    allocator: std.mem.Allocator,
-    registry_ref: *const RegistryRef,
-    oci_image: *const image.OciImage,
-) ![]const plan.HttpRequestPreview {
-    const scope = try std.fmt.allocPrint(allocator, "repository:{s}:pull,push", .{registry_ref.repo});
-    defer allocator.free(scope);
-    const v2_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/", .{registry_ref.host});
-    defer allocator.free(v2_url);
-    const head_config = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/blobs/{s}", .{
-        registry_ref.host,
-        registry_ref.repo,
-        oci_image.config_blob.digest,
-    });
-    defer allocator.free(head_config);
-    const head_layer = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/blobs/{s}", .{
-        registry_ref.host,
-        registry_ref.repo,
-        oci_image.layer_blob.digest,
-    });
-    defer allocator.free(head_layer);
-    const upload_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/blobs/uploads/", .{
-        registry_ref.host,
-        registry_ref.repo,
-    });
-    defer allocator.free(upload_url);
-    const manifest_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/manifests/{s}", .{
-        registry_ref.host,
-        registry_ref.repo,
-        oci_image.manifest_blob.digest,
-    });
-    defer allocator.free(manifest_url);
-
-    const requests = try allocator.alloc(plan.HttpRequestPreview, 6);
-    requests[0] = .{ .method = try allocator.dupe(u8, "GET"), .url = try allocator.dupe(u8, v2_url) };
-    requests[1] = .{ .method = try allocator.dupe(u8, "GET"), .url = try std.fmt.allocPrint(allocator, "<auth realm>?service={s}&scope={s}", .{ registry_ref.host, scope }) };
-    requests[2] = .{ .method = try allocator.dupe(u8, "HEAD"), .url = try allocator.dupe(u8, head_config) };
-    requests[3] = .{ .method = try allocator.dupe(u8, "HEAD"), .url = try allocator.dupe(u8, head_layer) };
-    requests[4] = .{ .method = try allocator.dupe(u8, "POST"), .url = try allocator.dupe(u8, upload_url) };
-    requests[5] = .{ .method = try allocator.dupe(u8, "PUT"), .url = try allocator.dupe(u8, manifest_url) };
-    return requests;
 }
 
 pub fn push(
@@ -73,6 +28,7 @@ pub fn push(
     oci_image: *const image.OciImage,
     username: []const u8,
     password: []const u8,
+    progress: ?*Progress,
 ) !void {
     const challenge = try http.request(allocator, .GET, try std.fmt.allocPrint(allocator, "https://{s}/v2/", .{registry_ref.host}), &.{}, null);
     defer challenge.deinit(allocator);
@@ -85,7 +41,13 @@ pub fn push(
     } else null;
     defer if (bearer_token) |token| allocator.free(token);
 
+    // Phase lines land on stderr. An image has exactly two blobs (config and
+    // layer) plus the manifest; we number them 1/3, 2/3, 3/3 so the user can
+    // see forward motion even when a single layer push takes minutes.
+    try emitPushLine(progress, allocator, "  Pushing config ", oci_image.config_blob.digest, 1, 3);
     try uploadBlobIfMissing(allocator, registry_ref, bearer_token, oci_image.config_blob.digest, oci_image.config_blob.bytes, "application/vnd.oci.image.config.v1+json");
+
+    try emitPushLine(progress, allocator, "  Pushing layer ", oci_image.layer_blob.digest, 2, 3);
     try uploadBlobIfMissing(allocator, registry_ref, bearer_token, oci_image.layer_blob.digest, oci_image.layer_blob.gzip_bytes, "application/vnd.oci.image.layer.v1.tar+gzip");
 
     const manifest_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/manifests/{s}", .{
@@ -94,6 +56,8 @@ pub fn push(
         oci_image.manifest_blob.digest,
     });
     defer allocator.free(manifest_url);
+
+    try emitPushLine(progress, allocator, "  Pushing manifest ", oci_image.manifest_blob.digest, 3, 3);
     var headers = std.ArrayList(http.Header).empty;
     defer headers.deinit(allocator);
     try headers.append(allocator, .{ .name = "content-type", .value = "application/vnd.oci.image.manifest.v1+json" });
@@ -103,10 +67,12 @@ pub fn push(
         try headers.append(allocator, .{ .name = "authorization", .value = auth });
         const response = try http.request(allocator, .PUT, manifest_url, headers.items, oci_image.manifest_blob.bytes);
         defer response.deinit(allocator);
+        if (response.status == 401 or response.status == 403) return error.RegistryUnauthorized;
         if (response.status != 200 and response.status != 201) return error.ManifestUploadFailed;
     } else {
         const response = try http.request(allocator, .PUT, manifest_url, headers.items, oci_image.manifest_blob.bytes);
         defer response.deinit(allocator);
+        if (response.status == 401 or response.status == 403) return error.RegistryUnauthorized;
         if (response.status != 200 and response.status != 201) return error.ManifestUploadFailed;
     }
 }
@@ -207,6 +173,7 @@ fn uploadBlobIfMissing(
     const head = try http.request(allocator, .HEAD, head_url, headers, null);
     defer head.deinit(allocator);
     if (head.status == 200) return;
+    if (head.status == 401 or head.status == 403) return error.RegistryUnauthorized;
 
     const start_url = try std.fmt.allocPrint(allocator, "https://{s}/v2/{s}/blobs/uploads/", .{
         registry_ref.host,
@@ -215,6 +182,7 @@ fn uploadBlobIfMissing(
     defer allocator.free(start_url);
     const start = try http.request(allocator, .POST, start_url, headers, null);
     defer start.deinit(allocator);
+    if (start.status == 401 or start.status == 403) return error.RegistryUnauthorized;
     if (start.status != 202 and start.status != 201) return error.BlobUploadFailed;
     const location = start.header("location") orelse return error.BlobUploadFailed;
     const absolute_location = try absoluteUrl(allocator, registry_ref.host, location);
@@ -240,7 +208,35 @@ fn uploadBlobIfMissing(
 
     const put = try http.request(allocator, .PUT, put_url, put_headers.items, bytes);
     defer put.deinit(allocator);
+    if (put.status == 401 or put.status == 403) return error.RegistryUnauthorized;
     if (put.status != 201 and put.status != 202) return error.BlobUploadFailed;
+}
+
+// emitPushLine formats a progress line with a shortened digest and passes it
+// through the Progress rate limiter. Short digests keep stderr uncluttered;
+// users who need the full digest see it on stdout via `  Digest: ...`.
+fn emitPushLine(
+    progress: ?*Progress,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    digest: []const u8,
+    index: usize,
+    total: usize,
+) !void {
+    const p = progress orelse return;
+    const short = shortDigest(digest);
+    const line = try std.fmt.allocPrint(allocator, "{s}{s}... ({d}/{d})", .{ prefix, short, index, total });
+    defer allocator.free(line);
+    p.emit(line);
+}
+
+fn shortDigest(digest: []const u8) []const u8 {
+    // Digests are "sha256:<64hex>"; trim to "sha256:<first 7>..." so lines stay
+    // short. If the digest is shorter than expected, fall back to the raw value.
+    const colon = std.mem.indexOfScalar(u8, digest, ':') orelse return digest;
+    const hex_start = colon + 1;
+    if (digest.len < hex_start + 7) return digest;
+    return digest[0 .. hex_start + 7];
 }
 
 fn absoluteUrl(allocator: std.mem.Allocator, host: []const u8, location: []const u8) ![]u8 {

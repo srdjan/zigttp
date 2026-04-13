@@ -20,6 +20,10 @@ const precompile = zigts_cli.precompile;
 
 const embedded_handler = @import("embedded_handler");
 
+const deploy_exit_drift: u8 = 2;
+const deploy_exit_ready_timeout: u8 = 3;
+const deploy_exit_did_not_start: u8 = 4;
+
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
         if (builtin.mode == .Debug) .init else {};
@@ -99,21 +103,26 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp deploy takes no arguments.\n\n", .{});
+                std.debug.print("zigttp deploy only accepts --confirm, --region <name>, --wait, and --no-wait.\n\n", .{});
+                printDeployHelp();
+                return;
+            }
+            if (err == error.MissingOptionValue) {
+                std.debug.print("--region requires a value, for example: zigttp deploy --region us-east\n\n", .{});
                 printDeployHelp();
                 return;
             }
             if (err == error.HandlerNotFound) {
-                std.debug.print("Could not find a handler file. Create handler.ts in this directory and try again.\n", .{});
+                std.debug.print("Could not find a handler file. Create one of handler.ts, handler.tsx, handler.jsx, or handler.js (optionally under src/) and try again.\n", .{});
                 return;
             }
             if (err == error.NameUndetectable) {
                 std.debug.print("Could not determine a service name from package.json, git remote, or directory name.\n", .{});
                 return;
             }
-            if (err == error.DeployDrift) {
-                return;
-            }
+            if (err == error.DeployDrift) std.process.exit(deploy_exit_drift);
+            if (err == error.ServiceReadyTimeout) std.process.exit(deploy_exit_ready_timeout);
+            if (err == error.ServiceDidNotStart) std.process.exit(deploy_exit_did_not_start);
             std.log.err("Deploy failed: {}", .{err});
             return err;
         };
@@ -1008,12 +1017,26 @@ fn printDeployHelp() void {
         \\On first run, prints a device-code URL. Open it in your browser to sign in.
         \\Zigttp remembers you after that.
         \\
-        \\The command takes no arguments. It auto-detects:
+        \\The command auto-detects everything by default. Optional flags:
+        \\  --confirm        Allow replace-like updates after showing the drift warning
+        \\  --region <name>  Override the deployment region for this run
+        \\  --wait           Block until the service reports ready (default)
+        \\  --no-wait        Return immediately after the deploy is accepted
+        \\
+        \\Exit codes:
+        \\  0  success
+        \\  2  drift detected, re-run with --confirm
+        \\  3  timed out waiting for the service to become ready
+        \\  4  service failed to start
+        \\
+        \\Auto-detected inputs:
         \\  handler file - handler.ts, handler.tsx, handler.jsx, handler.js,
         \\                 or the same under src/
         \\  service name - package.json name field, then git origin remote,
         \\                 then the current directory name
         \\  runtime env  - read from .env in this directory if present
+        \\  region       - --region flag, then the region from the last deploy of
+        \\                 this service, falling back to us-central
         \\
         \\Related:
         \\  zigttp logout   Forget the saved sign-in credentials

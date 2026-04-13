@@ -2270,72 +2270,76 @@ const config = ServerConfig{
 
 #### Native Deploy CLI
 
-`zigttp deploy` cross-compiles the handler to a Linux binary, packages it as
-an OCI image built in Zig, pushes the image to any OCI registry, and then
-creates or updates a service on Render or Northflank that pulls the image by
-digest. The only external tool invoked is `zig`, for cross-compilation.
+`zigttp deploy` cross-compiles the handler to a Linux musl binary,
+packages it as an OCI image, pushes it through the zigttp control plane,
+and provisions the service. The control plane mints short-lived registry
+credentials per deploy and forwards the image to the upstream provider,
+so there is no account to create, no registry to configure, and no API
+token to manage on the client. The only external tool invoked is `zig`,
+for cross-compilation.
 
 ```bash
-ZIGTTP_OCI_REGISTRY=ghcr.io ZIGTTP_OCI_NAMESPACE=acme/zigttp \
-RENDER_WORKSPACE_ID=ws_demo RENDER_PLAN=starter \
-zigttp deploy --provider render --name demo --region oregon \
-  examples/handler/handler.ts --dry-run --json
+zigttp deploy
+zigttp deploy --region eu-west
+zigttp deploy --no-wait
+zigttp deploy --confirm   # acknowledge drift after a warning
 ```
 
-Flags:
+Flags (all optional):
 
-- `--provider render|northflank` (required)
-- `--name <service>` (required)
-- `--region <region>`
-- `--env-file <path>`, a dotenv file of runtime env vars for the service
-- `--arch amd64|arm64`, default amd64; only amd64 is validated in v1
-- `--dry-run`, plan only, no registry push, no provider calls
-- `--json`, structured output
-- `--confirm`, allow replace-like reconciliation
+- `--region <name>` overrides the deployment region for this run.
+- `--confirm` acknowledges drift detected in `.zigttp/deploy-state.json` and
+  proceeds with a replace-like update.
+- `--wait` (default) blocks until the service reports ready.
+- `--no-wait` returns immediately after the deploy is accepted.
+- `-h` / `--help` prints usage.
 
-Everything else is read from environment variables.
+First run prints a sign-in URL. Open it in a browser; the CLI polls
+until the device flow completes and stores the token at
+`~/.zigttp/credentials`. `zigttp logout` clears it. Set
+`ZIGTTP_CONTROL_PLANE_URL` to point at a self-hosted control plane;
+the default is `https://api.zigttp.dev`.
 
-OCI push:
+Auto-detection from the current directory:
 
-- `ZIGTTP_OCI_REGISTRY` for the host (e.g. `ghcr.io`)
-- `ZIGTTP_OCI_NAMESPACE` for the repo namespace (e.g. `acme/zigttp-handlers`)
-- `ZIGTTP_OCI_USERNAME`, `ZIGTTP_OCI_PASSWORD` for the registry credentials (push only)
+- **Handler file**: first match of `handler.ts`, `handler.tsx`,
+  `handler.jsx`, `handler.js`, or the same paths under `src/`.
+- **Service name**: the `name` field in `package.json`, then the
+  basename of the git origin remote, then the current directory name.
+  Slugified to lowercase with dashes.
+- **Runtime environment**: `KEY=value` pairs from `.env` in the
+  current directory, one per line. Missing file is fine; a malformed
+  line aborts the deploy with a `path:line` diagnostic.
+- **Region**: `--region` if given, then the previous deploy's region,
+  then `us-central`.
 
-Render:
+Image references are content-addressed by the manifest digest, which
+is printed alongside the public URL on success. Identical handlers
+produce identical digests, so rerunning the deploy is a no-op when
+nothing changed.
 
-- `RENDER_API_KEY`, `RENDER_WORKSPACE_ID`, `RENDER_PLAN`
-- `RENDER_REGISTRY_CREDENTIAL_ID` for private registries (optional)
+Reconciliation reads `.zigttp/deploy-state.json`, which stores non-secret
+identifiers (`service_id`, `scope_id`, `plan_id`, `region`,
+`managed_env_keys`, `last_image_digest`) from the last successful
+deploy. A second run for the same service reuses the stored service
+id and patches in place. A change to scope, region, plan, or removal
+of a previously managed env var raises a drift warning; the CLI
+prints it and exits with code 2 unless `--confirm` is passed. Even
+with `--confirm`, the old service is rebound and updated, never
+deleted.
 
-Northflank:
+After the push the CLI polls the provider until the service reports
+ready (120s default). Exit codes:
 
-- `NORTHFLANK_API_TOKEN`, `NORTHFLANK_PROJECT_ID`, `NORTHFLANK_PLAN_ID`
-- `NORTHFLANK_REGISTRY_CREDENTIAL_ID` for private registries (optional)
+- `0` success
+- `2` drift detected, re-run with `--confirm`
+- `3` timed out waiting for the service to report ready
+- `4` service failed to start
 
-Image references are always content-addressed; tags are never user-supplied.
-
-```
-{ZIGTTP_OCI_REGISTRY}/{ZIGTTP_OCI_NAMESPACE}/{sanitized-name}@sha256:<manifest-digest>
-```
-
-Dry-run requires the OCI registry/namespace and the provider scope/plan
-vars. Push credentials and the provider API token are only required for a
-real deploy. Any missing variables are listed together in a single error.
-
-Reconciliation uses a local state file, `.zigttp/deploy-state.json`, that
-stores non-secret provider identifiers. A second run for the same
-`(provider, name)` reuses the stored `service_id` and patches in place.
-A change to scope, region, plan, or removal of a previously managed env
-var triggers a `replace_requires_confirm` action that fails unless
-`--confirm` is passed. Even with `--confirm`, v1 never deletes the old
-remote service; it rebinds and updates state.
-
-The same compiler-proven contract used for sandboxing drives the deploy.
-The dry-run output prints the proof level, proven env vars, egress hosts,
-routes, and OWASP Top 10 coverage. The same facts go into OCI image labels
-so provenance survives in the registry.
-
-The old build-time `-Ddeploy=aws` manifest generator has been removed; this
-is now the only supported deployment path.
+The same compiler-proven contract used for sandboxing drives the
+deploy. Proof facts (proof level, env var names, egress hosts, cache
+namespaces, routes, handler properties) are encoded as JSON arrays in
+OCI image labels so provenance survives in the registry.
 
 #### Docker Container
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const plan = @import("../plan.zig");
+const types = @import("../types.zig");
 const layer = @import("layer.zig");
 const config = @import("config.zig");
 const manifest = @import("manifest.zig");
@@ -22,7 +22,7 @@ pub fn buildImage(
     allocator: std.mem.Allocator,
     registry_host: []const u8,
     image_repo: []const u8,
-    arch: plan.Arch,
+    arch: types.Arch,
     binary: []const u8,
     labels: []const config.Label,
 ) !OciImage {
