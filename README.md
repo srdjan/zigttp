@@ -29,7 +29,7 @@ Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**One-command deploy.** `zigttp deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run signs you in through the browser; subsequent runs reuse the saved session. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+**One-command deploy.** `zigttp deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run prompts for a Zigttp access token in the terminal; browser-based device login remains available as fallback. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
@@ -362,12 +362,13 @@ Options:
 ```
 
 If credentials are missing, the CLI first prompts for a Zigttp access token
-directly in the terminal. Submit an empty token to fall back to browser-based
-device login. Tokens are stored at `~/.zigttp/credentials`; `zigttp logout`
-clears them. You can also sign in ahead of time with `zigttp login` or
-`zigttp login --token-stdin`. The control plane base URL defaults to
-`https://api.zigttp.dev`; set `ZIGTTP_CONTROL_PLANE_URL` to point at a
-self-hosted instance.
+directly in the terminal. The intended hosted flow is to create that token in
+`zigttp-admin`, then paste it into the CLI. Submit an empty token to fall back
+to browser-based device login. Tokens are stored at `~/.zigttp/credentials`;
+`zigttp logout` clears them. You can also sign in ahead of time with
+`zigttp login` or `zigttp login --token-stdin`. The control plane base URL
+defaults to `https://api.zigttp.dev`; set `ZIGTTP_CONTROL_PLANE_URL` to point
+at a self-hosted instance.
 
 Everything else is auto-detected from the current directory:
 

@@ -13,6 +13,7 @@ const auth = @import("deploy/auth.zig");
 const control_plane = @import("deploy/control_plane.zig");
 const autodetect = @import("deploy/autodetect.zig");
 const first_run = @import("deploy/first_run.zig");
+const io_util = @import("deploy/io_util.zig");
 const printer_mod = @import("deploy/printer.zig");
 
 const Printer = printer_mod.Printer;
@@ -152,17 +153,16 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     printer.line("  Uploading.. ok", "");
     printer.line("  Digest:     ", image.image_digest_ref);
 
-    const provider_ctx = northflank_adapter.ProviderContext{
-        .name = service_name,
-        .region = session.region,
-        .image_ref = image.image_digest_ref,
-        .env_vars = env_vars,
-        .project_id = session.scope_id,
-        .plan_id = session.plan_id,
-        .registry_credential_id = session.registry_credential_id,
-        .state_entry = previous,
-    };
-    const result = try executeWithAuthRetry(allocator, &provider_ctx, &session, service_name, effective_region, &progress);
+    const result = try executeWithAuthRetry(
+        allocator,
+        &session,
+        service_name,
+        effective_region,
+        image.image_digest_ref,
+        env_vars,
+        previous,
+        &progress,
+    );
     defer {
         allocator.free(result.service_id);
         if (result.deployment_id) |value| allocator.free(value);
@@ -174,11 +174,15 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
     var readiness_error: ?anyerror = null;
     if (options.wait) {
-        const readiness = try northflank_adapter.waitForReadyDefault(
+        const readiness = try waitForReadyWithAuthRetry(
             allocator,
-            &provider_ctx,
+            &session,
+            service_name,
+            effective_region,
+            image.image_digest_ref,
+            env_vars,
+            previous,
             result.service_id,
-            session.provider_api_token,
             northflank_adapter.default_deadline_seconds,
             printer,
         );
@@ -338,18 +342,22 @@ fn pushWithAuthRetryFns(
 
 fn executeWithAuthRetry(
     allocator: std.mem.Allocator,
-    ctx: *const northflank_adapter.ProviderContext,
     session: *control_plane.DeploySession,
     project_name: []const u8,
     region: []const u8,
+    image_ref: []const u8,
+    env_vars: []const types_mod.EnvVar,
+    state_entry: ?*const state.Entry,
     progress: *printer_mod.Progress,
 ) !types_mod.DeployResult {
     return executeWithAuthRetryFns(
         allocator,
-        ctx,
         session,
         project_name,
         region,
+        image_ref,
+        env_vars,
+        state_entry,
         progress,
         northflank_adapter.execute,
         control_plane.fetchDeploySession,
@@ -359,10 +367,12 @@ fn executeWithAuthRetry(
 
 fn executeWithAuthRetryFns(
     allocator: std.mem.Allocator,
-    ctx: *const northflank_adapter.ProviderContext,
     session: *control_plane.DeploySession,
     project_name: []const u8,
     region: []const u8,
+    image_ref: []const u8,
+    env_vars: []const types_mod.EnvVar,
+    state_entry: ?*const state.Entry,
     progress: *printer_mod.Progress,
     execute_fn: anytype,
     fetch_session: anytype,
@@ -378,13 +388,125 @@ fn executeWithAuthRetryFns(
         fetch_session,
     );
 
-    return execute_fn(allocator, ctx, session.provider_api_token, progress) catch |err| switch (err) {
+    var ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
+    return execute_fn(allocator, &ctx, session.provider_api_token, progress) catch |err| switch (err) {
         error.ProviderUnauthorized => {
             const fresh = try fetch_session(allocator, session.token, project_name, region);
             try control_plane.swapRefreshedSession(allocator, session, fresh);
-            return execute_fn(allocator, ctx, session.provider_api_token, progress);
+            ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
+            return execute_fn(allocator, &ctx, session.provider_api_token, progress);
         },
         else => return err,
+    };
+}
+
+fn waitForReadyWithAuthRetry(
+    allocator: std.mem.Allocator,
+    session: *control_plane.DeploySession,
+    project_name: []const u8,
+    region: []const u8,
+    image_ref: []const u8,
+    env_vars: []const types_mod.EnvVar,
+    state_entry: ?*const state.Entry,
+    service_id: []const u8,
+    deadline_seconds: u32,
+    printer: Printer,
+) !northflank_adapter.Readiness {
+    var io_backend = io_util.threadedIo(allocator);
+    defer io_backend.deinit();
+    const sleeper = northflank_adapter.RealSleeper{ .io = io_backend.io() };
+    return waitForReadyWithAuthRetryFns(
+        allocator,
+        session,
+        project_name,
+        region,
+        image_ref,
+        env_vars,
+        state_entry,
+        service_id,
+        deadline_seconds,
+        printer,
+        northflank_adapter.waitForReady,
+        northflank_adapter.fetchStatusReal,
+        sleeper,
+        control_plane.fetchDeploySession,
+        control_plane.defaultNowSec,
+    );
+}
+
+fn waitForReadyWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    session: *control_plane.DeploySession,
+    project_name: []const u8,
+    region: []const u8,
+    image_ref: []const u8,
+    env_vars: []const types_mod.EnvVar,
+    state_entry: ?*const state.Entry,
+    service_id: []const u8,
+    deadline_seconds: u32,
+    printer: Printer,
+    wait_fn: anytype,
+    fetch_status: anytype,
+    sleeper: anytype,
+    fetch_session: anytype,
+    now_fn: *const fn () i64,
+) !northflank_adapter.Readiness {
+    _ = try control_plane.sessionRefreshIfExpiringFns(
+        allocator,
+        session,
+        project_name,
+        region,
+        refresh_skew_seconds,
+        now_fn,
+        fetch_session,
+    );
+
+    var ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
+    return wait_fn(
+        allocator,
+        &ctx,
+        service_id,
+        session.provider_api_token,
+        deadline_seconds,
+        fetch_status,
+        sleeper,
+        printer,
+    ) catch |err| switch (err) {
+        error.ProviderUnauthorized => {
+            const fresh = try fetch_session(allocator, session.token, project_name, region);
+            try control_plane.swapRefreshedSession(allocator, session, fresh);
+            ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
+            return wait_fn(
+                allocator,
+                &ctx,
+                service_id,
+                session.provider_api_token,
+                deadline_seconds,
+                fetch_status,
+                sleeper,
+                printer,
+            );
+        },
+        else => return err,
+    };
+}
+
+fn buildProviderContext(
+    session: *const control_plane.DeploySession,
+    name: []const u8,
+    image_ref: []const u8,
+    env_vars: []const types_mod.EnvVar,
+    state_entry: ?*const state.Entry,
+) northflank_adapter.ProviderContext {
+    return .{
+        .name = name,
+        .region = session.region,
+        .image_ref = image_ref,
+        .env_vars = env_vars,
+        .project_id = session.scope_id,
+        .plan_id = session.plan_id,
+        .registry_credential_id = session.registry_credential_id,
+        .state_entry = state_entry,
     };
 }
 
@@ -845,15 +967,21 @@ test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
     const TestCtx = struct {
         var execute_calls: usize = 0;
         var fetch_calls: usize = 0;
+        var saw_refreshed_ctx = false;
 
         fn executeStub(
             allocator: std.mem.Allocator,
             ctx: *const northflank_adapter.ProviderContext,
-            _: []const u8,
+            api_token: []const u8,
             _: ?*printer_mod.Progress,
         ) !types_mod.DeployResult {
             execute_calls += 1;
             if (execute_calls == 1) return error.ProviderUnauthorized;
+            try std.testing.expectEqualStrings("proj-2", ctx.project_id);
+            try std.testing.expectEqualStrings("plan-rotated", ctx.plan_id);
+            try std.testing.expectEqualStrings("eu-west", ctx.region);
+            try std.testing.expectEqualStrings("nf-token-rotated", api_token);
+            saw_refreshed_ctx = true;
             return .{
                 .provider = .northflank,
                 .name = ctx.name,
@@ -872,7 +1000,16 @@ test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
             _: []const u8,
         ) !control_plane.DeploySession {
             fetch_calls += 1;
-            return freshSessionForTest(allocator, "rotated-token");
+            var fresh = try freshSessionForTest(allocator, "rotated-token");
+            allocator.free(fresh.scope_id);
+            fresh.scope_id = try allocator.dupe(u8, "proj-2");
+            allocator.free(fresh.plan_id);
+            fresh.plan_id = try allocator.dupe(u8, "plan-rotated");
+            allocator.free(fresh.region);
+            fresh.region = try allocator.dupe(u8, "eu-west");
+            allocator.free(fresh.provider_api_token);
+            fresh.provider_api_token = try allocator.dupe(u8, "nf-token-rotated");
+            return fresh;
         }
 
         fn nowStub() i64 {
@@ -881,20 +1018,10 @@ test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
     };
     TestCtx.execute_calls = 0;
     TestCtx.fetch_calls = 0;
+    TestCtx.saw_refreshed_ctx = false;
 
     var session = try freshSessionForTest(std.testing.allocator, "initial-token");
     defer session.deinit(std.testing.allocator);
-
-    const ctx = northflank_adapter.ProviderContext{
-        .name = "demo",
-        .region = "us-central",
-        .image_ref = "img",
-        .env_vars = &.{},
-        .project_id = "proj-1",
-        .plan_id = "plan",
-        .registry_credential_id = null,
-        .state_entry = null,
-    };
 
     var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
     defer buffered.deinit();
@@ -902,10 +1029,12 @@ test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
 
     const result = try executeWithAuthRetryFns(
         std.testing.allocator,
-        &ctx,
         &session,
         "demo",
         "us-east",
+        "img",
+        &.{},
+        null,
         &progress,
         TestCtx.executeStub,
         TestCtx.fetchSession,
@@ -920,6 +1049,115 @@ test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
     try std.testing.expectEqual(@as(usize, 2), TestCtx.execute_calls);
     try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
     try std.testing.expectEqualStrings("rotated-token", session.token);
+    try std.testing.expect(TestCtx.saw_refreshed_ctx);
+}
+
+test "waitForReadyWithAuthRetry refreshes on ProviderUnauthorized" {
+    const TestCtx = struct {
+        var wait_calls: usize = 0;
+        var fetch_calls: usize = 0;
+        var saw_refreshed_ctx = false;
+
+        const NoopSleeper = struct {
+            pub fn sleep(_: NoopSleeper, _: u32) void {}
+        };
+
+        fn waitStub(
+            allocator: std.mem.Allocator,
+            ctx: *const northflank_adapter.ProviderContext,
+            service_id: []const u8,
+            api_token: []const u8,
+            deadline_seconds: u32,
+            fetch_status: anytype,
+            sleeper: NoopSleeper,
+            printer: Printer,
+        ) !northflank_adapter.Readiness {
+            _ = service_id;
+            _ = deadline_seconds;
+            _ = sleeper;
+            _ = printer;
+            wait_calls += 1;
+            const status = try fetch_status(allocator, ctx.project_id, api_token);
+            return switch (status) {
+                .running => blk: {
+                    try std.testing.expectEqualStrings("proj-2", ctx.project_id);
+                    try std.testing.expectEqualStrings("plan-rotated", ctx.plan_id);
+                    try std.testing.expectEqualStrings("eu-west", ctx.region);
+                    try std.testing.expectEqualStrings("nf-token-rotated", api_token);
+                    saw_refreshed_ctx = true;
+                    break :blk .running;
+                },
+                .pending => .timed_out,
+                .failed => .failed,
+            };
+        }
+
+        fn fetchStatus(_: std.mem.Allocator, project_id: []const u8, api_token: []const u8) !northflank_adapter.ServiceStatus {
+            if (std.mem.eql(u8, project_id, "proj-1")) {
+                try std.testing.expectEqualStrings("nf-token", api_token);
+                return error.ProviderUnauthorized;
+            }
+            try std.testing.expectEqualStrings("proj-2", project_id);
+            try std.testing.expectEqualStrings("nf-token-rotated", api_token);
+            return .running;
+        }
+
+        fn fetchSession(
+            allocator: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+            _: []const u8,
+        ) !control_plane.DeploySession {
+            fetch_calls += 1;
+            var fresh = try freshSessionForTest(allocator, "rotated-token");
+            allocator.free(fresh.scope_id);
+            fresh.scope_id = try allocator.dupe(u8, "proj-2");
+            allocator.free(fresh.plan_id);
+            fresh.plan_id = try allocator.dupe(u8, "plan-rotated");
+            allocator.free(fresh.region);
+            fresh.region = try allocator.dupe(u8, "eu-west");
+            allocator.free(fresh.provider_api_token);
+            fresh.provider_api_token = try allocator.dupe(u8, "nf-token-rotated");
+            return fresh;
+        }
+
+        fn nowStub() i64 {
+            return 1000;
+        }
+    };
+    TestCtx.wait_calls = 0;
+    TestCtx.fetch_calls = 0;
+    TestCtx.saw_refreshed_ctx = false;
+
+    var session = try freshSessionForTest(std.testing.allocator, "initial-token");
+    defer session.deinit(std.testing.allocator);
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    const readiness = try waitForReadyWithAuthRetryFns(
+        std.testing.allocator,
+        &session,
+        "demo",
+        "us-east",
+        "img",
+        &.{},
+        null,
+        "srv-1",
+        northflank_adapter.default_deadline_seconds,
+        buffered.printer(),
+        TestCtx.waitStub,
+        TestCtx.fetchStatus,
+        TestCtx.NoopSleeper{},
+        TestCtx.fetchSession,
+        TestCtx.nowStub,
+    );
+
+    try std.testing.expectEqual(northflank_adapter.Readiness.running, readiness);
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.wait_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
+    try std.testing.expectEqualStrings("rotated-token", session.token);
+    try std.testing.expect(TestCtx.saw_refreshed_ctx);
 }
 
 pub fn logout(allocator: std.mem.Allocator) !void {
