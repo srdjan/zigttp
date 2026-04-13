@@ -802,6 +802,7 @@ pub const ContractBuilder = struct {
     /// FunctionBinding metadata from the module registry.
     const GenericBinding = struct {
         slot: u16,
+        module_specifier: []const u8,
         binding_name: []const u8,
         extractions: []const module_binding.ContractExtraction,
         flags: module_binding.ContractFlags,
@@ -1120,7 +1121,7 @@ pub const ContractBuilder = struct {
 
                 // Look up the function in the binding registry and track its
                 // contract extraction rules and flags for scanCallSites.
-                if (builtin_modules.findFunction(imported_name)) |entry| {
+                if (builtin_modules.findExport(module_str, imported_name)) |entry| {
                     const has_extractions = entry.func.contract_extractions.len > 0;
                     const has_flags = entry.func.contract_flags.sets_scope_used or
                         entry.func.contract_flags.sets_durable_used or
@@ -1130,6 +1131,7 @@ pub const ContractBuilder = struct {
                     if (has_extractions or has_flags) {
                         try self.generic_bindings.append(self.allocator, .{
                             .slot = spec.local_binding.slot,
+                            .module_specifier = entry.binding.specifier,
                             .binding_name = imported_name,
                             .extractions = entry.func.contract_extractions,
                             .flags = entry.func.contract_flags,
@@ -6322,4 +6324,31 @@ test "computeProperties egress is conservative write" {
     try std.testing.expect(props.deterministic);
     try std.testing.expect(props.has_egress);
     try std.testing.expect(!props.idempotent);
+}
+
+test "scanImports includes zigttp-ext modules in contract function map" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { double } from "zigttp-ext:math";
+        \\const value = double(21);
+    ;
+
+    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    defer builder.deinit();
+
+    try builder.scanImports();
+
+    try std.testing.expect(containsString(builder.modules_list.items, "zigttp-ext:math"));
+    try std.testing.expectEqual(@as(usize, 1), builder.functions_map.items.len);
+    try std.testing.expectEqualStrings("zigttp-ext:math", builder.functions_map.items[0].module);
+    try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "double"));
 }

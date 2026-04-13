@@ -145,16 +145,14 @@ const mb = @import("module_binding.zig");
 
 /// Look up whether a function produces a value requiring caller-side checking.
 /// Reads from the module binding registry instead of a hardcoded table.
-fn lookupTrackedFunction(name: []const u8) ?FunctionProduces {
-    if (builtin_modules.findFunction(name)) |entry| {
-        return switch (entry.func.returns) {
-            .result => .result,
-            .optional_string => .optional_string,
-            .optional_object => .optional_object,
-            else => null,
-        };
-    }
-    return null;
+fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?FunctionProduces {
+    const entry = builtin_modules.findExport(module_specifier, name) orelse return null;
+    return switch (entry.func.returns) {
+        .result => .result,
+        .optional_string => .optional_string,
+        .optional_object => .optional_object,
+        else => null,
+    };
 }
 
 const bindingKey = bool_checker_mod.packBindingKey;
@@ -473,7 +471,7 @@ pub const HandlerVerifier = struct {
                 const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
 
                 const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
-                const produces = lookupTrackedFunction(imported_name) orelse continue;
+                const produces = lookupTrackedFunction(module_str, imported_name) orelse continue;
 
                 switch (produces) {
                     .result => {
@@ -1399,18 +1397,18 @@ test "DiagnosticKind enum values" {
 
 test "lookupTrackedFunction" {
     // Result-producing
-    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("jwtVerify").?);
-    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("validateJson").?);
-    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("validateObject").?);
-    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("coerceJson").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zigttp:auth", "jwtVerify").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zigttp:validate", "validateJson").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zigttp:validate", "validateObject").?);
+    try std.testing.expectEqual(FunctionProduces.result, lookupTrackedFunction("zigttp:validate", "coerceJson").?);
     // Optional-producing
-    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("env").?);
-    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("cacheGet").?);
-    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("parseBearer").?);
-    try std.testing.expectEqual(FunctionProduces.optional_object, lookupTrackedFunction("routerMatch").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("zigttp:env", "env").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("zigttp:cache", "cacheGet").?);
+    try std.testing.expectEqual(FunctionProduces.optional_string, lookupTrackedFunction("zigttp:auth", "parseBearer").?);
+    try std.testing.expectEqual(FunctionProduces.optional_object, lookupTrackedFunction("zigttp:router", "routerMatch").?);
     // Untracked
-    try std.testing.expect(lookupTrackedFunction("sha256") == null);
-    try std.testing.expect(lookupTrackedFunction("cacheSet") == null);
+    try std.testing.expect(lookupTrackedFunction("zigttp:crypto", "sha256") == null);
+    try std.testing.expect(lookupTrackedFunction("zigttp:cache", "cacheSet") == null);
 }
 
 test "getSourceLine" {
