@@ -214,6 +214,29 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (readiness_error) |err| return err;
 }
 
+pub fn login(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const options = try config_mod.parseLogin(argv);
+
+    var stdout_buf: [256]u8 = undefined;
+    var stderr_buf: [256]u8 = undefined;
+    var stdout_writer = printer_mod.FdWriter.init(std.c.STDOUT_FILENO, stdout_buf[0..]);
+    var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+    const printer = Printer{
+        .stdout = &stdout_writer.interface,
+        .stderr = &stderr_writer.interface,
+    };
+
+    const mode: first_run.LoginMode = if (options.token_stdin)
+        .token_stdin
+    else if (options.device)
+        .device
+    else
+        .prompt;
+
+    var credentials = try first_run.login(allocator, printer, mode);
+    credentials.deinit(allocator);
+}
+
 fn fetchDeploySessionWithAuthRetry(
     allocator: std.mem.Allocator,
     service_name: []const u8,

@@ -96,6 +96,39 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try compileCommand(allocator, user_args[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "login")) {
+        deploy.login(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printLoginHelp();
+                return;
+            }
+            if (err == error.UnknownOption) {
+                std.debug.print("zigttp login only accepts --token-stdin and --device.\n\n", .{});
+                printLoginHelp();
+                return;
+            }
+            if (err == error.InvalidOptionCombination) {
+                std.debug.print("Choose either --token-stdin or --device, not both.\n\n", .{});
+                printLoginHelp();
+                return;
+            }
+            if (err == error.TokenPromptUnavailable) {
+                std.debug.print("Interactive token entry requires a TTY. Use `zigttp login --token-stdin` or `zigttp login --device`.\n", .{});
+                return;
+            }
+            if (err == error.EmptyToken) {
+                std.debug.print("No token was provided.\n", .{});
+                return;
+            }
+            if (err == error.InvalidToken) {
+                std.debug.print("Token rejected by the control plane.\n", .{});
+                return;
+            }
+            std.log.err("Login failed: {}", .{err});
+            return err;
+        };
+        return;
+    }
     if (std.mem.eql(u8, command, "deploy")) {
         deploy.run(allocator, user_args[1..]) catch |err| {
             if (err == error.HelpRequested) {
@@ -1014,8 +1047,8 @@ fn printDeployHelp() void {
         \\
         \\Deploy the handler in this directory to the zigttp runtime.
         \\
-        \\On first run, prints a device-code URL. Open it in your browser to sign in.
-        \\Zigttp remembers you after that.
+        \\If credentials are missing, Zigttp first prompts for an access token.
+        \\Submit an empty token to fall back to browser-based device login.
         \\
         \\The command auto-detects everything by default. Optional flags:
         \\  --confirm        Allow replace-like updates after showing the drift warning
@@ -1039,6 +1072,28 @@ fn printDeployHelp() void {
         \\                 this service, falling back to us-central
         \\
         \\Related:
+        \\  zigttp login    Store deploy credentials explicitly
+        \\  zigttp logout   Forget the saved sign-in credentials
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printLoginHelp() void {
+    const help =
+        \\zigttp login
+        \\
+        \\Store a Zigttp access token for future deploys.
+        \\
+        \\Default behavior prompts for a token in the terminal. Submit an empty
+        \\line to fall back to browser-based device login.
+        \\
+        \\Options:
+        \\  --token-stdin   Read the token from stdin
+        \\  --device        Skip token entry and use browser-based device login
+        \\
+        \\Related:
+        \\  zigttp deploy   Deploy using saved credentials or prompt if needed
         \\  zigttp logout   Forget the saved sign-in credentials
         \\
     ;
@@ -1055,6 +1110,7 @@ fn printHelp() void {
         \\  zigttp dev [handler-or-project]         Watch mode
         \\  zigttp check [handler.ts] [--contract]  Verify handler
         \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
+        \\  zigttp login                            Store deploy credentials
         \\  zigttp deploy                           Deploy the handler in this directory
         \\  zigttp logout                           Forget saved sign-in credentials
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check

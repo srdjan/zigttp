@@ -361,9 +361,11 @@ Options:
   -h, --help        Show usage
 ```
 
-First run prints a sign-in URL. Open it in a browser; the CLI polls until
-the device flow completes and stores the token at `~/.zigttp/credentials`.
-`zigttp logout` clears it. The control plane base URL defaults to
+If credentials are missing, the CLI first prompts for a Zigttp access token
+directly in the terminal. Submit an empty token to fall back to browser-based
+device login. Tokens are stored at `~/.zigttp/credentials`; `zigttp logout`
+clears them. You can also sign in ahead of time with `zigttp login` or
+`zigttp login --token-stdin`. The control plane base URL defaults to
 `https://api.zigttp.dev`; set `ZIGTTP_CONTROL_PLANE_URL` to point at a
 self-hosted instance.
 
@@ -404,8 +406,7 @@ ready (120s default). `--no-wait` skips the poll. Exit codes:
 
 OCI image references are content-addressed by the manifest digest, which
 is printed alongside the public URL on success. Identical handlers
-produce identical digests, so rerunning the deploy is a no-op when
-nothing changed. Proof facts from the handler contract (proof level,
+produce identical digests. Proof facts from the handler contract (proof level,
 env var names, egress hosts, cache namespaces, routes, handler
 properties) are encoded as JSON arrays in OCI image labels so
 provenance survives in the registry.

@@ -62,7 +62,15 @@ pub const Progress = struct {
 };
 
 fn defaultNowMs() i64 {
-    return std.time.milliTimestamp();
+    var ts: std.posix.timespec = undefined;
+    switch (std.posix.errno(std.posix.system.clock_gettime(.MONOTONIC, &ts))) {
+        .SUCCESS => {
+            const seconds: i64 = @intCast(ts.sec);
+            const nanos: i64 = @intCast(ts.nsec);
+            return seconds * std.time.ms_per_s + @divTrunc(nanos, std.time.ns_per_ms);
+        },
+        else => return 0,
+    }
 }
 
 // FdWriter wraps a raw POSIX file descriptor (STDOUT_FILENO / STDERR_FILENO)
