@@ -189,20 +189,7 @@ fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--force-swap")) force_swap = true;
     }
 
-    var config = try parseServeArgs(allocator, argv);
-    var owned_contract_json: ?[]const u8 = null;
-    defer if (owned_contract_json) |json| allocator.free(json);
-    var owned_admin_key: ?[]const u8 = null;
-    defer if (owned_admin_key) |key| allocator.free(key);
-
-    if (config.durable_admin.enabled) {
-        try configureDurableAdmin(allocator, &config, &owned_admin_key);
-        if (config.contract_json == null) {
-            owned_contract_json = try deriveServeContractJson(allocator, config);
-            config.contract_json = owned_contract_json;
-        }
-        config.durable_admin.contract_json = config.contract_json;
-    }
+    const config = try parseServeArgs(allocator, argv);
 
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config) catch |err| {
@@ -466,7 +453,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         config.static_dir = cfg.static_dir;
         config.runtime_config.sqlite_path = cfg.sqlite;
         config.runtime_config.durable_oplog_dir = cfg.durable_dir;
-        config.durable_admin.enabled = cfg.durable_admin;
         config.runtime_config.system_config_path = cfg.system;
         config.runtime_config.outbound_http_enabled = cfg.outbound_http;
         if (cfg.outbound_hosts.len > 1) return error.UnsupportedMultipleOutboundHosts;
@@ -549,8 +535,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             i += 1;
             if (i >= argv.len) return error.MissingDurableDir;
             config.runtime_config.durable_oplog_dir = argv[i];
-        } else if (std.mem.eql(u8, arg, "--durable-admin")) {
-            config.durable_admin.enabled = true;
         } else if (std.mem.eql(u8, arg, "--system")) {
             i += 1;
             if (i >= argv.len) return error.MissingSystemFile;
@@ -960,67 +944,6 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
     // pid == -1 (fork failed): silently skip signing
 }
 
-fn configureDurableAdmin(
-    allocator: std.mem.Allocator,
-    config: *ServerConfig,
-    owned_admin_key: *?[]const u8,
-) !void {
-    if (config.runtime_config.durable_oplog_dir == null) {
-        return error.DurableAdminRequiresDurable;
-    }
-
-    config.durable_admin.durable_dir = config.runtime_config.durable_oplog_dir;
-
-    if (isLoopbackHost(config.host)) return;
-
-    const env_name = "ZIGTTP_DURABLE_ADMIN_KEY";
-    const env_name_z = try allocator.dupeZ(u8, env_name);
-    defer allocator.free(env_name_z);
-    const raw = std.c.getenv(env_name_z) orelse return error.MissingDurableAdminKey;
-    const value = std.mem.sliceTo(raw, 0);
-    owned_admin_key.* = try allocator.dupe(u8, value);
-    config.durable_admin.admin_key = owned_admin_key.*.?;
-}
-
-fn deriveServeContractJson(allocator: std.mem.Allocator, config: ServerConfig) ![]u8 {
-    var result = switch (config.handler) {
-        .file_path => |path| try precompile.runCheckOnly(
-            allocator,
-            path,
-            config.runtime_config.sqlite_path,
-            false,
-            config.runtime_config.system_config_path,
-        ),
-        .inline_code => |code| try precompile.runCheckOnlyFromSource(
-            allocator,
-            code,
-            "eval.ts",
-            config.runtime_config.sqlite_path,
-            false,
-            config.runtime_config.system_config_path,
-            false,
-        ),
-        else => return error.ContractUnavailable,
-    };
-    defer result.deinit(allocator);
-
-    if (result.totalErrors() > 0) return error.ContractUnavailable;
-    const contract = result.contract orelse return error.ContractUnavailable;
-
-    var json_output: std.ArrayList(u8) = .empty;
-    defer json_output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_output);
-    zigts.writeContractJson(&contract, &aw.writer) catch return error.ContractUnavailable;
-    json_output = aw.toArrayList();
-    return json_output.toOwnedSlice(allocator);
-}
-
-fn isLoopbackHost(host: []const u8) bool {
-    return std.mem.eql(u8, host, "127.0.0.1") or
-        std.mem.eql(u8, host, "localhost") or
-        std.mem.eql(u8, host, "::1");
-}
-
 fn printVersion() void {
     const version = "zigttp " ++ zigts.version.string ++ "\n";
     _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
@@ -1146,7 +1069,6 @@ fn printServeHelp() void {
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --test <FILE>         Run declarative handler tests from JSONL file
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
-        \\  --durable-admin      Enable opt-in durable admin API
         \\  --system <FILE>       System registry for zigttp:service
         \\
     ;

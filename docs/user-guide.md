@@ -151,9 +151,6 @@ OPTIONS:
   --durable <DIR>       Enable durable run/step oplogs in a directory
                         Required for zigttp:durable
 
-  --durable-admin       Enable the durable admin API
-                        Exposes contract and durable run endpoints
-
   --system <FILE>       System registry for zigttp:service
                         Required for named internal service calls
 
@@ -195,9 +192,6 @@ OPTIONS:
 
 # Durable execution with persisted oplogs
 ./zig-out/bin/zigttp serve --durable .zigttp-durable handler.js
-
-# Durable execution with the admin API
-./zig-out/bin/zigttp serve --durable .zigttp-durable --durable-admin examples/durable/approval.ts
 
 # Named internal service calls
 ./zig-out/bin/zigttp serve --system examples/system/system.json examples/system/gateway.ts
@@ -1215,24 +1209,30 @@ durable run. Returns `false` if `key` does not identify an incomplete run.
 becomes available at or after `atUnixMs`. Delivery uses the same replay-safe
 path as `signal()`.
 
-Turn on `--durable-admin` to expose `/_zigttp/durable`:
+The runtime does not expose embedded admin routes. Run the sibling
+`zigttp-admin` service against the same durable directory to inspect runs and
+enqueue signals:
 
+- `GET /` renders the admin dashboard
+- `GET /runs/:key` inspects one durable run in the UI
+- `GET /contract` renders the workflow contract
 - `GET /_zigttp/durable/contract` returns the current contract JSON
 - `GET /_zigttp/durable/runs` lists discovered durable runs
 - `GET /_zigttp/durable/runs/:key` inspects one durable run
 - `POST /_zigttp/durable/runs/:key/signals/:name` enqueues a signal payload
 
-zigttp reserves that prefix while the flag is enabled. If the server binds to a
-non-loopback host, set `ZIGTTP_DURABLE_ADMIN_KEY` and send the same value in
-the `x-zigttp-admin-key` request header. You can also set
-`durableAdmin: true` in `zigttp.json`.
+Pass the same durable oplog directory and contract JSON file that your runtime
+uses. `zigttp-admin` can also require `x-zigttp-admin-key` via
+`ZIGTTP_DURABLE_ADMIN_KEY` or `--admin-key`.
 
 ```bash
-./zig-out/bin/zigttp serve --durable .zigttp-durable --durable-admin examples/durable/approval.ts
-curl http://127.0.0.1:8080/_zigttp/durable/contract
-curl http://127.0.0.1:8080/_zigttp/durable/runs
+cd ../zigttp-admin
+deno task start --durable-dir ../zigttp/.zigttp-durable --contract ../zigttp/contract.json
+
+curl http://127.0.0.1:8787/_zigttp/durable/contract
+curl http://127.0.0.1:8787/_zigttp/durable/runs
 curl -X POST \
-  http://127.0.0.1:8080/_zigttp/durable/runs/order%3A42/signals/approved \
+  http://127.0.0.1:8787/_zigttp/durable/runs/order%3A42/signals/approved \
   -H 'content-type: application/json' \
   -d '{"approvedBy":"ops"}'
 ```
