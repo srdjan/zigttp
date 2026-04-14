@@ -9,6 +9,8 @@
 
 const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
+const behavior_canonical = @import("behavior_canonical.zig");
+const builtin_modules = @import("builtin_modules.zig");
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;
@@ -53,6 +55,12 @@ pub fn deriveProofLevel(contract: *const HandlerContract) ProofLevel {
 pub const Classification = enum {
     /// Contract unchanged AND all traces identical. Pure refactor.
     equivalent,
+    /// Contract surface unchanged and every BehaviorPath, after
+    /// canonicalization under the algebraic laws declared on virtual
+    /// modules, is equal to its counterpart in the other version.
+    /// Strictly stronger than `.equivalent`: the laws_used list
+    /// enumerates which equations the proof relied on.
+    equivalent_modulo_laws,
     /// New routes/capabilities added, existing preserved. No regressions.
     additive,
     /// Routes/capabilities removed OR traces diverged. Needs review.
@@ -61,9 +69,18 @@ pub const Classification = enum {
     pub fn toString(self: Classification) []const u8 {
         return switch (self) {
             .equivalent => "equivalent",
+            .equivalent_modulo_laws => "equivalent_modulo_laws",
             .additive => "additive",
             .breaking => "breaking",
         };
+    }
+
+    /// True when the deploy is a proven no-op: surfaces unchanged and
+    /// behavior either byte-equal or canonically-equivalent under laws.
+    /// Callers that want to skip work for no-op deploys must use this
+    /// helper rather than comparing against `.equivalent` directly.
+    pub fn isSafeNoOp(self: Classification) bool {
+        return self == .equivalent or self == .equivalent_modulo_laws;
     }
 };
 
@@ -169,6 +186,15 @@ pub const ContractDiff = struct {
     effect_changes: std.ArrayList(PropertiesChange) = .empty,
     /// Behavioral path diff - present when both contracts have behaviors.
     behavior_diff: ?BehaviorDiff = null,
+    /// Identifiers of laws that fired during canonical reclassification,
+    /// in the form "<module>.<func>.<law_kind>". Owned. A non-empty list
+    /// causes `classify()` to return `.equivalent_modulo_laws` when the
+    /// structural verdict is `.equivalent`.
+    laws_used: std.ArrayList([]const u8) = .empty,
+    /// First canonical-path mismatch when `tryCanonicalEquivalence` runs
+    /// but cannot reclassify. Owned. null when canonicalization succeeds
+    /// or when it was never attempted.
+    canonical_counterexample: ?[]const u8 = null,
 
     pub fn deinit(self: *ContractDiff, allocator: std.mem.Allocator) void {
         self.routes.deinit(allocator);
@@ -180,6 +206,9 @@ pub const ContractDiff = struct {
         self.dynamic_changes.deinit(allocator);
         self.effect_changes.deinit(allocator);
         if (self.behavior_diff) |*bd| bd.deinit(allocator);
+        for (self.laws_used.items) |s| allocator.free(s);
+        self.laws_used.deinit(allocator);
+        if (self.canonical_counterexample) |c| allocator.free(c);
     }
 
     pub fn capabilitiesWidened(self: *const ContractDiff) bool {
@@ -197,8 +226,19 @@ pub const ContractDiff = struct {
     }
 
     /// Classify the diff structurally (without replay data).
-    /// Single pass over each change list, checking for removed and added items.
+    /// When `tryCanonicalEquivalence` has recorded fired laws, returns
+    /// `.equivalent_modulo_laws` in place of `.equivalent`.
     pub fn classify(self: *const ContractDiff) Classification {
+        const structural = self.classifyStructural();
+        if (structural == .equivalent and self.laws_used.items.len > 0) {
+            return .equivalent_modulo_laws;
+        }
+        return structural;
+    }
+
+    /// Classify the diff purely structurally, ignoring any canonicalization
+    /// upgrade. Exposed for tests and for callers that want the raw answer.
+    pub fn classifyStructural(self: *const ContractDiff) Classification {
         var has_added = false;
 
         for (self.routes.items) |r| {
@@ -234,7 +274,125 @@ pub const ContractDiff = struct {
 
         return self.classify();
     }
+
+    /// Attempt to upgrade `.equivalent` to `.equivalent_modulo_laws` by
+    /// canonicalizing every BehaviorPath on both sides and checking that
+    /// the canonical forms match. On success, populates `laws_used`. On
+    /// mismatch, populates `canonical_counterexample`. Best-effort.
+    ///
+    /// No-op when the structural classification is not already
+    /// `.equivalent` - canonicalization cannot rescue a surface change.
+    pub fn tryCanonicalEquivalence(
+        self: *ContractDiff,
+        allocator: std.mem.Allocator,
+        old: *const HandlerContract,
+        new: *const HandlerContract,
+    ) !void {
+        if (self.laws_used.items.len > 0) return;
+        if (self.classifyStructural() != .equivalent) return;
+        if (old.behaviors.items.len == 0 and new.behaviors.items.len == 0) return;
+        if (old.behaviors.items.len != new.behaviors.items.len) {
+            try self.setCounterexample(allocator, "behavior path count differs");
+            return;
+        }
+
+        var fired: std.ArrayList(behavior_canonical.FiredLawId) = .empty;
+        defer fired.deinit(allocator);
+
+        // Canonicalize every new path up front so the match loop is
+        // O(|old| + |new|) instead of O(|old| * |new|).
+        var new_canons = try std.ArrayList(handler_contract.BehaviorPath).initCapacity(
+            allocator,
+            new.behaviors.items.len,
+        );
+        defer {
+            for (new_canons.items) |*c| c.deinit(allocator);
+            new_canons.deinit(allocator);
+        }
+        for (new.behaviors.items) |*np| {
+            const canon = try behavior_canonical.canonicalize(allocator, np, .default, null, &fired);
+            new_canons.appendAssumeCapacity(canon);
+        }
+
+        var matched = try allocator.alloc(bool, new_canons.items.len);
+        defer allocator.free(matched);
+        @memset(matched, false);
+
+        for (old.behaviors.items) |*old_path| {
+            var old_canon = try behavior_canonical.canonicalize(allocator, old_path, .default, null, &fired);
+            defer old_canon.deinit(allocator);
+
+            var found = false;
+            for (new_canons.items, 0..) |*new_canon, j| {
+                if (matched[j]) continue;
+                if (!canonicalPathsEqual(&old_canon, new_canon)) continue;
+                matched[j] = true;
+                found = true;
+                break;
+            }
+
+            if (!found) {
+                const msg = try std.fmt.allocPrint(
+                    allocator,
+                    "{s} {s} -> no canonically-equivalent new path (old response {d})",
+                    .{ old_path.route_method, old_path.route_pattern, old_path.response_status },
+                );
+                defer allocator.free(msg);
+                try self.setCounterexample(allocator, msg);
+                return;
+            }
+        }
+
+        // Every old path matched. Dedup the fired laws in-place, then
+        // render each unique triple into an owned identifier string.
+        var seen_end: usize = 0;
+        for (fired.items) |law| {
+            if (containsLawId(fired.items[0..seen_end], law)) continue;
+            fired.items[seen_end] = law;
+            seen_end += 1;
+        }
+        for (fired.items[0..seen_end]) |law| {
+            const id = try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{
+                law.module,
+                law.func,
+                @tagName(law.kind),
+            });
+            errdefer allocator.free(id);
+            try self.laws_used.append(allocator, id);
+        }
+    }
+
+    fn setCounterexample(self: *ContractDiff, allocator: std.mem.Allocator, msg: []const u8) !void {
+        const owned = try allocator.dupe(u8, msg);
+        if (self.canonical_counterexample) |prev| allocator.free(prev);
+        self.canonical_counterexample = owned;
+    }
 };
+
+/// Canonicalized paths are equal when their keys (route, conditions)
+/// match AND their response/failure status match AND their io_sequences
+/// are byte-for-byte identical.
+fn canonicalPathsEqual(a: *const handler_contract.BehaviorPath, b: *const handler_contract.BehaviorPath) bool {
+    if (!behaviorPathKeysMatch(a, b)) return false;
+    if (a.response_status != b.response_status) return false;
+    if (a.is_failure_path != b.is_failure_path) return false;
+    if (a.io_sequence.items.len != b.io_sequence.items.len) return false;
+    for (a.io_sequence.items, b.io_sequence.items) |ia, ib| {
+        if (!std.mem.eql(u8, ia.module, ib.module)) return false;
+        if (!std.mem.eql(u8, ia.func, ib.func)) return false;
+        if (!eqlOptStr(ia.arg_signature, ib.arg_signature)) return false;
+    }
+    return true;
+}
+
+/// Linear membership check on an already-seen list of FiredLawIds.
+/// Typical cardinality is under 10 so a scan beats any hashed alternative.
+fn containsLawId(seen: []const behavior_canonical.FiredLawId, law: behavior_canonical.FiredLawId) bool {
+    for (seen) |s| {
+        if (s.eql(law)) return true;
+    }
+    return false;
+}
 
 pub const ProofCertificate = struct {
     classification: Classification,
@@ -409,7 +567,7 @@ pub fn diffContracts(
         behavior_diff = try diffBehaviors(allocator, old.behaviors.items, new.behaviors.items);
     }
 
-    return .{
+    var diff = ContractDiff{
         .routes = routes,
         .api_route_changes = api_route_changes,
         .env_changes = env_changes,
@@ -420,6 +578,11 @@ pub fn diffContracts(
         .effect_changes = effect_changes,
         .behavior_diff = behavior_diff,
     };
+    errdefer diff.deinit(allocator);
+
+    try diff.tryCanonicalEquivalence(allocator, old, new);
+
+    return diff;
 }
 
 // -------------------------------------------------------------------------
@@ -596,6 +759,13 @@ pub fn writeProofJson(cert: *const ProofCertificate, writer: anytype) !void {
     try writer.writeAll(cert.proof_level.toString());
     try writer.writeAll("\",\n");
 
+    try writer.writeAll("  \"laws_used\": [");
+    for (cert.diff.laws_used.items, 0..) |law_id, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, law_id);
+    }
+    try writer.writeAll("],\n");
+
     // Behavioral diff
     if (cert.diff.behavior_diff) |bd| {
         try writer.writeAll("  \"behavioralDiff\": {\n");
@@ -620,8 +790,22 @@ pub fn writeProofReport(writer: anytype, cert: *const ProofCertificate) !void {
     try writer.writeAll("Classification: ");
     switch (cert.classification) {
         .equivalent => try writer.writeAll("EQUIVALENT (safe to deploy)\n"),
+        .equivalent_modulo_laws => try writer.writeAll("EQUIVALENT MODULO LAWS (safe to deploy, proof via canonicalization)\n"),
         .additive => try writer.writeAll("ADDITIVE (safe to deploy)\n"),
         .breaking => try writer.writeAll("BREAKING (requires review)\n"),
+    }
+
+    if (cert.diff.laws_used.items.len > 0) {
+        try writer.writeAll("\nLaws used in canonical equivalence proof:\n");
+        for (cert.diff.laws_used.items) |law_id| {
+            try writer.writeAll("  - ");
+            try writer.writeAll(law_id);
+            try writer.writeAll("\n");
+        }
+    } else if (cert.diff.canonical_counterexample) |cex| {
+        try writer.writeAll("\nCanonical equivalence not established:\n  ");
+        try writer.writeAll(cex);
+        try writer.writeAll("\n");
     }
 
     try writer.writeAll("\nContract Diff:\n");
@@ -873,6 +1057,13 @@ pub fn generateRecommendation(
             } else {
                 try w.writeAll("contract unchanged");
             }
+        },
+        .equivalent_modulo_laws => {
+            try w.writeAll("Deploy immediately - canonical equivalence proved via ");
+            try w.print("{d} law{s}", .{
+                diff.laws_used.items.len,
+                if (diff.laws_used.items.len == 1) "" else "s",
+            });
         },
         .additive => {
             try w.writeAll("Safe to deploy - ");
@@ -1988,4 +2179,215 @@ test "diffBehaviors added path" {
     try std.testing.expectEqual(@as(u32, 0), bd.preserved);
     try std.testing.expectEqual(@as(u32, 1), bd.added);
     try std.testing.expect(!bd.hasBreaking());
+}
+
+// ---------------------------------------------------------------------------
+// Canonical equivalence tests
+// ---------------------------------------------------------------------------
+
+/// Build a BehaviorPath owned by the caller. Mirrors the shape expected by
+/// `diffContracts` and `tryCanonicalEquivalence`: everything deeply owned,
+/// no aliasing with test-fixture literals.
+fn makeOwnedPath(
+    allocator: std.mem.Allocator,
+    method: []const u8,
+    pattern: []const u8,
+    status: u16,
+    calls: []const struct {
+        module: []const u8,
+        func: []const u8,
+        args: ?[]const u8,
+    },
+) !handler_contract.BehaviorPath {
+    var seq: std.ArrayList(handler_contract.PathIoCall) = .empty;
+    errdefer {
+        for (seq.items) |*c| @constCast(c).deinit(allocator);
+        seq.deinit(allocator);
+    }
+    for (calls) |c| {
+        try seq.append(allocator, .{
+            .module = try allocator.dupe(u8, c.module),
+            .func = try allocator.dupe(u8, c.func),
+            .arg_signature = if (c.args) |a| try allocator.dupe(u8, a) else null,
+        });
+    }
+
+    return .{
+        .route_method = try allocator.dupe(u8, method),
+        .route_pattern = try allocator.dupe(u8, pattern),
+        .conditions = .empty,
+        .io_sequence = seq,
+        .response_status = status,
+        .io_depth = @intCast(calls.len),
+        .is_failure_path = false,
+    };
+}
+
+test "diffContracts upgrades equivalent to equivalent_modulo_laws when dedup fires" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    // Old: handler reads env("KEY") once.
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+    }));
+    // New: handler reads env("KEY") twice - canonicalization collapses to one.
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.equivalent_modulo_laws, diff.classify());
+    try std.testing.expect(diff.laws_used.items.len >= 1);
+
+    // Verify law identifier format: "<module>.<func>.<law_kind>"
+    var found_env_pure = false;
+    for (diff.laws_used.items) |id| {
+        if (std.mem.eql(u8, id, "env.env.pure")) found_env_pure = true;
+    }
+    try std.testing.expect(found_env_pure);
+}
+
+test "diffContracts stays equivalent when canonical forms already match" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    // Identical single-call paths - no canonicalization work, no laws fire.
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+    }));
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    // Canonicalization ran but no rewrites fired, so we stay at plain equivalent.
+    try std.testing.expectEqual(Classification.equivalent, diff.classify());
+    try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
+}
+
+test "diffContracts does not reclassify when canonical forms differ" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    // Different calls - canonicalization cannot make them match.
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "crypto", .func = "sha256", .args = "lit:A" },
+    }));
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "crypto", .func = "sha256", .args = "lit:B" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.equivalent, diff.classify());
+    try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
+    // Structurally-matched paths that fail canonical equality record
+    // a counterexample pointing at the divergence.
+    try std.testing.expect(diff.canonical_counterexample != null);
+}
+
+test "diffContracts reclassifies cacheSet idempotent collapse" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "POST", "/session", 201, &.{
+        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|?" },
+    }));
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "POST", "/session", 201, &.{
+        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|?" },
+        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|?" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.equivalent_modulo_laws, diff.classify());
+    var found_cache = false;
+    for (diff.laws_used.items) |id| {
+        if (std.mem.eql(u8, id, "cache.cacheSet.idempotent_call")) found_cache = true;
+    }
+    try std.testing.expect(found_cache);
+}
+
+test "diffContracts reclassifies when multiple paths match in any order" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    // Old side: /a followed by /b, each with one env read.
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/a", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY_A" },
+    }));
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/b", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY_B" },
+    }));
+
+    // New side: same routes in reversed order, and /a has a redundant
+    // env read that must collapse under canonicalization.
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/b", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY_B" },
+    }));
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/a", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY_A" },
+        .{ .module = "env", .func = "env", .args = "lit:KEY_A" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    try std.testing.expectEqual(Classification.equivalent_modulo_laws, diff.classify());
+    try std.testing.expect(diff.laws_used.items.len >= 1);
+}
+
+test "diffContracts does not upgrade when surface differs" {
+    const allocator = std.testing.allocator;
+
+    var old = try makeTestContract(allocator);
+    defer old.deinit(allocator);
+    var new = try makeTestContract(allocator);
+    defer new.deinit(allocator);
+
+    // Add an env var only to the new side - surface change -> additive.
+    try new.env.literal.append(allocator, try allocator.dupe(u8, "NEW_KEY"));
+
+    try old.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+    }));
+    try new.behaviors.append(allocator, try makeOwnedPath(allocator, "GET", "/data", 200, &.{
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+        .{ .module = "env", .func = "env", .args = "lit:KEY" },
+    }));
+
+    var diff = try diffContracts(allocator, &old, &new);
+    defer diff.deinit(allocator);
+
+    // Surface is additive, so canonicalization does not try to upgrade.
+    try std.testing.expectEqual(Classification.additive, diff.classify());
+    try std.testing.expectEqual(@as(usize, 0), diff.laws_used.items.len);
 }

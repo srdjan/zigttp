@@ -40,8 +40,29 @@ pub const binding = mb.ModuleBinding{
     .sandboxable = true,
     .exports = &.{
         .{ .name = "cacheGet", .func = cacheGetNative, .arg_count = 2, .effect = .read, .returns = .optional_string, .param_types = &.{.string}, .failure_severity = .expected, .contract_extractions = &.{.{ .category = .cache_namespace }}, .return_labels = .{ .internal = true } },
-        .{ .name = "cacheSet", .func = cacheSetNative, .arg_count = 4, .effect = .write, .returns = .boolean, .param_types = &.{ .string, .string }, .contract_extractions = &.{.{ .category = .cache_namespace }} },
-        .{ .name = "cacheDelete", .func = cacheDeleteNative, .arg_count = 2, .effect = .write, .returns = .boolean, .param_types = &.{.string}, .contract_extractions = &.{.{ .category = .cache_namespace }} },
+        // cacheSet and cacheDelete are last-write-wins: two adjacent calls
+        // with identical (namespace, key, value, ttl) arguments leave the
+        // store in the same observable state as one call.
+        .{
+            .name = "cacheSet",
+            .func = cacheSetNative,
+            .arg_count = 4,
+            .effect = .write,
+            .returns = .boolean,
+            .param_types = &.{ .string, .string },
+            .contract_extractions = &.{.{ .category = .cache_namespace }},
+            .laws = &.{.idempotent_call},
+        },
+        .{
+            .name = "cacheDelete",
+            .func = cacheDeleteNative,
+            .arg_count = 2,
+            .effect = .write,
+            .returns = .boolean,
+            .param_types = &.{.string},
+            .contract_extractions = &.{.{ .category = .cache_namespace }},
+            .laws = &.{.idempotent_call},
+        },
         .{ .name = "cacheIncr", .func = cacheIncrNative, .arg_count = 4, .effect = .write, .returns = .number, .param_types = &.{.string}, .contract_extractions = &.{.{ .category = .cache_namespace }} },
         .{ .name = "cacheStats", .func = cacheStatsNative, .arg_count = 1, .effect = .read, .returns = .object, .param_types = &.{} },
     },

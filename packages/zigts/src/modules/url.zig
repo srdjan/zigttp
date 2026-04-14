@@ -25,10 +25,13 @@ pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:url",
     .name = "url",
     .exports = &.{
-        .{ .name = "urlParse", .func = urlParseNative, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true } },
-        .{ .name = "urlSearchParams", .func = urlSearchParamsNative, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true } },
-        .{ .name = "urlEncode", .func = urlEncodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
-        .{ .name = "urlDecode", .func = urlDecodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
+        .{ .name = "urlParse", .func = urlParseNative, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
+        .{ .name = "urlSearchParams", .func = urlSearchParamsNative, .arg_count = 1, .returns = .object, .param_types = &.{.string}, .effect = .none, .return_labels = .{ .user_input = true }, .laws = &.{.pure} },
+        // urlEncode/urlDecode are pure, but NOT symmetric inverses: URL
+        // encoding accepts multiple valid forms ("+" vs "%20") that round-trip
+        // to a canonical representation, so `.inverse_of` is unsound here.
+        .{ .name = "urlEncode", .func = urlEncodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "urlDecode", .func = urlDecodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
     },
 };
 

@@ -53,6 +53,7 @@ pub const handler_policy = @import("handler_policy.zig");
 pub const bool_checker = @import("bool_checker.zig");
 pub const flow_checker = @import("flow_checker.zig");
 pub const path_generator = @import("path_generator.zig");
+pub const behavior_canonical = @import("behavior_canonical.zig");
 pub const fault_coverage = @import("fault_coverage.zig");
 pub const property_diagnostics = @import("property_diagnostics.zig");
 pub const route_match = @import("route_match.zig");

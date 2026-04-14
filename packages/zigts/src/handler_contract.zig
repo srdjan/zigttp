@@ -563,16 +563,45 @@ pub const PathCondition = struct {
         if (self.func) |f| allocator.free(f);
         if (self.value) |v| allocator.free(v);
     }
+
+    pub fn dupeOwned(self: PathCondition, allocator: std.mem.Allocator) !PathCondition {
+        return .{
+            .kind = self.kind,
+            .module = try dupeOptionalString(allocator, self.module),
+            .func = try dupeOptionalString(allocator, self.func),
+            .value = try dupeOptionalString(allocator, self.value),
+        };
+    }
 };
 
 /// A single I/O call in a behavior path's sequence.
 pub const PathIoCall = struct {
     module: []const u8, // owned
     func: []const u8, // owned
+    /// Canonical argument signature used by the behavior-path canonicalizer.
+    /// Pipe-delimited, one token per argument position:
+    ///   "lit:<raw>"   - string literal
+    ///   "int:<raw>"   - integer literal
+    ///   "bool:true"   - boolean literal
+    ///   "bool:false"
+    ///   "?"           - dynamic or unknown
+    /// `null` means the path generator did not record arguments for this
+    /// call (older contracts, or a call site where we could not walk the
+    /// arguments). A null signature disables all rewrites on this call.
+    arg_signature: ?[]const u8 = null, // owned when non-null
 
     pub fn deinit(self: *PathIoCall, allocator: std.mem.Allocator) void {
         allocator.free(self.module);
         allocator.free(self.func);
+        if (self.arg_signature) |sig| allocator.free(sig);
+    }
+
+    pub fn dupeOwned(self: PathIoCall, allocator: std.mem.Allocator) !PathIoCall {
+        return .{
+            .module = try allocator.dupe(u8, self.module),
+            .func = try allocator.dupe(u8, self.func),
+            .arg_signature = try dupeOptionalString(allocator, self.arg_signature),
+        };
     }
 };
 
@@ -598,6 +627,38 @@ pub const BehaviorPath = struct {
             @constCast(io).deinit(allocator);
         }
         self.io_sequence.deinit(allocator);
+    }
+
+    pub fn dupeOwned(self: *const BehaviorPath, allocator: std.mem.Allocator) !BehaviorPath {
+        var conditions: std.ArrayList(PathCondition) = .empty;
+        errdefer {
+            for (conditions.items) |*c| @constCast(c).deinit(allocator);
+            conditions.deinit(allocator);
+        }
+        try conditions.ensureTotalCapacity(allocator, self.conditions.items.len);
+        for (self.conditions.items) |c| {
+            conditions.appendAssumeCapacity(try c.dupeOwned(allocator));
+        }
+
+        var io_sequence: std.ArrayList(PathIoCall) = .empty;
+        errdefer {
+            for (io_sequence.items) |*io| @constCast(io).deinit(allocator);
+            io_sequence.deinit(allocator);
+        }
+        try io_sequence.ensureTotalCapacity(allocator, self.io_sequence.items.len);
+        for (self.io_sequence.items) |io| {
+            io_sequence.appendAssumeCapacity(try io.dupeOwned(allocator));
+        }
+
+        return .{
+            .route_method = try allocator.dupe(u8, self.route_method),
+            .route_pattern = try allocator.dupe(u8, self.route_pattern),
+            .conditions = conditions,
+            .io_sequence = io_sequence,
+            .response_status = self.response_status,
+            .io_depth = self.io_depth,
+            .is_failure_path = self.is_failure_path,
+        };
     }
 };
 
@@ -4812,6 +4873,15 @@ fn parseBehaviorIoSequence(parser: *JsonParser, allocator: std.mem.Allocator, io
                 io_call.module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
             } else if (std.mem.eql(u8, key, "func")) {
                 io_call.func = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+            } else if (std.mem.eql(u8, key, "args")) {
+                // Optional arg signature for canonicalization. Older contracts
+                // without this key leave arg_signature null.
+                parser.skipWhitespace();
+                if (parser.readNull()) {
+                    io_call.arg_signature = null;
+                } else {
+                    io_call.arg_signature = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
+                }
             } else {
                 parser.skipValue();
             }
@@ -5485,6 +5555,10 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
                 try writeJsonString(writer, io.module);
                 try writer.writeAll(", \"func\": ");
                 try writeJsonString(writer, io.func);
+                if (io.arg_signature) |sig| {
+                    try writer.writeAll(", \"args\": ");
+                    try writeJsonString(writer, sig);
+                }
                 try writer.writeByte('}');
             }
             try writer.writeAll("]\n");

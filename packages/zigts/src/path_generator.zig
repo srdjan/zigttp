@@ -63,6 +63,9 @@ pub const IoStub = struct {
     module: []const u8,
     func: []const u8,
     result_json: []const u8,
+    /// Canonical arg signature (pipe-delimited), owned when non-null.
+    /// See `handler_contract.PathIoCall.arg_signature` for the format.
+    arg_signature: ?[]const u8 = null,
 };
 
 pub const GeneratedTest = struct {
@@ -116,6 +119,11 @@ pub const PathGenerator = struct {
         func: []const u8,
         returns: mb.ReturnKind,
         binding_key: ?u32,
+        /// IR node of the originating call expression. Used at emission
+        /// time to compute an argument signature for the behavior-path
+        /// canonicalizer. null when the call was tracked through a wrapper
+        /// (e.g. nullish-coalesce) and the original node is unavailable.
+        call_node: ?NodeIndex,
     };
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) PathGenerator {
@@ -142,6 +150,9 @@ pub const PathGenerator = struct {
         self.io_seq.deinit(self.allocator);
         for (self.tests.items) |*t| {
             self.allocator.free(t.name);
+            for (t.io_stubs.items) |*stub| {
+                if (stub.arg_signature) |sig| self.allocator.free(sig);
+            }
             t.io_stubs.deinit(self.allocator);
             if (t.constraints.len > 0) self.allocator.free(t.constraints);
         }
@@ -244,9 +255,14 @@ pub const PathGenerator = struct {
             }
 
             for (test_case.io_stubs.items) |stub| {
+                const arg_sig: ?[]const u8 = if (stub.arg_signature) |sig|
+                    try allocator.dupe(u8, sig)
+                else
+                    null;
                 try io_sequence.append(allocator, .{
                     .module = try allocator.dupe(u8, stub.module),
                     .func = try allocator.dupe(u8, stub.func),
+                    .arg_signature = arg_sig,
                 });
             }
 
@@ -682,6 +698,7 @@ pub const PathGenerator = struct {
                     .func = meta.func,
                     .returns = meta.returns,
                     .binding_key = binding_key,
+                    .call_node = node,
                 }) catch {};
             }
             return;
@@ -695,6 +712,64 @@ pub const PathGenerator = struct {
                 return;
             }
         }
+    }
+
+    /// Build a canonical argument signature for the call at `call_node`.
+    /// Pipe-delimited, one token per argument position:
+    ///   "lit:<raw>"   - string literal
+    ///   "int:<raw>"   - integer literal
+    ///   "bool:true"   - boolean literal
+    ///   "bool:false"
+    ///   "?"           - dynamic or unknown
+    /// Returns an owned slice. Caller frees.
+    fn computeArgSignature(self: *const PathGenerator, allocator: std.mem.Allocator, call_node: NodeIndex) !?[]const u8 {
+        const tag = self.ir_view.getTag(call_node) orelse return null;
+        if (tag != .call and tag != .method_call) return null;
+        const call = self.ir_view.getCall(call_node) orelse return null;
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+
+        var j: u8 = 0;
+        while (j < call.args_count) : (j += 1) {
+            if (j > 0) try buf.append(allocator, '|');
+            const arg_idx = self.ir_view.getListIndex(call.args_start, j);
+            const arg_tag = self.ir_view.getTag(arg_idx) orelse {
+                try buf.append(allocator, '?');
+                continue;
+            };
+            switch (arg_tag) {
+                .lit_string => {
+                    const str_idx = self.ir_view.getStringIdx(arg_idx) orelse {
+                        try buf.append(allocator, '?');
+                        continue;
+                    };
+                    const raw = self.ir_view.getString(str_idx) orelse {
+                        try buf.append(allocator, '?');
+                        continue;
+                    };
+                    try buf.appendSlice(allocator, "lit:");
+                    try buf.appendSlice(allocator, raw);
+                },
+                .lit_int => {
+                    const v = self.ir_view.getIntValue(arg_idx) orelse {
+                        try buf.append(allocator, '?');
+                        continue;
+                    };
+                    try buf.print(allocator, "int:{d}", .{v});
+                },
+                .lit_bool => {
+                    const b = self.ir_view.getBoolValue(arg_idx) orelse {
+                        try buf.append(allocator, '?');
+                        continue;
+                    };
+                    try buf.appendSlice(allocator, if (b) "bool:true" else "bool:false");
+                },
+                else => try buf.append(allocator, '?'),
+            }
+        }
+
+        return try buf.toOwnedSlice(allocator);
     }
 
     // -------------------------------------------------------------------
@@ -813,11 +888,17 @@ pub const PathGenerator = struct {
             const result_json = stub_overrides.get(io_call.func) orelse
                 stubValueForType(io_call.returns, true);
 
+            const arg_sig: ?[]const u8 = if (io_call.call_node) |cn|
+                self.computeArgSignature(self.allocator, cn) catch null
+            else
+                null;
+
             try io_stubs.append(self.allocator, .{
                 .seq = seq,
                 .module = io_call.module,
                 .func = io_call.func,
                 .result_json = result_json,
+                .arg_signature = arg_sig,
             });
             seq += 1;
         }

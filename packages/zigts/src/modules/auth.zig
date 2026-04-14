@@ -35,11 +35,56 @@ pub const binding = mb.ModuleBinding{
     .name = "auth",
     .required_capabilities = &.{ .crypto, .clock },
     .exports = &.{
-        .{ .name = "parseBearer", .func = parseBearerNative, .arg_count = 1, .returns = .optional_string, .param_types = &.{.string}, .failure_severity = .expected, .contract_flags = .{ .sets_bearer_auth = true }, .return_labels = .{ .credential = true } },
-        .{ .name = "jwtVerify", .func = jwtVerifyNative, .arg_count = 3, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .critical, .contract_flags = .{ .sets_jwt_auth = true }, .return_labels = .{ .credential = true, .validated = true } },
+        .{
+            .name = "parseBearer",
+            .func = parseBearerNative,
+            .arg_count = 1,
+            .returns = .optional_string,
+            .param_types = &.{.string},
+            .failure_severity = .expected,
+            .contract_flags = .{ .sets_bearer_auth = true },
+            .return_labels = .{ .credential = true },
+            .laws = &.{.pure},
+        },
+        // jwtVerify and jwtSign read the current clock for exp/iat handling,
+        // so no `.pure` law - two calls at different microseconds are not
+        // strictly observationally equal. `.absorbing` is sound because an
+        // empty-string token literal is always invalid regardless of when
+        // the call is made.
+        .{
+            .name = "jwtVerify",
+            .func = jwtVerifyNative,
+            .arg_count = 3,
+            .returns = .result,
+            .param_types = &.{ .string, .string },
+            .failure_severity = .critical,
+            .contract_flags = .{ .sets_jwt_auth = true },
+            .return_labels = .{ .credential = true, .validated = true },
+            .laws = &.{
+                .{ .absorbing = .{
+                    .arg_position = 0,
+                    .argument_shape = .empty_string_literal,
+                    .residue = .result_err,
+                } },
+            },
+        },
         .{ .name = "jwtSign", .func = jwtSignNative, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
-        .{ .name = "verifyWebhookSignature", .func = verifyWebhookSignatureNative, .arg_count = 3, .returns = .boolean, .param_types = &.{ .string, .string, .string } },
-        .{ .name = "timingSafeEqual", .func = timingSafeEqualNative, .arg_count = 2, .returns = .boolean, .param_types = &.{ .string, .string } },
+        .{
+            .name = "verifyWebhookSignature",
+            .func = verifyWebhookSignatureNative,
+            .arg_count = 3,
+            .returns = .boolean,
+            .param_types = &.{ .string, .string, .string },
+            .laws = &.{.pure},
+        },
+        .{
+            .name = "timingSafeEqual",
+            .func = timingSafeEqualNative,
+            .arg_count = 2,
+            .returns = .boolean,
+            .param_types = &.{ .string, .string },
+            .laws = &.{.pure},
+        },
     },
 };
 

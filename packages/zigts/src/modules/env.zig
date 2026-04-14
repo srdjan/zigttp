@@ -24,7 +24,20 @@ pub const binding = mb.ModuleBinding{
     .contract_section = "env",
     .sandboxable = true,
     .exports = &.{
-        .{ .name = "env", .func = envNative, .arg_count = 1, .returns = .optional_string, .param_types = &.{.string}, .failure_severity = .expected, .contract_extractions = &.{.{ .category = .env }}, .return_labels = .{ .secret = true } },
+        .{
+            .name = "env",
+            .func = envNative,
+            .arg_count = 1,
+            .returns = .optional_string,
+            .param_types = &.{.string},
+            .failure_severity = .expected,
+            .contract_extractions = &.{.{ .category = .env }},
+            .return_labels = .{ .secret = true },
+            // env is immutable within a request lifetime; two reads of the
+            // same key within a single handler invocation always return the
+            // same value, so the canonicalizer may collapse repeated calls.
+            .laws = &.{.pure},
+        },
     },
 };
 
