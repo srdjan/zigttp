@@ -16,6 +16,25 @@ pub const LoginOptions = struct {
     device: bool = false,
 };
 
+pub const ReviewAction = enum {
+    approve,
+    reject,
+};
+
+pub const ReviewOptions = struct {
+    plan_id: ?[]const u8 = null,
+    action: ?ReviewAction = null,
+    grant: bool = false,
+};
+
+pub const GrantsOptions = struct {
+    project_name: ?[]const u8 = null,
+};
+
+pub const RevokeGrantOptions = struct {
+    grant_id: ?[]const u8 = null,
+};
+
 pub fn parse(argv: []const []const u8) !Options {
     var options = Options{};
     var i: usize = 0;
@@ -66,6 +85,65 @@ pub fn parseLogin(argv: []const []const u8) !LoginOptions {
         return error.UnknownOption;
     }
     if (options.token_stdin and options.device) return error.InvalidOptionCombination;
+    return options;
+}
+
+pub fn parseReview(argv: []const []const u8) !ReviewOptions {
+    var options = ReviewOptions{};
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+        if (std.mem.eql(u8, arg, "--approve")) {
+            if (options.action != null) return error.InvalidOptionCombination;
+            options.action = .approve;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--reject")) {
+            if (options.action != null) return error.InvalidOptionCombination;
+            options.action = .reject;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--grant")) {
+            options.grant = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownOption;
+        if (options.plan_id != null) return error.InvalidOptionCombination;
+        options.plan_id = arg;
+    }
+
+    if (options.plan_id == null) return error.MissingPlanId;
+    if (options.grant and options.action != .approve) {
+        return error.InvalidOptionCombination;
+    }
+    return options;
+}
+
+pub fn parseGrants(argv: []const []const u8) !GrantsOptions {
+    var options = GrantsOptions{};
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownOption;
+        if (options.project_name != null) return error.InvalidOptionCombination;
+        options.project_name = arg;
+    }
+    return options;
+}
+
+pub fn parseRevokeGrant(argv: []const []const u8) !RevokeGrantOptions {
+    var options = RevokeGrantOptions{};
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) return error.UnknownOption;
+        if (options.grant_id != null) return error.InvalidOptionCombination;
+        options.grant_id = arg;
+    }
+    if (options.grant_id == null) return error.MissingGrantId;
     return options;
 }
 
@@ -216,6 +294,66 @@ test "parseLogin rejects conflicting modes" {
 
 test "parseLogin rejects unknown option" {
     try std.testing.expectError(error.UnknownOption, parseLogin(&.{"--token"}));
+}
+
+test "parseReview requires plan id" {
+    try std.testing.expectError(error.MissingPlanId, parseReview(&.{"--approve"}));
+}
+
+test "parseReview allows read-only inspect mode" {
+    const options = try parseReview(&.{"plan-1"});
+    try std.testing.expectEqualStrings("plan-1", options.plan_id.?);
+    try std.testing.expect(options.action == null);
+    try std.testing.expect(!options.grant);
+}
+
+test "parseReview accepts approve and grant" {
+    const options = try parseReview(&.{ "plan-1", "--approve", "--grant" });
+    try std.testing.expectEqualStrings("plan-1", options.plan_id.?);
+    try std.testing.expect(options.action.? == .approve);
+    try std.testing.expect(options.grant);
+}
+
+test "parseReview accepts reject" {
+    const options = try parseReview(&.{ "--reject", "plan-1" });
+    try std.testing.expectEqualStrings("plan-1", options.plan_id.?);
+    try std.testing.expect(options.action.? == .reject);
+    try std.testing.expect(!options.grant);
+}
+
+test "parseReview rejects conflicting actions" {
+    try std.testing.expectError(
+        error.InvalidOptionCombination,
+        parseReview(&.{ "plan-1", "--approve", "--reject" }),
+    );
+    try std.testing.expectError(
+        error.InvalidOptionCombination,
+        parseReview(&.{ "plan-1", "--reject", "--grant" }),
+    );
+}
+
+test "parseGrants accepts optional project name" {
+    const empty = try parseGrants(&.{});
+    try std.testing.expect(empty.project_name == null);
+
+    const filtered = try parseGrants(&.{"demo"});
+    try std.testing.expectEqualStrings("demo", filtered.project_name.?);
+}
+
+test "parseGrants rejects extra args" {
+    try std.testing.expectError(
+        error.InvalidOptionCombination,
+        parseGrants(&.{ "demo", "extra" }),
+    );
+}
+
+test "parseRevokeGrant requires grant id" {
+    try std.testing.expectError(error.MissingGrantId, parseRevokeGrant(&.{}));
+}
+
+test "parseRevokeGrant accepts grant id" {
+    const options = try parseRevokeGrant(&.{"grant-1"});
+    try std.testing.expectEqualStrings("grant-1", options.grant_id.?);
 }
 
 test "loadEnvFile parses key value pairs" {

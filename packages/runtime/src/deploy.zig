@@ -57,12 +57,6 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         break :blk control_plane.default_region;
     };
 
-    var session = try fetchDeploySessionWithAuthRetry(allocator, service_name, effective_region, printer);
-    defer session.deinit(allocator);
-
-    const image_repo = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ session.namespace, service_name });
-    defer allocator.free(image_repo);
-
     const env_vars = try config_mod.loadEnvFile(allocator, ".env");
     defer {
         for (env_vars) |item| {
@@ -98,6 +92,40 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     printer.line("  Verifying.. ok", "");
 
+    const contract = compiled.contract orelse return error.ContractUnavailable;
+    const contract_json = try canonicalContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const contract_sha256 = try sha256Hex(allocator, contract_json);
+    defer allocator.free(contract_sha256);
+
+    const session_outcome = try fetchDeploySessionWithAuthRetry(
+        allocator,
+        service_name,
+        effective_region,
+        contract_json,
+        contract_sha256,
+        printer,
+    );
+    var session = switch (session_outcome) {
+        .approved => |session| session,
+        .plan_required => |plan_value| {
+            var plan = plan_value;
+            defer plan.deinit(allocator);
+            try printDeployPlanRequired(allocator, printer, &plan);
+            return error.ControlPlaneReviewRequired;
+        },
+    };
+    defer session.deinit(allocator);
+
+    if (session.grant_ids.len > 0) {
+        const joined = try std.mem.join(allocator, ", ", session.grant_ids);
+        defer allocator.free(joined);
+        printer.line("  Grants:     ", joined);
+    }
+
+    const image_repo = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ session.namespace, service_name });
+    defer allocator.free(image_repo);
+
     var proven_extract: ?struct {
         facts: deploy_manifest.ProvenFacts,
         checks_buf: [][]const u8,
@@ -108,8 +136,8 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         allocator.free(extract.routes_buf);
     };
 
-    if (compiled.contract) |*contract| {
-        const extract = try deploy_manifest.extractProvenFacts(allocator, contract);
+    if (compiled.contract) |*compiled_contract| {
+        const extract = try deploy_manifest.extractProvenFacts(allocator, compiled_contract);
         proven_extract = .{
             .facts = extract.facts,
             .checks_buf = extract.checks_buf,
@@ -241,16 +269,109 @@ pub fn login(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     credentials.deinit(allocator);
 }
 
+pub fn review(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const options = try config_mod.parseReview(argv);
+
+    var stdout_buf: [256]u8 = undefined;
+    var stderr_buf: [256]u8 = undefined;
+    var stdout_writer = printer_mod.FdWriter.init(std.c.STDOUT_FILENO, stdout_buf[0..]);
+    var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+    const printer = Printer{
+        .stdout = &stdout_writer.interface,
+        .stderr = &stderr_writer.interface,
+    };
+
+    if (options.action) |action| {
+        var result = try reviewPlanWithAuthRetry(
+            allocator,
+            options.plan_id.?,
+            switch (action) {
+                .approve => .approve,
+                .reject => .reject,
+            },
+            if (options.grant) .grant else .once,
+            printer,
+        );
+        defer result.deinit(allocator);
+
+        const action_text = switch (action) {
+            .approve => if (options.grant) "approved and granted" else "approved",
+            .reject => "rejected",
+        };
+        const line = try std.fmt.allocPrint(
+            allocator,
+            "plan {s} {s}",
+            .{ options.plan_id.?, action_text },
+        );
+        defer allocator.free(line);
+        printer.line("  Review:     ", line);
+        if (result.grants_created > 0) {
+            const grant_line = try std.fmt.allocPrint(
+                allocator,
+                "{d}",
+                .{result.grants_created},
+            );
+            defer allocator.free(grant_line);
+            printer.line("  Grants:     ", grant_line);
+        }
+        return;
+    }
+
+    var plan = try fetchDeployPlanWithAuthRetry(allocator, options.plan_id.?, printer);
+    defer plan.deinit(allocator);
+    try printReviewStatus(allocator, printer, &plan);
+}
+
+pub fn grants(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const options = try config_mod.parseGrants(argv);
+
+    var stdout_buf: [256]u8 = undefined;
+    var stderr_buf: [256]u8 = undefined;
+    var stdout_writer = printer_mod.FdWriter.init(std.c.STDOUT_FILENO, stdout_buf[0..]);
+    var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+    const printer = Printer{
+        .stdout = &stdout_writer.interface,
+        .stderr = &stderr_writer.interface,
+    };
+
+    var grants_list = try fetchCapabilityGrantsWithAuthRetry(allocator, options.project_name, printer);
+    defer grants_list.deinit(allocator);
+    try printCapabilityGrants(allocator, printer, &grants_list);
+}
+
+pub fn revokeGrant(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    const options = try config_mod.parseRevokeGrant(argv);
+
+    var stdout_buf: [256]u8 = undefined;
+    var stderr_buf: [256]u8 = undefined;
+    var stdout_writer = printer_mod.FdWriter.init(std.c.STDOUT_FILENO, stdout_buf[0..]);
+    var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
+    const printer = Printer{
+        .stdout = &stdout_writer.interface,
+        .stderr = &stderr_writer.interface,
+    };
+
+    var grant = try revokeCapabilityGrantWithAuthRetry(allocator, options.grant_id.?, printer);
+    defer grant.deinit(allocator);
+    printer.line("  Grant:      ", grant.id);
+    printer.line("  Project:    ", grant.project_name);
+    printer.line("  Status:     ", grant.status);
+}
+
 fn fetchDeploySessionWithAuthRetry(
     allocator: std.mem.Allocator,
     service_name: []const u8,
     region: []const u8,
+    contract_json: []const u8,
+    contract_sha256: []const u8,
     printer: Printer,
-) !control_plane.DeploySession {
+) !control_plane.FetchDeploySessionResult {
     return fetchDeploySessionWithAuthRetryFns(
         allocator,
         service_name,
         region,
+        contract_json,
+        contract_sha256,
         printer,
         first_run.ensureSignedIn,
         control_plane.fetchDeploySession,
@@ -258,26 +379,200 @@ fn fetchDeploySessionWithAuthRetry(
     );
 }
 
-fn fetchDeploySessionWithAuthRetryFns(
+fn reviewPlanWithAuthRetry(
     allocator: std.mem.Allocator,
-    service_name: []const u8,
-    region: []const u8,
+    plan_id: []const u8,
+    action: control_plane.ReviewAction,
+    mode: control_plane.ReviewMode,
+    printer: Printer,
+) !control_plane.ReviewResult {
+    return reviewPlanWithAuthRetryFns(
+        allocator,
+        plan_id,
+        action,
+        mode,
+        printer,
+        first_run.ensureSignedIn,
+        control_plane.reviewPlan,
+        auth.clear,
+    );
+}
+
+fn fetchDeployPlanWithAuthRetry(
+    allocator: std.mem.Allocator,
+    plan_id: []const u8,
+    printer: Printer,
+) !control_plane.DeployPlanStatus {
+    return fetchDeployPlanWithAuthRetryFns(
+        allocator,
+        plan_id,
+        printer,
+        first_run.ensureSignedIn,
+        control_plane.fetchDeployPlan,
+        auth.clear,
+    );
+}
+
+fn fetchCapabilityGrantsWithAuthRetry(
+    allocator: std.mem.Allocator,
+    project_name: ?[]const u8,
+    printer: Printer,
+) !control_plane.CapabilityGrantList {
+    return fetchCapabilityGrantsWithAuthRetryFns(
+        allocator,
+        project_name,
+        printer,
+        first_run.ensureSignedIn,
+        control_plane.fetchCapabilityGrants,
+        auth.clear,
+    );
+}
+
+fn revokeCapabilityGrantWithAuthRetry(
+    allocator: std.mem.Allocator,
+    grant_id: []const u8,
+    printer: Printer,
+) !control_plane.CapabilityGrant {
+    return revokeCapabilityGrantWithAuthRetryFns(
+        allocator,
+        grant_id,
+        printer,
+        first_run.ensureSignedIn,
+        control_plane.revokeCapabilityGrant,
+        auth.clear,
+    );
+}
+
+fn reviewPlanWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    plan_id: []const u8,
+    action: control_plane.ReviewAction,
+    mode: control_plane.ReviewMode,
     printer: Printer,
     ensure_signed_in: anytype,
-    fetch_session: anytype,
+    review_plan: anytype,
     clear_auth: anytype,
-) !control_plane.DeploySession {
+) !control_plane.ReviewResult {
     var credentials = try ensure_signed_in(allocator, printer);
     defer credentials.deinit(allocator);
 
-    return fetch_session(allocator, credentials.token, service_name, region) catch |err| switch (err) {
+    return review_plan(allocator, credentials.token, plan_id, action, mode) catch |err| switch (err) {
         error.NotSignedIn => {
             _ = try clear_auth(allocator);
 
             var refreshed_credentials = try ensure_signed_in(allocator, printer);
             defer refreshed_credentials.deinit(allocator);
 
-            return fetch_session(allocator, refreshed_credentials.token, service_name, region);
+            return review_plan(allocator, refreshed_credentials.token, plan_id, action, mode);
+        },
+        else => return err,
+    };
+}
+
+fn fetchDeployPlanWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    plan_id: []const u8,
+    printer: Printer,
+    ensure_signed_in: anytype,
+    fetch_plan: anytype,
+    clear_auth: anytype,
+) !control_plane.DeployPlanStatus {
+    var credentials = try ensure_signed_in(allocator, printer);
+    defer credentials.deinit(allocator);
+
+    return fetch_plan(allocator, credentials.token, plan_id) catch |err| switch (err) {
+        error.NotSignedIn => {
+            _ = try clear_auth(allocator);
+
+            var refreshed_credentials = try ensure_signed_in(allocator, printer);
+            defer refreshed_credentials.deinit(allocator);
+
+            return fetch_plan(allocator, refreshed_credentials.token, plan_id);
+        },
+        else => return err,
+    };
+}
+
+fn fetchCapabilityGrantsWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    project_name: ?[]const u8,
+    printer: Printer,
+    ensure_signed_in: anytype,
+    fetch_grants: anytype,
+    clear_auth: anytype,
+) !control_plane.CapabilityGrantList {
+    var credentials = try ensure_signed_in(allocator, printer);
+    defer credentials.deinit(allocator);
+
+    return fetch_grants(allocator, credentials.token, project_name) catch |err| switch (err) {
+        error.NotSignedIn => {
+            _ = try clear_auth(allocator);
+
+            var refreshed_credentials = try ensure_signed_in(allocator, printer);
+            defer refreshed_credentials.deinit(allocator);
+
+            return fetch_grants(allocator, refreshed_credentials.token, project_name);
+        },
+        else => return err,
+    };
+}
+
+fn revokeCapabilityGrantWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    grant_id: []const u8,
+    printer: Printer,
+    ensure_signed_in: anytype,
+    revoke_grant: anytype,
+    clear_auth: anytype,
+) !control_plane.CapabilityGrant {
+    var credentials = try ensure_signed_in(allocator, printer);
+    defer credentials.deinit(allocator);
+
+    return revoke_grant(allocator, credentials.token, grant_id) catch |err| switch (err) {
+        error.NotSignedIn => {
+            _ = try clear_auth(allocator);
+
+            var refreshed_credentials = try ensure_signed_in(allocator, printer);
+            defer refreshed_credentials.deinit(allocator);
+
+            return revoke_grant(allocator, refreshed_credentials.token, grant_id);
+        },
+        else => return err,
+    };
+}
+
+fn fetchDeploySessionWithAuthRetryFns(
+    allocator: std.mem.Allocator,
+    service_name: []const u8,
+    region: []const u8,
+    contract_json: []const u8,
+    contract_sha256: []const u8,
+    printer: Printer,
+    ensure_signed_in: anytype,
+    fetch_session: anytype,
+    clear_auth: anytype,
+) !control_plane.FetchDeploySessionResult {
+    var credentials = try ensure_signed_in(allocator, printer);
+    defer credentials.deinit(allocator);
+
+    return fetch_session(allocator, credentials.token, .{
+        .project_name = service_name,
+        .region = region,
+        .contract_json = contract_json,
+        .contract_sha256 = contract_sha256,
+    }) catch |err| switch (err) {
+        error.NotSignedIn => {
+            _ = try clear_auth(allocator);
+
+            var refreshed_credentials = try ensure_signed_in(allocator, printer);
+            defer refreshed_credentials.deinit(allocator);
+
+            return fetch_session(allocator, refreshed_credentials.token, .{
+                .project_name = service_name,
+                .region = region,
+                .contract_json = contract_json,
+                .contract_sha256 = contract_sha256,
+            });
         },
         else => return err,
     };
@@ -303,7 +598,7 @@ fn pushWithAuthRetry(
         region,
         progress,
         registry.push,
-        control_plane.fetchDeploySession,
+        control_plane.fetchApprovedDeploySession,
         control_plane.defaultNowSec,
     );
 }
@@ -313,8 +608,8 @@ fn pushWithAuthRetryFns(
     registry_ref: *registry.RegistryRef,
     image: *oci_image.OciImage,
     session: *control_plane.DeploySession,
-    project_name: []const u8,
-    region: []const u8,
+    _: []const u8,
+    _: []const u8,
     progress: *printer_mod.Progress,
     push_fn: anytype,
     fetch_session: anytype,
@@ -323,8 +618,6 @@ fn pushWithAuthRetryFns(
     _ = try control_plane.sessionRefreshIfExpiringFns(
         allocator,
         session,
-        project_name,
-        region,
         refresh_skew_seconds,
         now_fn,
         fetch_session,
@@ -332,7 +625,7 @@ fn pushWithAuthRetryFns(
 
     push_fn(allocator, registry_ref, image, session.registry_username, session.registry_password, progress) catch |err| switch (err) {
         error.RegistryUnauthorized => {
-            const fresh = try fetch_session(allocator, session.token, project_name, region);
+            const fresh = try fetch_session(allocator, session.token, session.request_body);
             try control_plane.swapRefreshedSession(allocator, session, fresh);
             return push_fn(allocator, registry_ref, image, session.registry_username, session.registry_password, progress);
         },
@@ -360,7 +653,7 @@ fn executeWithAuthRetry(
         state_entry,
         progress,
         northflank_adapter.execute,
-        control_plane.fetchDeploySession,
+        control_plane.fetchApprovedDeploySession,
         control_plane.defaultNowSec,
     );
 }
@@ -369,7 +662,7 @@ fn executeWithAuthRetryFns(
     allocator: std.mem.Allocator,
     session: *control_plane.DeploySession,
     project_name: []const u8,
-    region: []const u8,
+    _: []const u8,
     image_ref: []const u8,
     env_vars: []const types_mod.EnvVar,
     state_entry: ?*const state.Entry,
@@ -381,8 +674,6 @@ fn executeWithAuthRetryFns(
     _ = try control_plane.sessionRefreshIfExpiringFns(
         allocator,
         session,
-        project_name,
-        region,
         refresh_skew_seconds,
         now_fn,
         fetch_session,
@@ -391,7 +682,7 @@ fn executeWithAuthRetryFns(
     var ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
     return execute_fn(allocator, &ctx, session.provider_api_token, progress) catch |err| switch (err) {
         error.ProviderUnauthorized => {
-            const fresh = try fetch_session(allocator, session.token, project_name, region);
+            const fresh = try fetch_session(allocator, session.token, session.request_body);
             try control_plane.swapRefreshedSession(allocator, session, fresh);
             ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
             return execute_fn(allocator, &ctx, session.provider_api_token, progress);
@@ -429,7 +720,7 @@ fn waitForReadyWithAuthRetry(
         northflank_adapter.waitForReady,
         northflank_adapter.fetchStatusReal,
         sleeper,
-        control_plane.fetchDeploySession,
+        control_plane.fetchApprovedDeploySession,
         control_plane.defaultNowSec,
     );
 }
@@ -438,7 +729,7 @@ fn waitForReadyWithAuthRetryFns(
     allocator: std.mem.Allocator,
     session: *control_plane.DeploySession,
     project_name: []const u8,
-    region: []const u8,
+    _: []const u8,
     image_ref: []const u8,
     env_vars: []const types_mod.EnvVar,
     state_entry: ?*const state.Entry,
@@ -454,8 +745,6 @@ fn waitForReadyWithAuthRetryFns(
     _ = try control_plane.sessionRefreshIfExpiringFns(
         allocator,
         session,
-        project_name,
-        region,
         refresh_skew_seconds,
         now_fn,
         fetch_session,
@@ -473,7 +762,7 @@ fn waitForReadyWithAuthRetryFns(
         printer,
     ) catch |err| switch (err) {
         error.ProviderUnauthorized => {
-            const fresh = try fetch_session(allocator, session.token, project_name, region);
+            const fresh = try fetch_session(allocator, session.token, session.request_body);
             try control_plane.swapRefreshedSession(allocator, session, fresh);
             ctx = buildProviderContext(session, project_name, image_ref, env_vars, state_entry);
             return wait_fn(
@@ -508,6 +797,173 @@ fn buildProviderContext(
         .registry_credential_id = session.registry_credential_id,
         .state_entry = state_entry,
     };
+}
+
+fn canonicalContractJson(
+    allocator: std.mem.Allocator,
+    contract: *const zigts.HandlerContract,
+) ![]u8 {
+    var raw_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer raw_writer.deinit();
+    try zigts.writeContractJson(contract, &raw_writer.writer);
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, raw_writer.writer.buffered(), .{}) catch {
+        return error.InvalidContract;
+    };
+    defer parsed.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeCanonicalJsonValue(allocator, parsed.value, &out.writer);
+    return out.toOwnedSlice();
+}
+
+fn writeCanonicalJsonValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    writer: anytype,
+) !void {
+    switch (value) {
+        .object => |obj| {
+            const Entry = struct {
+                key: []const u8,
+                value: *const std.json.Value,
+            };
+            var entries = try allocator.alloc(Entry, obj.count());
+            defer allocator.free(entries);
+
+            var it = obj.iterator();
+            var idx: usize = 0;
+            while (it.next()) |entry| : (idx += 1) {
+                entries[idx] = .{
+                    .key = entry.key_ptr.*,
+                    .value = entry.value_ptr,
+                };
+            }
+            std.mem.sort(Entry, entries, {}, struct {
+                fn lessThan(_: void, a: Entry, b: Entry) bool {
+                    return std.mem.lessThan(u8, a.key, b.key);
+                }
+            }.lessThan);
+
+            try writer.writeByte('{');
+            for (entries, 0..) |entry, i| {
+                if (i > 0) try writer.writeByte(',');
+                try zigts.handler_contract.writeJsonString(writer, entry.key);
+                try writer.writeByte(':');
+                try writeCanonicalJsonValue(allocator, entry.value.*, writer);
+            }
+            try writer.writeByte('}');
+        },
+        .array => |array| {
+            try writer.writeByte('[');
+            for (array.items, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writeCanonicalJsonValue(allocator, item, writer);
+            }
+            try writer.writeByte(']');
+        },
+        .null => try writer.writeAll("null"),
+        .bool => |b| try writer.writeAll(if (b) "true" else "false"),
+        .integer => |i| try writer.print("{d}", .{i}),
+        .float => |f| try writer.print("{d}", .{f}),
+        .string => |s| try zigts.handler_contract.writeJsonString(writer, s),
+        else => return error.UnsupportedJsonValue,
+    }
+}
+
+fn sha256Hex(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(value);
+    const digest = hasher.finalResult();
+    return try allocator.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
+}
+
+fn printDeployPlanRequired(
+    allocator: std.mem.Allocator,
+    printer: Printer,
+    plan: *const control_plane.DeployPlanRequired,
+) !void {
+    printer.warn("Capability review required before this deploy can continue.");
+    printer.line("  Plan ID:    ", plan.plan_id);
+    if (plan.review_url) |review_url| {
+        printer.line("  Review:     ", review_url);
+    }
+
+    for (plan.covered_reasons) |reason| {
+        const line = try std.fmt.allocPrint(allocator, "  already granted: {s}", .{reason});
+        defer allocator.free(line);
+        printer.warn(line);
+    }
+    const reasons = if (plan.uncovered_reasons.len > 0) plan.uncovered_reasons else plan.diff_reasons;
+    for (reasons) |reason| {
+        const line = try std.fmt.allocPrint(allocator, "  needs review:    {s}", .{reason});
+        defer allocator.free(line);
+        printer.warn(line);
+    }
+    printer.warn("Approve the plan, then re-run `zigttp deploy`.");
+}
+
+fn printReviewStatus(
+    _: std.mem.Allocator,
+    printer: Printer,
+    plan: *const control_plane.DeployPlanStatus,
+) !void {
+    printer.line("  Plan ID:    ", plan.id);
+    printer.line("  Project:    ", plan.project_name);
+    printer.line("  Status:     ", plan.status);
+    if (plan.baseline_sha) |baseline_sha| {
+        printer.line("  Baseline:   ", baseline_sha);
+    }
+    printer.line("  Proposed:   ", plan.proposed_sha);
+    printer.line("  Created:    ", plan.created_at);
+    printer.line("  Expires:    ", plan.expires_at);
+    if (plan.decided_at) |decided_at| {
+        printer.line("  Decided:    ", decided_at);
+    }
+    if (plan.decided_by_token_id) |token_id| {
+        printer.line("  By Token:   ", token_id);
+    }
+    if (plan.consumed_at) |consumed_at| {
+        printer.line("  Consumed:   ", consumed_at);
+    }
+
+    for (plan.diff_reasons) |reason| {
+        printer.line("  Risk:       ", reason);
+    }
+}
+
+fn printCapabilityGrants(
+    allocator: std.mem.Allocator,
+    printer: Printer,
+    grants_list: *const control_plane.CapabilityGrantList,
+) !void {
+    if (grants_list.items.len == 0) {
+        printer.line("  Grants:     ", "none");
+        return;
+    }
+
+    const count = try std.fmt.allocPrint(allocator, "{d}", .{grants_list.items.len});
+    defer allocator.free(count);
+    printer.line("  Grants:     ", count);
+    for (grants_list.items) |grant| {
+        printer.line("  ID:         ", grant.id);
+        printer.line("  Project:    ", grant.project_name);
+        printer.line("  Status:     ", grant.status);
+        if (grant.expires_at) |expires_at| {
+            printer.line("  Expires:    ", expires_at);
+        }
+        if (grant.revoked_at) |revoked_at| {
+            printer.line("  Revoked:    ", revoked_at);
+        }
+        const scope = if (grant.reasons.len > 0)
+            try std.mem.join(allocator, ", ", grant.reasons)
+        else
+            try allocator.dupe(u8, "grant scope");
+        defer allocator.free(scope);
+        printer.line("  Scope:      ", scope);
+        printer.line("", "");
+    }
 }
 
 fn managedEnvKeys(allocator: std.mem.Allocator, env_vars: []const types_mod.EnvVar) ![]const []const u8 {
@@ -771,15 +1227,16 @@ test "fetchDeploySessionWithAuthRetry retries after rejected saved token" {
         fn fetchSession(
             allocator: std.mem.Allocator,
             token: []const u8,
-            service_name: []const u8,
-            region: []const u8,
-        ) !control_plane.DeploySession {
+            request: control_plane.SessionRequest,
+        ) !control_plane.FetchDeploySessionResult {
             fetch_calls += 1;
-            received_region = region;
-            try std.testing.expectEqualStrings("demo", service_name);
+            received_region = request.region;
+            try std.testing.expectEqualStrings("demo", request.project_name);
+            try std.testing.expectEqualStrings("{\"routes\":[]}", request.contract_json);
+            try std.testing.expectEqualStrings("sha", request.contract_sha256);
             if (std.mem.eql(u8, token, "expired-token")) return error.NotSignedIn;
             try std.testing.expectEqualStrings("fresh-token", token);
-            return .{
+            return .{ .approved = .{
                 .provider = .northflank,
                 .registry_host = try allocator.dupe(u8, "registry.zigttp.dev"),
                 .namespace = try allocator.dupe(u8, "u-42"),
@@ -793,7 +1250,9 @@ test "fetchDeploySessionWithAuthRetry retries after rejected saved token" {
                 .url_hint = null,
                 .token = try allocator.dupe(u8, token),
                 .expires_at = null,
-            };
+                .request_body = try allocator.dupe(u8, "{\"session\":true}"),
+                .grant_ids = try allocator.alloc([]u8, 0),
+            } };
         }
 
         fn clearAuth(_: std.mem.Allocator) !bool {
@@ -810,15 +1269,21 @@ test "fetchDeploySessionWithAuthRetry retries after rejected saved token" {
     var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
     defer buffered.deinit();
 
-    var session = try fetchDeploySessionWithAuthRetryFns(
+    const outcome = try fetchDeploySessionWithAuthRetryFns(
         std.testing.allocator,
         "demo",
         "eu-west",
+        "{\"routes\":[]}",
+        "sha",
         buffered.printer(),
         TestCtx.ensureSignedIn,
         TestCtx.fetchSession,
         TestCtx.clearAuth,
     );
+    var session = switch (outcome) {
+        .approved => |session| session,
+        else => return error.TestUnexpectedResult,
+    };
     defer session.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 2), TestCtx.ensure_calls);
@@ -843,7 +1308,7 @@ test "fetchDeploySessionWithAuthRetry does not clear auth for other fetch errors
             };
         }
 
-        fn fetchSession(_: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !control_plane.DeploySession {
+        fn fetchSession(_: std.mem.Allocator, _: []const u8, _: control_plane.SessionRequest) !control_plane.FetchDeploySessionResult {
             fetch_calls += 1;
             return error.ControlPlaneError;
         }
@@ -867,6 +1332,8 @@ test "fetchDeploySessionWithAuthRetry does not clear auth for other fetch errors
             std.testing.allocator,
             "demo",
             control_plane.default_region,
+            "{\"routes\":[]}",
+            "sha",
             buffered.printer(),
             TestCtx.ensureSignedIn,
             TestCtx.fetchSession,
@@ -877,6 +1344,478 @@ test "fetchDeploySessionWithAuthRetry does not clear auth for other fetch errors
     try std.testing.expectEqual(@as(usize, 1), TestCtx.ensure_calls);
     try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
     try std.testing.expectEqual(@as(usize, 0), TestCtx.clear_calls);
+}
+
+test "fetchDeploySessionWithAuthRetry returns plan_required without clearing auth" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var fetch_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, "token"),
+                .email = null,
+            };
+        }
+
+        fn fetchSession(
+            allocator: std.mem.Allocator,
+            _: []const u8,
+            _: control_plane.SessionRequest,
+        ) !control_plane.FetchDeploySessionResult {
+            fetch_calls += 1;
+            return .{ .plan_required = .{
+                .plan_id = try allocator.dupe(u8, "plan-1"),
+                .review_url = try allocator.dupe(u8, "https://control/deploy/plans/plan-1"),
+                .baseline_sha = null,
+                .proposed_sha = null,
+                .expires_at = null,
+                .diff_reasons = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "new env read: SECRET_KEY")}),
+                .covered_reasons = try allocator.alloc([]u8, 0),
+                .uncovered_reasons = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "new env read: SECRET_KEY")}),
+            } };
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.fetch_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    const result = try fetchDeploySessionWithAuthRetryFns(
+        std.testing.allocator,
+        "demo",
+        control_plane.default_region,
+        "{\"routes\":[]}",
+        "sha",
+        buffered.printer(),
+        TestCtx.ensureSignedIn,
+        TestCtx.fetchSession,
+        TestCtx.clearAuth,
+    );
+    switch (result) {
+        .plan_required => |*plan| {
+            defer plan.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("plan-1", plan.plan_id);
+        },
+        else => return error.TestExpectedPlanRequired,
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.fetch_calls);
+    try std.testing.expectEqual(@as(usize, 0), TestCtx.clear_calls);
+}
+
+test "reviewPlanWithAuthRetry retries after rejected saved token" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var review_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, if (ensure_calls == 1) "expired-token" else "fresh-token"),
+                .email = null,
+            };
+        }
+
+        fn reviewPlan(
+            allocator: std.mem.Allocator,
+            token: []const u8,
+            plan_id: []const u8,
+            action: control_plane.ReviewAction,
+            mode: control_plane.ReviewMode,
+        ) !control_plane.ReviewResult {
+            review_calls += 1;
+            try std.testing.expectEqualStrings("plan-1", plan_id);
+            try std.testing.expect(action == .approve);
+            try std.testing.expect(mode == .grant);
+            if (std.mem.eql(u8, token, "expired-token")) return error.NotSignedIn;
+            try std.testing.expectEqualStrings("fresh-token", token);
+            return .{
+                .status = try allocator.dupe(u8, "approved"),
+                .grants_created = 1,
+            };
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.review_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var result = try reviewPlanWithAuthRetryFns(
+        std.testing.allocator,
+        "plan-1",
+        .approve,
+        .grant,
+        buffered.printer(),
+        TestCtx.ensureSignedIn,
+        TestCtx.reviewPlan,
+        TestCtx.clearAuth,
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.review_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.clear_calls);
+    try std.testing.expectEqualStrings("approved", result.status);
+    try std.testing.expectEqual(@as(usize, 1), result.grants_created);
+}
+
+test "reviewPlanWithAuthRetry does not clear auth for plan conflicts" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var review_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, "token"),
+                .email = null,
+            };
+        }
+
+        fn reviewPlan(
+            _: std.mem.Allocator,
+            _: []const u8,
+            _: []const u8,
+            _: control_plane.ReviewAction,
+            _: control_plane.ReviewMode,
+        ) !control_plane.ReviewResult {
+            review_calls += 1;
+            return error.PlanConflict;
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.review_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    try std.testing.expectError(
+        error.PlanConflict,
+        reviewPlanWithAuthRetryFns(
+            std.testing.allocator,
+            "plan-1",
+            .reject,
+            .once,
+            buffered.printer(),
+            TestCtx.ensureSignedIn,
+            TestCtx.reviewPlan,
+            TestCtx.clearAuth,
+        ),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.review_calls);
+    try std.testing.expectEqual(@as(usize, 0), TestCtx.clear_calls);
+}
+
+test "fetchDeployPlanWithAuthRetry retries after rejected saved token" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var fetch_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, if (ensure_calls == 1) "expired-token" else "fresh-token"),
+                .email = null,
+            };
+        }
+
+        fn fetchPlan(
+            allocator: std.mem.Allocator,
+            token: []const u8,
+            plan_id: []const u8,
+        ) !control_plane.DeployPlanStatus {
+            fetch_calls += 1;
+            try std.testing.expectEqualStrings("plan-1", plan_id);
+            if (std.mem.eql(u8, token, "expired-token")) return error.NotSignedIn;
+            try std.testing.expectEqualStrings("fresh-token", token);
+            return .{
+                .id = try allocator.dupe(u8, "plan-1"),
+                .project_name = try allocator.dupe(u8, "demo"),
+                .status = try allocator.dupe(u8, "pending"),
+                .baseline_sha = try allocator.dupe(u8, "base"),
+                .proposed_sha = try allocator.dupe(u8, "next"),
+                .diff_reasons = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "new env read: SECRET_KEY")}),
+                .created_at = try allocator.dupe(u8, "2026-04-14T12:00:00.000Z"),
+                .expires_at = try allocator.dupe(u8, "2026-04-14T12:30:00.000Z"),
+                .decided_at = null,
+                .decided_by_token_id = null,
+                .consumed_at = null,
+            };
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.fetch_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var plan = try fetchDeployPlanWithAuthRetryFns(
+        std.testing.allocator,
+        "plan-1",
+        buffered.printer(),
+        TestCtx.ensureSignedIn,
+        TestCtx.fetchPlan,
+        TestCtx.clearAuth,
+    );
+    defer plan.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.fetch_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.clear_calls);
+    try std.testing.expectEqualStrings("pending", plan.status);
+}
+
+test "fetchCapabilityGrantsWithAuthRetry retries after rejected saved token" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var fetch_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, if (ensure_calls == 1) "expired-token" else "fresh-token"),
+                .email = null,
+            };
+        }
+
+        fn fetchGrants(
+            allocator: std.mem.Allocator,
+            token: []const u8,
+            project_name: ?[]const u8,
+        ) !control_plane.CapabilityGrantList {
+            fetch_calls += 1;
+            try std.testing.expect(project_name != null);
+            try std.testing.expectEqualStrings("demo", project_name.?);
+            if (std.mem.eql(u8, token, "expired-token")) return error.NotSignedIn;
+            try std.testing.expectEqualStrings("fresh-token", token);
+
+            const items = try allocator.alloc(control_plane.CapabilityGrant, 1);
+            items[0] = .{
+                .id = try allocator.dupe(u8, "grant-1"),
+                .project_name = try allocator.dupe(u8, "demo"),
+                .source_plan_id = try allocator.dupe(u8, "plan-1"),
+                .created_at = try allocator.dupe(u8, "2026-04-14T12:00:00.000Z"),
+                .expires_at = null,
+                .revoked_at = null,
+                .status = try allocator.dupe(u8, "active"),
+                .reasons = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "new env read: SECRET_KEY")}),
+            };
+            return .{ .items = items };
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.fetch_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var grants_list = try fetchCapabilityGrantsWithAuthRetryFns(
+        std.testing.allocator,
+        "demo",
+        buffered.printer(),
+        TestCtx.ensureSignedIn,
+        TestCtx.fetchGrants,
+        TestCtx.clearAuth,
+    );
+    defer grants_list.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.fetch_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.clear_calls);
+    try std.testing.expectEqual(@as(usize, 1), grants_list.items.len);
+}
+
+test "revokeCapabilityGrantWithAuthRetry retries after rejected saved token" {
+    const TestCtx = struct {
+        var ensure_calls: usize = 0;
+        var revoke_calls: usize = 0;
+        var clear_calls: usize = 0;
+
+        fn ensureSignedIn(allocator: std.mem.Allocator, _: Printer) !auth.Credentials {
+            ensure_calls += 1;
+            return .{
+                .token = try allocator.dupe(u8, if (ensure_calls == 1) "expired-token" else "fresh-token"),
+                .email = null,
+            };
+        }
+
+        fn revokeGrant(
+            allocator: std.mem.Allocator,
+            token: []const u8,
+            grant_id: []const u8,
+        ) !control_plane.CapabilityGrant {
+            revoke_calls += 1;
+            try std.testing.expectEqualStrings("grant-1", grant_id);
+            if (std.mem.eql(u8, token, "expired-token")) return error.NotSignedIn;
+            try std.testing.expectEqualStrings("fresh-token", token);
+            return .{
+                .id = try allocator.dupe(u8, "grant-1"),
+                .project_name = try allocator.dupe(u8, "demo"),
+                .source_plan_id = try allocator.dupe(u8, "plan-1"),
+                .created_at = try allocator.dupe(u8, "2026-04-14T12:00:00.000Z"),
+                .expires_at = null,
+                .revoked_at = try allocator.dupe(u8, "2026-04-14T13:00:00.000Z"),
+                .status = try allocator.dupe(u8, "revoked"),
+                .reasons = try allocator.dupe([]u8, &.{try allocator.dupe(u8, "new effect: write")}),
+            };
+        }
+
+        fn clearAuth(_: std.mem.Allocator) !bool {
+            clear_calls += 1;
+            return true;
+        }
+    };
+
+    TestCtx.ensure_calls = 0;
+    TestCtx.revoke_calls = 0;
+    TestCtx.clear_calls = 0;
+
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var grant = try revokeCapabilityGrantWithAuthRetryFns(
+        std.testing.allocator,
+        "grant-1",
+        buffered.printer(),
+        TestCtx.ensureSignedIn,
+        TestCtx.revokeGrant,
+        TestCtx.clearAuth,
+    );
+    defer grant.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.ensure_calls);
+    try std.testing.expectEqual(@as(usize, 2), TestCtx.revoke_calls);
+    try std.testing.expectEqual(@as(usize, 1), TestCtx.clear_calls);
+    try std.testing.expectEqualStrings("revoked", grant.status);
+}
+
+test "printDeployPlanRequired shows review summary" {
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var plan = control_plane.DeployPlanRequired{
+        .plan_id = try std.testing.allocator.dupe(u8, "plan-1"),
+        .review_url = try std.testing.allocator.dupe(u8, "https://control/deploy/plans/plan-1"),
+        .baseline_sha = null,
+        .proposed_sha = null,
+        .expires_at = null,
+        .diff_reasons = try std.testing.allocator.dupe([]u8, &.{try std.testing.allocator.dupe(u8, "new env read: SECRET_KEY")}),
+        .covered_reasons = try std.testing.allocator.dupe([]u8, &.{try std.testing.allocator.dupe(u8, "new env read: DATABASE_URL")}),
+        .uncovered_reasons = try std.testing.allocator.dupe([]u8, &.{try std.testing.allocator.dupe(u8, "new effect: write")}),
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    try printDeployPlanRequired(std.testing.allocator, buffered.printer(), &plan);
+
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Plan ID:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stderrSlice(), "already granted") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stderrSlice(), "needs review") != null);
+}
+
+test "printReviewStatus shows plan details" {
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    var plan = control_plane.DeployPlanStatus{
+        .id = try std.testing.allocator.dupe(u8, "plan-1"),
+        .project_name = try std.testing.allocator.dupe(u8, "demo"),
+        .status = try std.testing.allocator.dupe(u8, "approved"),
+        .baseline_sha = try std.testing.allocator.dupe(u8, "base"),
+        .proposed_sha = try std.testing.allocator.dupe(u8, "next"),
+        .diff_reasons = try std.testing.allocator.dupe([]u8, &.{
+            try std.testing.allocator.dupe(u8, "new env read: SECRET_KEY"),
+            try std.testing.allocator.dupe(u8, "new effect: write"),
+        }),
+        .created_at = try std.testing.allocator.dupe(u8, "2026-04-14T12:00:00.000Z"),
+        .expires_at = try std.testing.allocator.dupe(u8, "2026-04-14T12:30:00.000Z"),
+        .decided_at = try std.testing.allocator.dupe(u8, "2026-04-14T12:05:00.000Z"),
+        .decided_by_token_id = try std.testing.allocator.dupe(u8, "token-1"),
+        .consumed_at = null,
+    };
+    defer plan.deinit(std.testing.allocator);
+
+    try printReviewStatus(std.testing.allocator, buffered.printer(), &plan);
+
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Plan ID:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Project:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Status:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Risk:       new env read: SECRET_KEY") != null);
+    try std.testing.expectEqualStrings("", buffered.stderrSlice());
+}
+
+test "printCapabilityGrants shows grant details" {
+    var buffered = printer_mod.BufferedPrinter.init(std.testing.allocator);
+    defer buffered.deinit();
+
+    const items = try std.testing.allocator.alloc(control_plane.CapabilityGrant, 1);
+    items[0] = .{
+        .id = try std.testing.allocator.dupe(u8, "grant-1"),
+        .project_name = try std.testing.allocator.dupe(u8, "demo"),
+        .source_plan_id = try std.testing.allocator.dupe(u8, "plan-1"),
+        .created_at = try std.testing.allocator.dupe(u8, "2026-04-14T12:00:00.000Z"),
+        .expires_at = try std.testing.allocator.dupe(u8, "2026-04-15T12:00:00.000Z"),
+        .revoked_at = null,
+        .status = try std.testing.allocator.dupe(u8, "active"),
+        .reasons = try std.testing.allocator.dupe([]u8, &.{
+            try std.testing.allocator.dupe(u8, "new env read: SECRET_KEY"),
+            try std.testing.allocator.dupe(u8, "new effect: write"),
+        }),
+    };
+    var grants_list = control_plane.CapabilityGrantList{ .items = items };
+    defer grants_list.deinit(std.testing.allocator);
+
+    try printCapabilityGrants(std.testing.allocator, buffered.printer(), &grants_list);
+
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Grants:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "grant-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffered.stdoutSlice(), "Scope:      new env read: SECRET_KEY, new effect: write") != null);
 }
 
 fn freshSessionForTest(allocator: std.mem.Allocator, token: []const u8) !control_plane.DeploySession {
@@ -894,6 +1833,8 @@ fn freshSessionForTest(allocator: std.mem.Allocator, token: []const u8) !control
         .url_hint = null,
         .token = try allocator.dupe(u8, token),
         .expires_at = null,
+        .request_body = try allocator.dupe(u8, "{\"projectName\":\"demo\",\"contract\":{}}"),
+        .grant_ids = try allocator.alloc([]u8, 0),
     };
 }
 
@@ -916,7 +1857,6 @@ test "pushWithAuthRetry refreshes on RegistryUnauthorized" {
 
         fn fetchSession(
             allocator: std.mem.Allocator,
-            _: []const u8,
             _: []const u8,
             _: []const u8,
         ) !control_plane.DeploySession {
@@ -995,7 +1935,6 @@ test "executeWithAuthRetry refreshes on ProviderUnauthorized" {
 
         fn fetchSession(
             allocator: std.mem.Allocator,
-            _: []const u8,
             _: []const u8,
             _: []const u8,
         ) !control_plane.DeploySession {
@@ -1104,7 +2043,6 @@ test "waitForReadyWithAuthRetry refreshes on ProviderUnauthorized" {
 
         fn fetchSession(
             allocator: std.mem.Allocator,
-            _: []const u8,
             _: []const u8,
             _: []const u8,
         ) !control_plane.DeploySession {

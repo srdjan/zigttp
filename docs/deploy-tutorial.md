@@ -33,6 +33,19 @@ The handler, plus whatever sits in `.env` in the current directory as runtime va
 
 zigttp cross-compiles the handler to a Linux musl binary, packages it as an OCI image, and tags every image with compiler-proven facts from the handler contract: env var names, egress hosts, cache namespaces, route patterns, and boolean properties like `retry-safe`, `read-only`, and `idempotent`. The image manifest digest is content-addressed, and the CLI prints the digest alongside the public URL on success.
 
+Before any upload happens, zigttp sends that handler contract to the control plane. If the contract expands risky capabilities, the control plane can block the deploy and return a review URL instead of credentials. The CLI prints the review summary, including which additions were already covered by reusable grants and which still need manual approval, then stops. After approval, re-run `zigttp deploy`.
+
+To approve or reject a pending review from a terminal or CI job:
+
+```bash
+zigttp review <plan-id>
+zigttp review <plan-id> --approve
+zigttp review <plan-id> --approve --grant
+zigttp review <plan-id> --reject
+zigttp grants [project-name]
+zigttp revoke-grant <grant-id>
+```
+
 ## Updates
 
 Re-run `zigttp deploy` any time. zigttp reuses the same service and updates it in place to the newly built image digest.

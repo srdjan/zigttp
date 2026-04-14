@@ -68,6 +68,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try initCommand(allocator, user_args[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "agent")) {
+        try zigts_cli.run(allocator, user_args);
+        return;
+    }
     if (std.mem.eql(u8, command, "dev")) {
         try devCommand(allocator, args[0], user_args[1..]);
         return;
@@ -94,6 +98,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     if (std.mem.eql(u8, command, "compile")) {
         try compileCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "pi")) {
+        try zigts_cli.runPi(allocator);
         return;
     }
     if (std.mem.eql(u8, command, "login")) {
@@ -153,10 +161,101 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 std.debug.print("Could not determine a service name from package.json, git remote, or directory name.\n", .{});
                 return;
             }
+            if (err == error.ContractUnavailable) {
+                std.debug.print("Could not extract a handler contract for this deploy.\n", .{});
+                return;
+            }
+            if (err == error.ControlPlaneReviewRequired) {
+                return;
+            }
             if (err == error.DeployDrift) std.process.exit(deploy_exit_drift);
             if (err == error.ServiceReadyTimeout) std.process.exit(deploy_exit_ready_timeout);
             if (err == error.ServiceDidNotStart) std.process.exit(deploy_exit_did_not_start);
             std.log.err("Deploy failed: {}", .{err});
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "review")) {
+        deploy.review(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printReviewHelp();
+                return;
+            }
+            if (err == error.UnknownOption) {
+                std.debug.print("zigttp review accepts <plan-id> and optional --approve|--reject, with --grant only for approvals.\n\n", .{});
+                printReviewHelp();
+                return;
+            }
+            if (err == error.MissingPlanId) {
+                std.debug.print("zigttp review requires a plan id.\n\n", .{});
+                printReviewHelp();
+                return;
+            }
+            if (err == error.InvalidOptionCombination) {
+                std.debug.print("Use exactly one of --approve or --reject. --grant only works with --approve.\n\n", .{});
+                printReviewHelp();
+                return;
+            }
+            if (err == error.PlanNotFound) {
+                std.debug.print("Deploy plan not found.\n", .{});
+                return;
+            }
+            if (err == error.PlanConflict) {
+                std.debug.print("Deploy plan cannot be changed in its current state.\n", .{});
+                return;
+            }
+            if (err == error.PlanExpired) {
+                std.debug.print("Deploy plan has expired.\n", .{});
+                return;
+            }
+            std.log.err("Review failed: {}", .{err});
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "grants")) {
+        deploy.grants(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printGrantsHelp();
+                return;
+            }
+            if (err == error.UnknownOption or err == error.InvalidOptionCombination) {
+                std.debug.print("zigttp grants accepts at most one optional project name.\n\n", .{});
+                printGrantsHelp();
+                return;
+            }
+            std.log.err("Grant listing failed: {}", .{err});
+            return err;
+        };
+        return;
+    }
+    if (std.mem.eql(u8, command, "revoke-grant")) {
+        deploy.revokeGrant(allocator, user_args[1..]) catch |err| {
+            if (err == error.HelpRequested) {
+                printRevokeGrantHelp();
+                return;
+            }
+            if (err == error.UnknownOption) {
+                std.debug.print("zigttp revoke-grant only accepts a grant id.\n\n", .{});
+                printRevokeGrantHelp();
+                return;
+            }
+            if (err == error.MissingGrantId) {
+                std.debug.print("zigttp revoke-grant requires a grant id.\n\n", .{});
+                printRevokeGrantHelp();
+                return;
+            }
+            if (err == error.InvalidOptionCombination) {
+                std.debug.print("zigttp revoke-grant accepts exactly one grant id.\n\n", .{});
+                printRevokeGrantHelp();
+                return;
+            }
+            if (err == error.GrantNotFound) {
+                std.debug.print("Capability grant not found.\n", .{});
+                return;
+            }
+            std.log.err("Grant revoke failed: {}", .{err});
             return err;
         };
         return;
@@ -1023,6 +1122,59 @@ fn printLoginHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+fn printReviewHelp() void {
+    const help =
+        \\zigttp review <plan-id>
+        \\zigttp review <plan-id> --approve [--grant]
+        \\zigttp review <plan-id> --reject
+        \\
+        \\Inspect, approve, or reject a deploy capability review.
+        \\
+        \\Options:
+        \\  <plan-id>       Show the current plan status and risky additions
+        \\  --approve       Approve the plan for one use
+        \\  --grant         When approving, also create a reusable capability grant
+        \\  --reject        Reject the plan
+        \\
+        \\Related:
+        \\  zigttp deploy   Trigger a deploy and surface plan-required reviews
+        \\  zigttp login    Store deploy credentials explicitly
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printGrantsHelp() void {
+    const help =
+        \\zigttp grants [project-name]
+        \\
+        \\List reusable capability grants visible to the current account.
+        \\
+        \\Arguments:
+        \\  project-name    Optional project filter
+        \\
+        \\Related:
+        \\  zigttp revoke-grant <grant-id>   Revoke a reusable capability grant
+        \\  zigttp review <plan-id>          Inspect or approve a pending review
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printRevokeGrantHelp() void {
+    const help =
+        \\zigttp revoke-grant <grant-id>
+        \\
+        \\Revoke a reusable capability grant so future risky deploys must be reviewed again.
+        \\
+        \\Related:
+        \\  zigttp grants                    List reusable capability grants
+        \\  zigttp review <plan-id>         Approve a new review or grant
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
 fn printHelp() void {
     const help =
         \\zigttp - serverless TypeScript runtime
@@ -1030,11 +1182,15 @@ fn printHelp() void {
         \\Usage:
         \\  zigttp serve [options] [handler.ts]    Run handler
         \\  zigttp init <name> [--template ...]    Create project
+        \\  zigttp agent init [--force]            Install local Claude skills and hooks
         \\  zigttp dev [handler-or-project]         Watch mode
         \\  zigttp check [handler.ts] [--contract]  Verify handler
         \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
         \\  zigttp login                            Store deploy credentials
         \\  zigttp deploy                           Deploy the handler in this directory
+        \\  zigttp review <plan-id>                 Inspect, approve, or reject a deploy plan
+        \\  zigttp grants [project-name]            List reusable capability grants
+        \\  zigttp revoke-grant <grant-id>          Revoke a reusable capability grant
         \\  zigttp logout                           Forget saved sign-in credentials
         \\  zigttp prove <old.json> <new.json>      Upgrade safety check
         \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
