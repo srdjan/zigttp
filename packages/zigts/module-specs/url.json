@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:url",
+  "source": "packages/zigts/src/modules/url.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "urlParse",
+      "effect": "none",
+      "returns": "object",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "urlSearchParams",
+      "effect": "none",
+      "returns": "object",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "urlEncode",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "urlDecode",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:service",
+  "source": "packages/zigts/src/modules/service.zig",
+  "requiredCapabilities": [
+    "filesystem",
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "serviceCall",
+      "effect": "write",
+      "returns": "object",
+      "contractExtractions": [
+        {
+          "category": "service_call"
+        }
+      ]
+    }
+  ]
+}

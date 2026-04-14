@@ -9,6 +9,7 @@
 const mb = @import("module_binding.zig");
 const ModuleBinding = mb.ModuleBinding;
 const extension_bindings = @import("extension_bindings.zig");
+const file_io = @import("file_io.zig");
 
 const env_mod = @import("modules/env.zig");
 const crypto_mod = @import("modules/crypto.zig");
@@ -60,6 +61,35 @@ pub const all = builtins ++ extension_bindings.all;
 
 /// Number of built-in modules.
 pub const count = all.len;
+
+const builtin_spec_paths = [_][]const u8{
+    "../module-specs/env.json",
+    "../module-specs/crypto.json",
+    "../module-specs/router.json",
+    "../module-specs/auth.json",
+    "../module-specs/validate.json",
+    "../module-specs/decode.json",
+    "../module-specs/cache.json",
+    "../module-specs/sql.json",
+    "../module-specs/io.json",
+    "../module-specs/scope.json",
+    "../module-specs/compose.json",
+    "../module-specs/durable.json",
+    "../module-specs/url.json",
+    "../module-specs/id.json",
+    "../module-specs/http-mod.json",
+    "../module-specs/log.json",
+    "../module-specs/text.json",
+    "../module-specs/time.json",
+    "../module-specs/ratelimit.json",
+    "../module-specs/service.json",
+};
+
+comptime {
+    if (builtin_spec_paths.len != builtins.len) {
+        @compileError("builtin_spec_paths must stay in sync with builtin_modules.builtins");
+    }
+}
 
 // Validate all bindings at compile time. Produces compile errors for
 // duplicate specifiers, duplicate function names, or state inconsistency.
@@ -239,4 +269,14 @@ test "module capability annotations cover audited helper-enforced built-ins" {
 
     const url_binding = fromSpecifier("zigttp:url").?;
     try std.testing.expectEqual(@as(usize, 0), url_binding.required_capabilities.len);
+}
+
+test "every in-tree builtin module has a module spec artifact" {
+    inline for (builtin_spec_paths) |path| {
+        const full_path = "packages/zigts/" ++ path[3..];
+        try std.testing.expect(file_io.fileExists(std.testing.allocator, full_path));
+        const contents = try file_io.readFile(std.testing.allocator, full_path, 64 * 1024);
+        defer std.testing.allocator.free(contents);
+        try std.testing.expect(contents.len > 0);
+    }
 }

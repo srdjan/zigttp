@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:crypto",
+  "source": "packages/zigts/src/modules/crypto.zig",
+  "requiredCapabilities": [
+    "crypto"
+  ],
+  "exports": [
+    {
+      "name": "sha256",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "hmacSha256",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "base64Encode",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure",
+        {
+          "inverseOf": "base64Decode"
+        }
+      ]
+    },
+    {
+      "name": "base64Decode",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure",
+        {
+          "inverseOf": "base64Encode"
+        }
+      ]
+    }
+  ]
+}

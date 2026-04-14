@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:ratelimit",
+  "source": "packages/zigts/src/modules/ratelimit.zig",
+  "requiredCapabilities": [
+    "clock"
+  ],
+  "exports": [
+    {
+      "name": "rateCheck",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "rate_limit_key",
+          "argPosition": 0
+        }
+      ]
+    },
+    {
+      "name": "rateReset",
+      "effect": "write",
+      "returns": "boolean"
+    }
+  ]
+}

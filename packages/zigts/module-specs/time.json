@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:time",
+  "source": "packages/zigts/src/modules/time.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "formatIso",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "formatHttp",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "parseIso",
+      "effect": "none",
+      "returns": "number",
+      "failureSeverity": "expected",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "addSeconds",
+      "effect": "none",
+      "returns": "number",
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

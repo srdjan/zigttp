@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:log",
+  "source": "packages/zigts/src/modules/log.zig",
+  "requiredCapabilities": [
+    "clock",
+    "stderr"
+  ],
+  "exports": [
+    {
+      "name": "logDebug",
+      "effect": "write",
+      "returns": "unknown"
+    },
+    {
+      "name": "logInfo",
+      "effect": "write",
+      "returns": "unknown"
+    },
+    {
+      "name": "logWarn",
+      "effect": "write",
+      "returns": "unknown"
+    },
+    {
+      "name": "logError",
+      "effect": "write",
+      "returns": "unknown"
+    }
+  ]
+}

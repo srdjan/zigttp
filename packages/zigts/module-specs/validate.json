@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:validate",
+  "source": "packages/zigts/src/modules/validate.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "schemaCompile",
+      "effect": "none",
+      "returns": "boolean",
+      "contractExtractions": [
+        {
+          "category": "schema_compile"
+        }
+      ]
+    },
+    {
+      "name": "validateJson",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "validateObject",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "coerceJson",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "schemaDrop",
+      "effect": "none",
+      "returns": "boolean"
+    }
+  ]
+}

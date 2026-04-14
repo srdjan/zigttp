@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:durable",
+  "source": "packages/zigts/src/modules/durable.zig",
+  "requiredCapabilities": [
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "run",
+      "effect": "write",
+      "returns": "unknown",
+      "contractExtractions": [
+        {
+          "category": "durable_key"
+        }
+      ]
+    },
+    {
+      "name": "step",
+      "effect": "write",
+      "returns": "unknown",
+      "contractExtractions": [
+        {
+          "category": "durable_step"
+        }
+      ]
+    },
+    {
+      "name": "stepWithTimeout",
+      "effect": "write",
+      "returns": "result",
+      "failureSeverity": "expected",
+      "contractExtractions": [
+        {
+          "category": "durable_step"
+        }
+      ]
+    },
+    {
+      "name": "sleep",
+      "effect": "write",
+      "returns": "undefined"
+    },
+    {
+      "name": "sleepUntil",
+      "effect": "write",
+      "returns": "undefined"
+    },
+    {
+      "name": "waitSignal",
+      "effect": "write",
+      "returns": "unknown",
+      "contractExtractions": [
+        {
+          "category": "durable_signal"
+        }
+      ]
+    },
+    {
+      "name": "signal",
+      "effect": "write",
+      "returns": "boolean",
+      "contractExtractions": [
+        {
+          "category": "durable_producer_key"
+        },
+        {
+          "category": "durable_signal",
+          "argPosition": 1
+        }
+      ]
+    },
+    {
+      "name": "signalAt",
+      "effect": "write",
+      "returns": "boolean",
+      "contractExtractions": [
+        {
+          "category": "durable_producer_key"
+        },
+        {
+          "category": "durable_signal",
+          "argPosition": 1
+        }
+      ]
+    }
+  ]
+}

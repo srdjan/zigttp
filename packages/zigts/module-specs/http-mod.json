@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:http",
+  "source": "packages/zigts/src/modules/http_mod.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "parseCookies",
+      "effect": "none",
+      "returns": "object"
+    },
+    {
+      "name": "setCookie",
+      "effect": "none",
+      "returns": "string",
+      "contractExtractions": [
+        {
+          "category": "cookie_name",
+          "argPosition": 0
+        }
+      ]
+    },
+    {
+      "name": "negotiate",
+      "effect": "none",
+      "returns": "optional_string",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "parseContentType",
+      "effect": "none",
+      "returns": "object"
+    },
+    {
+      "name": "cors",
+      "effect": "none",
+      "returns": "object",
+      "contractExtractions": [
+        {
+          "category": "cors_origin",
+          "argPosition": 0
+        }
+      ]
+    }
+  ]
+}

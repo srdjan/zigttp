@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:router",
+  "source": "packages/zigts/src/modules/router.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "routerMatch",
+      "effect": "none",
+      "returns": "optional_object",
+      "failureSeverity": "expected",
+      "contractExtractions": [
+        {
+          "category": "route_pattern"
+        }
+      ]
+    }
+  ]
+}
