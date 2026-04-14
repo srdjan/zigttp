@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:scope",
+  "source": "packages/zigts/src/modules/scope.zig",
+  "requiredCapabilities": [
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "scope",
+      "effect": "write",
+      "returns": "unknown",
+      "contractExtractions": [
+        {
+          "category": "scope_name"
+        }
+      ]
+    },
+    {
+      "name": "using",
+      "effect": "write",
+      "returns": "unknown"
+    },
+    {
+      "name": "ensure",
+      "effect": "write",
+      "returns": "undefined"
+    }
+  ]
+}

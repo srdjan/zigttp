@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:cache",
+  "source": "packages/zigts/src/modules/cache.zig",
+  "requiredCapabilities": [
+    "clock",
+    "policy_check"
+  ],
+  "exports": [
+    {
+      "name": "cacheGet",
+      "effect": "read",
+      "returns": "optional_string",
+      "failureSeverity": "expected",
+      "contractExtractions": [
+        {
+          "category": "cache_namespace"
+        }
+      ]
+    },
+    {
+      "name": "cacheSet",
+      "effect": "write",
+      "returns": "boolean",
+      "contractExtractions": [
+        {
+          "category": "cache_namespace"
+        }
+      ],
+      "laws": [
+        "idempotent_call"
+      ]
+    },
+    {
+      "name": "cacheDelete",
+      "effect": "write",
+      "returns": "boolean",
+      "contractExtractions": [
+        {
+          "category": "cache_namespace"
+        }
+      ],
+      "laws": [
+        "idempotent_call"
+      ]
+    },
+    {
+      "name": "cacheIncr",
+      "effect": "write",
+      "returns": "number",
+      "contractExtractions": [
+        {
+          "category": "cache_namespace"
+        }
+      ]
+    },
+    {
+      "name": "cacheStats",
+      "effect": "read",
+      "returns": "object"
+    }
+  ]
+}

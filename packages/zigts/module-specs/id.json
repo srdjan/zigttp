@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:id",
+  "source": "packages/zigts/src/modules/id.zig",
+  "requiredCapabilities": [
+    "clock",
+    "random"
+  ],
+  "exports": [
+    {
+      "name": "uuid",
+      "effect": "read",
+      "returns": "string"
+    },
+    {
+      "name": "ulid",
+      "effect": "read",
+      "returns": "string"
+    },
+    {
+      "name": "nanoid",
+      "effect": "read",
+      "returns": "string"
+    }
+  ]
+}

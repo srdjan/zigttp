@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:sql",
+  "source": "packages/zigts/src/modules/sql.zig",
+  "requiredCapabilities": [
+    "sqlite",
+    "policy_check"
+  ],
+  "exports": [
+    {
+      "name": "sql",
+      "effect": "none",
+      "returns": "boolean",
+      "contractExtractions": [
+        {
+          "category": "sql_registration"
+        }
+      ]
+    },
+    {
+      "name": "sqlOne",
+      "effect": "none",
+      "returns": "optional_object",
+      "failureSeverity": "expected"
+    },
+    {
+      "name": "sqlMany",
+      "effect": "none",
+      "returns": "object"
+    },
+    {
+      "name": "sqlExec",
+      "effect": "write",
+      "returns": "object"
+    }
+  ]
+}

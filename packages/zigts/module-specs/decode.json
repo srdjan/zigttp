@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:decode",
+  "source": "packages/zigts/src/modules/decode.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "decodeJson",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ]
+    },
+    {
+      "name": "decodeForm",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ]
+    },
+    {
+      "name": "decodeQuery",
+      "effect": "none",
+      "returns": "result",
+      "failureSeverity": "critical",
+      "contractExtractions": [
+        {
+          "category": "request_schema"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:text",
+  "source": "packages/zigts/src/modules/text.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "escapeHtml",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "unescapeHtml",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "slugify",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "truncate",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "mask",
+      "effect": "none",
+      "returns": "string",
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:io",
+  "source": "packages/zigts/src/modules/io.zig",
+  "requiredCapabilities": [
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "parallel",
+      "effect": "write",
+      "returns": "string"
+    },
+    {
+      "name": "race",
+      "effect": "write",
+      "returns": "string"
+    }
+  ]
+}
