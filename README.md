@@ -1030,6 +1030,7 @@ Then update the pinned version in this README and `docs/user-guide.md`.
 - [Verification](docs/verification.md) - Compile-time handler verification: checks, diagnostics, examples
 - [Sound Mode](docs/sound-mode.md) - Type-directed analysis: arithmetic safety, `+` safety, tautology detection, truthiness, type-specialized codegen
 - [Architecture](docs/architecture.md) - System design, runtime model, concurrency, project structure
+- [Frontier](docs/frontier.md) - Strategic direction: core moat, next-frontier features, identity guardrails
 - [JSX Guide](docs/jsx-guide.md) - JSX/TSX usage and server-side rendering
 - [TypeScript](docs/typescript.md) - Type stripping, compile-time evaluation
 - [Performance](docs/performance.md) - Benchmarks, cold starts, optimizations, concurrent I/O

@@ -2,6 +2,9 @@
 
 This document describes the architecture of zigttp, a serverless JavaScript runtime powered by the zigts JavaScript engine.
 
+For the strategic direction beyond the current implementation, see
+[Frontier](frontier.md).
+
 ## Design Philosophy
 
 **Goal**: Instant cold starts, small deployment package, request isolation, zero external dependencies.
