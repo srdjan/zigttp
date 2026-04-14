@@ -38,10 +38,44 @@ pub const binding = mb.ModuleBinding{
     .name = "validate",
     .stateful = true,
     .exports = &.{
+        // schemaCompile and schemaDrop mutate the module-global schema
+        // registry. They are traceable=false and never appear in
+        // BehaviorPath.io_sequence, so no law is declared: canonicalization
+        // would have nothing to rewrite.
         .{ .name = "schemaCompile", .func = schemaCompileNative, .arg_count = 2, .returns = .boolean, .param_types = &.{.string}, .traceable = false, .contract_extractions = &.{.{ .category = .schema_compile }} },
-        .{ .name = "validateJson", .func = validateJsonNative, .arg_count = 2, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .critical, .contract_extractions = &.{.{ .category = .request_schema }}, .return_labels = .{ .validated = true } },
-        .{ .name = "validateObject", .func = validateObjectNative, .arg_count = 2, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .critical, .contract_extractions = &.{.{ .category = .request_schema }}, .return_labels = .{ .validated = true } },
-        .{ .name = "coerceJson", .func = coerceJsonNative, .arg_count = 2, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .critical, .contract_extractions = &.{.{ .category = .request_schema }}, .return_labels = .{ .validated = true } },
+        .{
+            .name = "validateJson",
+            .func = validateJsonNative,
+            .arg_count = 2,
+            .returns = .result,
+            .param_types = &.{ .string, .string },
+            .failure_severity = .critical,
+            .contract_extractions = &.{.{ .category = .request_schema }},
+            .return_labels = .{ .validated = true },
+            .laws = &.{.pure},
+        },
+        .{
+            .name = "validateObject",
+            .func = validateObjectNative,
+            .arg_count = 2,
+            .returns = .result,
+            .param_types = &.{ .string, .string },
+            .failure_severity = .critical,
+            .contract_extractions = &.{.{ .category = .request_schema }},
+            .return_labels = .{ .validated = true },
+            .laws = &.{.pure},
+        },
+        .{
+            .name = "coerceJson",
+            .func = coerceJsonNative,
+            .arg_count = 2,
+            .returns = .result,
+            .param_types = &.{ .string, .string },
+            .failure_severity = .critical,
+            .contract_extractions = &.{.{ .category = .request_schema }},
+            .return_labels = .{ .validated = true },
+            .laws = &.{.pure},
+        },
         .{ .name = "schemaDrop", .func = schemaDropNative, .arg_count = 1, .returns = .boolean, .param_types = &.{.string}, .traceable = false },
     },
 };

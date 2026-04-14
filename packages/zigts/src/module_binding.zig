@@ -631,6 +631,65 @@ pub const ContractFlags = struct {
 };
 
 // -------------------------------------------------------------------------
+// Algebraic laws
+// -------------------------------------------------------------------------
+
+/// Tag identifying which algebraic law applies to a function.
+/// Laws are the mechanism behind proven-equivalent deploys: the canonicalizer
+/// walks `BehaviorPath.io_sequence` and applies rewrites justified by these
+/// equations. Every variant here must be *unconditionally sound*, i.e. the
+/// rewrite is valid regardless of surrounding context. Conditional laws
+/// (commutation, reordering) are explicitly deferred until side-condition
+/// machinery exists.
+pub const LawKind = enum {
+    pure,
+    idempotent_call,
+    inverse_of,
+    absorbing,
+};
+
+/// An algebraic equation attached to a `FunctionBinding`.
+///
+/// - `.pure`: `f(args)` is a function of its arguments only. Two adjacent
+///   calls with structurally-equal arguments collapse to one.
+/// - `.idempotent_call`: `f(args); f(args)` has the same observable effect
+///   as `f(args)`. The only law allowed on write-effect functions.
+/// - `.inverse_of`: `g(f(x)) == x` where `g` is the named function.
+///   The name is resolved against the full registry in `validateBindings`;
+///   a dangling reference is a compile error.
+/// - `.absorbing`: when an argument matches `AbsorbingPattern.argument_shape`,
+///   the call is known to produce the fixed `residue` and can be folded.
+pub const Law = union(LawKind) {
+    pure: void,
+    idempotent_call: void,
+    inverse_of: []const u8,
+    absorbing: AbsorbingPattern,
+};
+
+/// Describes a recognizable argument shape and the residue the function
+/// produces when that shape appears. Used for dead-branch pruning during
+/// path canonicalization (e.g. `jwtVerify("")` is always `.err`).
+pub const AbsorbingPattern = struct {
+    /// Which argument position the pattern matches on (0-indexed).
+    arg_position: u8 = 0,
+    /// The shape the argument must have for the residue to apply.
+    argument_shape: ArgumentShape,
+    /// The fixed residue produced when the shape matches.
+    residue: Residue,
+
+    pub const ArgumentShape = enum {
+        empty_string_literal,
+        undefined_literal,
+    };
+
+    pub const Residue = enum {
+        result_err,
+        returns_undefined,
+        returns_false,
+    };
+};
+
+// -------------------------------------------------------------------------
 // Function binding
 // -------------------------------------------------------------------------
 
@@ -677,6 +736,12 @@ pub const FunctionBinding = struct {
     /// Determines how the fault coverage checker treats a 2xx response
     /// on this function's failure path.
     failure_severity: FailureSeverity = .none,
+
+    /// Algebraic laws this function satisfies. Consumed by the behavior-path
+    /// canonicalizer (see `behavior_canonical.zig`) to justify rewrites for
+    /// proven-equivalent deploys. Every law must be unconditionally sound;
+    /// `validateBindings` rejects laws that contradict the declared effect.
+    laws: []const Law = &.{},
 
     /// Get the NativeFn for this binding, wrapping ModuleFn if needed.
     pub fn getNativeFn(comptime self: FunctionBinding) object.NativeFn {
@@ -782,6 +847,22 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             if (f.func == null and f.module_func == null) {
                 @compileError("function binding missing both func and module_func: " ++ f.name);
             }
+            if (f.laws.len > 0) {
+                if (b.comptime_only) {
+                    @compileError("laws are not allowed on comptime_only module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
+                }
+                if (b.self_managed_io) {
+                    @compileError("laws are not allowed on self_managed_io module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
+                }
+                if (findDuplicateLawKind(f.laws)) |kind| {
+                    @compileError("duplicate law '" ++ @tagName(kind) ++ "' on " ++ b.specifier ++ "." ++ f.name);
+                }
+                for (f.laws) |law| {
+                    if (f.effect == .write and law != .idempotent_call) {
+                        @compileError("only '.idempotent_call' may be declared on write-effect function " ++ b.specifier ++ "." ++ f.name ++ " (got '." ++ @tagName(std.meta.activeTag(law)) ++ "')");
+                    }
+                }
+            }
         }
     }
     // Check unique specifiers
@@ -811,6 +892,29 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             }
         }
     }
+    // Resolve .inverse_of references. The target name must refer to an
+    // existing function somewhere in the registry, and the target must
+    // declare the symmetric inverse so `g(f(x)) = x` and `f(g(x)) = x`
+    // are both justified by paired declarations.
+    for (bindings) |b| {
+        for (b.exports) |f| {
+            for (f.laws) |law| {
+                switch (law) {
+                    .inverse_of => |target_name| {
+                        const target = findFunctionInRegistry(bindings, target_name) orelse {
+                            @compileError("inverse_of target '" ++ target_name ++ "' not found for " ++ b.specifier ++ "." ++ f.name);
+                        };
+                        if (!hasInverseLawPointingTo(target.laws, f.name)) {
+                            @compileError("inverse_of must be declared symmetrically: " ++
+                                b.specifier ++ "." ++ f.name ++ " declares inverse_of=" ++
+                                target_name ++ " but " ++ target_name ++ " does not declare inverse_of=" ++ f.name);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
 }
 
 fn findDuplicateRequiredCapability(comptime capabilities: []const ModuleCapability) ?ModuleCapability {
@@ -820,6 +924,50 @@ fn findDuplicateRequiredCapability(comptime capabilities: []const ModuleCapabili
         }
     }
     return null;
+}
+
+/// Return the first duplicated law *kind* within a single function's laws
+/// list. Duplicates are always a spec error: laws are unconditionally sound
+/// and idempotent, so declaring `[pure, pure]` or `[inverse_of "a", inverse_of "b"]`
+/// signals confusion, not intent.
+pub fn findDuplicateLawKind(comptime laws: []const Law) ?LawKind {
+    for (laws, 0..) |law, i| {
+        const kind = std.meta.activeTag(law);
+        for (laws[i + 1 ..]) |other| {
+            if (std.meta.activeTag(other) == kind) return kind;
+        }
+    }
+    return null;
+}
+
+/// Find a function binding by name across an entire registry. Used to
+/// resolve `.inverse_of` targets at comptime.
+pub fn findFunctionInRegistry(
+    comptime bindings: []const ModuleBinding,
+    comptime name: []const u8,
+) ?FunctionBinding {
+    for (bindings) |b| {
+        for (b.exports) |f| {
+            if (std.mem.eql(u8, f.name, name)) return f;
+        }
+    }
+    return null;
+}
+
+/// Check whether a laws list contains an `.inverse_of` pointing at `name`.
+pub fn hasInverseLawPointingTo(
+    comptime laws: []const Law,
+    comptime name: []const u8,
+) bool {
+    for (laws) |law| {
+        switch (law) {
+            .inverse_of => |target| {
+                if (std.mem.eql(u8, target, name)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
 }
 
 // -------------------------------------------------------------------------
@@ -1018,6 +1166,149 @@ test "active module helpers reject missing capabilities" {
 
     var bytes: [8]u8 = undefined;
     try std.testing.expectError(ModuleCapabilityError.MissingModuleCapability, fillRandomForActiveModule(&bytes));
+}
+
+test "FunctionBinding laws defaults to empty" {
+    const fb = FunctionBinding{
+        .name = "test",
+        .func = struct {
+            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+                return value.JSValue.undefined_val;
+            }
+        }.f,
+        .arg_count = 0,
+    };
+    try std.testing.expectEqual(@as(usize, 0), fb.laws.len);
+}
+
+test "findDuplicateLawKind detects repeats" {
+    const laws_dup = [_]Law{ .pure, .pure };
+    try std.testing.expectEqual(LawKind.pure, findDuplicateLawKind(&laws_dup).?);
+
+    const laws_ok = [_]Law{ .pure, .idempotent_call };
+    try std.testing.expect(findDuplicateLawKind(&laws_ok) == null);
+
+    const laws_mixed = [_]Law{
+        .{ .inverse_of = "decode" },
+        .{ .inverse_of = "other" },
+    };
+    try std.testing.expectEqual(LawKind.inverse_of, findDuplicateLawKind(&laws_mixed).?);
+}
+
+test "findDuplicateLawKind returns null for empty list" {
+    const laws = [_]Law{};
+    try std.testing.expect(findDuplicateLawKind(&laws) == null);
+}
+
+test "hasInverseLawPointingTo matches by target name" {
+    const laws = [_]Law{
+        .pure,
+        .{ .inverse_of = "base64Decode" },
+    };
+    try std.testing.expect(hasInverseLawPointingTo(&laws, "base64Decode"));
+    try std.testing.expect(!hasInverseLawPointingTo(&laws, "base64Encode"));
+    try std.testing.expect(!hasInverseLawPointingTo(&laws, ""));
+}
+
+test "findFunctionInRegistry locates binding across modules" {
+    const dummy = struct {
+        fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.undefined_val;
+        }
+    }.f;
+
+    const bindings = [_]ModuleBinding{
+        .{
+            .specifier = "zigttp:a",
+            .name = "a",
+            .exports = &.{.{ .name = "alpha", .func = dummy, .arg_count = 0 }},
+        },
+        .{
+            .specifier = "zigttp:b",
+            .name = "b",
+            .exports = &.{.{ .name = "beta", .func = dummy, .arg_count = 0 }},
+        },
+    };
+
+    try std.testing.expect(findFunctionInRegistry(&bindings, "alpha") != null);
+    try std.testing.expect(findFunctionInRegistry(&bindings, "beta") != null);
+    try std.testing.expect(findFunctionInRegistry(&bindings, "gamma") == null);
+}
+
+test "AbsorbingPattern fields set correctly" {
+    const pat = AbsorbingPattern{
+        .arg_position = 1,
+        .argument_shape = .empty_string_literal,
+        .residue = .result_err,
+    };
+    try std.testing.expectEqual(@as(u8, 1), pat.arg_position);
+    try std.testing.expectEqual(AbsorbingPattern.ArgumentShape.empty_string_literal, pat.argument_shape);
+    try std.testing.expectEqual(AbsorbingPattern.Residue.result_err, pat.residue);
+}
+
+test "Law union carries inverse_of payload" {
+    const law: Law = .{ .inverse_of = "decode" };
+    switch (law) {
+        .inverse_of => |target| try std.testing.expectEqualStrings("decode", target),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "validateBindings accepts paired inverse_of laws" {
+    const dummy = struct {
+        fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.undefined_val;
+        }
+    }.f;
+
+    comptime {
+        const bindings = [_]ModuleBinding{.{
+            .specifier = "zigttp:codec",
+            .name = "codec",
+            .exports = &.{
+                .{
+                    .name = "encode",
+                    .func = dummy,
+                    .arg_count = 1,
+                    .effect = .none,
+                    .laws = &.{ .pure, .{ .inverse_of = "decode" } },
+                },
+                .{
+                    .name = "decode",
+                    .func = dummy,
+                    .arg_count = 1,
+                    .effect = .none,
+                    .laws = &.{ .pure, .{ .inverse_of = "encode" } },
+                },
+            },
+        }};
+        validateBindings(&bindings);
+    }
+}
+
+test "validateBindings accepts idempotent_call on write-effect function" {
+    const dummy = struct {
+        fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.undefined_val;
+        }
+    }.f;
+
+    comptime {
+        const bindings = [_]ModuleBinding{.{
+            .specifier = "zigttp:kv",
+            .name = "kv",
+            .exports = &.{
+                .{
+                    .name = "kvSet",
+                    .func = dummy,
+                    .arg_count = 2,
+                    .effect = .write,
+                    .laws = &.{.idempotent_call},
+                },
+            },
+        }};
+        validateBindings(&bindings);
+    }
 }
 
 test "wrapNativeFnWithCapabilities activates context for built-in native fns" {

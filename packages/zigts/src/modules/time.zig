@@ -26,10 +26,14 @@ pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:time",
     .name = "time",
     .exports = &.{
-        .{ .name = "formatIso", .func = formatIsoNative, .arg_count = 1, .returns = .string, .param_types = &.{.number} },
-        .{ .name = "formatHttp", .func = formatHttpNative, .arg_count = 1, .returns = .string, .param_types = &.{.number} },
-        .{ .name = "parseIso", .func = parseIsoNative, .arg_count = 1, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected },
-        .{ .name = "addSeconds", .func = addSecondsNative, .arg_count = 2, .returns = .number, .param_types = &.{ .number, .number } },
+        // These functions format/parse a caller-provided epoch number;
+        // they do not read the clock themselves (there is no `now`
+        // helper here - handlers get the current time via Date.now from
+        // the JS engine). Pure in the strict sense.
+        .{ .name = "formatIso", .func = formatIsoNative, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
+        .{ .name = "formatHttp", .func = formatHttpNative, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
+        .{ .name = "parseIso", .func = parseIsoNative, .arg_count = 1, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected, .laws = &.{.pure} },
+        .{ .name = "addSeconds", .func = addSecondsNative, .arg_count = 2, .returns = .number, .param_types = &.{ .number, .number }, .laws = &.{.pure} },
     },
 };
 

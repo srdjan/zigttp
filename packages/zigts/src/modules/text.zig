@@ -26,11 +26,15 @@ pub const binding = mb.ModuleBinding{
     .specifier = "zigttp:text",
     .name = "text",
     .exports = &.{
-        .{ .name = "escapeHtml", .func = escapeHtmlNative, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .return_labels = .{ .validated = true } },
-        .{ .name = "unescapeHtml", .func = unescapeHtmlNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
-        .{ .name = "slugify", .func = slugifyNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
-        .{ .name = "truncate", .func = truncateNative, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .number, .string } },
-        .{ .name = "mask", .func = maskNative, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .number }, .return_labels = .{ .internal = true } },
+        // All exports are pure string transformations. No inverse pairs:
+        // unescapeHtml accepts multiple entity encodings (&amp; and &#38;)
+        // that collapse to a canonical form, so round-tripping is not
+        // bijective.
+        .{ .name = "escapeHtml", .func = escapeHtmlNative, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .return_labels = .{ .validated = true }, .laws = &.{.pure} },
+        .{ .name = "unescapeHtml", .func = unescapeHtmlNative, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "slugify", .func = slugifyNative, .arg_count = 1, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "truncate", .func = truncateNative, .arg_count = 3, .returns = .string, .param_types = &.{ .string, .number, .string }, .laws = &.{.pure} },
+        .{ .name = "mask", .func = maskNative, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .number }, .return_labels = .{ .internal = true }, .laws = &.{.pure} },
     },
 };
 

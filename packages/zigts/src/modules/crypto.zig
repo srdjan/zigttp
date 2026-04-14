@@ -21,10 +21,38 @@ pub const binding = mb.ModuleBinding{
     .name = "crypto",
     .required_capabilities = &.{.crypto},
     .exports = &.{
-        .{ .name = "sha256", .func = sha256Native, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
-        .{ .name = "hmacSha256", .func = hmacSha256Native, .arg_count = 2, .returns = .string, .param_types = &.{ .string, .string } },
-        .{ .name = "base64Encode", .func = base64EncodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
-        .{ .name = "base64Decode", .func = base64DecodeNative, .arg_count = 1, .returns = .string, .param_types = &.{.string} },
+        .{
+            .name = "sha256",
+            .func = sha256Native,
+            .arg_count = 1,
+            .returns = .string,
+            .param_types = &.{.string},
+            .laws = &.{.pure},
+        },
+        .{
+            .name = "hmacSha256",
+            .func = hmacSha256Native,
+            .arg_count = 2,
+            .returns = .string,
+            .param_types = &.{ .string, .string },
+            .laws = &.{.pure},
+        },
+        .{
+            .name = "base64Encode",
+            .func = base64EncodeNative,
+            .arg_count = 1,
+            .returns = .string,
+            .param_types = &.{.string},
+            .laws = &.{ .pure, .{ .inverse_of = "base64Decode" } },
+        },
+        .{
+            .name = "base64Decode",
+            .func = base64DecodeNative,
+            .arg_count = 1,
+            .returns = .string,
+            .param_types = &.{.string},
+            .laws = &.{ .pure, .{ .inverse_of = "base64Encode" } },
+        },
     },
 };
 

@@ -427,7 +427,7 @@ pub fn analyzeRollout(
             new_system.analysis.config.handlers[new_idx].path,
         );
 
-        if (classification == .equivalent and manifest.verdict == .safe and !base_url_changed and !path_changed) {
+        if (classification.isSafeNoOp() and manifest.verdict == .safe and !base_url_changed and !path_changed) {
             continue;
         }
 
