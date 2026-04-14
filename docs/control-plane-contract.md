@@ -104,11 +104,13 @@ Request body:
 ```json
 {
   "projectName": "demo",
-  "region": "us-central"
+  "region": "us-central",
+  "contract": { "routes": [], "egress": { "hosts": [] } },
+  "contractSha256": "hex-sha256 of the canonicalized contract JSON"
 }
 ```
 
-`region` defaults to `"us-central"` on the client (`control_plane.zig:7`). The server may also fall back to `us-central` if the client sends an unknown region, but that is a server concern.
+`region` defaults to `"us-central"` on the client (`control_plane.zig:7`). The client now compiles first, serializes the handler contract to canonical JSON, hashes that canonical form, and sends both the contract object and `contractSha256` to the control plane.
 
 Response 200:
 
@@ -131,9 +133,30 @@ Response 200:
 
 Required fields: `provider`, `registryHost`, `namespace`, `registryUsername`, `registryPassword`, `scopeId`, `planId`, `providerApiToken`, `region`. Missing any of them produces `error.InvalidSessionResponse`.
 
-Optional fields: `registryCredentialId`, `urlHint`, `expiresAt` (unix seconds; null means no expiry advertised).
+Optional fields: `registryCredentialId`, `urlHint`, `expiresAt` (unix seconds; null means no expiry advertised), `grantIds` (reusable capability grants that enabled this approval).
 
-Status codes: `401` and `403` are `error.NotSignedIn`; anything else `>=400` is `error.ControlPlaneError`.
+Response 202:
+
+```json
+{
+  "status": "plan_required",
+  "planId": "plan-1",
+  "reviewUrl": "https://control.example.com/deploy/plans/plan-1",
+  "baselineSha": "prev-sha",
+  "proposedSha": "next-sha",
+  "diff": {
+    "reasons": ["new env read: SECRET_KEY"]
+  },
+  "grantCoverage": {
+    "coveredReasons": ["new env read: DATABASE_URL"],
+    "uncoveredReasons": ["new effect: write"]
+  }
+}
+```
+
+When the control plane returns `202`, the CLI does not build or upload anything. It prints the review URL plus a short summary of which risky additions are already covered by existing grants and which still need manual approval, then exits without proceeding.
+
+Status codes: `401` and `403` are `error.NotSignedIn`; `202` is a structured review-needed response; anything else `>=400` is `error.ControlPlaneError`.
 
 ### Provider enum
 
@@ -141,7 +164,7 @@ Currently the only legal `provider` value is `"northflank"`. An unknown value pr
 
 ### Session refresh
 
-When a session has `expiresAt` within `skew_seconds` of `now`, the client re-calls `POST /v1/deploy/session` with the same token. If the refreshed session has a different `namespace` or `registryHost` than the original, the refresh is rejected with `error.SessionIdentityChanged` because the OCI image and registry ref were already derived from the old values. Self-hosted control planes must never rotate the user's namespace or registry identity mid-session.
+When a session has `expiresAt` within `skew_seconds` of `now`, the client re-calls `POST /v1/deploy/session` with the exact same request body, including the contract and hash. If the refreshed session has a different `namespace` or `registryHost` than the original, the refresh is rejected with `error.SessionIdentityChanged` because the OCI image and registry ref were already derived from the old values. Self-hosted control planes must never rotate the user's namespace or registry identity mid-session.
 
 ## Build pipeline
 
@@ -236,8 +259,10 @@ To run a self-hosted control plane behind `ZIGTTP_CONTROL_PLANE_URL`, you must i
 
 1. `POST /v1/auth/device/start`, `POST /v1/auth/device/poll`, `POST /v1/auth/token/verify` with the status code semantics above, or issue tokens out-of-band and document the token format.
 2. `POST /v1/deploy/session` returning the full envelope with all required fields and a stable `namespace` + `registryHost` per user.
-3. An OCI registry reachable at `registryHost` that accepts basic auth with `registryUsername` + `registryPassword` and stores images under `namespace/<service-name>`.
-4. Either a Northflank-compatible provider API at `https://api.northflank.com/...` (unlikely) or a fork that adds a new adapter module.
+3. `GET /v1/deploy/plans/{id}` plus `POST /v1/deploy/plans/{id}/approve` and `POST /v1/deploy/plans/{id}/reject` for scripted review workflows. `approve` should accept `{"mode":"once"}` or `{"mode":"grant"}` and may also accept `{"expiresAt":"ISO-8601"}` when creating an expiring grant.
+4. `GET /v1/grants`, `GET /v1/projects/{name}/grants`, and `POST /v1/grants/{id}/revoke` so the CLI can inspect and revoke reusable grants.
+5. An OCI registry reachable at `registryHost` that accepts basic auth with `registryUsername` + `registryPassword` and stores images under `namespace/<service-name>`.
+6. Either a Northflank-compatible provider API at `https://api.northflank.com/...` (unlikely) or a fork that adds a new adapter module.
 
 The provider API is the hardest boundary to emulate. Until a non-Northflank adapter ships, self-hosting is effectively Northflank-only.
 

@@ -383,10 +383,16 @@ Everything else is auto-detected from the current directory:
 - **Region**: `--region` if given, then the region from the previous
   deploy of this service, then `us-central`.
 
+Before the CLI requests deploy credentials, it compiles the handler contract and sends that contract plus its canonical SHA-256 to the control plane. A self-hosted control plane can use that to auto-approve safe changes, auto-approve previously granted risky changes, or return a review URL when a deploy needs capability approval before continuing.
+
 ```bash
 zigttp deploy
 zigttp deploy --region eu-west
 zigttp deploy --no-wait
+zigttp review <plan-id>
+zigttp review <plan-id> --approve --grant
+zigttp grants
+zigttp revoke-grant <grant-id>
 ```
 
 Reconciliation reads `.zigttp/deploy-state.json`, which stores non-secret
