@@ -1,0 +1,68 @@
+//! Both this tool and `zigts expert meta --json` go through
+//! `expert_meta.writeJson`, so the TUI and CLI stay byte-identical.
+
+const std = @import("std");
+const expert_meta = @import("../../expert_meta.zig");
+const registry_mod = @import("../registry/registry.zig");
+
+const name = "zigts_expert_meta";
+
+pub const tool: registry_mod.ToolDef = .{
+    .name = name,
+    .label = "policy meta",
+    .description = "Show compiler version, policy version, policy hash, and rule counts.",
+    .execute = execute,
+};
+
+fn execute(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    // Args are ignored in v1. A future slice may accept `--text` to flip
+    // formatters; for now the tool always emits the JSON envelope so the
+    // output is directly consumable by a v1 client.
+    _ = args;
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    const info = expert_meta.compute();
+    try expert_meta.writeJson(&aw.writer, &info);
+
+    buf = aw.toArrayList();
+    return .{
+        .ok = true,
+        .body = try buf.toOwnedSlice(allocator),
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "execute returns v1 meta envelope" {
+    var result = try execute(testing.allocator, &.{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"compiler_version\":\"0.16.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"policy_version\":\"2026.04.2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"mode\":\"embedded\"") != null);
+}
+
+test "registry invokes the tool end-to-end" {
+    var reg: registry_mod.Registry = .{};
+    defer reg.deinit(testing.allocator);
+
+    try reg.register(testing.allocator, tool);
+
+    var result = try reg.invoke(testing.allocator, name, &.{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"rule_count\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"categories\":{\"verifier\":") != null);
+}

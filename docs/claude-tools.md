@@ -109,7 +109,7 @@ zigttp init my-app
 cd my-app
 ```
 
-`zigttp init` scaffolds the project structure: handler, tests, manifest. It does not install skill files - those are installed separately.
+`zigttp init` scaffolds the project structure: handler, tests, manifest. Agent tooling is installed separately.
 
 ### Installing the Skill
 
@@ -117,10 +117,10 @@ The skill files need to live in the project's local `.claude/skills/` directory 
 
 ```bash
 # From your project root
-zigts init
+zigttp agent init
 ```
 
-This writes skill files and hook scripts into the current directory:
+This writes skill files, hook scripts, and `.claude/settings.json` into the current directory:
 
 ```
 my-app/
@@ -134,21 +134,32 @@ my-app/
         virtual-modules.md  # Full API docs for zigttp:* imports
         testing-replay.md   # JSONL test format and replay workflow
         jsx-patterns.md     # JSX/TSX component patterns
+    skills/zigttp-virtual-module-author/
+      SKILL.md              # Built-in virtual module authoring workflow
+      references/
+        capability-discipline.md
+        module-specs.md
+        law-review.md
     hooks/
       pre-edit-zts.sh       # PreToolUse: check before edits
       post-edit-zts.sh      # PostToolUse: analyze after edits
+      pre-edit-zig-module.sh
+      post-edit-zig-module.sh
       session-start.sh      # SessionStart: export policy env vars
+    settings.json           # Hook wiring and deny rules
 ```
 
 Add `.claude/skills/` and `.claude/hooks/` to `.gitignore`. These are local tool configuration, not project source.
 
 ### Existing Project
 
-Same process. Run `zigts init` from the project root. It writes the skill files without touching your handler code.
+Same process. Run `zigttp agent init` from the project root. It writes the local agent tooling without touching your handler code.
+
+`zigts init` still exists for the older handler-only setup, but `zigttp agent init` is the canonical path now.
 
 ### Manual Setup
 
-If you prefer not to run `zigts init`, copy the skill files from any project that has them, or point Claude Code at them via your global `~/.claude/CLAUDE.md`:
+If you prefer not to run `zigttp agent init`, copy the skill files from any project that has them, or point Claude Code at them via your global `~/.claude/CLAUDE.md`:
 
 ```markdown
 <skills>
@@ -416,7 +427,7 @@ This works because virtual modules are the only I/O boundary. Handlers are deter
 
 ## Hooks
 
-`zigts init` installs three hook scripts into `.claude/hooks/` alongside the skill files. Each script calls `zigts`, parses the output, and returns structured JSON to Claude Code.
+`zigttp agent init` installs the handler hooks and the virtual-module hooks into `.claude/hooks/` alongside the skill files. Each script calls `zigts`, parses the output, and returns structured JSON to Claude Code.
 
 ### Pre-Edit Hook (PreToolUse)
 
@@ -436,7 +447,7 @@ Timeout: 30 seconds. On timeout or missing binary, the hook exits silently.
 
 ### Hook Sources
 
-The canonical hook scripts live in `packages/tools/src/hooks/` and are embedded into the `zigts` binary via `@embedFile`. Running `zigts init` copies them to `.claude/hooks/` with executable permissions. To update hooks after a zigts upgrade, run `zigts init --force`.
+The canonical hook scripts live in `packages/tools/src/hooks/` and are embedded into the `zigts` binary via `@embedFile`. Running `zigttp agent init` copies them to `.claude/hooks/` with executable permissions and writes `.claude/settings.json`. To update them after a zigttp or zigts upgrade, run `zigttp agent init --force`.
 
 ### Configuration
 
