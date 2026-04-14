@@ -119,6 +119,38 @@ pub fn build(b: *std.Build) void {
     const rollout_test_step = b.step("test-rollout", "Run rollout planner tests");
     rollout_test_step.dependOn(&run_rollout_tests.step);
 
+    const expert_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = tools_dep.path("src/expert.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    expert_tests.root_module.addImport("zigts", zigts_host_mod);
+    const run_expert_tests = b.addRunArtifact(expert_tests);
+    const expert_test_step = b.step("test-expert", "Run zigts expert v1 contract tripwires");
+    expert_test_step.dependOn(&run_expert_tests.step);
+
+    // Pi in-process tool registry tests. Rooted at src/pi_tests.zig so the
+    // module path anchors at packages/tools/src/ and the pi tree can reach
+    // sibling shared cores (expert_meta, verify_paths_core, describe_rule)
+    // via ../../X.zig without escaping Zig 0.16's module sandbox. The file
+    // graph is self-contained; mirrors how test-precompile and test-rollout
+    // work.
+    const pi_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = tools_dep.path("src/pi_tests.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    pi_tests.root_module.addImport("zigts", zigts_host_mod);
+    const run_pi_tests = b.addRunArtifact(pi_tests);
+    const pi_test_step = b.step("test-pi", "Run pi in-process tool registry tests");
+    pi_test_step.dependOn(&run_pi_tests.step);
+
     const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
@@ -294,6 +326,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_precompile_tests.step);
     test_step.dependOn(&run_prop_expect_tests.step);
     test_step.dependOn(&run_rollout_tests.step);
+    test_step.dependOn(&run_expert_tests.step);
+    test_step.dependOn(&run_pi_tests.step);
     test_step.dependOn(&capability_audit.step);
 
     // ZRuntime tests (native Zig runtime)
