@@ -7,15 +7,11 @@ const compat = @import("compat.zig");
 const json_utils = @import("json_utils.zig");
 
 pub const SecurityEventKind = enum {
-    capability_denied,
     policy_denied_env,
     policy_denied_cache,
     policy_denied_sql,
-    policy_denied_egress,
     arena_audit_failure,
     persistent_string_escape,
-    request_timeout,
-    oom,
 };
 
 pub const max_module_len: usize = 32;
@@ -216,7 +212,7 @@ test "Stream drops oldest on overflow and tracks drop count" {
     // Emit 5 events tagged via the detail field so we can identify survivors
     const details = [_][]const u8{ "e0", "e1", "e2", "e3", "e4" };
     for (details) |d| {
-        stream.emit(SecurityEvent.init(.capability_denied, "m", d));
+        stream.emit(SecurityEvent.init(.arena_audit_failure, "m", d));
     }
 
     try std.testing.expectEqual(@as(u64, 2), stream.stats().dropped);
@@ -260,7 +256,7 @@ test "global stream init/deinit/emit" {
     try initGlobal(std.testing.allocator, 16);
     defer deinitGlobal();
 
-    emitGlobal(SecurityEvent.init(.oom, "handler", "heap exhausted"));
+    emitGlobal(SecurityEvent.init(.arena_audit_failure, "handler", "heap exhausted"));
 
     const stream = getGlobal() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 1), stream.stats().emitted);
@@ -268,5 +264,5 @@ test "global stream init/deinit/emit" {
     var buf: [4]SecurityEvent = undefined;
     const n = stream.drain(&buf);
     try std.testing.expectEqual(@as(usize, 1), n);
-    try std.testing.expectEqual(SecurityEventKind.oom, buf[0].kind);
+    try std.testing.expectEqual(SecurityEventKind.arena_audit_failure, buf[0].kind);
 }
