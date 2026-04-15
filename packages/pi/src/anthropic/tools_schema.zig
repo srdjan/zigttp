@@ -8,6 +8,7 @@
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
 const json_writer = @import("json_writer.zig");
+const apply_edit = @import("apply_edit.zig");
 
 const input_schema_literal =
     "{\"type\":\"object\"," ++
@@ -20,10 +21,24 @@ pub fn writeToolsArray(
     registry: *const registry_mod.Registry,
 ) !void {
     try writer.writeByte('[');
-    var first = true;
+
+    // `apply_edit` is a synthetic tool: it appears in the tools array so
+    // the model knows how to propose an edit, but it is *not* a Registry
+    // entry and never reaches `Registry.invoke`. The assembler +
+    // anthropic client remap the matching tool_call into a first-class
+    // `turn.ModelReply.edit` before the loop hands it to the state
+    // machine. Its input_schema is richer than the minimal registry-tool
+    // schema because the model needs to know the exact field names.
+    try writer.writeAll("{\"name\":");
+    try json_writer.writeString(writer, apply_edit.tool_name);
+    try writer.writeAll(",\"description\":");
+    try json_writer.writeString(writer, apply_edit.tool_description);
+    try writer.writeAll(",\"input_schema\":");
+    try writer.writeAll(apply_edit.input_schema_literal);
+    try writer.writeByte('}');
+
     for (registry.list()) |entry| {
-        if (!first) try writer.writeByte(',');
-        first = false;
+        try writer.writeByte(',');
         try writer.writeAll("{\"name\":");
         try json_writer.writeString(writer, entry.name);
         try writer.writeAll(",\"description\":");
@@ -58,16 +73,38 @@ fn serialize(registry: *const registry_mod.Registry) ![]u8 {
     return try buf.toOwnedSlice(testing.allocator);
 }
 
-test "writeToolsArray: empty registry emits an empty array" {
+fn findTool(array: std.json.Value, name: []const u8) ?std.json.Value {
+    if (array != .array) return null;
+    for (array.array.items) |item| {
+        if (item != .object) continue;
+        const n = item.object.get("name") orelse continue;
+        if (n != .string) continue;
+        if (std.mem.eql(u8, n.string, name)) return item;
+    }
+    return null;
+}
+
+test "writeToolsArray: empty registry still emits the synthetic apply_edit tool" {
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
 
     const out = try serialize(&reg);
     defer testing.allocator.free(out);
-    try testing.expectEqualStrings("[]", out);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value == .array);
+    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    const synthetic = findTool(parsed.value, apply_edit.tool_name) orelse return error.TestFailed;
+    try testing.expect(synthetic.object.get("input_schema").? == .object);
+    // The synthetic schema declares file + content as required properties.
+    const schema = synthetic.object.get("input_schema").?.object;
+    const required = schema.get("required").?;
+    try testing.expect(required == .array);
+    try testing.expectEqual(@as(usize, 2), required.array.items.len);
 }
 
-test "writeToolsArray: single tool produces parseable JSON with name, description, and schema" {
+test "writeToolsArray: registered tool appears alongside apply_edit, found by name" {
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
     try reg.register(testing.allocator, .{
@@ -84,20 +121,16 @@ test "writeToolsArray: single tool produces parseable JSON with name, descriptio
     defer parsed.deinit();
 
     try testing.expect(parsed.value == .array);
-    try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
+    try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
 
-    const first = parsed.value.array.items[0];
-    try testing.expect(first == .object);
-    const name = first.object.get("name").?;
-    try testing.expectEqualStrings("zigts_expert_meta", name.string);
-    const desc = first.object.get("description").?;
-    try testing.expectEqualStrings("Emit policy metadata.", desc.string);
-    const schema = first.object.get("input_schema").?;
-    try testing.expect(schema == .object);
-    try testing.expectEqualStrings("object", schema.object.get("type").?.string);
+    const meta = findTool(parsed.value, "zigts_expert_meta") orelse return error.TestFailed;
+    try testing.expectEqualStrings("Emit policy metadata.", meta.object.get("description").?.string);
+
+    // apply_edit is still present alongside registered tools.
+    _ = findTool(parsed.value, apply_edit.tool_name) orelse return error.TestFailed;
 }
 
-test "writeToolsArray: multiple tools separated by commas, order preserved" {
+test "writeToolsArray: multiple registered tools preserve insertion order" {
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
     try reg.register(testing.allocator, .{
@@ -119,9 +152,11 @@ test "writeToolsArray: multiple tools separated by commas, order preserved" {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
     defer parsed.deinit();
 
-    try testing.expectEqual(@as(usize, 2), parsed.value.array.items.len);
-    try testing.expectEqualStrings("alpha", parsed.value.array.items[0].object.get("name").?.string);
-    try testing.expectEqualStrings("beta", parsed.value.array.items[1].object.get("name").?.string);
+    try testing.expectEqual(@as(usize, 3), parsed.value.array.items.len);
+    // apply_edit is first, then alpha, then beta.
+    try testing.expectEqualStrings(apply_edit.tool_name, parsed.value.array.items[0].object.get("name").?.string);
+    try testing.expectEqualStrings("alpha", parsed.value.array.items[1].object.get("name").?.string);
+    try testing.expectEqualStrings("beta", parsed.value.array.items[2].object.get("name").?.string);
 }
 
 test "writeToolsArray: description with quotes and backslashes is escaped" {
@@ -139,8 +174,9 @@ test "writeToolsArray: description with quotes and backslashes is escaped" {
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
     defer parsed.deinit();
+    const tricky = findTool(parsed.value, "tricky") orelse return error.TestFailed;
     try testing.expectEqualStrings(
         "has \"quotes\" and \\ backslash",
-        parsed.value.array.items[0].object.get("description").?.string,
+        tricky.object.get("description").?.string,
     );
 }

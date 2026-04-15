@@ -29,6 +29,7 @@ comptime {
     _ = @import("anthropic/tools_schema.zig");
     _ = @import("anthropic/request.zig");
     _ = @import("anthropic/response_assembler.zig");
+    _ = @import("anthropic/apply_edit.zig");
     _ = @import("anthropic/client.zig");
     _ = @import("app.zig");
 }
