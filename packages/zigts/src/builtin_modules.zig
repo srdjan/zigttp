@@ -10,6 +10,7 @@ const mb = @import("module_binding.zig");
 const ModuleBinding = mb.ModuleBinding;
 const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
+const std = @import("std");
 
 const env_mod = @import("modules/env.zig");
 const crypto_mod = @import("modules/crypto.zig");
@@ -62,33 +63,48 @@ pub const all = builtins ++ extension_bindings.all;
 /// Number of built-in modules.
 pub const count = all.len;
 
-const builtin_spec_paths = [_][]const u8{
-    "../module-specs/env.json",
-    "../module-specs/crypto.json",
-    "../module-specs/router.json",
-    "../module-specs/auth.json",
-    "../module-specs/validate.json",
-    "../module-specs/decode.json",
-    "../module-specs/cache.json",
-    "../module-specs/sql.json",
-    "../module-specs/io.json",
-    "../module-specs/scope.json",
-    "../module-specs/compose.json",
-    "../module-specs/durable.json",
-    "../module-specs/url.json",
-    "../module-specs/id.json",
-    "../module-specs/http-mod.json",
-    "../module-specs/log.json",
-    "../module-specs/text.json",
-    "../module-specs/time.json",
-    "../module-specs/ratelimit.json",
-    "../module-specs/service.json",
+pub const BuiltinGovernanceEntry = struct {
+    specifier: []const u8,
+    module_path: []const u8,
+    spec_path: []const u8,
+};
+
+pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
+    .{ .specifier = "zigttp:env", .module_path = "packages/zigts/src/modules/env.zig", .spec_path = "packages/zigts/module-specs/env.json" },
+    .{ .specifier = "zigttp:crypto", .module_path = "packages/zigts/src/modules/crypto.zig", .spec_path = "packages/zigts/module-specs/crypto.json" },
+    .{ .specifier = "zigttp:router", .module_path = "packages/zigts/src/modules/router.zig", .spec_path = "packages/zigts/module-specs/router.json" },
+    .{ .specifier = "zigttp:auth", .module_path = "packages/zigts/src/modules/auth.zig", .spec_path = "packages/zigts/module-specs/auth.json" },
+    .{ .specifier = "zigttp:validate", .module_path = "packages/zigts/src/modules/validate.zig", .spec_path = "packages/zigts/module-specs/validate.json" },
+    .{ .specifier = "zigttp:decode", .module_path = "packages/zigts/src/modules/decode.zig", .spec_path = "packages/zigts/module-specs/decode.json" },
+    .{ .specifier = "zigttp:cache", .module_path = "packages/zigts/src/modules/cache.zig", .spec_path = "packages/zigts/module-specs/cache.json" },
+    .{ .specifier = "zigttp:sql", .module_path = "packages/zigts/src/modules/sql.zig", .spec_path = "packages/zigts/module-specs/sql.json" },
+    .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/io.zig", .spec_path = "packages/zigts/module-specs/io.json" },
+    .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/scope.zig", .spec_path = "packages/zigts/module-specs/scope.json" },
+    .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/compose.zig", .spec_path = "packages/zigts/module-specs/compose.json" },
+    .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/durable.zig", .spec_path = "packages/zigts/module-specs/durable.json" },
+    .{ .specifier = "zigttp:url", .module_path = "packages/zigts/src/modules/url.zig", .spec_path = "packages/zigts/module-specs/url.json" },
+    .{ .specifier = "zigttp:id", .module_path = "packages/zigts/src/modules/id.zig", .spec_path = "packages/zigts/module-specs/id.json" },
+    .{ .specifier = "zigttp:http", .module_path = "packages/zigts/src/modules/http_mod.zig", .spec_path = "packages/zigts/module-specs/http-mod.json" },
+    .{ .specifier = "zigttp:log", .module_path = "packages/zigts/src/modules/log.zig", .spec_path = "packages/zigts/module-specs/log.json" },
+    .{ .specifier = "zigttp:text", .module_path = "packages/zigts/src/modules/text.zig", .spec_path = "packages/zigts/module-specs/text.json" },
+    .{ .specifier = "zigttp:time", .module_path = "packages/zigts/src/modules/time.zig", .spec_path = "packages/zigts/module-specs/time.json" },
+    .{ .specifier = "zigttp:ratelimit", .module_path = "packages/zigts/src/modules/ratelimit.zig", .spec_path = "packages/zigts/module-specs/ratelimit.json" },
+    .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/service.zig", .spec_path = "packages/zigts/module-specs/service.json" },
 };
 
 comptime {
-    if (builtin_spec_paths.len != builtins.len) {
-        @compileError("builtin_spec_paths must stay in sync with builtin_modules.builtins");
+    if (builtin_governance_entries.len != builtins.len) {
+        @compileError("builtin_governance_entries must stay in sync with builtin_modules.builtins");
     }
+    for (builtin_governance_entries, builtins) |entry, binding| {
+        if (!std.mem.eql(u8, entry.specifier, binding.specifier)) {
+            @compileError("builtin_governance_entries specifier drift: " ++ entry.specifier ++ " vs " ++ binding.specifier);
+        }
+    }
+}
+
+pub fn governanceEntries() []const BuiltinGovernanceEntry {
+    return &builtin_governance_entries;
 }
 
 // Validate all bindings at compile time. Produces compile errors for
@@ -130,8 +146,6 @@ pub fn findFunction(func_name: []const u8) ?struct { binding: *const ModuleBindi
     }
     return null;
 }
-
-const std = @import("std");
 
 // -------------------------------------------------------------------------
 // Tests
@@ -272,11 +286,19 @@ test "module capability annotations cover audited helper-enforced built-ins" {
 }
 
 test "every in-tree builtin module has a module spec artifact" {
-    inline for (builtin_spec_paths) |path| {
-        const full_path = "packages/zigts/" ++ path[3..];
-        try std.testing.expect(file_io.fileExists(std.testing.allocator, full_path));
-        const contents = try file_io.readFile(std.testing.allocator, full_path, 64 * 1024);
+    inline for (builtin_governance_entries) |entry| {
+        try std.testing.expect(file_io.fileExists(std.testing.allocator, entry.spec_path));
+        const contents = try file_io.readFile(std.testing.allocator, entry.spec_path, 64 * 1024);
         defer std.testing.allocator.free(contents);
         try std.testing.expect(contents.len > 0);
     }
+}
+
+test "governance entries stay aligned with public built-ins" {
+    const entries = governanceEntries();
+    try std.testing.expectEqual(builtins.len, entries.len);
+    try std.testing.expectEqualStrings("zigttp:env", entries[0].specifier);
+    try std.testing.expectEqualStrings("packages/zigts/src/modules/env.zig", entries[0].module_path);
+    try std.testing.expectEqualStrings("packages/zigts/module-specs/env.json", entries[0].spec_path);
+    try std.testing.expectEqualStrings("zigttp:service", entries[entries.len - 1].specifier);
 }

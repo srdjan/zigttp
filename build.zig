@@ -318,6 +318,11 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(zigts_exe);
 
+    const run_module_governance = b.addRunArtifact(zigts_exe);
+    run_module_governance.addArgs(&.{ "expert", "verify-modules", "--builtins", "--strict", "--json" });
+    const module_governance_step = b.step("test-module-governance", "Run built-in module governance audit");
+    module_governance_step.dependOn(&run_module_governance.step);
+
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -358,6 +363,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_expert_tests.step);
     test_step.dependOn(&run_pi_tests.step);
     test_step.dependOn(&capability_audit.step);
+    test_step.dependOn(&run_module_governance.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{

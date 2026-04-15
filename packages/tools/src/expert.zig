@@ -186,28 +186,30 @@ fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void 
 }
 
 fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var json_mode = false;
-    var paths: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer paths.deinit(allocator);
-
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--json")) {
-            json_mode = true;
-        } else if (std.mem.eql(u8, arg, "--help")) {
+    var parsed = parseVerifyModulesArgs(allocator, argv) catch |err| switch (err) {
+        error.InvalidArguments, error.UnknownArgument => {
             printVerifyModulesHelp();
-            return;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            try paths.append(allocator, arg);
-        }
-    }
+            return err;
+        },
+        else => return err,
+    };
+    defer parsed.paths.deinit(allocator);
 
-    if (paths.items.len == 0) {
+    if (parsed.help) {
         printVerifyModulesHelp();
-        return error.MissingArgument;
+        return;
     }
 
     const hash = rule_registry.policyHash();
-    var result = try module_audit.verifyPaths(allocator, paths.items);
+    var result = if (parsed.builtins)
+        try module_audit.verifyBuiltins(allocator, .{ .strict = parsed.strict })
+    else blk: {
+        if (parsed.paths.items.len == 0) {
+            printVerifyModulesHelp();
+            return error.MissingArgument;
+        }
+        break :blk try module_audit.verifyPaths(allocator, parsed.paths.items, .{ .strict = parsed.strict });
+    };
     defer result.deinit(allocator);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -215,7 +217,7 @@ fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
 
-    if (json_mode) {
+    if (parsed.json_mode) {
         try module_audit.writeJsonEnvelope(w, &result, hash);
     } else if (result.diagnostics.items.len == 0) {
         try w.print("Verified {d} virtual module file(s): no issues\n", .{result.checked_files.items.len});
@@ -244,6 +246,44 @@ fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) !voi
     if (result.hasErrors()) std.process.exit(1);
 }
 
+const VerifyModulesArgs = struct {
+    help: bool = false,
+    json_mode: bool = false,
+    builtins: bool = false,
+    strict: bool = false,
+    paths: std.ArrayListUnmanaged([]const u8) = .empty,
+};
+
+fn parseVerifyModulesArgs(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+) !VerifyModulesArgs {
+    var parsed = VerifyModulesArgs{};
+    errdefer parsed.paths.deinit(allocator);
+
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--json")) {
+            parsed.json_mode = true;
+        } else if (std.mem.eql(u8, arg, "--help")) {
+            parsed.help = true;
+        } else if (std.mem.eql(u8, arg, "--builtins")) {
+            parsed.builtins = true;
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            parsed.strict = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownArgument;
+        } else {
+            try parsed.paths.append(allocator, arg);
+        }
+    }
+
+    if (parsed.builtins and parsed.paths.items.len > 0) {
+        return error.InvalidArguments;
+    }
+
+    return parsed;
+}
+
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
@@ -255,7 +295,8 @@ fn printExpertHelp() void {
         \\Usage:
         \\  zigts expert meta [--json]
         \\  zigts expert verify-paths <file>... [--json]
-        \\  zigts expert verify-modules <file>... [--json]
+        \\  zigts expert verify-modules <file>... [--strict] [--json]
+        \\  zigts expert verify-modules --builtins [--strict] [--json]
         \\  zigts expert review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
         \\  zigts expert edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
         \\  zigts expert describe-rule [rule-name|code] [--json] [--hash]
@@ -304,14 +345,18 @@ fn printVerifyModulesHelp() void {
     const help =
         \\zigts expert verify-modules - audit built-in virtual module files
         \\
-        \\Usage: zigts expert verify-modules <file>... [--json]
+        \\Usage:
+        \\  zigts expert verify-modules <file>... [--strict] [--json]
+        \\  zigts expert verify-modules --builtins [--strict] [--json]
         \\
-        \\Accepts paths under:
-        \\  packages/zigts/src/modules/*.zig
-        \\  packages/zigts/module-specs/*.json
+        \\`--builtins` audits the authoritative public built-in module/spec set.
+        \\Positional paths audit individual built-in module/spec files.
+        \\Paths under packages/zigts/src/modules/ that are not public built-ins
+        \\are ignored so editor hooks stay advisory and low-noise.
         \\
         \\Checks for forbidden direct effect usage, helper/capability drift,
         \\and mismatches between the Zig binding and the module spec artifact.
+        \\`--strict` upgrades missing-spec governance warnings into errors.
         \\Exit code 1 if any errors found.
         \\
     ;
@@ -337,4 +382,21 @@ test "v1 contract: policy_version pinned" {
 test "v1 contract: every rule has a category" {
     const sum = category_counts.verifier + category_counts.policy + category_counts.property;
     try std.testing.expectEqual(rule_registry.all_rules.len, sum);
+}
+
+test "verify-modules arg parser accepts builtins and strict flags" {
+    var parsed = try parseVerifyModulesArgs(std.testing.allocator, &.{ "--builtins", "--strict", "--json" });
+    defer parsed.paths.deinit(std.testing.allocator);
+
+    try std.testing.expect(parsed.builtins);
+    try std.testing.expect(parsed.strict);
+    try std.testing.expect(parsed.json_mode);
+    try std.testing.expectEqual(@as(usize, 0), parsed.paths.items.len);
+}
+
+test "verify-modules arg parser rejects mixing builtins and positional paths" {
+    try std.testing.expectError(
+        error.InvalidArguments,
+        parseVerifyModulesArgs(std.testing.allocator, &.{ "--builtins", "packages/zigts/src/modules/env.zig" }),
+    );
 }

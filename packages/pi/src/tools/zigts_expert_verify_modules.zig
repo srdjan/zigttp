@@ -27,7 +27,7 @@ fn execute(
         return registry_mod.ToolResult.err(allocator, "zigts_expert_verify_modules requires at least one path\n");
     }
 
-    var result = try module_audit.verifyPaths(allocator, args);
+    var result = try module_audit.verifyPaths(allocator, args, .{});
     defer result.deinit(allocator);
 
     var buf: std.ArrayList(u8) = .empty;

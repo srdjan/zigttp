@@ -86,15 +86,24 @@ The absence of a capability does not make these modules "trusted": they still go
 
 ## The build-time audit
 
-`zig build test-capability-audit` grep-walks `packages/zigts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the enforcement that keeps the capability declarations honest - without it, an implementation drift would silently re-introduce an unsandboxed path.
+`zig build test-capability-audit` grep-walks `packages/zigts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the broad helper-bypass tripwire - it watches every module implementation, including internal helpers.
+
+`zig build test-module-governance` is the public built-in governance gate. It runs `zigts expert verify-modules --builtins --strict --json` against the authoritative built-in set from `packages/zigts/src/builtin_modules.zig` and fails on:
+
+- direct forbidden effect usage
+- undeclared helper-capability use
+- binding/spec specifier drift
+- binding/spec capability drift
+- missing spec artifacts for public built-ins
 
 Run it after any change under `modules/`:
 
 ```bash
 zig build test-capability-audit
+zig build test-module-governance
 ```
 
-The CI `test` job on `macos-latest` and `ubuntu-latest` runs this pass on every push.
+The release CI job runs both checks explicitly. Local `zig build test` also depends on `test-module-governance`.
 
 ## Adding a new module
 
@@ -103,7 +112,7 @@ Follow these steps, in order:
 1. **Declare the `ModuleBinding`** in your new `modules/foo.zig` with `specifier`, `effect` (`.read`, `.write`, or `.none`), and `required_capabilities`. Capability list must be exact - list nothing you do not call, and list everything you do call.
 2. **Wire the exports** into `modules/root.zig` so the resolver picks them up.
 3. **Call guarded helpers only through `module_binding` wrappers.** If you need a direct call inside a helper function, push and pop the active context manually (see the patterns referenced above).
-4. **Run the audit**: `zig build test-capability-audit` must pass.
+4. **Run the audits**: `zig build test-capability-audit test-module-governance` must pass.
 5. **Run the full test matrix**: `zig build test test-zigts test-zruntime`.
 6. **Add a fixture** under `tests/validate/` and, if the module has a handler-visible surface, an example under `examples/` with a `.test.jsonl` wired into `scripts/test-examples.sh`.
 7. **Update this document** with the new row in the capability table.

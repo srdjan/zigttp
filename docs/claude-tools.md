@@ -143,8 +143,8 @@ my-app/
     hooks/
       pre-edit-zts.sh       # PreToolUse: check before edits
       post-edit-zts.sh      # PostToolUse: analyze after edits
-      pre-edit-zig-module.sh
-      post-edit-zig-module.sh
+      pre-edit-zig-module.sh  # Advisory virtual-module governance
+      post-edit-zig-module.sh # Advisory virtual-module governance
       session-start.sh      # SessionStart: export policy env vars
     settings.json           # Hook wiring and deny rules
 ```
@@ -156,6 +156,8 @@ Add `.claude/skills/` and `.claude/hooks/` to `.gitignore`. These are local tool
 Same process. Run `zigttp agent init` from the project root. It writes the local agent tooling without touching your handler code.
 
 `zigts init` still exists for the older handler-only setup, but `zigttp agent init` is the canonical path now.
+
+The virtual-module hooks stay advisory in this phase. They call `zigts expert verify-modules "$file" --json`; the CLI now scopes those checks to the authoritative public built-in set, so edits to internal helper files under `packages/zigts/src/modules/` return clean no-op results instead of spec-governance noise.
 
 ### Manual Setup
 

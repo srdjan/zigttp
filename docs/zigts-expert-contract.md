@@ -130,9 +130,14 @@ Fields:
 
 ## `zigts expert verify-modules`
 
-Audits zigts built-in virtual module source files (the Zig modules under `packages/zigts/src/modules/` and their JSON specs under `packages/zigts/module-specs/`). Used by CI to catch direct effect usage and capability drift.
+Audits zigts built-in virtual module source files and their JSON specs. The authoritative public built-in set comes from `packages/zigts/src/builtin_modules.zig`; editor hooks may still point at individual files under `packages/zigts/src/modules/`, but files outside that public set are ignored so helper edits do not produce governance noise.
 
-**Invocation:** `zigts expert verify-modules <file>... --json`
+**Invocation:**
+
+```text
+zigts expert verify-modules <file>... [--strict] --json
+zigts expert verify-modules --builtins [--strict] --json
+```
 
 **Output shape** (`packages/tools/src/expert.zig:271-286`):
 
@@ -147,6 +152,13 @@ Audits zigts built-in virtual module source files (the Zig modules under `packag
 ```
 
 Identical shape to `verify-paths`. The only differences are the accepted input paths and the diagnostic codes produced (`ZVM00x` series).
+
+Mode semantics:
+
+- Positional-path mode audits the supplied public built-in module/spec files only.
+- `--builtins` audits the full authoritative public built-in set and reports every built-in module/spec file in `checked_files`.
+- Positional paths and `--builtins` are mutually exclusive.
+- `--strict` upgrades governance warnings that must block CI into errors. In v1 that means `ZVM003` ("built-in module has no module spec artifact") becomes error-severity instead of warning-severity.
 
 **Exit code:** `0` if no errors, `1` otherwise.
 
