@@ -26,6 +26,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const pi_dep = b.dependency("zigttp_pi", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const pi_app_mod = pi_dep.module("pi_app");
+
     // Sub-dependencies needed for zigts test module construction
     const zigttp_sdk_dep = b.dependency("zigttp_sdk", .{
         .target = target,
@@ -132,21 +138,25 @@ pub fn build(b: *std.Build) void {
     const expert_test_step = b.step("test-expert", "Run zigts expert v1 contract tripwires");
     expert_test_step.dependOn(&run_expert_tests.step);
 
-    // Pi in-process tool registry tests. Rooted at src/pi_tests.zig so the
-    // module path anchors at packages/tools/src/ and the pi tree can reach
-    // sibling shared cores (expert_meta, verify_paths_core, describe_rule)
-    // via ../../X.zig without escaping Zig 0.16's module sandbox. The file
-    // graph is self-contained; mirrors how test-precompile and test-rollout
-    // work.
+    // Pi in-process tool registry tests. The pi package owns its own module
+    // graph; shared tool cores (expert_meta, verify_paths_core, etc.) are
+    // consumed through the `zigts_cli` named module rather than relatively
+    // imported, so the file graphs stay disjoint.
+    const pi_host_tools_dep = b.dependency("zigttp_tools", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const pi_zigts_cli_host_mod = pi_host_tools_dep.module("zigts_cli");
     const pi_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/pi_tests.zig"),
+            .root_source_file = pi_dep.path("src/tests.zig"),
             .target = b.graph.host,
             .optimize = optimize,
             .link_libc = true,
         }),
     });
     pi_tests.root_module.addImport("zigts", zigts_host_mod);
+    pi_tests.root_module.addImport("zigts_cli", pi_zigts_cli_host_mod);
     const run_pi_tests = b.addRunArtifact(pi_tests);
     const pi_test_step = b.step("test-pi", "Run pi in-process tool registry tests");
     pi_test_step.dependOn(&run_pi_tests.step);
@@ -180,6 +190,7 @@ pub fn build(b: *std.Build) void {
     // Add zigts module to main executable
     exe.root_module.addImport("zigts", zigts_mod);
     exe.root_module.addImport("zigts_cli", zigts_cli_mod);
+    exe.root_module.addImport("pi_app", pi_app_mod);
     exe.root_module.addImport("project_config", project_config_mod);
 
     // If handler is specified, precompile it and add as dependency

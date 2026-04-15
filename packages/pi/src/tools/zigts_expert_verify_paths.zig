@@ -1,21 +1,16 @@
-//! Both this tool and `zigts expert verify-modules --json` go through
-//! `module_audit.writeJsonEnvelope`, so the TUI and CLI stay byte-identical.
-//!
 //! `ToolResult.ok` mirrors the v1 envelope's `ok` field so callers can branch
 //! on the tool result without parsing the body.
 
 const std = @import("std");
-const zigts = @import("zigts");
-const rule_registry = zigts.rule_registry;
-const module_audit = @import("../../module_audit.zig");
+const verify_paths_core = @import("zigts_cli").verify_paths_core;
 const registry_mod = @import("../registry/registry.zig");
 
-const name = "zigts_expert_verify_modules";
+const name = "zigts_expert_verify_paths";
 
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
-    .label = "verify module(s)",
-    .description = "Audit built-in virtual module files for capability and effect discipline.",
+    .label = "verify handler(s)",
+    .description = "Run full analysis on one or more handler files and emit the v1 envelope.",
     .execute = execute,
 };
 
@@ -24,22 +19,18 @@ fn execute(
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
     if (args.len == 0) {
-        return registry_mod.ToolResult.err(allocator, "zigts_expert_verify_modules requires at least one path\n");
+        return registry_mod.ToolResult.err(allocator, "zigts_expert_verify_paths requires at least one path\n");
     }
-
-    var result = try module_audit.verifyPaths(allocator, args);
-    defer result.deinit(allocator);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-    const hash = rule_registry.policyHash();
-    try module_audit.writeJsonEnvelope(&aw.writer, &result, hash);
+    const outcome = try verify_paths_core.writeJsonEnvelope(allocator, &aw.writer, args);
 
     buf = aw.toArrayList();
     return .{
-        .ok = !result.hasErrors(),
+        .ok = outcome.ok,
         .body = try buf.toOwnedSlice(allocator),
     };
 }
@@ -58,13 +49,12 @@ test "missing args returns not-ok body" {
     try testing.expect(std.mem.indexOf(u8, result.body, "requires at least one path") != null);
 }
 
-test "nonexistent module path produces a v1 envelope" {
-    var result = try execute(testing.allocator, &.{"/tmp/zigts-pi-not-a-module.zig"});
+test "execute on a file that does not exist emits ZTS000 envelope" {
+    var result = try execute(testing.allocator, &.{"/tmp/zigts-pi-does-not-exist.ts"});
     defer result.deinit(testing.allocator);
 
-    // The audit reports "unknown virtual module file" or similar, but the
-    // envelope shape must match regardless of the specific diagnostic.
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"ok\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"ZTS000\"") != null);
     try testing.expect(std.mem.indexOf(u8, result.body, "\"policy_version\":\"2026.04.2\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"checked_files\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"violations\":") != null);
 }

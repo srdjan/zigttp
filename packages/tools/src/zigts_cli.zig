@@ -3,18 +3,23 @@ const std = @import("std");
 pub const precompile = @import("precompile.zig");
 pub const deploy_manifest = @import("deploy_manifest.zig");
 pub const upgrade_verifier = @import("upgrade_verifier.zig");
+// Re-exports for the pi package, which consumes shared tool cores through
+// the `zigts_cli` named module instead of reaching into tools/src/ directly.
+pub const expert_meta = @import("expert_meta.zig");
+pub const verify_paths_core = @import("verify_paths_core.zig");
+pub const describe_rule = @import("describe_rule.zig");
+pub const edit_simulate = @import("edit_simulate.zig");
+pub const module_audit = @import("module_audit.zig");
+pub const json_diagnostics = @import("json_diagnostics.zig");
 const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");
 const system_rollout = @import("system_rollout.zig");
 const init_command = @import("init_command.zig");
-const edit_simulate = @import("edit_simulate.zig");
-const describe_rule = @import("describe_rule.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
 const expert = @import("expert.zig");
-const pi_app = @import("pi_app.zig");
 const project_config_mod = @import("project_config");
 const zigts = @import("zigts");
 const zigts_file_io = zigts.file_io;
@@ -97,17 +102,9 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try expert.runWithArgs(allocator, argv[1..]);
         return;
     }
-    if (std.mem.eql(u8, command, "pi")) {
-        try pi_app.run(allocator);
-        return;
-    }
 
     printHelp();
     return error.UnknownCommand;
-}
-
-pub fn runPi(allocator: std.mem.Allocator) !void {
-    try pi_app.run(allocator);
 }
 
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -347,7 +344,6 @@ fn printHelp() void {
         \\  zigts search <keyword> [--json]
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
         \\  zigts expert <subcommand> [options]   (hook-oriented interface)
-        \\  zigts pi                              (interactive in-process tool registry)
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

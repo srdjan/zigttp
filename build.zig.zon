@@ -19,6 +19,9 @@
         .zigttp_ext_demo = .{
             .path = "packages/zigttp-ext-demo",
         },
+        .zigttp_pi = .{
+            .path = "packages/pi",
+        },
     },
     .paths = .{
         "build.zig",

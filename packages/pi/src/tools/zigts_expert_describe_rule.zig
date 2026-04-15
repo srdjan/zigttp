@@ -4,7 +4,7 @@
 const std = @import("std");
 const zigts = @import("zigts");
 const rule_registry = zigts.rule_registry;
-const describe_rule = @import("../../describe_rule.zig");
+const describe_rule = @import("zigts_cli").describe_rule;
 const registry_mod = @import("../registry/registry.zig");
 
 const name = "zigts_expert_describe_rule";

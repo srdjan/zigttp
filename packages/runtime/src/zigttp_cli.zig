@@ -101,7 +101,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "pi")) {
-        try zigts_cli.runPi(allocator);
+        const pi_app = @import("pi_app");
+        try pi_app.run(allocator);
         return;
     }
     if (std.mem.eql(u8, command, "login")) {

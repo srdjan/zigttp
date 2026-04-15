@@ -2,7 +2,7 @@
 //! `expert_meta.writeJson`, so the TUI and CLI stay byte-identical.
 
 const std = @import("std");
-const expert_meta = @import("../../expert_meta.zig");
+const expert_meta = @import("zigts_cli").expert_meta;
 const registry_mod = @import("../registry/registry.zig");
 
 const name = "zigts_expert_meta";
