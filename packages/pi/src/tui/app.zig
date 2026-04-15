@@ -31,7 +31,7 @@ pub fn run(
     var editor: LineEditor = .{};
     defer editor.deinit(allocator);
 
-    var session = agent.AgentSession.init();
+    var session = try agent.initFromEnv(allocator);
     defer session.deinit(allocator);
     var agent_mode = false;
 

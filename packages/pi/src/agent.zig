@@ -1,32 +1,37 @@
-//! Agent-mode session wrapper around `loop.runTurn`. Ships today with a
-//! `StubClient` that returns a fixed text reply regardless of the prompt;
-//! slice 3 of the phase-2 plan replaces the stub with a real Anthropic
-//! streaming client by swapping the `ModelClient` stored on the session.
+//! Agent-mode session wrapper around `loop.runTurn`. Carries a backend
+//! union that is either a `StubClient` (default, zero-config, fixed
+//! reply) or a live Anthropic `client.Client` built from an API key and
+//! a system prompt. Callers swap backends at session construction; the
+//! rest of the loop is agnostic.
 //!
-//! The session owns a long-lived `Transcript` that grows across turns.
-//! `runOneTurn` drives one pass through the loop driver, then renders just
-//! the latest appended transcript entry (the turn's rendered output) to an
-//! owned `[]u8` the caller frees. Rendering the whole transcript per turn
-//! would re-print history on every submission.
+//! The session owns a long-lived `Transcript` that grows across turns
+//! plus, in the live path, an allocator-owned copy of the system prompt
+//! so the persona bytes outlive whatever buffer produced them.
+//! `runOneTurn` drives one pass through the loop driver, then renders
+//! the latest appended transcript entry to an owned `[]u8` the caller
+//! frees. Rendering the whole transcript per turn would re-print
+//! history on every submission.
 
 const std = @import("std");
 const loop = @import("loop.zig");
 const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
+const anthropic_client = @import("anthropic/client.zig");
+const expert_persona = @import("expert_persona.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
 
 pub const stub_reply_text =
-    "agent stub: real model lands with the Anthropic client slice";
+    "agent stub: set ZIGTTP_PI_LIVE=1 and ANTHROPIC_API_KEY to enable the real model";
 
 /// Meta command that toggles agent mode on/off in the REPL and TUI.
 pub const toggle_command = ":agent";
 
-/// Production-side client used until the Anthropic client lands. Lives in
-/// `agent.zig` rather than `loop.zig` so `loop.CannedClient` (test-only) and
-/// this one are kept visibly distinct.
+/// Zero-state client used when no Anthropic credentials are present.
+/// Returns a fixed reply regardless of the prompt so the loop still
+/// exercises every path from keyboard to transcript.
 pub const StubClient = struct {
     fn requestFn(
         ctx: *anyopaque,
@@ -47,18 +52,86 @@ pub const StubClient = struct {
     }
 };
 
+pub const Backend = union(enum) {
+    stub: StubClient,
+    live: anthropic_client.Client,
+};
+
 pub const AgentSession = struct {
     transcript: Transcript = .{},
-    stub: StubClient = .{},
+    backend: Backend = .{ .stub = .{} },
+    /// Allocator-owned copy of the system prompt bytes backing the live
+    /// client's Config. Null for the stub path.
+    system_prompt_owned: ?[]u8 = null,
 
-    pub fn init() AgentSession {
+    pub fn initStub() AgentSession {
         return .{};
+    }
+
+    /// Constructs a session whose backend is a real Anthropic client.
+    /// Dupes the system prompt so the caller's buffer can be freed
+    /// independently. Dupes the API key for the same reason.
+    pub fn initLive(
+        allocator: std.mem.Allocator,
+        api_key: []const u8,
+        system_prompt: []const u8,
+    ) !AgentSession {
+        const prompt_owned = try allocator.dupe(u8, system_prompt);
+        errdefer allocator.free(prompt_owned);
+        const key_owned = try allocator.dupe(u8, api_key);
+        errdefer allocator.free(key_owned);
+        return .{
+            .backend = .{ .live = anthropic_client.Client.init(.{
+                .api_key = key_owned,
+                .system_prompt = prompt_owned,
+            }) },
+            .system_prompt_owned = prompt_owned,
+        };
     }
 
     pub fn deinit(self: *AgentSession, allocator: std.mem.Allocator) void {
         self.transcript.deinit(allocator);
+        if (self.system_prompt_owned) |s| allocator.free(s);
+        switch (self.backend) {
+            .stub => {},
+            .live => |*c| allocator.free(c.config.api_key),
+        }
+    }
+
+    pub fn modelClient(self: *AgentSession) loop.ModelClient {
+        return switch (self.backend) {
+            .stub => (&self.backend.stub).asClient(),
+            .live => (&self.backend.live).asModelClient(),
+        };
+    }
+
+    pub fn isLive(self: *const AgentSession) bool {
+        return self.backend == .live;
     }
 };
+
+/// Reads `ZIGTTP_PI_LIVE` and `ANTHROPIC_API_KEY` from the environment. If
+/// both are set (and `ZIGTTP_PI_LIVE=1`), builds the persona bundle and
+/// returns a live session. Otherwise returns a stub session. Callers see
+/// a single constructor regardless of which path activated.
+pub fn initFromEnv(allocator: std.mem.Allocator) !AgentSession {
+    const opt_in = envVar("ZIGTTP_PI_LIVE") orelse return initStub();
+    if (!std.mem.eql(u8, opt_in, "1")) return initStub();
+    const api_key = envVar("ANTHROPIC_API_KEY") orelse return initStub();
+
+    const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+    defer allocator.free(system_prompt);
+    return try AgentSession.initLive(allocator, api_key, system_prompt);
+}
+
+fn envVar(name_z: [:0]const u8) ?[]const u8 {
+    const raw = std.c.getenv(name_z) orelse return null;
+    return std.mem.sliceTo(raw, 0);
+}
+
+fn initStub() AgentSession {
+    return AgentSession.initStub();
+}
 
 /// Runs one turn through the loop driver and returns an owned slice holding
 /// the rendered plain-text form of the message the turn appended. Caller
@@ -74,7 +147,7 @@ pub fn runOneTurn(
 ) ![]u8 {
     _ = try loop.runTurn(
         allocator,
-        session.stub.asClient(),
+        session.modelClient(),
         registry,
         &session.transcript,
         user_text,
@@ -91,8 +164,8 @@ pub fn runOneTurn(
 
 const testing = std.testing;
 
-test "runOneTurn: fresh session grows transcript by 2 and renders model reply" {
-    var session = AgentSession.init();
+test "runOneTurn: fresh stub session grows transcript by 2 and renders model reply" {
+    var session = AgentSession.initStub();
     defer session.deinit(testing.allocator);
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
@@ -110,7 +183,7 @@ test "runOneTurn: fresh session grows transcript by 2 and renders model reply" {
 }
 
 test "runOneTurn: two turns back-to-back accumulate in the transcript" {
-    var session = AgentSession.init();
+    var session = AgentSession.initStub();
     defer session.deinit(testing.allocator);
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
@@ -137,4 +210,26 @@ test "StubClient ignores user_text and always returns the stub reply" {
         .text => |t| try testing.expectEqualStrings(stub_reply_text, t),
         else => return error.TestFailed,
     }
+}
+
+test "initLive dupes api_key and system_prompt, deinit releases both" {
+    var session = try AgentSession.initLive(
+        testing.allocator,
+        "sk-ant-test",
+        "you are a zigts expert",
+    );
+    defer session.deinit(testing.allocator);
+
+    try testing.expect(session.backend == .live);
+    try testing.expectEqualStrings("sk-ant-test", session.backend.live.config.api_key);
+    try testing.expectEqualStrings("you are a zigts expert", session.backend.live.config.system_prompt);
+    try testing.expect(session.system_prompt_owned != null);
+}
+
+test "modelClient returns a live client vtable when backend is live" {
+    var session = try AgentSession.initLive(testing.allocator, "k", "p");
+    defer session.deinit(testing.allocator);
+
+    const mc = session.modelClient();
+    try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.live)));
 }
