@@ -293,7 +293,10 @@ test "veto -> turn -> transcript pipeline: broken handler produces an error line
     });
     defer outcome.deinit(testing.allocator);
 
-    var machine: turn.TurnMachine = .{ .state = .verifying_edit };
+    // max_attempts=1 so the first failed veto is budget-exhausted immediately
+    // and surfaces as a diagnostic_box. With the default (3), the machine
+    // would emit retry_draft and the pipeline test wouldn't reach render.
+    var machine: turn.TurnMachine = .{ .state = .verifying_edit, .max_attempts = 1 };
     const action = machine.transition(.{ .edit_verified = outcome });
 
     var tr: Transcript = .{};

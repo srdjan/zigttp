@@ -43,6 +43,14 @@ pub const ModelClient = struct {
 
 pub const TurnResult = struct {
     final_state: turn.TurnState,
+    /// Final attempt counter at the moment the turn returned. 1 for the
+    /// happy path, 2..max_attempts when a retry landed the final edit,
+    /// and `max_attempts` for an exhausted retry budget.
+    attempt: u8,
+};
+
+pub const RunOptions = struct {
+    max_attempts: u8 = 3,
 };
 
 pub fn runTurn(
@@ -52,13 +60,24 @@ pub fn runTurn(
     transcript: *transcript_mod.Transcript,
     user_text: []const u8,
 ) !TurnResult {
+    return runTurnWith(allocator, client, registry, transcript, user_text, .{});
+}
+
+pub fn runTurnWith(
+    allocator: std.mem.Allocator,
+    client: ModelClient,
+    registry: *const registry_mod.Registry,
+    transcript: *transcript_mod.Transcript,
+    user_text: []const u8,
+    options: RunOptions,
+) !TurnResult {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const ta = arena.allocator();
 
     try transcript.append(allocator, .{ .user_text = user_text });
 
-    var machine: turn.TurnMachine = .{};
+    var machine: turn.TurnMachine = .{ .max_attempts = options.max_attempts };
     var next_event: turn.TurnEvent = .{ .user_submitted = user_text };
 
     while (true) {
@@ -73,6 +92,17 @@ pub fn runTurn(
                 const outcome = try veto.runVeto(ta, edit);
                 next_event = .{ .edit_verified = outcome };
             },
+            .retry_draft => |payload| {
+                const prompt = try std.fmt.allocPrint(
+                    ta,
+                    "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
+                        "Here is the diagnostic envelope. Fix the flagged violations and " ++
+                        "emit a new edit.\n\n{s}",
+                    .{ payload.attempt, payload.max_attempts, payload.diagnostic },
+                );
+                const reply = try client.request(ta, prompt);
+                next_event = .{ .model_replied = reply };
+            },
             .invoke_tool => |tc| {
                 const args = [_][]const u8{tc.args_json};
                 const result = try registry.invoke(ta, tc.name, &args);
@@ -86,11 +116,11 @@ pub fn runTurn(
                 // dupes it using the long-lived allocator before we return
                 // and `defer arena.deinit()` fires below.
                 try transcript.append(allocator, msg);
-                return .{ .final_state = machine.state };
+                return .{ .final_state = machine.state, .attempt = machine.attempt };
             },
-            .prompt_user => return .{ .final_state = machine.state },
-            .end_turn => return .{ .final_state = machine.state },
-            .none => return .{ .final_state = machine.state },
+            .prompt_user => return .{ .final_state = machine.state, .attempt = machine.attempt },
+            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt },
+            .none => return .{ .final_state = machine.state, .attempt = machine.attempt },
         }
     }
 }
@@ -121,6 +151,35 @@ const CannedClient = struct {
     }
 
     pub fn asClient(self: *CannedClient) ModelClient {
+        return .{
+            .context = self,
+            .request_fn = requestFn,
+        };
+    }
+};
+
+/// Iterates through a fixed list of canned replies, one per request.
+/// Used by the retry tests to script "bad, good" and "bad, bad, bad"
+/// scenarios without touching a real model.
+const SequenceClient = struct {
+    replies: []const turn.ModelReply,
+    index: usize = 0,
+
+    fn requestFn(
+        ctx: *anyopaque,
+        arena: std.mem.Allocator,
+        user_text: []const u8,
+    ) anyerror!turn.ModelReply {
+        const self: *SequenceClient = @ptrCast(@alignCast(ctx));
+        _ = arena;
+        _ = user_text;
+        if (self.index >= self.replies.len) return error.TestSequenceExhausted;
+        const reply = self.replies[self.index];
+        self.index += 1;
+        return reply;
+    }
+
+    pub fn asClient(self: *SequenceClient) ModelClient {
         return .{
             .context = self,
             .request_fn = requestFn,
@@ -261,4 +320,116 @@ test "user text is always the first transcript entry regardless of reply shape" 
 
     try testing.expectEqual(Tag.user_text, tr.at(0).tag);
     try testing.expectEqualStrings("original intent", tr.at(0).body);
+}
+
+// ---------------------------------------------------------------------------
+// Retry loop integration tests. Each drives a real `runVeto` through the
+// compiler so the retry path exercises the full diagnostic envelope shape,
+// not a hand-rolled mock. SequenceClient swaps replies between attempts.
+// ---------------------------------------------------------------------------
+
+const bad_handler =
+    "function handler(req: Request): Response { var x = 1; return Response.json({x}); }";
+const clean_handler =
+    "function handler(req: Request): Response { return Response.json({ok: true}); }";
+
+test "retry: one bad draft then one good draft lands a proof card" {
+    var seq: SequenceClient = .{ .replies = &.{
+        .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
+        .{ .edit = .{ .file = "handler.ts", .content = clean_handler, .before = null } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurn(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "add a GET route",
+    );
+
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(@as(u8, 2), result.attempt);
+    try testing.expectEqual(@as(usize, 2), tr.len());
+    try testing.expectEqual(Tag.proof_card, tr.at(1).tag);
+    try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"total\":0") != null);
+    try testing.expectEqual(@as(usize, 2), seq.index);
+}
+
+test "retry: budget exhausted after three bad drafts surfaces diagnostic" {
+    var seq: SequenceClient = .{ .replies = &.{
+        .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
+        .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
+        .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "add a GET route",
+        .{ .max_attempts = 3 },
+    );
+
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(@as(u8, 3), result.attempt);
+    try testing.expectEqual(@as(usize, 2), tr.len());
+    try testing.expectEqual(Tag.diagnostic_box, tr.at(1).tag);
+    try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"ZTS001\"") != null);
+    try testing.expectEqual(@as(usize, 3), seq.index);
+}
+
+test "retry: max_attempts=2 blocks a third call" {
+    var seq: SequenceClient = .{ .replies = &.{
+        .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
+        .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "add a GET route",
+        .{ .max_attempts = 2 },
+    );
+
+    try testing.expectEqual(@as(u8, 2), result.attempt);
+    try testing.expectEqual(Tag.diagnostic_box, tr.at(1).tag);
+    try testing.expectEqual(@as(usize, 2), seq.index);
+}
+
+test "retry: clean first draft has attempt=1 (regression guard for happy path)" {
+    var canned: CannedClient = .{ .reply = .{ .edit = .{
+        .file = "handler.ts",
+        .content = clean_handler,
+        .before = null,
+    } } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurn(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+    );
+
+    try testing.expectEqual(@as(u8, 1), result.attempt);
+    try testing.expectEqual(Tag.proof_card, tr.at(1).tag);
 }
