@@ -1,17 +1,17 @@
-//! Both this tool and `zigts modules --json` go through
-//! `json_diagnostics.writeModulesJson`, so the TUI and CLI stay
+//! Both this tool and `zigts features --json` go through
+//! `json_diagnostics.writeFeaturesJson`, so the TUI and CLI stay
 //! byte-identical.
 
 const std = @import("std");
-const json_diagnostics = @import("../../json_diagnostics.zig");
+const json_diagnostics = @import("zigts_cli").json_diagnostics;
 const registry_mod = @import("../registry/registry.zig");
 
-const name = "zigts_expert_modules";
+const name = "zigts_expert_features";
 
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
-    .label = "virtual modules",
-    .description = "List built-in zigttp:* virtual modules and their exports.",
+    .label = "language features",
+    .description = "List allowed and blocked JS/TS features with suggested alternatives.",
     .execute = execute,
 };
 
@@ -25,7 +25,7 @@ fn execute(
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-    try json_diagnostics.writeModulesJson(&aw.writer);
+    try json_diagnostics.writeFeaturesJson(&aw.writer);
 
     buf = aw.toArrayList();
     return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
@@ -37,12 +37,12 @@ fn execute(
 
 const testing = std.testing;
 
-test "modules emits JSON array with at least the env module" {
+test "features emits JSON array with at least one allowed and one blocked entry" {
     var result = try execute(testing.allocator, &.{});
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
     try testing.expectEqual(@as(u8, '['), result.body[0]);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"specifier\":\"zigttp:env\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"exports\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"status\":\"allowed\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "\"status\":\"blocked\"") != null);
 }

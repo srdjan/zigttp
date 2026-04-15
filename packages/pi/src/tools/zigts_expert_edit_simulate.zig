@@ -7,7 +7,7 @@
 //! CLI and registry paths are compatible: {"file", "content", "before"?}.
 
 const std = @import("std");
-const edit_simulate = @import("../../edit_simulate.zig");
+const edit_simulate = @import("zigts_cli").edit_simulate;
 const registry_mod = @import("../registry/registry.zig");
 
 const name = "zigts_expert_edit_simulate";

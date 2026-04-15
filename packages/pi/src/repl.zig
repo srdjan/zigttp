@@ -15,8 +15,8 @@ const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
 
 pub const Registry = registry_mod.Registry;
-pub const ToolResult = registry_mod.ToolResult;
-pub const ToolDef = registry_mod.ToolDef;
+const ToolResult = registry_mod.ToolResult;
+const ToolDef = registry_mod.ToolDef;
 
 pub const DispatchOutcome = union(enum) {
     noop,

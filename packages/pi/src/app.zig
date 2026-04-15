@@ -6,20 +6,21 @@
 //! inside the module sandbox Zig 0.16 enforces.
 
 const std = @import("std");
-const registry_mod = @import("pi/registry/registry.zig");
-const repl = @import("pi/repl.zig");
+const registry_mod = @import("registry/registry.zig");
+const repl = @import("repl.zig");
+const tui_app = @import("tui/app.zig");
 
-const meta_tool = @import("pi/tools/zigts_expert_meta.zig");
-const verify_paths_tool = @import("pi/tools/zigts_expert_verify_paths.zig");
-const describe_rule_tool = @import("pi/tools/zigts_expert_describe_rule.zig");
-const search_tool = @import("pi/tools/zigts_expert_search.zig");
-const edit_simulate_tool = @import("pi/tools/zigts_expert_edit_simulate.zig");
-const review_patch_tool = @import("pi/tools/zigts_expert_review_patch.zig");
-const features_tool = @import("pi/tools/zigts_expert_features.zig");
-const modules_tool = @import("pi/tools/zigts_expert_modules.zig");
-const verify_modules_tool = @import("pi/tools/zigts_expert_verify_modules.zig");
+const meta_tool = @import("tools/zigts_expert_meta.zig");
+const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
+const describe_rule_tool = @import("tools/zigts_expert_describe_rule.zig");
+const search_tool = @import("tools/zigts_expert_search.zig");
+const edit_simulate_tool = @import("tools/zigts_expert_edit_simulate.zig");
+const review_patch_tool = @import("tools/zigts_expert_review_patch.zig");
+const features_tool = @import("tools/zigts_expert_features.zig");
+const modules_tool = @import("tools/zigts_expert_modules.zig");
+const verify_modules_tool = @import("tools/zigts_expert_verify_modules.zig");
 
-pub const Registry = registry_mod.Registry;
+const Registry = registry_mod.Registry;
 
 pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
@@ -42,7 +43,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
     var registry = try buildRegistry(allocator);
     defer registry.deinit(allocator);
 
-    try repl.run(allocator, &registry);
+    const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
+    if (is_tty) {
+        try tui_app.run(allocator, &registry);
+    } else {
+        try repl.run(allocator, &registry);
+    }
 }
 
 // ---------------------------------------------------------------------------
