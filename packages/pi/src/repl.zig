@@ -91,7 +91,7 @@ pub fn run(
         _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
     }
 
-    var session = agent.AgentSession.init();
+    var session = try agent.initFromEnv(allocator);
     defer session.deinit(allocator);
     var agent_mode = false;
 
