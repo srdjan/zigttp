@@ -48,7 +48,8 @@ pub const SecurityLogger = struct {
             .nsec = @intCast(poll_ns % std.time.ns_per_s),
         };
         while (!self.stop.load(.acquire)) {
-            self.drainOnce(&batch);
+            const n = drainInto(&batch);
+            if (n > 0) self.writeBatch(batch[0..n]);
             _ = std.c.nanosleep(&ts, null);
         }
     }
@@ -60,12 +61,6 @@ pub const SecurityLogger = struct {
             if (n == 0) break;
             self.writeBatch(batch[0..n]);
         }
-    }
-
-    fn drainOnce(self: *SecurityLogger, batch: []security_events.SecurityEvent) void {
-        const n = drainInto(batch);
-        if (n == 0) return;
-        self.writeBatch(batch[0..n]);
     }
 
     fn drainInto(batch: []security_events.SecurityEvent) usize {
