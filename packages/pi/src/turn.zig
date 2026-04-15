@@ -96,6 +96,15 @@ pub const Message = union(enum) {
     tool_result: []const u8,
 };
 
+pub const RetryPayload = struct {
+    /// Borrowed from the failed EditOutcome.body; the loop driver frames
+    /// it into a retry prompt before calling the model client.
+    diagnostic: []const u8,
+    /// The attempt number the machine is *about* to start (2, 3, ...).
+    attempt: u8,
+    max_attempts: u8,
+};
+
 pub const Action = union(enum) {
     /// No side effect; caller waits for the next event.
     none,
@@ -105,6 +114,10 @@ pub const Action = union(enum) {
     run_veto: ModelReply.Edit,
     /// Execute a non-edit tool through the registry.
     invoke_tool: ModelReply.ToolCall,
+    /// Re-prompt the model with a failed veto's diagnostic. Semantically
+    /// distinct from `send_to_model` so the loop can frame the retry
+    /// prompt and count attempts without inferring intent from state.
+    retry_draft: RetryPayload,
     /// Append a message to the transcript.
     render: Message,
     /// Block the loop and ask the user to approve.
@@ -115,6 +128,11 @@ pub const Action = union(enum) {
 
 pub const TurnMachine = struct {
     state: TurnState = .idle,
+    /// Which attempt is currently in flight (1 = first draft). Bumped
+    /// whenever `fromVerifyingEdit` re-enters `awaiting_model` on a
+    /// failed veto with remaining budget.
+    attempt: u8 = 1,
+    max_attempts: u8 = 3,
 
     pub fn transition(self: *TurnMachine, event: TurnEvent) Action {
         // Cross-cutting events fire uniformly regardless of the current state.
@@ -169,12 +187,21 @@ pub const TurnMachine = struct {
     fn fromVerifyingEdit(self: *TurnMachine, event: TurnEvent) Action {
         switch (event) {
             .edit_verified => |outcome| {
-                self.state = .done;
-                const msg: Message = if (outcome.ok)
-                    .{ .proof_card = outcome.body }
-                else
-                    .{ .diagnostic_box = outcome.body };
-                return .{ .render = msg };
+                if (outcome.ok) {
+                    self.state = .done;
+                    return .{ .render = .{ .proof_card = outcome.body } };
+                }
+                if (self.attempt >= self.max_attempts) {
+                    self.state = .done;
+                    return .{ .render = .{ .diagnostic_box = outcome.body } };
+                }
+                self.attempt += 1;
+                self.state = .awaiting_model;
+                return .{ .retry_draft = .{
+                    .diagnostic = outcome.body,
+                    .attempt = self.attempt,
+                    .max_attempts = self.max_attempts,
+                } };
             },
             else => return .none,
         }
@@ -281,14 +308,98 @@ test "verifying_edit + edit_verified(ok) -> done with render(proof_card)" {
     }
 }
 
-test "verifying_edit + edit_verified(fail) -> done with render(diagnostic_box)" {
-    var m: TurnMachine = .{ .state = .verifying_edit };
+test "verifying_edit + edit_verified(fail) with max_attempts=1 exhausts immediately" {
+    var m: TurnMachine = .{ .state = .verifying_edit, .max_attempts = 1 };
     const action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "ZTS001 ..." } });
 
     try testing.expectEqual(TurnState.done, m.state);
     switch (action) {
         .render => |msg| switch (msg) {
             .diagnostic_box => |b| try testing.expectEqualStrings("ZTS001 ...", b),
+            else => return error.TestFailed,
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verifying_edit + edit_verified(fail) with budget remaining -> retry_draft" {
+    var m: TurnMachine = .{ .state = .verifying_edit, .max_attempts = 3 };
+    const action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "ZTS001 diag" } });
+
+    try testing.expectEqual(TurnState.awaiting_model, m.state);
+    try testing.expectEqual(@as(u8, 2), m.attempt);
+    switch (action) {
+        .retry_draft => |payload| {
+            try testing.expectEqualStrings("ZTS001 diag", payload.diagnostic);
+            try testing.expectEqual(@as(u8, 2), payload.attempt);
+            try testing.expectEqual(@as(u8, 3), payload.max_attempts);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verifying_edit + edit_verified(fail) at max_attempts -> render(diagnostic_box)" {
+    var m: TurnMachine = .{ .state = .verifying_edit, .attempt = 3, .max_attempts = 3 };
+    const action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "final diag" } });
+
+    try testing.expectEqual(TurnState.done, m.state);
+    switch (action) {
+        .render => |msg| switch (msg) {
+            .diagnostic_box => |b| try testing.expectEqualStrings("final diag", b),
+            else => return error.TestFailed,
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "retry sequence: two fails then one pass lands proof_card on attempt 3" {
+    var m: TurnMachine = .{ .state = .verifying_edit, .max_attempts = 3 };
+
+    // Attempt 1 fails -> retry_draft, attempt = 2
+    var action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "d1" } });
+    try testing.expect(action == .retry_draft);
+    try testing.expectEqual(@as(u8, 2), m.attempt);
+    try testing.expectEqual(TurnState.awaiting_model, m.state);
+
+    // Simulate the driver: model_replied(edit) -> verifying_edit again
+    m.state = .verifying_edit;
+
+    // Attempt 2 fails -> retry_draft, attempt = 3
+    action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "d2" } });
+    try testing.expect(action == .retry_draft);
+    try testing.expectEqual(@as(u8, 3), m.attempt);
+    try testing.expectEqual(TurnState.awaiting_model, m.state);
+
+    m.state = .verifying_edit;
+
+    // Attempt 3 passes -> render(proof_card), done
+    action = m.transition(.{ .edit_verified = .{ .ok = true, .body = "proof" } });
+    try testing.expectEqual(TurnState.done, m.state);
+    switch (action) {
+        .render => |msg| switch (msg) {
+            .proof_card => |b| try testing.expectEqualStrings("proof", b),
+            else => return error.TestFailed,
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "retry sequence: three fails in a row surfaces final diagnostic" {
+    var m: TurnMachine = .{ .state = .verifying_edit, .max_attempts = 3 };
+
+    var action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "d1" } });
+    try testing.expect(action == .retry_draft);
+    m.state = .verifying_edit;
+
+    action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "d2" } });
+    try testing.expect(action == .retry_draft);
+    m.state = .verifying_edit;
+
+    action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "d3-final" } });
+    try testing.expectEqual(TurnState.done, m.state);
+    switch (action) {
+        .render => |msg| switch (msg) {
+            .diagnostic_box => |b| try testing.expectEqualStrings("d3-final", b),
             else => return error.TestFailed,
         },
         else => return error.TestFailed,
