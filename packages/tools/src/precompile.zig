@@ -807,6 +807,10 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     }
 
     if (compiled.contract) |*contract| {
+        // Stamp the compiled-artifact hash so the runtime can verify the
+        // embedded bytecode at boot against the contract it shipped with.
+        std.crypto.hash.sha2.Sha256.hash(compiled.bytecode, &contract.artifact_sha256, .{});
+
         // Write contract.json alongside the output if requested
         if (emit_contract) {
             const contract_path = deriveSiblingPath(allocator, output_path_final, "contract.json") catch |err| {

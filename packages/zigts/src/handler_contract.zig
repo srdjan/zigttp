@@ -26,6 +26,14 @@ const handler_analyzer = @import("handler_analyzer.zig");
 const type_checker_mod = @import("type_checker.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
+const rule_registry = @import("rule_registry.zig");
+
+fn currentPolicyHashRaw() [32]u8 {
+    const hex = rule_registry.policyHash();
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, &hex) catch unreachable;
+    return out;
+}
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -694,8 +702,55 @@ pub const ServiceCallInfo = struct {
     }
 };
 
+/// Aggregate of module capabilities required by a handler's imports.
+/// Stable SHA-256 hash over the canonically-ordered tag names lets the
+/// runtime detect drift between the embedded contract and the linked
+/// module registry.
+pub const CapabilityMatrix = struct {
+    items: [module_binding.capability_count]module_binding.ModuleCapability = undefined,
+    len: u8 = 0,
+    hash: [32]u8 = [_]u8{0} ** 32,
+
+    pub const empty: CapabilityMatrix = .{};
+
+    pub fn slice(self: *const CapabilityMatrix) []const module_binding.ModuleCapability {
+        return self.items[0..self.len];
+    }
+
+    pub fn has(self: *const CapabilityMatrix, cap: module_binding.ModuleCapability) bool {
+        for (self.slice()) |c| {
+            if (c == cap) return true;
+        }
+        return false;
+    }
+};
+
+/// Union `required_capabilities` across every module resolved from
+/// `specifiers`. Unknown specifiers (third-party modules not in the linked
+/// registry) are silently skipped.
+pub fn computeCapabilityMatrix(specifiers: []const []const u8) CapabilityMatrix {
+    var matrix: CapabilityMatrix = .{};
+    var seen = [_]bool{false} ** module_binding.capability_count;
+    for (specifiers) |spec| {
+        const binding = builtin_modules.fromSpecifier(spec) orelse continue;
+        for (binding.required_capabilities) |c| {
+            seen[@intFromEnum(c)] = true;
+        }
+    }
+    var n: u8 = 0;
+    for (std.enums.values(module_binding.ModuleCapability)) |c| {
+        if (seen[@intFromEnum(c)]) {
+            matrix.items[n] = c;
+            n += 1;
+        }
+    }
+    matrix.len = n;
+    matrix.hash = module_binding.capabilityHash(matrix.slice());
+    return matrix;
+}
+
 pub const HandlerContract = struct {
-    version: u32 = 12,
+    version: u32 = 14,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -715,6 +770,14 @@ pub const HandlerContract = struct {
     properties: ?HandlerProperties = null,
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
+    capabilities: CapabilityMatrix = .empty,
+    /// SHA-256 of the compiled handler bytecode. Stamped by the build
+    /// pipeline after compile and verified at runtime startup.
+    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    /// SHA-256 of the zigts rule registry used to extract this contract.
+    /// Populated in `build()`; verified at runtime against the registry the
+    /// running binary was linked with.
+    policy_hash: [32]u8 = [_]u8{0} ** 32,
 
     pub const FunctionEntry = struct {
         module: []const u8, // owned
@@ -1047,7 +1110,7 @@ pub const ContractBuilder = struct {
             };
         }
 
-        const contract = HandlerContract{
+        var contract = HandlerContract{
             .handler = .{
                 .path = try self.allocator.dupe(u8, handler_path),
                 .line = if (handler_loc) |loc| loc.line else 0,
@@ -1118,6 +1181,9 @@ pub const ContractBuilder = struct {
             .rate_limiting = rate_limiting,
             .properties = properties,
         };
+
+        contract.capabilities = computeCapabilityMatrix(contract.modules.items);
+        contract.policy_hash = currentPolicyHashRaw();
 
         // Clear moved lists so deinit() won't double-free
         self.modules_list = .empty;
@@ -3430,6 +3496,8 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             }
         } else if (std.mem.eql(u8, key, "properties")) {
             contract.properties = try parseProperties(&parser);
+        } else if (std.mem.eql(u8, key, "sandbox")) {
+            try parseSandbox(&parser, &contract);
         } else if (std.mem.eql(u8, key, "behaviors")) {
             try parseBehaviors(&parser, allocator, &contract);
         } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
@@ -4714,6 +4782,76 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
     return props;
 }
 
+fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {
+    parser.skipWhitespace();
+    if (parser.readNull()) return;
+    if (!parser.consume('{')) return error.InvalidJson;
+
+    var seen = [_]bool{false} ** module_binding.capability_count;
+    var matrix: CapabilityMatrix = .{};
+    var have_cap_hash = false;
+
+    while (true) {
+        parser.skipWhitespace();
+        if (parser.peek() == '}') {
+            _ = parser.advance();
+            break;
+        }
+        if (parser.peek() == ',') _ = parser.advance();
+        parser.skipWhitespace();
+
+        const key = parser.readString() orelse return error.InvalidJson;
+        parser.skipWhitespace();
+        if (!parser.consume(':')) return error.InvalidJson;
+        parser.skipWhitespace();
+
+        if (std.mem.eql(u8, key, "capabilities")) {
+            if (!parser.consume('[')) return error.InvalidJson;
+            while (true) {
+                parser.skipWhitespace();
+                if (parser.peek() == ']') {
+                    _ = parser.advance();
+                    break;
+                }
+                if (parser.peek() == ',') _ = parser.advance();
+                parser.skipWhitespace();
+                const name = parser.readString() orelse return error.InvalidJson;
+                const cap = std.meta.stringToEnum(module_binding.ModuleCapability, name) orelse continue;
+                seen[@intFromEnum(cap)] = true;
+            }
+        } else if (std.mem.eql(u8, key, "capabilityHash")) {
+            const hex = parser.readString() orelse return error.InvalidJson;
+            if (hex.len == 64) {
+                _ = std.fmt.hexToBytes(&matrix.hash, hex) catch return error.InvalidJson;
+                have_cap_hash = true;
+            }
+        } else if (std.mem.eql(u8, key, "policyHash")) {
+            const hex = parser.readString() orelse return error.InvalidJson;
+            if (hex.len == 64) {
+                _ = std.fmt.hexToBytes(&contract.policy_hash, hex) catch return error.InvalidJson;
+            }
+        } else if (std.mem.eql(u8, key, "artifactSha256")) {
+            const hex = parser.readString() orelse return error.InvalidJson;
+            if (hex.len == 64) {
+                _ = std.fmt.hexToBytes(&contract.artifact_sha256, hex) catch return error.InvalidJson;
+            }
+        } else {
+            parser.skipValue();
+        }
+    }
+
+    for (std.enums.values(module_binding.ModuleCapability)) |c| {
+        if (seen[@intFromEnum(c)]) {
+            matrix.items[matrix.len] = c;
+            matrix.len += 1;
+        }
+    }
+    if (!have_cap_hash) {
+        matrix.hash = module_binding.capabilityHash(matrix.slice());
+    }
+    contract.capabilities = matrix;
+}
+
 fn parseBehaviors(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
     parser.skipWhitespace();
     if (parser.readNull()) return;
@@ -5046,6 +5184,24 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, mod);
     }
     try writer.writeAll("],\n");
+
+    try writer.writeAll("  \"sandbox\": {\n");
+    try writer.writeAll("    \"capabilities\": [");
+    for (contract.capabilities.slice(), 0..) |cap, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writeJsonString(writer, @tagName(cap));
+    }
+    try writer.writeAll("],\n");
+    try writer.writeAll("    \"capabilityHash\": ");
+    try json_utils.writeJsonHex(writer, contract.capabilities.hash);
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"policyHash\": ");
+    try json_utils.writeJsonHex(writer, contract.policy_hash);
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"artifactSha256\": ");
+    try json_utils.writeJsonHex(writer, contract.artifact_sha256);
+    try writer.writeAll("\n");
+    try writer.writeAll("  },\n");
 
     // functions
     try writer.writeAll("  \"functions\": {");
@@ -6089,7 +6245,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 14") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
@@ -6425,4 +6581,107 @@ test "scanImports includes zigttp-ext modules in contract function map" {
     try std.testing.expectEqual(@as(usize, 1), builder.functions_map.items.len);
     try std.testing.expectEqualStrings("zigttp-ext:math", builder.functions_map.items[0].module);
     try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "double"));
+}
+
+test "computeCapabilityMatrix unions crypto and auth into canonical set" {
+    const specs = [_][]const u8{ "zigttp:crypto", "zigttp:auth" };
+    const matrix = computeCapabilityMatrix(&specs);
+
+    // auth needs crypto + clock, crypto needs crypto. Union = {crypto, clock}.
+    // Canonical order is enum-declaration order: clock before crypto.
+    try std.testing.expectEqual(@as(u8, 2), matrix.len);
+    try std.testing.expectEqual(module_binding.ModuleCapability.clock, matrix.items[0]);
+    try std.testing.expectEqual(module_binding.ModuleCapability.crypto, matrix.items[1]);
+
+    // Hash is non-zero and deterministic
+    try std.testing.expect(!std.mem.allEqual(u8, &matrix.hash, 0));
+    const again = computeCapabilityMatrix(&specs);
+    try std.testing.expectEqualSlices(u8, &matrix.hash, &again.hash);
+}
+
+test "computeCapabilityMatrix is order-independent for hash" {
+    const specs_ab = [_][]const u8{ "zigttp:crypto", "zigttp:auth" };
+    const specs_ba = [_][]const u8{ "zigttp:auth", "zigttp:crypto" };
+    const a = computeCapabilityMatrix(&specs_ab);
+    const b = computeCapabilityMatrix(&specs_ba);
+    try std.testing.expectEqualSlices(u8, &a.hash, &b.hash);
+    try std.testing.expectEqual(a.len, b.len);
+}
+
+test "computeCapabilityMatrix skips unknown specifiers" {
+    const specs = [_][]const u8{ "zigttp:crypto", "zigttp:does-not-exist" };
+    const matrix = computeCapabilityMatrix(&specs);
+    try std.testing.expectEqual(@as(u8, 1), matrix.len);
+    try std.testing.expectEqual(module_binding.ModuleCapability.crypto, matrix.items[0]);
+}
+
+test "computeCapabilityMatrix empty input has empty len and zero hash-of-empty" {
+    const matrix = computeCapabilityMatrix(&.{});
+    try std.testing.expectEqual(@as(u8, 0), matrix.len);
+    // Hash of an empty canonical list must still be deterministic
+    const again = computeCapabilityMatrix(&.{});
+    try std.testing.expectEqualSlices(u8, &matrix.hash, &again.hash);
+}
+
+test "CapabilityMatrix.has finds present and misses absent" {
+    const specs = [_][]const u8{"zigttp:log"};
+    const matrix = computeCapabilityMatrix(&specs);
+    try std.testing.expect(matrix.has(.stderr));
+    try std.testing.expect(matrix.has(.clock));
+    try std.testing.expect(!matrix.has(.crypto));
+}
+
+test "sandbox block roundtrips through writeContractJson and parseFromJson" {
+    const allocator = std.testing.allocator;
+
+    // Build a contract with modules set so build-then-serialize has caps
+    var modules: std.ArrayList([]const u8) = .empty;
+    try modules.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+    try modules.append(allocator, try allocator.dupe(u8, "zigttp:auth"));
+
+    var contract = HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = modules,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = emptySqlInfo(),
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+        },
+        .scope = .{
+            .used = false,
+            .names = .empty,
+            .dynamic = false,
+            .max_depth = 0,
+        },
+        .api = emptyApiInfo(),
+        .verification = null,
+        .aot = null,
+    };
+    contract.capabilities = computeCapabilityMatrix(contract.modules.items);
+    defer contract.deinit(allocator);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    try writeContractJson(&contract, &aw.writer);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sandbox\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"capabilityHash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"clock\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"crypto\"") != null);
+
+    var parsed = try parseFromJson(allocator, output.items);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(contract.capabilities.len, parsed.capabilities.len);
+    try std.testing.expectEqualSlices(u8, &contract.capabilities.hash, &parsed.capabilities.hash);
+    try std.testing.expect(parsed.capabilities.has(.clock));
+    try std.testing.expect(parsed.capabilities.has(.crypto));
 }

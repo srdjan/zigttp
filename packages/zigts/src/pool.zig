@@ -55,6 +55,12 @@ pub const LockFreePool = struct {
         request_count: u64,
         peak_arena_usage: usize,
         overflow_count: u64,
+        /// Wall-clock ns of first acquire; null until used. Drives TTL recycling.
+        first_use_ns: ?u64 = null,
+        /// Set by auditAndResetArena so the next `reset` call skips the
+        /// arena work (already done) and avoids a second full-buffer poison
+        /// pass in runtime-safety builds. Cleared inside `reset`.
+        arena_preaudited: bool = false,
         /// Optional user data for higher-level runtime wrappers
         user_data: ?*anyopaque,
         /// Optional user-data cleanup hook (called before core runtime destroy)
@@ -141,32 +147,52 @@ pub const LockFreePool = struct {
 
         /// Reset runtime state for reuse - O(1) with hybrid allocation
         pub fn reset(self: *Runtime) void {
-            // Clear execution state
             self.ctx.sp = 0;
             self.ctx.call_depth = 0;
             self.ctx.clearException();
 
             if (self.use_hybrid) {
-                // O(1) arena reset - instant cleanup
                 if (self.request_arena) |arena| {
-                    // Track peak usage before reset
-                    const stats = arena.getStats();
-                    if (stats.high_watermark > self.peak_arena_usage) {
-                        self.peak_arena_usage = stats.high_watermark;
+                    if (self.arena_preaudited) {
+                        self.arena_preaudited = false;
+                    } else {
+                        const stats = arena.getStats();
+                        if (stats.high_watermark > self.peak_arena_usage) {
+                            self.peak_arena_usage = stats.high_watermark;
+                        }
+                        if (stats.overflow_count > 0) {
+                            self.overflow_count += stats.overflow_count;
+                        }
+                        arena.reset();
                     }
-                    if (stats.overflow_count > 0) {
-                        self.overflow_count += stats.overflow_count;
-                    }
-                    arena.reset();
                 }
             } else {
-                // Legacy GC-based cleanup
                 if (self.gc_state.nursery.used() > self.gc_state.config.nursery_size / 2) {
                     self.gc_state.minorGC();
                 }
             }
 
             self.request_count += 1;
+        }
+
+        /// Audit-reset the request arena, update cumulative stats, and mark
+        /// the runtime so the next `reset` skips the arena work. Returns null
+        /// on the legacy GC path.
+        pub fn auditAndResetArena(self: *Runtime) arena_mod.Arena.AuditError!?arena_mod.Arena.AuditSnapshot {
+            if (!self.use_hybrid) return null;
+            const arena = self.request_arena orelse return null;
+
+            const stats = arena.getStats();
+            if (stats.high_watermark > self.peak_arena_usage) {
+                self.peak_arena_usage = stats.high_watermark;
+            }
+            if (stats.overflow_count > 0) {
+                self.overflow_count += stats.overflow_count;
+            }
+
+            const snapshot = try arena.resetWithAudit();
+            self.arena_preaudited = true;
+            return snapshot;
         }
 
         /// Get arena statistics (if hybrid allocation enabled)
@@ -187,12 +213,18 @@ pub const LockFreePool = struct {
             };
         }
 
-        pub fn assertPersistentStringsOutsideArena(self: *const Runtime) void {
+        pub const PersistentStringEscapeError = error{PersistentStringEscapedIntoArena};
+
+        /// Verify no persistent string has drifted into the request arena.
+        /// No-op in ReleaseFast (gated on `std.debug.runtime_safety`).
+        pub fn assertPersistentStringsOutsideArena(
+            self: *const Runtime,
+        ) PersistentStringEscapeError!void {
             if (!std.debug.runtime_safety) return;
             const arena = self.request_arena orelse return;
             for (self.strings.strings.items) |str| {
                 if (arena.contains(str)) {
-                    std.debug.panic("pooled persistent string escaped into request arena: 0x{x}", .{@intFromPtr(str)});
+                    return error.PersistentStringEscapedIntoArena;
                 }
             }
         }
@@ -272,6 +304,22 @@ pub const LockFreePool = struct {
             }
         }
         return null;
+    }
+
+    /// Destroy a runtime without attempting to return it to a pool slot.
+    /// Used by higher-level recycle paths (e.g. contract-derived pooling
+    /// policies) that want a fresh runtime for the next request.
+    pub fn dropRuntime(self: *LockFreePool, runtime: *Runtime) void {
+        if (std.debug.runtime_safety) {
+            for (self.slots) |*slot| {
+                if (slot.load(.acquire) == runtime) {
+                    std.debug.panic("runtime dropped while still pooled: 0x{x}", .{@intFromPtr(runtime)});
+                }
+            }
+        }
+        runtime.in_use = false;
+        runtime.destroy(self.allocator);
+        _ = self.size.fetchSub(1, .monotonic);
     }
 
     /// Release a runtime back to pool

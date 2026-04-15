@@ -55,6 +55,20 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
     }
 }
 
+/// Open a file for append writes, creating it if missing. Returns the raw
+/// POSIX fd; caller is responsible for closing with `std.Io.Threaded.closeFd`.
+pub fn openAppend(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    return std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        path_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
+        0o644,
+    ) catch return error.FileOpenFailed;
+}
+
 /// Read a file for ModuleGraph.build() - wraps readFile with ReadFileError mapping.
 pub fn readFileForModuleGraph(allocator: std.mem.Allocator, path: []const u8) module_graph.ReadFileError![]const u8 {
     return readFile(allocator, path, 10 * 1024 * 1024) catch |err| switch (err) {

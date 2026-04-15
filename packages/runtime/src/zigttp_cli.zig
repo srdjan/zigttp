@@ -5,6 +5,7 @@ const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
 const HandlerSource = @import("server.zig").HandlerSource;
 const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
+const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
 const durable_recovery = @import("durable_recovery.zig");
@@ -62,6 +63,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (std.mem.eql(u8, command, "serve")) {
         try serveCommand(allocator, user_args[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "attest")) {
+        try attestCommand(allocator);
         return;
     }
     if (std.mem.eql(u8, command, "init")) {
@@ -276,6 +281,49 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     // Backward-compatible default: treat old `zigttp <handler>` usage as `serve`.
     try serveCommand(allocator, user_args);
+}
+
+fn attestCommand(allocator: std.mem.Allocator) !void {
+    var payload = (try self_extract.detect(allocator)) orelse {
+        writeStdoutLine("{\"error\":\"no embedded payload; attest is only available on self-extracting binaries\"}");
+        std.process.exit(1);
+    };
+    defer payload.deinit(allocator);
+
+    const contract_json = payload.contract_json orelse {
+        writeStdoutLine("{\"error\":\"embedded payload has no contract\"}");
+        std.process.exit(1);
+    };
+
+    var contract = contract_runtime.parseContractJson(allocator, contract_json) catch {
+        writeStdoutLine("{\"error\":\"failed to parse contract\"}");
+        std.process.exit(1);
+    };
+    defer contract.deinit();
+
+    var actual: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(payload.bytecode, &actual, .{});
+
+    const policy_hex = std.fmt.bytesToHex(contract.policy_hash, .lower);
+    const artifact_hex = std.fmt.bytesToHex(contract.artifact_sha256, .lower);
+    const actual_hex = std.fmt.bytesToHex(actual, .lower);
+    const cap_hex = if (contract.capabilities) |caps|
+        std.fmt.bytesToHex(caps.hash, .lower)
+    else
+        [_]u8{'0'} ** 64;
+
+    var buf: [1024]u8 = undefined;
+    const line = try std.fmt.bufPrint(
+        &buf,
+        "{{\"policyHash\":\"{s}\",\"artifactSha256\":\"{s}\",\"artifactActual\":\"{s}\",\"capabilityHash\":\"{s}\"}}\n",
+        .{ &policy_hex, &artifact_hex, &actual_hex, &cap_hex },
+    );
+    _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+}
+
+fn writeStdoutLine(s: []const u8) void {
+    _ = std.c.write(std.c.STDOUT_FILENO, s.ptr, s.len);
+    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
 }
 
 fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -641,6 +689,14 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             config.runtime_config.system_config_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--no-env-check")) {
             config.skip_env_check = true;
+        } else if (std.mem.eql(u8, arg, "--security-log")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingSecurityLogPath;
+            config.security_log_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--lifecycle")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingLifecycleValue;
+            config.lifecycle_override = parseLifecycle(argv[i]) orelse return error.InvalidLifecycleValue;
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
             std.mem.eql(u8, arg, "--force-swap"))
@@ -814,6 +870,14 @@ fn looksLikeHandlerFile(path: []const u8) bool {
         std.mem.endsWith(u8, path, ".tsx");
 }
 
+fn parseLifecycle(str: []const u8) ?contract_runtime.PoolingPolicy {
+    if (std.mem.eql(u8, str, "ephemeral")) return .ephemeral;
+    if (std.mem.eql(u8, str, "bounded")) return .reuse_bounded_by_count;
+    if (std.mem.eql(u8, str, "ttl")) return .reuse_bounded_by_ttl;
+    if (std.mem.eql(u8, str, "reuse")) return .reuse_unbounded;
+    return null;
+}
+
 fn parseSize(str: []const u8) !usize {
     var num_end: usize = 0;
     for (str, 0..) |c, i| {
@@ -875,8 +939,16 @@ fn serveAppended(allocator: std.mem.Allocator, payload: *const self_extract.Payl
             config.runtime_config.system_config_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--no-env-check")) {
             config.skip_env_check = true;
+        } else if (std.mem.eql(u8, arg, "--security-log")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingSecurityLogPath;
+            config.security_log_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--lifecycle")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingLifecycleValue;
+            config.lifecycle_override = parseLifecycle(argv[i]) orelse return error.InvalidLifecycleValue;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q] [--no-env-check] [--system FILE]\n";
+            const help = "Usage: <binary> [-p PORT] [-h HOST] [--cors] [-q] [--no-env-check] [--security-log FILE] [--lifecycle ephemeral|bounded|reuse] [--system FILE]\n";
             _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
             return;
         }
