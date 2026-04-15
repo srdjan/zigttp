@@ -17,5 +17,9 @@ comptime {
     _ = @import("tui/line_editor.zig");
     _ = @import("tui/app.zig");
     _ = @import("turn.zig");
+    _ = @import("veto.zig");
+    _ = @import("transcript.zig");
+    _ = @import("expert_persona.zig");
+    _ = @import("loop.zig");
     _ = @import("app.zig");
 }
