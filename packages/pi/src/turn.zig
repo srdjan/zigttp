@@ -59,12 +59,24 @@ pub const EditOutcome = struct {
     /// pinned in docs/zigts-expert-contract.md.
     ok: bool,
     /// Serialized body to render: proof card on `ok`, diagnostic box otherwise.
+    /// Allocator-owned; free with `deinit`.
     body: []const u8,
+
+    pub fn deinit(self: *EditOutcome, allocator: std.mem.Allocator) void {
+        allocator.free(self.body);
+        self.body = &.{};
+    }
 };
 
 pub const ToolOutcome = struct {
     ok: bool,
+    /// Allocator-owned; free with `deinit`.
     body: []const u8,
+
+    pub fn deinit(self: *ToolOutcome, allocator: std.mem.Allocator) void {
+        allocator.free(self.body);
+        self.body = &.{};
+    }
 };
 
 pub const TurnEvent = union(enum) {

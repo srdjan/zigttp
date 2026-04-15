@@ -27,4 +27,13 @@ pub fn build(b: *std.Build) void {
     });
     zigts_cli_mod.addImport("zigts", zigts_mod);
     zigts_cli_mod.addImport("project_config", project_config_mod);
+
+    // Embedded zigts-expert skill content, consumed by the pi package's
+    // `expert_persona` bundle builder. Rooted inside the skill directory so
+    // `@embedFile` can reach the sibling markdown files directly.
+    _ = b.addModule("zigts_expert_skill", .{
+        .root_source_file = b.path("src/skills/zigts-expert/skill_data.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 }
