@@ -101,6 +101,9 @@ pub const RetryPayload = struct {
     /// it into a retry prompt before calling the model client.
     diagnostic: []const u8,
     /// The attempt number the machine is *about* to start (2, 3, ...).
+    /// Duplicated onto the payload because `Action` is a value type —
+    /// the loop driver has no live handle to the machine once
+    /// `transition()` returns.
     attempt: u8,
     max_attempts: u8,
 };
@@ -135,7 +138,15 @@ pub const TurnMachine = struct {
     max_attempts: u8 = 3,
 
     pub fn transition(self: *TurnMachine, event: TurnEvent) Action {
-        // Cross-cutting events fire uniformly regardless of the current state.
+        // `budget_exhausted` is the escape hatch for a driver-initiated
+        // abort (e.g., wall-clock time budget, cost ceiling). It is
+        // deliberately kept separate from the retry-counter exhaustion
+        // path in `fromVerifyingEdit` because the two have different
+        // semantics: retry exhaustion surfaces the final diagnostic so
+        // the user sees what the compiler saw, while budget exhaustion
+        // interrupts the turn and asks the user to approve whatever is
+        // in flight. No driver fires this event today; it is scaffolding
+        // for the total-time-budget slice.
         switch (event) {
             .budget_exhausted => {
                 self.state = .awaiting_user;
