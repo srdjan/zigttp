@@ -190,14 +190,15 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !Runt
     // Parse properties
     const properties = parseProperties(root);
 
-    // Parse sandbox.capabilities + sandbox.capabilityHash
-    const capabilities = parseCapabilityMatrix(root);
+    var capabilities: ?CapabilityMatrix = null;
     var artifact_sha256 = [_]u8{0} ** 32;
     var policy_hash = [_]u8{0} ** 32;
     if (root.get("sandbox")) |sandbox_val| {
         if (sandbox_val == .object) {
-            readSandboxHex(sandbox_val.object, "artifactSha256", &artifact_sha256);
-            readSandboxHex(sandbox_val.object, "policyHash", &policy_hash);
+            const obj = sandbox_val.object;
+            capabilities = parseCapabilityMatrix(obj);
+            readSandboxHex(obj, "artifactSha256", &artifact_sha256);
+            readSandboxHex(obj, "policyHash", &policy_hash);
         }
     }
 
@@ -236,11 +237,7 @@ fn readSandboxHex(obj: std.json.ObjectMap, key: []const u8, out: *[32]u8) void {
     _ = std.fmt.hexToBytes(out, val.string) catch return;
 }
 
-fn parseCapabilityMatrix(root: std.json.ObjectMap) ?CapabilityMatrix {
-    const sandbox_val = root.get("sandbox") orelse return null;
-    if (sandbox_val != .object) return null;
-    const obj = sandbox_val.object;
-
+fn parseCapabilityMatrix(obj: std.json.ObjectMap) CapabilityMatrix {
     var matrix: CapabilityMatrix = .{};
     if (obj.get("capabilities")) |caps_val| {
         if (caps_val == .array) {
@@ -259,17 +256,12 @@ fn parseCapabilityMatrix(root: std.json.ObjectMap) ?CapabilityMatrix {
         }
     }
 
-    var parsed_hash = false;
-    if (obj.get("capabilityHash")) |hash_val| {
-        if (hash_val == .string and hash_val.string.len == 64) {
-            if (std.fmt.hexToBytes(&matrix.hash, hash_val.string)) |_| {
-                parsed_hash = true;
-            } else |_| {}
-        }
-    }
-    if (!parsed_hash) {
-        matrix.hash = zq.module_binding.capabilityHash(matrix.slice());
-    }
+    var stored_hash = [_]u8{0} ** 32;
+    readSandboxHex(obj, "capabilityHash", &stored_hash);
+    matrix.hash = if (std.mem.allEqual(u8, &stored_hash, 0))
+        zq.module_binding.capabilityHash(matrix.slice())
+    else
+        stored_hash;
     return matrix;
 }
 
