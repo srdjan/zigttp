@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const turn = @import("turn.zig");
+const box_widget = @import("tui/widgets/box.zig");
 
 /// Aliased to the inferred tag of `turn.Message` so adding a variant there
 /// automatically flows through here; the `ownMessage` switch below catches
@@ -95,6 +96,38 @@ pub fn renderEntryToOwned(
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     try renderPlain(&aw.writer, entry);
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Widget-aware renderer. Text-shaped variants (user/model/tool) fall
+/// through to the plain label-prefixed form so they share one path with
+/// the tests above. Veto-shaped variants (proof_card/diagnostic_box)
+/// route through the box widget with a tag-appropriate title and color.
+pub fn renderRich(writer: anytype, entry: *const OwnedMessage) !void {
+    switch (entry.tag) {
+        .user_text, .model_text, .tool_result => try renderPlain(writer, entry),
+        .proof_card => try box_widget.writeBox(
+            writer,
+            .{ .title = "proof", .color = .green },
+            entry.body,
+        ),
+        .diagnostic_box => try box_widget.writeBox(
+            writer,
+            .{ .title = "veto", .color = .red },
+            entry.body,
+        ),
+    }
+}
+
+pub fn renderRichEntryToOwned(
+    allocator: std.mem.Allocator,
+    entry: *const OwnedMessage,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try renderRich(&aw.writer, entry);
     buf = aw.toArrayList();
     return try buf.toOwnedSlice(allocator);
 }
@@ -206,6 +239,50 @@ test "veto -> turn -> transcript pipeline: clean handler produces a proof line" 
 
     try testing.expect(std.mem.startsWith(u8, out, "proof: "));
     try testing.expect(std.mem.indexOf(u8, out, "\"total\":0") != null);
+}
+
+test "renderRich: text variants fall through to the plain label form" {
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .user_text = "hi" });
+    try tr.append(testing.allocator, .{ .model_text = "hello" });
+    try tr.append(testing.allocator, .{ .tool_result = "{}" });
+
+    for (tr.entries.items) |*entry| {
+        const rendered = try renderRichEntryToOwned(testing.allocator, entry);
+        defer testing.allocator.free(rendered);
+        // No box characters should appear for text variants.
+        try testing.expect(std.mem.indexOf(u8, rendered, "\xe2\x94\x8c") == null);
+    }
+}
+
+test "renderRich: proof_card variant renders as a green bordered box" {
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .proof_card = "contract ok" });
+
+    const out = try renderRichEntryToOwned(testing.allocator, tr.at(0));
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\xe2\x94\x8c") != null); // ┌
+    try testing.expect(std.mem.indexOf(u8, out, "\xe2\x94\x98") != null); // ┘
+    try testing.expect(std.mem.indexOf(u8, out, "proof") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "contract ok") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[32m") != null); // green
+}
+
+test "renderRich: diagnostic_box variant renders as a red bordered box" {
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .diagnostic_box = "ZTS001 unsupported var" });
+
+    const out = try renderRichEntryToOwned(testing.allocator, tr.at(0));
+    defer testing.allocator.free(out);
+
+    try testing.expect(std.mem.indexOf(u8, out, "\xe2\x94\x8c") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "veto") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ZTS001") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[31m") != null); // red
 }
 
 test "veto -> turn -> transcript pipeline: broken handler produces an error line" {
