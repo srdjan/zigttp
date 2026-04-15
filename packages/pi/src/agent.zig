@@ -155,7 +155,7 @@ pub fn runOneTurn(
 
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
-    return transcript_mod.renderEntryToOwned(allocator, tr.at(tr.len() - 1));
+    return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
 // ---------------------------------------------------------------------------
