@@ -1,51 +1,51 @@
-//! Serializes the in-process `Registry` to the Anthropic Messages API
-//! tool-use JSON shape. Every tool takes a single free-form string
-//! argument today (the dispatch contract for `Registry.invoke` packs args
-//! as `[]const []const u8` with a `.string` payload), so every tool
-//! declares the same minimal `input_schema`. Richer per-tool schemas can
-//! land alongside the individual tool modules when the loop needs them.
+//! Serializes the tool catalog the model sees into the Anthropic Messages
+//! API tool-use JSON shape. Every `Registry` tool accepts a single
+//! free-form string argument today, so they share one minimal
+//! `input_schema`. The synthetic `apply_edit` tool is prepended with its
+//! own richer schema; it appears in the catalog so the model knows how
+//! to propose an edit but is intercepted by the assembler's remap before
+//! it reaches `Registry.invoke`.
 
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
 const json_writer = @import("json_writer.zig");
 const apply_edit = @import("apply_edit.zig");
 
-const input_schema_literal =
+const registry_tool_schema =
     "{\"type\":\"object\"," ++
     "\"properties\":{\"input\":{\"type\":\"string\"," ++
     "\"description\":\"Raw argument string passed to the tool.\"}}," ++
     "\"required\":[]}";
+
+fn writeToolEntry(
+    writer: anytype,
+    name: []const u8,
+    description: []const u8,
+    input_schema: []const u8,
+) !void {
+    try writer.writeAll("{\"name\":");
+    try json_writer.writeString(writer, name);
+    try writer.writeAll(",\"description\":");
+    try json_writer.writeString(writer, description);
+    try writer.writeAll(",\"input_schema\":");
+    try writer.writeAll(input_schema);
+    try writer.writeByte('}');
+}
 
 pub fn writeToolsArray(
     writer: anytype,
     registry: *const registry_mod.Registry,
 ) !void {
     try writer.writeByte('[');
-
-    // `apply_edit` is a synthetic tool: it appears in the tools array so
-    // the model knows how to propose an edit, but it is *not* a Registry
-    // entry and never reaches `Registry.invoke`. The assembler +
-    // anthropic client remap the matching tool_call into a first-class
-    // `turn.ModelReply.edit` before the loop hands it to the state
-    // machine. Its input_schema is richer than the minimal registry-tool
-    // schema because the model needs to know the exact field names.
-    try writer.writeAll("{\"name\":");
-    try json_writer.writeString(writer, apply_edit.tool_name);
-    try writer.writeAll(",\"description\":");
-    try json_writer.writeString(writer, apply_edit.tool_description);
-    try writer.writeAll(",\"input_schema\":");
-    try writer.writeAll(apply_edit.input_schema_literal);
-    try writer.writeByte('}');
-
+    try writeToolEntry(
+        writer,
+        apply_edit.tool_name,
+        apply_edit.tool_description,
+        apply_edit.input_schema_literal,
+    );
     for (registry.list()) |entry| {
         try writer.writeByte(',');
-        try writer.writeAll("{\"name\":");
-        try json_writer.writeString(writer, entry.name);
-        try writer.writeAll(",\"description\":");
-        try json_writer.writeString(writer, entry.description);
-        try writer.writeAll(",\"input_schema\":");
-        try writer.writeAll(input_schema_literal);
-        try writer.writeByte('}');
+        try writeToolEntry(writer, entry.name, entry.description, registry_tool_schema);
     }
     try writer.writeByte(']');
 }
@@ -73,6 +73,7 @@ fn serialize(registry: *const registry_mod.Registry) ![]u8 {
     return try buf.toOwnedSlice(testing.allocator);
 }
 
+/// Test-only: find a tool entry in a parsed JSON array by its name field.
 fn findTool(array: std.json.Value, name: []const u8) ?std.json.Value {
     if (array != .array) return null;
     for (array.array.items) |item| {

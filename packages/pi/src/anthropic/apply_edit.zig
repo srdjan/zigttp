@@ -1,21 +1,10 @@
 //! Synthetic `apply_edit` tool: the bridge between the model's
 //! Anthropic-side tool-use vocabulary and the turn machine's first-class
-//! `.edit` reply shape. The model calls `apply_edit` when it wants to
-//! propose a handler edit; the assembler + client path intercepts that
-//! tool call *before* it reaches `Registry.invoke` and remaps it into
-//! `turn.ModelReply.edit` so the veto path runs.
-//!
-//! Why a dedicated module rather than a case in `response_assembler.zig`:
-//! the assembler is meant to stay ignorant of pi-specific tool names so
-//! any future Anthropic-shape parser reuse doesn't drag in the tool
-//! catalog. The remap lives here as a named operation the real client
-//! orchestrates after assembly.
-//!
-//! Why not a real `Registry` entry: `apply_edit` must never actually
-//! execute via the tool dispatch path (the whole point is that the veto
-//! runs instead). Declaring it outside the registry makes the "never
-//! invoked" invariant mechanical — there's no execute function to
-//! accidentally call.
+//! `.edit` reply shape. Declared in the tools catalog so the model
+//! knows how to call it; `maybeRemap` intercepts the matching tool_call
+//! and returns `turn.ModelReply.edit` so the veto path runs. Never
+//! registered in `Registry`, so it cannot accidentally dispatch through
+//! `Registry.invoke`.
 
 const std = @import("std");
 const turn = @import("../turn.zig");
