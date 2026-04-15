@@ -11,6 +11,7 @@ const std = @import("std");
 const term = @import("term.zig");
 const line_editor = @import("line_editor.zig");
 const repl = @import("../repl.zig");
+const agent = @import("../agent.zig");
 
 const LineEditor = line_editor.LineEditor;
 const KeyEvent = line_editor.KeyEvent;
@@ -29,6 +30,10 @@ pub fn run(
 
     var editor: LineEditor = .{};
     defer editor.deinit(allocator);
+
+    var session = agent.AgentSession.init();
+    defer session.deinit(allocator);
+    var agent_mode = false;
 
     const banner = "pi tui - type 'help', press Enter to submit, Ctrl-C or type 'quit' to exit\r\n";
     writeAll(banner);
@@ -69,6 +74,32 @@ pub fn run(
                         std.mem.eql(u8, line_snapshot, ":q"))
                     {
                         return;
+                    }
+
+                    if (std.mem.eql(u8, line_snapshot, agent.toggle_command)) {
+                        agent_mode = !agent_mode;
+                        const msg = if (agent_mode) "agent mode: on\r\n" else "agent mode: off\r\n";
+                        writeAll(msg);
+                        editor.clear();
+                        redrawPrompt(editor.line());
+                        continue;
+                    }
+
+                    if (agent_mode and line_snapshot.len > 0) {
+                        const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot) catch |err| {
+                            var msg_buf: [256]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
+                            writeAll(msg);
+                            editor.clear();
+                            redrawPrompt(editor.line());
+                            continue;
+                        };
+                        defer allocator.free(rendered);
+                        const stdout = StdoutAdapter{};
+                        try printBody(&stdout, rendered);
+                        editor.clear();
+                        redrawPrompt(editor.line());
+                        continue;
                     }
 
                     var outcome = repl.dispatchLine(allocator, registry, line_snapshot) catch |err| {

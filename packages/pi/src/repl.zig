@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
+const agent = @import("agent.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -90,6 +91,10 @@ pub fn run(
         _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
     }
 
+    var session = agent.AgentSession.init();
+    defer session.deinit(allocator);
+    var agent_mode = false;
+
     var line_buf: [64 * 1024]u8 = undefined;
     while (true) {
         if (is_tty) {
@@ -99,6 +104,26 @@ pub fn run(
 
         const maybe_line = try readLine(&line_buf);
         const line = maybe_line orelse break;
+
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (std.mem.eql(u8, trimmed, agent.toggle_command)) {
+            agent_mode = !agent_mode;
+            const msg = if (agent_mode) "agent mode: on\n" else "agent mode: off\n";
+            _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            continue;
+        }
+
+        if (agent_mode and trimmed.len > 0 and !isQuit(trimmed)) {
+            const rendered = agent.runOneTurn(allocator, &session, registry, trimmed) catch |err| {
+                var msg_buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
+                _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+                continue;
+            };
+            defer allocator.free(rendered);
+            _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+            continue;
+        }
 
         var outcome = dispatchLine(allocator, registry, line) catch |err| {
             var msg_buf: [256]u8 = undefined;

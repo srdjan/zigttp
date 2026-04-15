@@ -87,6 +87,18 @@ pub fn renderAll(writer: anytype, transcript: *const Transcript) !void {
     }
 }
 
+pub fn renderEntryToOwned(
+    allocator: std.mem.Allocator,
+    entry: *const OwnedMessage,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try renderPlain(&aw.writer, entry);
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
