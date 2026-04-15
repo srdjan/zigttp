@@ -20,6 +20,7 @@ const turn = @import("../turn.zig");
 const request_mod = @import("request.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
+const apply_edit = @import("apply_edit.zig");
 
 const default_base_url = "https://api.anthropic.com/v1/messages";
 const default_anthropic_version = "2023-06-01";
@@ -71,7 +72,7 @@ pub const Client = struct {
         const response_body = try postAnthropic(arena, self.config, body);
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
-        return outcome.reply;
+        return try apply_edit.maybeRemap(arena, outcome.reply);
     }
 };
 
