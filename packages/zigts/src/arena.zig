@@ -416,14 +416,6 @@ pub const HybridAllocator = struct {
         self.arena.reset();
     }
 
-    pub fn resetEphemeralWithAudit(self: *HybridAllocator) Arena.AuditError!Arena.AuditSnapshot {
-        return self.arena.resetWithAudit();
-    }
-
-    pub fn bytesInUseAtCheckpoint(self: *const HybridAllocator) usize {
-        return self.arena.usedBytes() + self.arena.overflow_bytes;
-    }
-
     /// Get arena statistics
     pub fn getArenaStats(self: *const HybridAllocator) ArenaStats {
         return self.arena.getStats();
@@ -590,26 +582,6 @@ test "Arena resetWithAudit returns pre-reset snapshot and zeros state" {
     try std.testing.expectEqual(@as(usize, 0), after.used);
     try std.testing.expectEqual(@as(usize, 0), after.overflow_bytes);
     try std.testing.expectEqual(@as(u64, 0), after.overflow_count);
-}
-
-test "HybridAllocator resetEphemeralWithAudit surfaces overflow in snapshot" {
-    var arena = try Arena.init(std.testing.allocator, .{ .size = 128 });
-    defer arena.deinit();
-
-    var hybrid = HybridAllocator{
-        .persistent = std.testing.allocator,
-        .arena = &arena,
-    };
-
-    _ = hybrid.alloc(.ephemeral, 32);
-    // Force overflow
-    _ = hybrid.alloc(.ephemeral, 1024);
-
-    try std.testing.expect(hybrid.bytesInUseAtCheckpoint() > 0);
-
-    const snapshot = try hybrid.resetEphemeralWithAudit();
-    try std.testing.expect(snapshot.overflow_bytes > 0);
-    try std.testing.expectEqual(@as(usize, 0), hybrid.bytesInUseAtCheckpoint());
 }
 
 test "Arena high watermark tracking" {
