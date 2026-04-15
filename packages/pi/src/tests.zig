@@ -22,5 +22,7 @@ comptime {
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
     _ = @import("agent.zig");
+    _ = @import("anthropic/events.zig");
+    _ = @import("anthropic/sse_parser.zig");
     _ = @import("app.zig");
 }
