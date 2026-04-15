@@ -185,20 +185,16 @@ pub const Arena = struct {
 
     pub const AuditError = error{ArenaLeaked};
 
-    pub fn captureAuditSnapshot(self: *const Arena) AuditSnapshot {
-        return .{
+    /// Reset and verify the arena is fully reclaimed. Tripwire for future
+    /// regressions in `reset` or unexpected state corruption. Returns the
+    /// pre-reset snapshot on success.
+    pub fn resetWithAudit(self: *Arena) AuditError!AuditSnapshot {
+        const snapshot: AuditSnapshot = .{
             .bump_used = self.usedBytes(),
             .overflow_bytes = self.overflow_bytes,
             .overflow_count = self.overflow_count,
             .alloc_count = self.alloc_count,
         };
-    }
-
-    /// Reset and verify the arena is fully reclaimed. Tripwire for future
-    /// regressions in `reset` or unexpected state corruption. Returns the
-    /// pre-reset snapshot on success.
-    pub fn resetWithAudit(self: *Arena) AuditError!AuditSnapshot {
-        const snapshot = self.captureAuditSnapshot();
         self.reset();
         if (self.usedBytes() != 0) return error.ArenaLeaked;
         if (self.overflow_bytes != 0) return error.ArenaLeaked;
