@@ -4797,22 +4797,18 @@ pub const HandlerPool = struct {
         // ReleaseFast drop both checks entirely.
         var audit_poisoned = false;
         if (comptime std.debug.runtime_safety) {
-            rt.assertPersistentStringsOutsideArena() catch |err| switch (err) {
-                error.PersistentStringEscapedIntoArena => {
-                    _ = self.persistent_escape_failures.fetchAdd(1, .monotonic);
-                    std.log.err("sandbox: persistent string escaped into request arena", .{});
-                    emitRuntimeEvent(.persistent_string_escape, "persistent string escaped into request arena");
-                    audit_poisoned = true;
-                },
+            rt.assertPersistentStringsOutsideArena() catch {
+                _ = self.persistent_escape_failures.fetchAdd(1, .monotonic);
+                std.log.err("sandbox: persistent string escaped into request arena", .{});
+                emitRuntimeEvent(.persistent_string_escape, "persistent string escaped into request arena");
+                audit_poisoned = true;
             };
 
-            _ = rt.auditAndResetArena() catch |err| switch (err) {
-                error.ArenaLeaked => {
-                    _ = self.arena_audit_failures.fetchAdd(1, .monotonic);
-                    std.log.err("sandbox: request arena audit failed", .{});
-                    emitRuntimeEvent(.arena_audit_failure, "post-reset arena state was non-zero");
-                    audit_poisoned = true;
-                },
+            _ = rt.auditAndResetArena() catch {
+                _ = self.arena_audit_failures.fetchAdd(1, .monotonic);
+                std.log.err("sandbox: request arena audit failed", .{});
+                emitRuntimeEvent(.arena_audit_failure, "post-reset arena state was non-zero");
+                audit_poisoned = true;
             };
         }
 
