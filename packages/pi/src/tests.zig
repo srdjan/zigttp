@@ -24,5 +24,9 @@ comptime {
     _ = @import("agent.zig");
     _ = @import("anthropic/events.zig");
     _ = @import("anthropic/sse_parser.zig");
+    _ = @import("anthropic/json_writer.zig");
+    _ = @import("anthropic/tools_schema.zig");
+    _ = @import("anthropic/request.zig");
+    _ = @import("anthropic/response_assembler.zig");
     _ = @import("app.zig");
 }
