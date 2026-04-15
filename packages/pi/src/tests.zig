@@ -21,5 +21,6 @@ comptime {
     _ = @import("transcript.zig");
     _ = @import("expert_persona.zig");
     _ = @import("loop.zig");
+    _ = @import("agent.zig");
     _ = @import("app.zig");
 }
