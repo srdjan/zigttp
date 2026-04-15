@@ -5,6 +5,7 @@ const expert_meta = @import("expert_meta.zig");
 const writeJsonString = zigts.handler_contract.writeJsonString;
 
 const file_io = zigts.file_io;
+const builtin_modules = zigts.builtin_modules;
 
 /// Write the v1 verify-modules envelope to `writer`. Single source of truth
 /// for the shape documented in docs/zigts-expert-contract.md.
@@ -89,6 +90,10 @@ pub const VerifyResult = struct {
     }
 };
 
+pub const VerifyOptions = struct {
+    strict: bool = false,
+};
+
 const CapabilityRule = struct {
     capability: []const u8,
     helpers: []const []const u8,
@@ -170,13 +175,30 @@ const forbidden_patterns = [_]ForbiddenPattern{
     },
 };
 
-pub fn verifyPaths(allocator: std.mem.Allocator, paths: []const []const u8) !VerifyResult {
+pub fn verifyPaths(
+    allocator: std.mem.Allocator,
+    paths: []const []const u8,
+    options: VerifyOptions,
+) !VerifyResult {
     var result = VerifyResult{};
     errdefer result.deinit(allocator);
 
     for (paths) |path| {
         try result.checked_files.append(allocator, path);
-        try auditPath(allocator, path, &result.diagnostics);
+        try auditPath(allocator, path, &result.diagnostics, options);
+    }
+
+    return result;
+}
+
+pub fn verifyBuiltins(allocator: std.mem.Allocator, options: VerifyOptions) !VerifyResult {
+    var result = VerifyResult{};
+    errdefer result.deinit(allocator);
+
+    for (builtin_modules.governanceEntries()) |entry| {
+        try result.checked_files.append(allocator, entry.module_path);
+        try result.checked_files.append(allocator, entry.spec_path);
+        try auditModuleAndSpec(allocator, entry.module_path, entry.spec_path, &result.diagnostics, options);
     }
 
     return result;
@@ -186,14 +208,17 @@ fn auditPath(
     allocator: std.mem.Allocator,
     path: []const u8,
     diagnostics: *std.ArrayList(OwnedDiagnostic),
+    options: VerifyOptions,
 ) !void {
-    if (isModulePath(path)) {
-        try auditModuleWithSpec(allocator, path, diagnostics);
+    if (findBuiltinEntryByModulePath(path)) |entry| {
+        const spec_path = try resolveCompanionPath(allocator, path, entry.module_path, entry.spec_path);
+        defer allocator.free(spec_path);
+        try auditModuleAndSpec(allocator, path, spec_path, diagnostics, options);
         return;
     }
 
-    if (isSpecPath(path)) {
-        const module_path = try modulePathForSpecPath(allocator, path);
+    if (findBuiltinEntryBySpecPath(path)) |entry| {
+        const module_path = try resolveCompanionPath(allocator, path, entry.spec_path, entry.module_path);
         defer allocator.free(module_path);
 
         if (!file_io.fileExists(allocator, module_path)) {
@@ -215,6 +240,10 @@ fn auditPath(
         return;
     }
 
+    if (looksLikeBuiltinAdjacentPath(path)) {
+        return;
+    }
+
     try appendDiagnostic(
         allocator,
         diagnostics,
@@ -228,21 +257,20 @@ fn auditPath(
     );
 }
 
-fn auditModuleWithSpec(
+fn auditModuleAndSpec(
     allocator: std.mem.Allocator,
     module_path: []const u8,
+    spec_path: []const u8,
     diagnostics: *std.ArrayList(OwnedDiagnostic),
+    options: VerifyOptions,
 ) !void {
-    const spec_path = try specPathForModulePath(allocator, module_path);
-    defer allocator.free(spec_path);
-
     if (!file_io.fileExists(allocator, spec_path)) {
         try auditModuleContentWithSpecPath(allocator, module_path, null, diagnostics);
         try appendDiagnostic(
             allocator,
             diagnostics,
             "ZVM003",
-            "warning",
+            if (options.strict) "error" else "warning",
             "built-in module has no module spec artifact",
             module_path,
             1,
@@ -481,40 +509,48 @@ fn parseJsonStringField(content: []const u8, field_name: []const u8) ?[]const u8
     return content[first_quote + 1 .. end_quote];
 }
 
-fn isModulePath(path: []const u8) bool {
-    return std.mem.indexOf(u8, path, "packages/zigts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
+fn looksLikeBuiltinAdjacentPath(path: []const u8) bool {
+    const in_modules_dir = std.mem.indexOf(u8, path, "packages/zigts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_specs_dir = std.mem.indexOf(u8, path, "packages/zigts/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
+    return in_modules_dir or in_specs_dir;
 }
 
-fn isSpecPath(path: []const u8) bool {
-    return std.mem.indexOf(u8, path, "packages/zigts/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
-}
-
-fn specPathForModulePath(allocator: std.mem.Allocator, module_path: []const u8) ![]u8 {
-    const prefix = "packages/zigts/src/modules/";
-    const idx = std.mem.indexOf(u8, module_path, prefix);
-    const root = if (idx) |value| module_path[0..value] else "";
-    const base = std.fs.path.stem(module_path);
-    const kebab = try replaceByte(allocator, base, '_', '-');
-    defer allocator.free(kebab);
-    return std.fmt.allocPrint(allocator, "{s}packages/zigts/module-specs/{s}.json", .{ root, kebab });
-}
-
-fn modulePathForSpecPath(allocator: std.mem.Allocator, spec_path: []const u8) ![]u8 {
-    const prefix = "packages/zigts/module-specs/";
-    const idx = std.mem.indexOf(u8, spec_path, prefix);
-    const root = if (idx) |value| spec_path[0..value] else "";
-    const base = std.fs.path.stem(spec_path);
-    const snake = try replaceByte(allocator, base, '-', '_');
-    defer allocator.free(snake);
-    return std.fmt.allocPrint(allocator, "{s}packages/zigts/src/modules/{s}.zig", .{ root, snake });
-}
-
-fn replaceByte(allocator: std.mem.Allocator, input: []const u8, from: u8, to: u8) ![]u8 {
-    const out = try allocator.dupe(u8, input);
-    for (out) |*byte| {
-        if (byte.* == from) byte.* = to;
+fn findBuiltinEntryByModulePath(path: []const u8) ?*const builtin_modules.BuiltinGovernanceEntry {
+    for (builtin_modules.governanceEntries()) |*entry| {
+        if (pathMatchesCanonical(path, entry.module_path)) return entry;
     }
-    return out;
+    return null;
+}
+
+fn findBuiltinEntryBySpecPath(path: []const u8) ?*const builtin_modules.BuiltinGovernanceEntry {
+    for (builtin_modules.governanceEntries()) |*entry| {
+        if (pathMatchesCanonical(path, entry.spec_path)) return entry;
+    }
+    return null;
+}
+
+fn pathMatchesCanonical(path: []const u8, canonical_path: []const u8) bool {
+    if (std.mem.eql(u8, path, canonical_path)) return true;
+    if (!std.mem.endsWith(u8, path, canonical_path)) return false;
+    const prefix_len = path.len - canonical_path.len;
+    return prefix_len > 0 and path[prefix_len - 1] == '/';
+}
+
+fn resolveCompanionPath(
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    canonical_input: []const u8,
+    canonical_target: []const u8,
+) ![]u8 {
+    if (std.mem.eql(u8, input_path, canonical_input)) {
+        return allocator.dupe(u8, canonical_target);
+    }
+
+    const prefix_len = input_path.len - canonical_input.len;
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{
+        input_path[0..prefix_len],
+        canonical_target,
+    });
 }
 
 fn sameStringSet(a: []const []const u8, b: []const []const u8) bool {
@@ -586,16 +622,17 @@ test "verify module reports helper use without declared capability" {
     try std.testing.expectEqualStrings("ZVM002", diags.items[0].diag.code);
 }
 
-test "module and spec path mapping round trip" {
+test "registry-driven companion path mapping preserves rooted paths" {
     const allocator = std.testing.allocator;
-    const module_path = "packages/zigts/src/modules/http_mod.zig";
-    const spec_path = try specPathForModulePath(allocator, module_path);
+    const module_path = "/tmp/work/packages/zigts/src/modules/http_mod.zig";
+    const spec_path = try resolveCompanionPath(
+        allocator,
+        module_path,
+        "packages/zigts/src/modules/http_mod.zig",
+        "packages/zigts/module-specs/http-mod.json",
+    );
     defer allocator.free(spec_path);
-    try std.testing.expectEqualStrings("packages/zigts/module-specs/http-mod.json", spec_path);
-
-    const round_trip = try modulePathForSpecPath(allocator, spec_path);
-    defer allocator.free(round_trip);
-    try std.testing.expectEqualStrings(module_path, round_trip);
+    try std.testing.expectEqualStrings("/tmp/work/packages/zigts/module-specs/http-mod.json", spec_path);
 }
 
 test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
@@ -617,4 +654,31 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
     try std.testing.expect(std.mem.indexOf(u8, s, "\"violations\":[]") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"policy_version\":\"2026.04.2\"") != null);
     try std.testing.expectEqual(@as(u8, '\n'), s[s.len - 1]);
+}
+
+test "verifyPaths ignores internal helper files outside the public built-in set" {
+    var result = try verifyPaths(
+        std.testing.allocator,
+        &.{"packages/zigts/src/modules/util.zig"},
+        .{},
+    );
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), result.checked_files.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
+}
+
+test "verifyBuiltins reports the authoritative public module and spec set" {
+    var result = try verifyBuiltins(std.testing.allocator, .{});
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(builtin_modules.governanceEntries().len * 2, result.checked_files.items.len);
+    try std.testing.expect(containsString(result.checked_files.items, "packages/zigts/src/modules/env.zig"));
+    try std.testing.expect(containsString(result.checked_files.items, "packages/zigts/module-specs/env.json"));
+}
+
+test "pathMatchesCanonical requires a path-separator boundary" {
+    try std.testing.expect(pathMatchesCanonical("packages/zigts/src/modules/env.zig", "packages/zigts/src/modules/env.zig"));
+    try std.testing.expect(pathMatchesCanonical("/repo/packages/zigts/src/modules/env.zig", "packages/zigts/src/modules/env.zig"));
+    try std.testing.expect(!pathMatchesCanonical("xpackages/zigts/src/modules/env.zig", "packages/zigts/src/modules/env.zig"));
 }

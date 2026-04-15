@@ -26,7 +26,7 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
       - name: Run all tests
-        run: zig build test test-zigts test-zruntime
+        run: zig build test test-zigts test-zruntime test-expert test-pi test-capability-audit test-module-governance
 
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
