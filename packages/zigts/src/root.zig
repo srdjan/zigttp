@@ -72,6 +72,7 @@ pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
 pub const module_binding = @import("module_binding.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
+pub const security_events = @import("security_events.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const sql_analysis = @import("sql_analysis.zig");
 pub const modules = @import("modules/root.zig");

@@ -25,6 +25,13 @@ pub fn writeJsonString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
 }
 
+/// Write a fixed-size byte array as a quoted lowercase-hex JSON string.
+pub fn writeJsonHex(writer: anytype, bytes: anytype) !void {
+    try writer.writeByte('"');
+    try writer.writeAll(&std.fmt.bytesToHex(bytes, .lower));
+    try writer.writeByte('"');
+}
+
 pub fn containsString(items: []const []const u8, needle: []const u8) bool {
     for (items) |item| {
         if (std.mem.eql(u8, item, needle)) return true;

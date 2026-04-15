@@ -13,6 +13,7 @@ const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const http_parser = @import("http_parser.zig");
+const contract_runtime = @import("contract_runtime.zig");
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
@@ -92,19 +93,8 @@ pub const RuntimeConfig = struct {
     system_config_path: ?[]const u8 = null,
 };
 
-/// Open a trace file for append writing using POSIX APIs.
 fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
-    defer allocator.free(path_z);
-
-    const fd = std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        path_z,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true },
-        0o644,
-    ) catch return error.FileOpenFailed;
-
-    return fd;
+    return zq.file_io.openAppend(allocator, path);
 }
 
 /// Open an oplog file for write-ahead durable execution.
@@ -4286,6 +4276,15 @@ pub const HandlerPool = struct {
     total_exec_ns: std.atomic.Value(u64),
     max_exec_ns: std.atomic.Value(u64),
     exhausted_count: std.atomic.Value(u64),
+    /// Release-time arena audit failures. Exposed via getMetrics().
+    arena_audit_failures: std.atomic.Value(u64),
+    /// Release-time persistent-string-in-arena violations. Exposed via getMetrics().
+    persistent_escape_failures: std.atomic.Value(u64),
+    /// Runtimes recycled (destroyed, not returned to pool) by policy.
+    recycles: std.atomic.Value(u64),
+    /// Contract-derived lifecycle policy. Set by the server after contract parse.
+    pooling_policy: contract_runtime.PoolingPolicy = .reuse_bounded_by_count,
+    pooling_thresholds: contract_runtime.PoolingThresholds = .{},
     wait_percentiles: PercentileTracker,
     exec_percentiles: PercentileTracker,
     pool: zq.LockFreePool,
@@ -4382,6 +4381,9 @@ pub const HandlerPool = struct {
             .total_exec_ns = std.atomic.Value(u64).init(0),
             .max_exec_ns = std.atomic.Value(u64).init(0),
             .exhausted_count = std.atomic.Value(u64).init(0),
+            .arena_audit_failures = std.atomic.Value(u64).init(0),
+            .persistent_escape_failures = std.atomic.Value(u64).init(0),
+            .recycles = std.atomic.Value(u64).init(0),
             .wait_percentiles = .{},
             .exec_percentiles = .{},
             .pool = pool,
@@ -4764,7 +4766,24 @@ pub const HandlerPool = struct {
                 self.recordWait(0);
             }
         }
+
+        // TTL-based pooling is the only consumer of first_use_ns, so skip
+        // the clock read for every other policy.
+        if (self.pooling_policy == .reuse_bounded_by_ttl and rt.first_use_ns == null) {
+            rt.first_use_ns = compat.realtimeNowNs() catch 0;
+        }
+
         return rt;
+    }
+
+    pub fn setPoolingPolicy(self: *Self, policy: contract_runtime.PoolingPolicy) void {
+        self.pooling_policy = policy;
+    }
+
+    fn emitRuntimeEvent(kind: zq.security_events.SecurityEventKind, detail: []const u8) void {
+        zq.security_events.emitGlobal(
+            zq.security_events.SecurityEvent.init(kind, "runtime", detail),
+        );
     }
 
     fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
@@ -4772,6 +4791,52 @@ pub const HandlerPool = struct {
             const runtime: *Runtime = @ptrCast(@alignCast(ptr));
             runtime.prepareForPoolRelease();
         }
+
+        // Sandbox audit runs only under runtime safety; a failed audit
+        // forces recycle regardless of policy. The `comptime` guard lets
+        // ReleaseFast drop both checks entirely.
+        var audit_poisoned = false;
+        if (comptime std.debug.runtime_safety) {
+            rt.assertPersistentStringsOutsideArena() catch |err| switch (err) {
+                error.PersistentStringEscapedIntoArena => {
+                    _ = self.persistent_escape_failures.fetchAdd(1, .monotonic);
+                    std.log.err("sandbox: persistent string escaped into request arena", .{});
+                    emitRuntimeEvent(.persistent_string_escape, "persistent string escaped into request arena");
+                    audit_poisoned = true;
+                },
+            };
+
+            _ = rt.auditAndResetArena() catch |err| switch (err) {
+                error.ArenaLeaked => {
+                    _ = self.arena_audit_failures.fetchAdd(1, .monotonic);
+                    std.log.err("sandbox: request arena audit failed", .{});
+                    emitRuntimeEvent(.arena_audit_failure, "post-reset arena state was non-zero");
+                    audit_poisoned = true;
+                },
+            };
+        }
+
+        // request_count still reflects completed-BEFORE-this-one, so add
+        // one when comparing against the policy threshold.
+        const request_count_after: u64 = rt.request_count + 1;
+        const policy_recycle = switch (self.pooling_policy) {
+            .reuse_unbounded => false,
+            .ephemeral => true,
+            .reuse_bounded_by_count => request_count_after >= self.pooling_thresholds.max_requests,
+            .reuse_bounded_by_ttl => blk: {
+                const first = rt.first_use_ns orelse break :blk false;
+                const now = compat.realtimeNowNs() catch break :blk false;
+                break :blk now -| first >= self.pooling_thresholds.ttl_ns;
+            },
+        };
+
+        if (audit_poisoned or policy_recycle) {
+            _ = self.recycles.fetchAdd(1, .monotonic);
+            self.pool.dropRuntime(rt);
+            _ = self.in_use.fetchSub(1, .monotonic);
+            return;
+        }
+
         self.pool.release(rt);
         _ = self.in_use.fetchSub(1, .monotonic);
     }
@@ -4789,6 +4854,10 @@ pub const HandlerPool = struct {
         exec_p50_ns: u64,
         exec_p95_ns: u64,
         exec_p99_ns: u64,
+        arena_audit_failures: u64,
+        persistent_escape_failures: u64,
+        recycles: u64,
+        pooling_policy: contract_runtime.PoolingPolicy,
     } {
         const requests = self.request_seq.load(.acquire);
         const wait_total = self.total_wait_ns.load(.acquire);
@@ -4806,6 +4875,10 @@ pub const HandlerPool = struct {
             .exec_p50_ns = self.exec_percentiles.getPercentile(50.0),
             .exec_p95_ns = self.exec_percentiles.getPercentile(95.0),
             .exec_p99_ns = self.exec_percentiles.getPercentile(99.0),
+            .arena_audit_failures = self.arena_audit_failures.load(.acquire),
+            .persistent_escape_failures = self.persistent_escape_failures.load(.acquire),
+            .recycles = self.recycles.load(.acquire),
+            .pooling_policy = self.pooling_policy,
         };
     }
 
@@ -4861,7 +4934,12 @@ pub const HandlerPool = struct {
         }
 
         try self.loadHandlerCached(rt);
-        base_rt.assertPersistentStringsOutsideArena();
+        base_rt.assertPersistentStringsOutsideArena() catch |err| switch (err) {
+            error.PersistentStringEscapedIntoArena => {
+                std.log.err("sandbox: persistent string escaped into request arena during handler load", .{});
+                return error.PersistentStringEscapedIntoArena;
+            },
+        };
 
         base_rt.user_data = rt;
         base_rt.user_deinit = runtimeUserDeinit;

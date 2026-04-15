@@ -26,6 +26,8 @@ const QueryParam = http_types.QueryParam;
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const proof_adapter = @import("proof_adapter.zig");
+const security_logger_mod = @import("security_logger.zig");
+const SecurityLogger = security_logger_mod.SecurityLogger;
 
 const RequestLine = http_parser.RequestLine;
 const QueryParseResult = http_parser.QueryParseResult;
@@ -714,6 +716,14 @@ pub const ServerConfig = struct {
 
     /// Skip startup env validation (for testing/development)
     skip_env_check: bool = false,
+
+    /// When set, a background thread drains the global security event
+    /// stream and appends JSONL records to this file path.
+    security_log_path: ?[]const u8 = null,
+
+    /// Operator override of the contract-derived pooling policy. Null
+    /// means "use the policy derived from the contract properties".
+    lifecycle_override: ?contract_runtime.PoolingPolicy = null,
 };
 
 pub const HandlerSource = union(enum) {
@@ -757,6 +767,7 @@ pub const Server = struct {
     conn_pool: ?*ConnectionPool,
     contract: ?RuntimeContract,
     proof_cache: ?proof_adapter.ProofCache,
+    security_logger: ?*SecurityLogger,
 
     const Self = @This();
     const ConnectionEvent = enum { done, timeout };
@@ -814,6 +825,7 @@ pub const Server = struct {
             .conn_pool = null,
             .contract = null,
             .proof_cache = null,
+            .security_logger = null,
         };
     }
 
@@ -824,6 +836,8 @@ pub const Server = struct {
         if (self.pool) |*p| p.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
         if (self.contract) |*c| c.deinit();
+        if (self.security_logger) |logger| logger.deinit();
+        zq.security_events.deinitGlobal();
         self.static_cache.deinit();
         if (self.evented_ready) {
             const io = self.io_backend.io();
@@ -865,6 +879,20 @@ pub const Server = struct {
         self.evented_ready = true;
         const io = self.io_backend.io();
 
+        // Process-wide security event stream. Emits to an uninitialized
+        // stream are silent no-ops, so this just sizes the ring once.
+        try zq.security_events.initGlobal(self.allocator, 128);
+
+        if (self.config.security_log_path) |path| {
+            self.security_logger = SecurityLogger.start(self.allocator, path) catch |err| blk: {
+                std.log.err("Failed to start security logger at '{s}': {}", .{ path, err });
+                break :blk null;
+            };
+            if (self.security_logger != null) {
+                std.log.info("Security events -> {s}", .{path});
+            }
+        }
+
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         var pool_timer = compat.Timer.start() catch null;
         self.pool = try HandlerPool.initWithEmbeddedAndDeps(
@@ -894,7 +922,19 @@ pub const Server = struct {
         }
 
         if (self.contract) |*contract| {
-            // Log proven contract summary
+            contract_runtime.verifyCapabilityMatrix(contract) catch |err| {
+                std.log.err("sandbox: capability matrix drift - rebuild the handler contract against this runtime", .{});
+                return err;
+            };
+            contract_runtime.verifyPolicyHash(contract) catch |err| {
+                std.log.err("sandbox: policy hash drift - rebuild the handler contract against this runtime", .{});
+                return err;
+            };
+            contract_runtime.verifyArtifactHash(contract, self.embedded_bytecode) catch |err| {
+                std.log.err("sandbox: embedded bytecode does not match contract artifact hash", .{});
+                return err;
+            };
+
             logContractSummary(contract);
 
             // Fail fast if proven env vars are missing
@@ -921,6 +961,16 @@ pub const Server = struct {
                 );
                 std.log.info("   Proof cache: enabled (handler proven deterministic + read_only)", .{});
             }
+        }
+
+        // Apply the lifecycle policy: CLI override wins, otherwise derive
+        // from contract properties.
+        if (self.pool) |*p| {
+            const contract_ptr: ?*const RuntimeContract = if (self.contract) |*c| c else null;
+            const effective = self.config.lifecycle_override orelse
+                contract_runtime.derivePoolingPolicy(contract_ptr);
+            p.setPoolingPolicy(effective);
+            std.log.info("   Pooling policy: {s}", .{@tagName(effective)});
         }
 
         // Parse address and create listener

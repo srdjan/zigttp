@@ -10,6 +10,10 @@ const std = @import("std");
 const zq = @import("zigts");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.handler_contract.HandlerProperties;
+const ModuleCapability = zq.module_binding.ModuleCapability;
+const capability_count = zq.module_binding.capability_count;
+
+pub const CapabilityMatrix = zq.handler_contract.CapabilityMatrix;
 
 /// Proven handler properties extracted from the contract.
 /// Each field is a mathematical proof, not an annotation.
@@ -39,6 +43,29 @@ pub const Route = struct {
     path: []const u8,
 };
 
+/// How aggressively the runtime pool may reuse a warmed handler runtime.
+pub const PoolingPolicy = enum {
+    ephemeral, // one runtime per request
+    reuse_bounded_by_count, // recycle after N requests
+    reuse_bounded_by_ttl, // recycle after wall-clock TTL
+    reuse_unbounded, // pure + deterministic + state-isolated only
+};
+
+pub const PoolingThresholds = struct {
+    max_requests: u32 = 64,
+    ttl_ns: u64 = 30 * std.time.ns_per_s,
+};
+
+/// Map proven contract properties to a lifecycle policy. Null falls back to
+/// `.reuse_bounded_by_count`.
+pub fn derivePoolingPolicy(contract: ?*const RuntimeContract) PoolingPolicy {
+    const rc = contract orelse return .reuse_bounded_by_count;
+    const p = rc.properties;
+    if (p.pure and p.deterministic and p.state_isolated) return .reuse_unbounded;
+    if (p.read_only and p.state_isolated) return .reuse_bounded_by_ttl;
+    return .reuse_bounded_by_count;
+}
+
 /// Runtime view of the proven contract.
 /// Owns all allocated memory; call deinit() when done.
 pub const RuntimeContract = struct {
@@ -47,7 +74,24 @@ pub const RuntimeContract = struct {
     routes: []const Route,
     routes_dynamic: bool,
     properties: Properties,
+    /// Null when the embedded contract did not emit a sandbox block (old
+    /// contract, or contract parse fell through). A non-null matrix with
+    /// len == 0 is a legitimate state for handlers that import only
+    /// capability-free modules (e.g. zigttp:router).
+    capabilities: ?CapabilityMatrix = null,
+    /// SHA-256 of the bytecode blob, stamped at build time. All-zero means
+    /// the contract did not carry a sandbox block.
+    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    /// SHA-256 of the zigts rule registry used to extract this contract.
+    /// All-zero means the contract did not carry a sandbox block.
+    policy_hash: [32]u8 = [_]u8{0} ** 32,
+    modules: []const []const u8 = &.{},
     allocator: std.mem.Allocator,
+
+    pub fn hasCapability(self: *const RuntimeContract, cap: ModuleCapability) bool {
+        const caps = self.capabilities orelse return false;
+        return caps.has(cap);
+    }
 
     pub fn deinit(self: *RuntimeContract) void {
         for (self.env_vars) |v| self.allocator.free(v);
@@ -57,6 +101,8 @@ pub const RuntimeContract = struct {
             self.allocator.free(r.path);
         }
         self.allocator.free(self.routes);
+        for (self.modules) |m| self.allocator.free(m);
+        self.allocator.free(self.modules);
     }
 
     /// Check if a request method+path matches any proven route.
@@ -144,14 +190,87 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !Runt
     // Parse properties
     const properties = parseProperties(root);
 
+    // Parse sandbox.capabilities + sandbox.capabilityHash
+    const capabilities = parseCapabilityMatrix(root);
+    var artifact_sha256 = [_]u8{0} ** 32;
+    var policy_hash = [_]u8{0} ** 32;
+    if (root.get("sandbox")) |sandbox_val| {
+        if (sandbox_val == .object) {
+            readSandboxHex(sandbox_val.object, "artifactSha256", &artifact_sha256);
+            readSandboxHex(sandbox_val.object, "policyHash", &policy_hash);
+        }
+    }
+
+    // Parse modules[] so the startup drift check has the handler's import set
+    var modules: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (modules.items) |m| allocator.free(m);
+        modules.deinit(allocator);
+    }
+    if (root.get("modules")) |mods_val| {
+        if (mods_val == .array) {
+            for (mods_val.array.items) |item| {
+                if (item != .string) continue;
+                try modules.append(allocator, try allocator.dupe(u8, item.string));
+            }
+        }
+    }
+
     return .{
         .env_vars = try env_vars.toOwnedSlice(allocator),
         .env_dynamic = env_dynamic,
         .routes = try routes.toOwnedSlice(allocator),
         .routes_dynamic = routes_dynamic,
         .properties = properties,
+        .capabilities = capabilities,
+        .artifact_sha256 = artifact_sha256,
+        .policy_hash = policy_hash,
+        .modules = try modules.toOwnedSlice(allocator),
         .allocator = allocator,
     };
+}
+
+fn readSandboxHex(obj: std.json.ObjectMap, key: []const u8, out: *[32]u8) void {
+    const val = obj.get(key) orelse return;
+    if (val != .string or val.string.len != 64) return;
+    _ = std.fmt.hexToBytes(out, val.string) catch return;
+}
+
+fn parseCapabilityMatrix(root: std.json.ObjectMap) ?CapabilityMatrix {
+    const sandbox_val = root.get("sandbox") orelse return null;
+    if (sandbox_val != .object) return null;
+    const obj = sandbox_val.object;
+
+    var matrix: CapabilityMatrix = .{};
+    if (obj.get("capabilities")) |caps_val| {
+        if (caps_val == .array) {
+            var seen = [_]bool{false} ** capability_count;
+            for (caps_val.array.items) |item| {
+                if (item != .string) continue;
+                const cap = std.meta.stringToEnum(ModuleCapability, item.string) orelse continue;
+                seen[@intFromEnum(cap)] = true;
+            }
+            for (std.enums.values(ModuleCapability)) |c| {
+                if (seen[@intFromEnum(c)]) {
+                    matrix.items[matrix.len] = c;
+                    matrix.len += 1;
+                }
+            }
+        }
+    }
+
+    var parsed_hash = false;
+    if (obj.get("capabilityHash")) |hash_val| {
+        if (hash_val == .string and hash_val.string.len == 64) {
+            if (std.fmt.hexToBytes(&matrix.hash, hash_val.string)) |_| {
+                parsed_hash = true;
+            } else |_| {}
+        }
+    }
+    if (!parsed_hash) {
+        matrix.hash = zq.module_binding.capabilityHash(matrix.slice());
+    }
+    return matrix;
 }
 
 fn parseProperties(root: std.json.ObjectMap) Properties {
@@ -271,6 +390,15 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .has_egress = false,
     };
 
+    var modules: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (modules.items) |m| allocator.free(m);
+        modules.deinit(allocator);
+    }
+    for (hc.modules.items) |m| {
+        try modules.append(allocator, try allocator.dupe(u8, m));
+    }
+
     return .{
         .env_vars = try env_vars.toOwnedSlice(allocator),
         .env_dynamic = hc.env.dynamic,
@@ -295,8 +423,55 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
             .result_safe = hp.result_safe,
             .optional_safe = hp.optional_safe,
         },
+        .capabilities = hc.capabilities,
+        .artifact_sha256 = hc.artifact_sha256,
+        .policy_hash = hc.policy_hash,
+        .modules = try modules.toOwnedSlice(allocator),
         .allocator = allocator,
     };
+}
+
+/// Rebuild the capability matrix from the currently-linked registry for
+/// this handler's imports. Compare against `contract.capabilities.hash` to
+/// detect drift between a compiled contract and the runtime binary.
+pub fn deriveLiveCapabilityMatrix(contract: *const RuntimeContract) CapabilityMatrix {
+    return zq.handler_contract.computeCapabilityMatrix(contract.modules);
+}
+
+/// Verify the embedded matrix still matches what the linked registry would
+/// produce. Returns error.CapabilityMatrixMismatch on drift. Skips silently
+/// when the contract did not carry a sandbox block.
+pub fn verifyCapabilityMatrix(contract: *const RuntimeContract) !void {
+    const stored = contract.capabilities orelse return;
+    const live = deriveLiveCapabilityMatrix(contract);
+    if (!std.mem.eql(u8, &live.hash, &stored.hash)) {
+        return error.CapabilityMatrixMismatch;
+    }
+}
+
+/// Compare the embedded policy hash against the linked rule registry.
+/// Returns error.PolicyHashMismatch on drift. All-zero means "not emitted",
+/// which skips the check.
+pub fn verifyPolicyHash(contract: *const RuntimeContract) !void {
+    if (std.mem.allEqual(u8, &contract.policy_hash, 0)) return;
+    const hex = zq.rule_registry.policyHash();
+    var live: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&live, &hex) catch return error.PolicyHashMismatch;
+    if (!std.mem.eql(u8, &live, &contract.policy_hash)) {
+        return error.PolicyHashMismatch;
+    }
+}
+
+/// Re-hash the embedded bytecode and compare against the contract. Skips
+/// when the hash is absent (all-zero) or no bytecode was provided.
+pub fn verifyArtifactHash(contract: *const RuntimeContract, bytecode: ?[]const u8) !void {
+    if (std.mem.allEqual(u8, &contract.artifact_sha256, 0)) return;
+    const blob = bytecode orelse return;
+    var live: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(blob, &live, .{});
+    if (!std.mem.eql(u8, &live, &contract.artifact_sha256)) {
+        return error.ArtifactHashMismatch;
+    }
 }
 
 // ============================================================================
@@ -548,4 +723,266 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(rc.properties.retry_safe);
     try std.testing.expect(rc.properties.deterministic);
     try std.testing.expect(!rc.properties.pure);
+}
+
+test "parseContractJson reads sandbox block" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 12,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": ["zigttp:crypto", "zigttp:auth"],
+        \\  "sandbox": {
+        \\    "capabilities": ["clock", "crypto"],
+        \\    "capabilityHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        \\  },
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+    var contract = try parseContractJson(allocator, source);
+    defer contract.deinit();
+
+    try std.testing.expect(contract.capabilities != null);
+    try std.testing.expectEqual(@as(u8, 2), contract.capabilities.?.len);
+    try std.testing.expect(contract.hasCapability(.clock));
+    try std.testing.expect(contract.hasCapability(.crypto));
+    try std.testing.expect(!contract.hasCapability(.stderr));
+    try std.testing.expectEqual(@as(usize, 2), contract.modules.len);
+}
+
+test "parseContractJson returns null capabilities when sandbox block is absent" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 13,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+    var contract = try parseContractJson(allocator, source);
+    defer contract.deinit();
+    try std.testing.expect(contract.capabilities == null);
+    try std.testing.expect(!contract.hasCapability(.crypto));
+}
+
+test "verifyCapabilityMatrix passes for a live-derived matrix" {
+    const allocator = std.testing.allocator;
+    // Build modules and a matching matrix from the live registry
+    var modules_list: std.ArrayList([]const u8) = .empty;
+    errdefer modules_list.deinit(allocator);
+    try modules_list.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+    try modules_list.append(allocator, try allocator.dupe(u8, "zigttp:auth"));
+
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .modules = try modules_list.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+    defer contract.deinit();
+
+    contract.capabilities = deriveLiveCapabilityMatrix(&contract);
+    try std.testing.expectEqual(@as(u8, 2), contract.capabilities.?.len);
+
+    try verifyCapabilityMatrix(&contract);
+}
+
+test "verifyCapabilityMatrix detects drift" {
+    const allocator = std.testing.allocator;
+    var modules_list: std.ArrayList([]const u8) = .empty;
+    errdefer modules_list.deinit(allocator);
+    try modules_list.append(allocator, try allocator.dupe(u8, "zigttp:crypto"));
+
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .modules = try modules_list.toOwnedSlice(allocator),
+        .allocator = allocator,
+    };
+    defer contract.deinit();
+
+    // Seed a non-null matrix whose hash does not match the live derivation.
+    contract.capabilities = CapabilityMatrix{
+        .len = 1,
+        .items = blk: {
+            var items: [capability_count]ModuleCapability = undefined;
+            items[0] = .crypto;
+            break :blk items;
+        },
+        .hash = [_]u8{0xAA} ** 32,
+    };
+
+    try std.testing.expectError(
+        error.CapabilityMatrixMismatch,
+        verifyCapabilityMatrix(&contract),
+    );
+}
+
+test "verifyCapabilityMatrix skips when matrix is absent" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = std.testing.allocator,
+    };
+    try verifyCapabilityMatrix(&contract);
+}
+
+test "derivePoolingPolicy: null contract falls back to bounded count" {
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(null));
+}
+
+test "derivePoolingPolicy: pure+deterministic+isolated = unbounded" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{
+            .pure = true,
+            .deterministic = true,
+            .state_isolated = true,
+        },
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectEqual(PoolingPolicy.reuse_unbounded, derivePoolingPolicy(&contract));
+}
+
+test "derivePoolingPolicy: read_only+isolated = ttl" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{
+            .read_only = true,
+            .state_isolated = true,
+        },
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_ttl, derivePoolingPolicy(&contract));
+}
+
+test "derivePoolingPolicy: has_egress = bounded count" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{
+            .has_egress = true,
+            .state_isolated = true,
+        },
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&contract));
+}
+
+test "verifyPolicyHash passes when hash matches live registry" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = std.testing.allocator,
+    };
+    const hex = zq.rule_registry.policyHash();
+    _ = try std.fmt.hexToBytes(&contract.policy_hash, &hex);
+    try verifyPolicyHash(&contract);
+}
+
+test "verifyPolicyHash rejects drift" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .policy_hash = [_]u8{0xAB} ** 32,
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectError(error.PolicyHashMismatch, verifyPolicyHash(&contract));
+}
+
+test "verifyPolicyHash skips when hash is absent" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = std.testing.allocator,
+    };
+    try verifyPolicyHash(&contract);
+}
+
+test "verifyArtifactHash matches bytecode digest" {
+    const bytecode = "some fake bytecode blob";
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytecode, &expected, .{});
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .artifact_sha256 = expected,
+        .allocator = std.testing.allocator,
+    };
+    try verifyArtifactHash(&contract, bytecode);
+}
+
+test "verifyArtifactHash rejects tampered bytecode" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .artifact_sha256 = [_]u8{0xFF} ** 32,
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectError(error.ArtifactHashMismatch, verifyArtifactHash(&contract, "anything"));
+}
+
+test "verifyArtifactHash skips when hash is absent" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .allocator = std.testing.allocator,
+    };
+    try verifyArtifactHash(&contract, "anything");
+}
+
+test "derivePoolingPolicy: !state_isolated = bounded count" {
+    var contract = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{
+            .pure = true,
+            .deterministic = true,
+            .state_isolated = false,
+        },
+        .allocator = std.testing.allocator,
+    };
+    try std.testing.expectEqual(PoolingPolicy.reuse_bounded_by_count, derivePoolingPolicy(&contract));
 }

@@ -20,6 +20,7 @@ const compat = @import("compat.zig");
 const file_io = @import("file_io.zig");
 const sqlite_runtime = @import("sqlite.zig");
 const resolver = @import("modules/resolver.zig");
+const security_events = @import("security_events.zig");
 
 // Re-export EffectClass from resolver for backward compatibility
 pub const EffectClass = resolver.EffectClass;
@@ -386,12 +387,22 @@ pub fn hmacSha256Checked(
     hmacSha256ForActiveModule(out, data, key) catch |err| panicCapabilityError(err, .crypto);
 }
 
+fn emitPolicyDenial(kind: security_events.SecurityEventKind, name: []const u8) void {
+    security_events.emitGlobal(security_events.SecurityEvent.init(
+        kind,
+        currentActiveModuleSpecifier(),
+        name,
+    ));
+}
+
 pub fn allowsCacheNamespaceForActiveModule(
     ctx: *context.Context,
     ns: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(.policy_check);
-    return ctx.capability_policy.allowsCacheNamespace(ns);
+    const allowed = ctx.capability_policy.allowsCacheNamespace(ns);
+    if (!allowed) emitPolicyDenial(.policy_denied_cache, ns);
+    return allowed;
 }
 
 pub fn allowsCacheNamespaceChecked(ctx: *context.Context, ns: []const u8) bool {
@@ -403,7 +414,9 @@ pub fn allowsEnvForActiveModule(
     name: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(.policy_check);
-    return ctx.capability_policy.allowsEnv(name);
+    const allowed = ctx.capability_policy.allowsEnv(name);
+    if (!allowed) emitPolicyDenial(.policy_denied_env, name);
+    return allowed;
 }
 
 pub fn allowsEnvChecked(ctx: *context.Context, name: []const u8) bool {
@@ -415,7 +428,9 @@ pub fn allowsSqlQueryForActiveModule(
     name: []const u8,
 ) ActiveCapabilityError!bool {
     try requireActiveCapability(.policy_check);
-    return ctx.capability_policy.allowsSqlQuery(name);
+    const allowed = ctx.capability_policy.allowsSqlQuery(name);
+    if (!allowed) emitPolicyDenial(.policy_denied_sql, name);
+    return allowed;
 }
 
 pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) bool {
@@ -510,6 +525,21 @@ pub const ModuleCapability = enum {
     network,
     policy_check,
 };
+
+pub const capability_count: usize = @typeInfo(ModuleCapability).@"enum".fields.len;
+
+/// SHA-256 over a canonical capability list. Tag names are hashed in the
+/// order given, newline-separated, so equal sets produce equal digests.
+pub fn capabilityHash(caps: []const ModuleCapability) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (caps) |c| {
+        hasher.update(@tagName(c));
+        hasher.update("\n");
+    }
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
 
 // -------------------------------------------------------------------------
 // Data provenance labels
