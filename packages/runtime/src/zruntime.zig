@@ -1327,6 +1327,27 @@ pub const Runtime = struct {
             return error.HandlerError;
         };
 
+        // If the bytecode path set an exception but didn't propagate a Zig error
+        // (e.g. a conditional opcode rejected its operand and left the stack in
+        // an `undefined` state), surface it as a 500 instead of letting
+        // extractResponseInternal return an empty default. This guards against
+        // the "silent empty 200" class of bug.
+        if (self.ctx.hasException()) {
+            const exc = self.ctx.exception;
+            self.ctx.clearException();
+            var err_response = HttpResponse.init(self.allocator);
+            err_response.status = 500;
+            const exc_msg: []const u8 = if (exc.isString())
+                exc.toPtr(zq.JSString).data()
+            else
+                "handler aborted without returning a Response";
+            const body_owned = try self.allocator.dupe(u8, exc_msg);
+            err_response.setBodyOwned(body_owned);
+            try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
+            self.traceRecordResponse(&err_response);
+            return err_response;
+        }
+
         // Convert result to HttpResponse
         const response = try self.extractResponseInternal(result, borrow_body);
         if (borrow_body and response.requires_runtime) {
