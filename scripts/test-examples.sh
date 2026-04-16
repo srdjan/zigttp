@@ -73,11 +73,11 @@ run_tests "examples/htmx-todo/handlers.tsx"    "examples/htmx-todo/handlers.test
 # shopping-cart/
 run_tests "examples/shopping-cart/shopping-cart.tsx" "examples/shopping-cart/shopping-cart.test.jsonl"
 
-# url-shortener/ — DISABLED: fixture drift. Most assertions fail because the
-# handler returns empty bodies where the fixture expects JSON or redirect
-# targets. Either the handler regressed or the fixture was written against a
-# different revision. Fix the discrepancy and re-enable this line.
-#run_tests "examples/url-shortener/shortener.ts" "examples/url-shortener/shortener.test.jsonl"
+# url-shortener/ — re-enabled after value.zig toConditionBool fix. The prior
+# "fixture drift" note was misdiagnosed: the handler uses `if (pub)` on the
+# result of `routerMatch`, and the old truthiness path rejected objects at
+# runtime, producing silent empty 200s that looked like fixture drift.
+run_tests "examples/url-shortener/shortener.ts" "examples/url-shortener/shortener.test.jsonl"
 
 echo ""
 echo "====================="
