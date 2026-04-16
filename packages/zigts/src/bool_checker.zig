@@ -2263,6 +2263,16 @@ test "sound: if (fn) fails - function always truthy" {
     try checkSource("if (() => 1) { let x = 1; }", 1);
 }
 
+test "sound: if (named_object_literal) - static check rejects pointless condition" {
+    // Regression: confirm the bool_checker correctly infers the type of a
+    // named-local bound to an object literal and rejects the pointless
+    // condition, matching the anonymous-literal case above.
+    try checkSource(
+        \\const found = { kind: "fake" };
+        \\if (found) { let x = 1; }
+    , 1);
+}
+
 test "sound: truthiness narrowing - if (x) narrows optional to string" {
     try checkSource(
         \\import { env } from "zigttp:env";

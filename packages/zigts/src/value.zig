@@ -622,10 +622,13 @@ pub const JSValue = packed struct(u64) {
         return true;
     }
 
-    /// Type-directed truthiness for sound mode conditional opcodes.
-    /// Returns the boolean result for types with unambiguous falsy states:
-    ///   boolean: value itself, number: != 0, string: != "", undefined: false
-    /// Returns null for objects/functions (always truthy - pointless condition).
+    /// JS-semantic truthiness for conditional opcodes.
+    /// Matches the ECMAScript ToBoolean algorithm: undefined/null/false/+0/-0/NaN/""
+    /// are falsy; everything else (including all objects and functions) is truthy.
+    /// Sound mode still rejects pointless-condition uses of objects/functions at
+    /// compile time in `bool_checker.zig`; this runtime path must never swallow
+    /// a live value as "rejected" because the ?bool return used to be folded
+    /// into a swallowed exception that produced silent empty responses.
     pub fn toConditionBool(self: JSValue) ?bool {
         const string_mod = @import("string.zig");
         // Fast path: boolean (most common case in conditionals)
@@ -637,14 +640,16 @@ pub const JSValue = packed struct(u64) {
             const f = self.getFloat64();
             return f != 0.0 and !std.math.isNan(f);
         }
-        // Undefined: always false
-        if (self.isUndefined()) return false;
+        // Null and undefined: always false
+        if (self.isNullish()) return false;
         // String: empty is falsy
         if (self.isString()) return self.toPtr(string_mod.JSString).len != 0;
         if (self.isStringSlice()) return self.toPtr(string_mod.SliceString).len != 0;
         if (self.isRope()) return self.toPtr(string_mod.RopeNode).total_len != 0;
-        // Objects, functions: no meaningful falsy state - reject
-        return null;
+        // Exception sentinel: refuse, surface to the caller.
+        if (self.isException()) return null;
+        // Objects, functions, and any other non-primitive: truthy per JS.
+        return true;
     }
 
     /// Get the JS typeof result
@@ -789,6 +794,28 @@ test "JSValue toNumber preserves NaN" {
     const num = JSValue.nan_val.toNumber();
     try std.testing.expect(num != null);
     try std.testing.expect(std.math.isNan(num.?));
+}
+
+test "JSValue toConditionBool - primitives match JS semantics" {
+    try std.testing.expectEqual(@as(?bool, true), JSValue.true_val.toConditionBool());
+    try std.testing.expectEqual(@as(?bool, false), JSValue.false_val.toConditionBool());
+    try std.testing.expectEqual(@as(?bool, false), JSValue.null_val.toConditionBool());
+    try std.testing.expectEqual(@as(?bool, false), JSValue.undefined_val.toConditionBool());
+    try std.testing.expectEqual(@as(?bool, false), JSValue.fromInt(0).toConditionBool());
+    try std.testing.expectEqual(@as(?bool, true), JSValue.fromInt(1).toConditionBool());
+    try std.testing.expectEqual(@as(?bool, false), JSValue.fromFloat(0.0).toConditionBool());
+    try std.testing.expectEqual(@as(?bool, false), JSValue.nan_val.toConditionBool());
+    try std.testing.expectEqual(@as(?bool, true), JSValue.fromFloat(2.5).toConditionBool());
+}
+
+test "JSValue toConditionBool - raw pointer (object) is truthy" {
+    // Regression: toConditionBool used to return null for pointer-tagged values
+    // (which carry objects and functions), causing the VM to synthesize a
+    // BoolError exception that the HTTP dispatch path silently swallowed into
+    // an empty 200. Objects and functions must be truthy to match JS.
+    var dummy: u64 = 0x1;
+    const obj_like = JSValue.fromPtr(&dummy);
+    try std.testing.expectEqual(@as(?bool, true), obj_like.toConditionBool());
 }
 
 test "JSValue pointer encoding" {
