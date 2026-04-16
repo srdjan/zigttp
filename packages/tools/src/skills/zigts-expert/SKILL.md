@@ -1,26 +1,13 @@
 ---
 name: zigts-expert
-description: Write handler code in the zigts TypeScript subset for zigttp's serverless runtime. Covers the language spec, virtual modules, compile-time verification, sound mode type safety, and idiomatic FaaS patterns. Use for any .ts/.tsx/.js/.jsx files targeting zigttp.
+description: "Write handler code in the zigts TypeScript subset for zigttp's serverless runtime. Covers the language spec, virtual modules, compile-time verification, sound mode type safety, and idiomatic FaaS patterns. Use for any .ts/.tsx/.js/.jsx files targeting zigttp."
 ---
 
 # zigts-expert - Skill + Compiler-in-the-Loop
 
-## Architecture
-
-```
-1. Read this SKILL.md (language expertise)
-2. Write zigts code using the rules below
-3. Run: zigts check --json handler.ts
-4. Read structured JSON from stdout
-5. Fix errors using suggestion fields
-6. Repeat until success
-```
-
-No MCP server. No protocol. No config wiring. Just a binary and a skill.
-
 ## When to Use
 
-Trigger when: writing `.ts` files for zigttp handlers, compiling with `zigts`, debugging zigts compiler errors, or asking about the zigts language subset.
+Trigger when: writing `.ts` files for zigttp handlers, compiling with `zigts`, debugging zigts compiler errors, or asking about the zigts language subset. Uses a compiler-in-the-loop workflow: write code, run `zigts check --json`, fix from diagnostics, repeat.
 
 ## CLI Reference
 
@@ -115,45 +102,24 @@ Error:
 - ZTS2xx: TypeChecker (type mismatches, argument errors)
 - ZTS3xx: HandlerVerifier (missing returns, unchecked results, state isolation)
 
-## Language Rules - What zigts Is
-
-zigts is a restricted TypeScript subset compiled by a Zig-based compiler. It removes features to guarantee that every handler is a pure function with a statically provable sandbox.
-
-### The Core Invariant
-
-The IR tree IS the control flow graph. No cycles, no hidden exception paths, no non-local jumps. Every feature that would break this property is blocked.
+## Language Rules
 
 ### What's Allowed
 
-| Category | Features |
-|----------|----------|
-| Declarations | `let`, `const`, `function`, arrow functions, destructuring (array/object/rest) |
-| Control flow | `if`/`else`, `for...of` with `break`/`continue`, `return`, `assert` |
-| Expressions | Template literals, ternary, spread, optional chaining (`?.`), nullish coalescing (`??`) |
-| Operators | `+` `-` `*` `/` `%` `**`, `===` `!==` `<` `>` `<=` `>=`, `&&` `||` `!` |
-| Assignment | `=` `+=` `-=` `*=` `/=` `%=` `**=` |
-| Modules | `import { x } from "zigttp:mod"`, `import { x } from "./local"`, `export` |
-| Special | `match` expression, pipe operator `|>`, `guard()` composition, `comptime()` |
-| Types | Type aliases, `distinct type`, interfaces, annotations, `readonly` fields, type guards (`x is T`), template literal types |
+`let`/`const`/`function`/arrows, destructuring, `if`/`else`, `for...of`, `return`, `assert`, template literals, ternary, spread, `?.`, `??`, standard operators (`===`/`!==`, arithmetic, logical), compound assignments, `import`/`export`, `match` expression, pipe `|>`, `guard()`, `comptime()`. Type system: aliases, `distinct type`, interfaces, annotations, `readonly`, type guards (`x is T`), template literal types.
 
 ### What's Blocked (and Why)
 
 | Banned | Use Instead |
 |--------|-------------|
 | `switch`/`case` | `match` expression |
-| `class` | Plain objects and functions |
-| `while`, `do...while` | `for (const x of range(n))` or `for (const x of collection)` |
-| C-style `for (;;)` | `for (const i of range(n))` |
-| `for...in` | `for (const k of Object.keys(obj))` |
-| `try`/`catch`/`finally` | Result types: check `.ok` before `.value` |
-| `throw` | `return Response.json({ error: "..." }, { status: 500 })` |
+| `class`, `new`, `this` | Plain objects, factory functions, explicit params |
+| `while`, `do...while`, C-style `for`, `for...in` | `for (const x of range(n))` or `for (const x of collection)` / `Object.keys(obj)` |
+| `try`/`catch`/`finally`, `throw` | Result types (check `.ok` before `.value`) or error responses |
 | `var` | `let` or `const` |
 | `null` | `undefined` (sole absent-value sentinel) |
-| `==`, `!=` | `===`, `!==` (strict equality only) |
-| `++`, `--` | `x = x + 1`, `x = x - 1` |
+| `==`, `!=`, `++`, `--` | `===`/`!==` (strict only), `x = x + 1` |
 | Regular expressions | String methods: `includes`, `startsWith`, `endsWith`, `indexOf` |
-| `new` (constructors) | Factory functions, object literals |
-| `this` | Explicit parameter passing |
 | `async`/`await`/`Promise` | `fetchSync()`, `parallel()`, `race()` |
 | `delete` | `const { key, ...rest } = obj` |
 
@@ -331,39 +297,13 @@ const requireAuth = (req: Request): Response | undefined => {
 const handler = guard(rateLimiter) |> guard(requireAuth) |> dashboard;
 ```
 
-### Sound Mode Type System
-
-The BoolChecker enforces type-directed safety rules at compile time:
-
-- Boolean contexts: only boolean, number, string, optional types accepted (not objects or functions)
-- Arithmetic: both operands must be numbers
-- Addition: `number + number` or `string + string` only - mixed types are errors (use template literals)
-- Optionals: must be narrowed before use in arithmetic or addition
-
 ### Built-in Globals
 
-`Object.keys/values/entries`, array HOFs (`map`, `filter`, `reduce`, `find`, `some`, `every`, `forEach`), all `String` methods, `Math`, `JSON.parse/stringify`, `Date.now()`, `console.log`, `range(end)`, `fetchSync(url, init?)`, `parseInt`, `parseFloat`, `structuredClone`.
+`Object.keys/values/entries`, array HOFs (`map`/`filter`/`reduce`/`find`/`some`/`every`/`forEach`), `String` methods, `Math`, `JSON.parse/stringify`, `Date.now()`, `console.log`, `range(end)`, `fetchSync(url, init?)`, `parseInt`/`parseFloat`, `structuredClone`.
 
 ### Compile-Time Features
 
-- `comptime(expr)`: evaluate at load time (literals, arithmetic, Math, string methods, hash)
-- `-Dverify`: proves exhaustive returns, Result checking, optional narrowing, state isolation
-- `-Dcontract`: extracts sandbox contract (env vars, hosts, modules, properties)
-
-## Writing Good zigts Code
-
-1. Start with the handler signature: `function handler(req: Request): Response`
-2. Import only what you need - every import is a sandbox contract
-3. Use `const` for everything - there is no mutation needed
-4. Use Result types for fallibility - never throw
-5. Use `pipe()` for sequencing - never nest callbacks
-6. Use `match()` for routing - never chain if/else on method+path
-7. Type your functions - annotations drive the type checker and proof system
-8. One handler per file - the compiler's proof unit is a single file
-
-## When the Compiler Knows Best
-
-If `zigts check --json` returns an error with a suggestion, **use the suggestion**. The compiler understands the restricted grammar better than any language model. The skill gives you the patterns; the compiler enforces them.
+`comptime(expr)` evaluates at load time. `-Dverify` proves exhaustive returns, Result checking, optional narrowing, state isolation. `-Dcontract` extracts sandbox contract (env vars, hosts, modules, properties).
 
 ## Reference Files
 

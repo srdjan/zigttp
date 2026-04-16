@@ -1,41 +1,9 @@
 ---
 name: zig-expert
-description: Write idiomatic Zig code following the Zen of Zig philosophy. Use for systems programming with Zig (.zig files), covering manual memory management with allocators, error unions and explicit error handling, compile-time programming (comptime), data-oriented design, and the new async/Io model. Applies functional programming parallels (Result types, ADTs, explicit effects) for C-free systems development.
+description: "Write idiomatic Zig code following the Zen of Zig philosophy. Use for systems programming with Zig (.zig files), covering manual memory management with allocators, error unions and explicit error handling, compile-time programming (comptime), data-oriented design, and the new async/Io model. Applies functional programming parallels (Result types, ADTs, explicit effects) for C-free systems development."
 ---
 
 # Idiomatic Zig Programming
-
-Expert guidance for writing idiomatic Zig code that embodies the Zen of Zig: explicit intent, no hidden control flow, and compile-time over runtime.
-
-## Zen of Zig (Core Philosophy)
-
-These principles govern all idiomatic Zig code:
-
-| Principle | Implication |
-|-----------|-------------|
-| Communicate intent precisely | Explicit code; APIs make requirements obvious |
-| Edge cases matter | No undefined behaviors glossed over |
-| Favor reading over writing | Optimize for clarity and maintainability |
-| One obvious way | Avoid multiple complex features for same task |
-| Runtime crashes > bugs | Fail fast and loudly, never corrupt state silently |
-| Compile errors > runtime crashes | Catch issues at compile-time when possible |
-| Resource deallocation must succeed | Design APIs with allocation failure in mind |
-| Memory is a resource | Manage memory as consciously as any other resource |
-| No hidden control flow | No exceptions, no GC, no implicit allocations |
-
-## FP Conceptual Parallels
-
-Zig shares key concepts with functional programming:
-
-| FP Concept | Zig Equivalent |
-|------------|----------------|
-| Result/Either type | Error union `!T` (either error or value) |
-| Option/Maybe | Optional `?T` (nullable type) |
-| ADTs / Sum types | Tagged unions with `union(enum)` |
-| Pattern matching | `switch` with exhaustive handling |
-| Explicit effects | Allocator/Io parameters (dependency injection) |
-| Immutability preference | `const` by default, `var` only when needed |
-| Pure functions | Functions without hidden state or allocations |
 
 ## Workflow Decision Tree
 
@@ -53,7 +21,7 @@ Zig shares key concepts with functional programming:
 
 ## Essential Patterns
 
-### Error Unions (Result Type Equivalent)
+### Error Unions
 
 ```zig
 const FileError = error{ NotFound, PermissionDenied, InvalidPath };
@@ -71,7 +39,7 @@ fn readConfig(path: []const u8) FileError!Config {
     return config;
 }
 
-// Propagate with try (like Rust's ?)
+// Propagate with try
 pub fn main() !void {
     const config = try readConfig("app.conf");
     // ...
@@ -87,19 +55,16 @@ pub fn mainSafe() void {
 }
 ```
 
-### Allocator Pattern (Explicit Effects)
+### Allocator Pattern
 
 ```zig
 const std = @import("std");
 
-// Function signature communicates: "I need to allocate"
 fn processData(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var result = try allocator.alloc(u8, input.len * 2);
-    errdefer allocator.free(result); // cleanup only on error path
-    
+    errdefer allocator.free(result);
     // ... process into result
-    
-    return result; // caller owns this memory
+    return result;
 }
 
 pub fn main() !void {
@@ -108,11 +73,11 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     
     const data = try processData(allocator, "input");
-    defer allocator.free(data); // caller responsible for cleanup
+    defer allocator.free(data);
 }
 ```
 
-### Tagged Unions (ADTs / Sum Types)
+### Tagged Unions
 
 ```zig
 const PaymentState = union(enum) {
@@ -160,7 +125,7 @@ const LOOKUP_TABLE = blk: {
     break :blk table;
 };
 
-// Generic container (like TypeScript generics)
+// Generic container
 fn ArrayList(comptime T: type) type {
     return struct {
         items: []T,
@@ -185,59 +150,52 @@ fn ArrayList(comptime T: type) type {
 fn processFile(allocator: std.mem.Allocator, path: []const u8) !void {
     // Open file
     const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close(); // ALWAYS runs on scope exit
+    defer file.close();
     
-    // Allocate buffer
     const buffer = try allocator.alloc(u8, 4096);
-    defer allocator.free(buffer); // cleanup guaranteed
+    defer allocator.free(buffer);
     
-    // errdefer for conditional cleanup
     var result = try allocator.alloc(u8, 1024);
-    errdefer allocator.free(result); // only on error
+    errdefer allocator.free(result);
     
     // If we reach here successfully, caller owns result
     // ...
 }
 ```
 
+## Build-Verify Loop
+
+1. Write code using the patterns above
+2. Run `zig build` — fix any compile errors (type mismatches, missing errdefer)
+3. Run `zig build test -- --test-filter "name"` — verify correctness
+4. Check GPA leak detection: `gpa.deinit()` returns `.ok` when no leaks
+5. Only proceed when tests pass and no leaks detected
+
+```zig
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+defer std.debug.assert(gpa.deinit() == .ok);
+```
+
 ## Quick Reference
 
 ```zig
-// Imports
 const std = @import("std");
 
-// Variables
-const immutable: u32 = 42;        // prefer const
-var mutable: u32 = 0;             // only when needed
-
-// Optionals (?T) - like Option/Maybe
+// Optionals (?T)
 var maybe_value: ?u32 = null;
-const unwrapped = maybe_value orelse 0;        // default value
-const ptr = maybe_value orelse return error.Missing;  // early return
+const unwrapped = maybe_value orelse 0;
+const ptr = maybe_value orelse return error.Missing;
 
-// Error unions (!T) - like Result/Either
-fn canFail() !u32 { return error.SomeError; }
-const value = try canFail();                   // propagate error
-const safe = canFail() catch |err| handleError(err);  // catch error
-
-// Slices (pointer + length, not null-terminated)
-const slice: []const u8 = "hello";             // string literal is []const u8
+// Slices
+const slice: []const u8 = "hello";
 const arr: [5]u8 = .{ 1, 2, 3, 4, 5 };
-const sub = arr[1..3];                         // slice of array
+for (slice, 0..) |byte, index| { }
 
-// Iteration
-for (slice, 0..) |byte, index| { }             // value and index
-for (slice) |byte| { }                         // value only
-
-// Switch (exhaustive, can capture)
+// Switch (exhaustive)
 switch (tagged_union) {
     .variant => |captured| doSomething(captured),
-    else => {},  // or handle all cases
+    else => {},
 }
-
-// Comptime
-const SIZE = comptime blk: { break :blk 64; };
-fn generic(comptime T: type, val: T) T { return val; }
 ```
 
 ## Detailed References

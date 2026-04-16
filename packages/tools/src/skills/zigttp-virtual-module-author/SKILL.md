@@ -1,6 +1,6 @@
 ---
 name: zigttp-virtual-module-author
-description: Design and update built-in zigttp virtual modules with explicit capability discipline, module specs, contract metadata, and law review. Use for changes under packages/zigts/src/modules/ and packages/zigts/module-specs/.
+description: "Define module interfaces, validate module contracts, and enforce capability boundaries for built-in zigttp virtual modules. Covers writing module specs, Zig bindings, effect classification, and algebraic law review. Use when adding a new virtual module, modifying module exports or behavior, or editing files under packages/zigts/src/modules/ and packages/zigts/module-specs/."
 ---
 
 # zigttp-virtual-module-author
@@ -42,6 +42,43 @@ What must be enforced mechanically is the capability boundary:
 5. Keep effects at the edge. Prefer checked capability helpers over direct stdlib or runtime access.
 6. Run `zigts expert verify-modules <file> --json` on touched module/spec files.
 7. Run targeted Zig tests for the touched module plus the capability audit when relevant.
+
+## Module Spec Example
+
+A minimal spec for `zigttp:env` (`packages/zigts/module-specs/env.json`):
+
+```json
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:env",
+  "source": "packages/zigts/src/modules/env.zig",
+  "requiredCapabilities": ["env", "policy_check"],
+  "exports": [
+    {
+      "name": "env",
+      "effect": "read",
+      "returns": "optional_string",
+      "failureSeverity": "expected",
+      "contractExtractions": [{ "category": "env" }],
+      "laws": ["pure"]
+    }
+  ]
+}
+```
+
+Key fields: `requiredCapabilities` declares what the module needs at call time, `effect` classifies each export (`read`, `write`, `pure`), and `laws` lists provable properties.
+
+## Capability Helper Usage
+
+In the Zig binding, access external state through checked capability helpers only:
+
+```zig
+// Correct: use the checked capability helper
+const value = ctx.capabilities.envRead(key) orelse return vm.makeOptionalNull();
+
+// Rejected: raw stdlib access bypasses the capability boundary
+const value = std.process.getEnvMap().get(key); // DO NOT use
+```
 
 ## Required Outputs
 
