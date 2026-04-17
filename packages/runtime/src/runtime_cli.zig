@@ -3,15 +3,12 @@ const builtin = @import("builtin");
 
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
-const HandlerSource = @import("server.zig").HandlerSource;
-const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
 const durable_recovery = @import("durable_recovery.zig");
 const durable_scheduler = @import("durable_scheduler.zig");
 const project_config_mod = @import("project_config");
-const ProjectConfig = project_config_mod.ProjectConfig;
 const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("live_reload.zig");
 const shared = @import("cli_shared.zig");
@@ -477,4 +474,52 @@ fn printServeHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+test "parseCommonServeFlag: -p consumes next arg as port" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{ "-p", "4242" };
+    var i: usize = 0;
+    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
+    try std.testing.expectEqual(@as(u16, 4242), config.port);
+    try std.testing.expectEqual(@as(usize, 1), i);
+}
+
+test "parseCommonServeFlag: --cors toggles enable_cors, no value consumed" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{"--cors"};
+    var i: usize = 0;
+    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
+    try std.testing.expect(config.enable_cors);
+    try std.testing.expectEqual(@as(usize, 0), i);
+}
+
+test "parseCommonServeFlag: returns false for unrelated flag" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{"--eval"};
+    var i: usize = 0;
+    try std.testing.expect(!try parseCommonServeFlag(argv[0], &i, &argv, &config));
+    try std.testing.expectEqual(@as(usize, 0), i);
+}
+
+test "parseCommonServeFlag: missing value returns error" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{"-p"};
+    var i: usize = 0;
+    try std.testing.expectError(error.MissingPortValue, parseCommonServeFlag(argv[0], &i, &argv, &config));
+}
+
+test "parseCommonServeFlag: --lifecycle parses known value" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{ "--lifecycle", "ephemeral" };
+    var i: usize = 0;
+    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
+    try std.testing.expectEqual(contract_runtime.PoolingPolicy.ephemeral, config.lifecycle_override.?);
+}
+
+test "parseCommonServeFlag: --lifecycle rejects unknown value" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{ "--lifecycle", "nonsense" };
+    var i: usize = 0;
+    try std.testing.expectError(error.InvalidLifecycleValue, parseCommonServeFlag(argv[0], &i, &argv, &config));
 }
