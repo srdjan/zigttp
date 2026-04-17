@@ -8,35 +8,48 @@ Serverless JavaScript runtime for FaaS, powered by zigts (pure Zig JS engine). T
 
 Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort until revalidated.
 
+The build produces three binaries:
+
+- `zigttp` — the runtime. Ships with deployed apps. Serves HTTP, executes handlers. Subcommands: `serve`, `attest`, `version`.
+- `zigttp-cli` — the developer tool. Subcommands: `init`, `dev`, `check`, `compile`, `prove`, `mock`, `link`, `expert`, `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`.
+- `zigts` — the engine/compiler CLI (not usually invoked directly; `zigttp-cli` wraps its commands).
+
 ```bash
-zig build                                      # Debug build
+zig build                                      # Debug build (all three binaries)
 zig build -Doptimize=ReleaseFast              # Release build
-zig build -Dhandler=handler.jsx               # Precompile handler
+zig build -Dhandler=handler.jsx               # Precompile handler into zigttp
 zig build -Dhandler=handler.jsx -Dverify      # Verify at compile time
 zig build -Dhandler=handler.jsx -Dcontract    # Emit contract.json
-zig build -Dhandler=handler.jsx -Ddeploy=aws  # Proven deploy manifest
 zig build -Dhandler=handler.jsx -Dreplay=traces.jsonl   # Replay-verify
 zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at build time
 
-zig build run -- examples/handler/handler.ts -p 3000
+zig build run -- examples/handler/handler.ts -p 3000       # Run zigttp
 zig build run -- examples/handler/handler.ts --watch --prove  # Proven live reload
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
+zig build cli -- expert meta --json            # Run zigttp-cli
 
-zig build test                     # All tests
-zig build test-zigts                 # Engine tests only
+zig build test                     # All tests (runtime + CLI + engine + zruntime)
+zig build test-zigts               # Engine tests only
 zig build test-zruntime            # Runtime tests only
+zig build test-cli                 # Developer CLI tests only
 zig build test -- --test-filter "name"  # Single test
 bash scripts/test-examples.sh      # All example handler tests
 
 zig build bench                    # Zig-native benchmarks (packages/runtime/src/benchmark.zig)
-zig build prove -- old.json new.json  # Compare contracts (0=safe, 1=breaking)
-zig build mock -- tests.jsonl --port 3001  # Mock server from test cases
-zigts link system.json               # Cross-handler contract linking
+zigttp-cli prove old.json new.json  # Compare contracts (0=safe, 1=breaking)
+zigttp-cli mock tests.jsonl --port 3001  # Mock server from test cases
+zigttp-cli link system.json         # Cross-handler contract linking
 ```
 
 ## Architecture
 
-Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Entry: `main.zig`, HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reload.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
+Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Two entry points after the split:
+
+- `main.zig` → `runtime_cli.zig` — the `zigttp` runtime binary (serve, attest, self-extract startup, version, help).
+- `cli_main.zig` → `dev_cli.zig` — the `zigttp-cli` developer binary (init, dev, check, compile, expert, deploy, etc.).
+- `cli_shared.zig` — arg parsing, watch sets, size parsing shared by both.
+
+HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reload.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
 
 Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
@@ -102,9 +115,9 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 `-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`.
 
-### zigttp deploy
+### zigttp-cli deploy
 
-`zigttp deploy` takes no arguments. It auto-detects the handler file, service name, and `.env` in the current directory, then ships to the zigttp runtime. First run prompts for browser sign-in; credentials persist in `~/.zigttp/credentials`. `zigttp logout` clears them. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+`zigttp-cli deploy` takes no arguments. It auto-detects the handler file, service name, and `.env` in the current directory, then ships to the zigttp runtime. First run prompts for browser sign-in; credentials persist in `~/.zigttp/credentials`. `zigttp-cli logout` clears them. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 ### zigts (compiler/analyzer)
 

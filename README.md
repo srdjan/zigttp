@@ -7,7 +7,7 @@ A JavaScript runtime built from scratch in Zig for serverless workloads. One bin
 
 Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zigts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
 
-Validated release target: Zig `0.16.0`. The compiler/analyzer CLI is `zigts`.
+Validated release target: Zig `0.16.0`. The build produces three binaries: `zigttp` (the runtime that ships with deployed apps), `zigttp-cli` (the developer tool for `init`, `dev`, `compile`, `deploy`, `expert`, etc.), and `zigts` (the compiler/analyzer that `zigttp-cli` wraps).
 
 ### What makes it different
 
@@ -29,7 +29,7 @@ Validated release target: Zig `0.16.0`. The compiler/analyzer CLI is `zigts`.
 
 **Structured concurrent I/O.** `parallel()` and `race()` from `zigttp:io` overlap outbound HTTP without async/await or Promises. Handler code stays synchronous and linear; concurrency happens in the I/O layer using OS threads. Three API calls at 50ms each complete in ~50ms total.
 
-**One-command deploy.** `zigttp deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run prompts for a Zigttp access token in the terminal; browser-based device login remains available as fallback. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+**One-command deploy.** `zigttp-cli deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run prompts for a Zigttp access token in the terminal; browser-based device login remains available as fallback. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 **Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 

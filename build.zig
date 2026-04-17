@@ -194,8 +194,10 @@ pub fn build(b: *std.Build) void {
     });
     precompile_exe.root_module.addImport("zigts", zigts_host_mod);
 
-    // Runtime/project CLI
-    const exe = b.addExecutable(.{
+    // Runtime binary — ships with deployed apps. Minimal dependencies:
+    // only what's needed to serve HTTP and execute a (possibly embedded)
+    // handler. No pi_app, no deploy, no zigts_cli.
+    const runtime_exe = b.addExecutable(.{
         .name = "zigttp",
         .root_module = b.createModule(.{
             .root_source_file = runtime_dep.path("src/main.zig"),
@@ -204,12 +206,14 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-
-    // Add zigts module to main executable
-    exe.root_module.addImport("zigts", zigts_mod);
-    exe.root_module.addImport("zigts_cli", zigts_cli_mod);
-    exe.root_module.addImport("pi_app", pi_app_mod);
-    exe.root_module.addImport("project_config", project_config_mod);
+    runtime_exe.root_module.addImport("zigts", zigts_mod);
+    runtime_exe.root_module.addImport("project_config", project_config_mod);
+    // Live reload (`serve --watch --prove`) uses precompile + upgrade_verifier
+    // from zigts_cli. Needed in the runtime binary only for developer-local
+    // `zigttp serve --watch`; production FaaS instances never enable --watch.
+    // Cost: binary size. Alternative (move live_reload out of runtime) is a
+    // larger refactor — deferred.
+    runtime_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
 
     // If handler is specified, precompile it and add as dependency
     if (handler_path) |path| {
@@ -289,11 +293,11 @@ pub fn build(b: *std.Build) void {
         const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated" });
         run_precompile.step.dependOn(&mkdir_step.step);
 
-        // Main exe depends on precompile completing
-        exe.step.dependOn(&run_precompile.step);
+        // Runtime exe depends on precompile completing
+        runtime_exe.step.dependOn(&run_precompile.step);
 
         // Add the generated module (with zigts dependency for transpiled handlers)
-        exe.root_module.addAnonymousImport("embedded_handler", .{
+        runtime_exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
             .imports = &.{
                 .{ .name = "zigts", .module = zigts_mod },
@@ -301,7 +305,7 @@ pub fn build(b: *std.Build) void {
         });
     } else {
         // No handler specified - create a stub module
-        exe.root_module.addAnonymousImport("embedded_handler", .{
+        runtime_exe.root_module.addAnonymousImport("embedded_handler", .{
             .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
             .imports = &.{
                 .{ .name = "zigts", .module = zigts_mod },
@@ -309,7 +313,34 @@ pub fn build(b: *std.Build) void {
         });
     }
 
-    b.installArtifact(exe);
+    b.installArtifact(runtime_exe);
+
+    // Developer CLI — installed by developers. Contains init, dev, check,
+    // compile, prove, mock, link, expert, deploy, login, logout, review,
+    // grants, revoke-grant, doctor. Links pi_app and the full deploy subtree.
+    // Does not embed a handler; never deployed to FaaS.
+    const cli_exe = b.addExecutable(.{
+        .name = "zigttp-cli",
+        .root_module = b.createModule(.{
+            .root_source_file = runtime_dep.path("src/cli_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    cli_exe.root_module.addImport("zigts", zigts_mod);
+    cli_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
+    cli_exe.root_module.addImport("pi_app", pi_app_mod);
+    cli_exe.root_module.addImport("project_config", project_config_mod);
+    // Dev CLI has no embedded handler; provide a stub so server/runtime code
+    // paths that reference `embedded_handler` still link.
+    cli_exe.root_module.addAnonymousImport("embedded_handler", .{
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zigts", .module = zigts_mod },
+        },
+    });
+    b.installArtifact(cli_exe);
 
     // Compiler/analyzer CLI
     const zigts_exe = b.addExecutable(.{
@@ -323,16 +354,22 @@ pub fn build(b: *std.Build) void {
     const module_governance_step = b.step("test-module-governance", "Run built-in module governance audit");
     module_governance_step.dependOn(&run_module_governance.step);
 
-    // Run command
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-
+    // Run command: runs the runtime binary directly, without triggering the
+    // full install step (which would also link the dev CLI and bench binaries).
+    const run_cmd = b.addRunArtifact(runtime_exe);
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
-
     const run_step = b.step("run", "Run the server");
     run_step.dependOn(&run_cmd.step);
+
+    // Dev CLI run command for convenience: `zig build cli -- expert`
+    const cli_run_cmd = b.addRunArtifact(cli_exe);
+    if (b.args) |args| {
+        cli_run_cmd.addArgs(args);
+    }
+    const cli_run_step = b.step("cli", "Run the developer CLI");
+    cli_run_step.dependOn(&cli_run_cmd.step);
 
     // Tests
     const unit_tests = b.addTest(.{
@@ -343,9 +380,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add zigts module to tests
+    // Runtime-side tests (main.zig root) — covers runtime_cli, zruntime,
+    // server, proof_adapter, cli_shared via the test block in main.zig.
     unit_tests.root_module.addImport("zigts", zigts_mod);
-    unit_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
     unit_tests.root_module.addImport("project_config", project_config_mod);
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
@@ -353,10 +390,34 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigts", .module = zigts_mod },
         },
     });
-
     const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
+    // dependencies (deploy, pi_app wiring, zigts_cli delegation).
+    const cli_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = runtime_dep.path("src/cli_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    cli_tests.root_module.addImport("zigts", zigts_mod);
+    cli_tests.root_module.addImport("zigts_cli", zigts_cli_mod);
+    cli_tests.root_module.addImport("pi_app", pi_app_mod);
+    cli_tests.root_module.addImport("project_config", project_config_mod);
+    cli_tests.root_module.addAnonymousImport("embedded_handler", .{
+        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zigts", .module = zigts_mod },
+        },
+    });
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    const cli_test_step = b.step("test-cli", "Run developer CLI unit tests");
+    cli_test_step.dependOn(&run_cli_tests.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_precompile_tests.step);
     test_step.dependOn(&run_prop_expect_tests.step);
     test_step.dependOn(&run_rollout_tests.step);
@@ -364,6 +425,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_pi_tests.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&run_module_governance.step);
+    test_step.dependOn(&run_zigts_tests.step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{
@@ -383,6 +445,7 @@ pub fn build(b: *std.Build) void {
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
+    test_step.dependOn(&run_zruntime_tests.step);
 
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
@@ -401,17 +464,17 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zigts", .module = zigts_mod },
         },
     });
-    b.installArtifact(bench_exe);
+    // Bench is not installed by default. `zig build bench` still builds and
+    // runs it; the artifact is available via the cache or an explicit install.
 
     // Benchmark run command
     const bench_cmd = b.addRunArtifact(bench_exe);
-    bench_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         bench_cmd.addArgs(args);
     }
 
     // Release build step (with handler precompilation if provided)
-    const release_step = b.step("release", "Build optimized release binaries (zigttp, zigts)");
+    const release_step = b.step("release", "Build optimized release binaries (zigttp, zigttp-cli, zigts)");
     release_step.dependOn(b.getInstallStep());
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
