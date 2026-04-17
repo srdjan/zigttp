@@ -1,9 +1,10 @@
-//! Line-buffered REPL driver for the in-process tool registry.
+//! Line-buffered expert REPL driver.
 //!
 //! The per-line logic lives in `dispatchLine` as a pure function so tests can
 //! exercise parsing + lookup + invocation without touching stdin/stdout. `run`
-//! wraps it in a minimal read/print loop intended for interactive poking and
-//! phase-1 smoke tests, not for the eventual agent loop.
+//! wraps it in an interactive loop where natural-language input goes to the
+//! expert backend and direct tool names still dispatch to the in-process
+//! registry.
 //!
 //! Wire format: `<tool_name>[ <arg>]`. The first whitespace-delimited token is
 //! the tool name; the remainder of the line (trimmed) is passed as a single
@@ -17,7 +18,6 @@ const agent = @import("agent.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
-const ToolDef = registry_mod.ToolDef;
 
 pub const DispatchOutcome = union(enum) {
     noop,
@@ -65,12 +65,23 @@ fn isHelp(name: []const u8) bool {
     return std.mem.eql(u8, name, "help") or std.mem.eql(u8, name, ":h");
 }
 
+pub fn shouldDispatchTool(registry: *const Registry, line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    if (trimmed.len == 0) return true;
+
+    const first_ws = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
+    const name = trimmed[0..first_ws];
+    return isQuit(name) or isHelp(name) or registry.findByName(name) != null;
+}
+
 fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResult {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const w = &aw.writer;
 
+    try w.writeAll("Natural language is sent to the expert backend by default.\n");
+    try w.writeAll("Type a tool name directly to call an in-process compiler primitive.\n\n");
     try w.writeAll("Registered tools:\n");
     for (registry.list()) |entry| {
         try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
@@ -87,18 +98,17 @@ pub fn run(
 ) !void {
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        const banner = "pi registry — type 'help' or 'quit'\n";
+        const banner = "zigttp expert — type a request, 'help' for tools, or 'quit'\n";
         _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
     }
 
     var session = try agent.initFromEnv(allocator);
     defer session.deinit(allocator);
-    var agent_mode = false;
 
     var line_buf: [64 * 1024]u8 = undefined;
     while (true) {
         if (is_tty) {
-            const prompt = "pi> ";
+            const prompt = "expert> ";
             _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
         }
 
@@ -106,14 +116,7 @@ pub fn run(
         const line = maybe_line orelse break;
 
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (std.mem.eql(u8, trimmed, agent.toggle_command)) {
-            agent_mode = !agent_mode;
-            const msg = if (agent_mode) "agent mode: on\n" else "agent mode: off\n";
-            _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
-            continue;
-        }
-
-        if (agent_mode and trimmed.len > 0 and !isQuit(trimmed)) {
+        if (trimmed.len > 0 and !shouldDispatchTool(registry, trimmed)) {
             const rendered = agent.runOneTurn(allocator, &session, registry, trimmed) catch |err| {
                 var msg_buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";

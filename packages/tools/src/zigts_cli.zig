@@ -16,7 +16,6 @@ const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 const system_build = @import("system_build.zig");
 const system_rollout = @import("system_rollout.zig");
-const init_command = @import("init_command.zig");
 const search_rules = @import("search_rules.zig");
 const review_patch = @import("review_patch.zig");
 const expert = @import("expert.zig");
@@ -72,14 +71,6 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
     if (std.mem.eql(u8, command, "modules")) {
         try runModulesCommand(argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "init")) {
-        try init_command.runInit(allocator, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, command, "agent")) {
-        try init_command.runAgentCommand(allocator, argv[1..]);
         return;
     }
     if (std.mem.eql(u8, command, "edit-simulate")) {
@@ -337,8 +328,6 @@ fn printHelp() void {
         \\  zigts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
         \\  zigts features [--json]
         \\  zigts modules [--json]
-        \\  zigts init [--force]
-        \\  zigts agent init [--force]
         \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]

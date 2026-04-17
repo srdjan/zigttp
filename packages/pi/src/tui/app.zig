@@ -1,6 +1,6 @@
-//! Raw-mode TUI event loop. Drives the existing in-process registry through
-//! the same `repl.dispatchLine` that the line-buffered REPL uses, so every
-//! registered tool works in both modes without a second dispatch table.
+//! Raw-mode TUI event loop. Natural-language input goes to the expert
+//! backend by default; direct tool invocations still route through the
+//! same `repl.dispatchLine` path as the line-buffered REPL.
 //!
 //! The loop reads bytes from stdin, classifies each into a `KeyEvent`, feeds
 //! it to the `LineEditor`, and on submit hands the collected line to the
@@ -19,7 +19,7 @@ const Registry = repl.Registry;
 
 // The redraw prefix is built at comptime so one syscall covers both the
 // clear-line escape and the label instead of two per keystroke.
-const prompt_prefix = "\r\x1b[2K" ++ "pi> ";
+const prompt_prefix = "\r\x1b[2K" ++ "expert> ";
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -33,9 +33,8 @@ pub fn run(
 
     var session = try agent.initFromEnv(allocator);
     defer session.deinit(allocator);
-    var agent_mode = false;
 
-    const banner = "pi tui - type 'help', press Enter to submit, Ctrl-C or type 'quit' to exit\r\n";
+    const banner = "zigttp expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
     writeAll(banner);
     redrawPrompt(editor.line());
 
@@ -76,16 +75,7 @@ pub fn run(
                         return;
                     }
 
-                    if (std.mem.eql(u8, line_snapshot, agent.toggle_command)) {
-                        agent_mode = !agent_mode;
-                        const msg = if (agent_mode) "agent mode: on\r\n" else "agent mode: off\r\n";
-                        writeAll(msg);
-                        editor.clear();
-                        redrawPrompt(editor.line());
-                        continue;
-                    }
-
-                    if (agent_mode and line_snapshot.len > 0) {
+                    if (line_snapshot.len > 0 and !repl.shouldDispatchTool(registry, line_snapshot)) {
                         const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot) catch |err| {
                             var msg_buf: [256]u8 = undefined;
                             const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";

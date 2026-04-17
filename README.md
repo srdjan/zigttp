@@ -422,6 +422,12 @@ provenance survives in the registry.
 
 Standalone analysis and compilation without starting a server.
 
+For the interactive compiler-backed authoring workflow, run:
+
+```bash
+zigttp expert
+```
+
 ```bash
 zigts check [handler.ts] [options]    # Verify handler, show proof card
 zigts compile [--system path] <handler.ts> <out.zig>  # Compile to embedded bytecode
@@ -430,7 +436,6 @@ zigts mock <tests.jsonl> [--port N]   # Mock server from test cases
 zigts link <system.json>              # Cross-handler contract linking
 zigts features [--json]               # List allowed/blocked language features
 zigts modules [--json]                # List virtual modules and exports
-zigts init                            # Install skill files and hooks for Claude Code
 zigts expert meta [--json]            # Policy metadata (version, hash, rule count)
 zigts expert verify-paths <f>... [--json]  # Full analysis on files
 ```

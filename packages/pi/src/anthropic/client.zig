@@ -11,7 +11,7 @@
 //!
 //! Unit tests cover header assembly and the end-to-end glue through
 //! synthetic bodies. The live-network test is gated on both
-//! `ANTHROPIC_API_KEY` and `ZIGTTP_PI_LIVE=1` so an ambient key in a
+//! `ANTHROPIC_API_KEY` and `ZIGTTP_EXPERT_LIVE=1` so an ambient key in a
 //! shell can't accidentally bill tokens during `zig build test`.
 
 const std = @import("std");
@@ -226,7 +226,7 @@ test "live: round-trip one turn against api.anthropic.com" {
     // Skip unless both env vars are set. This keeps the default test run
     // free of network dependencies and protects against surprise billing
     // from an ambient ANTHROPIC_API_KEY in the developer's shell.
-    const opt_in = envVar("ZIGTTP_PI_LIVE") orelse return error.SkipZigTest;
+    const opt_in = envVar("ZIGTTP_EXPERT_LIVE") orelse return error.SkipZigTest;
     if (!std.mem.eql(u8, opt_in, "1")) return error.SkipZigTest;
     const api_key = envVar("ANTHROPIC_API_KEY") orelse return error.SkipZigTest;
 

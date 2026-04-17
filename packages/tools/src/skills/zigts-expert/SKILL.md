@@ -49,7 +49,7 @@ zigts check --json --contract handler.ts
 zigts prove old-contract.json new-contract.json
 ```
 
-**Always use `--json` when running from Claude Code.** Parse the result. Never guess at errors from unstructured stderr.
+**Always use `--json` when running from an interactive expert client.** Parse the result. Never guess at errors from unstructured stderr.
 
 ## Compiler-in-the-Loop Workflow
 

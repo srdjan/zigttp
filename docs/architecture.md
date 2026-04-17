@@ -294,14 +294,7 @@ zigttp/
 │           ├── edit_simulate.zig    # Diff-aware violation analysis
 │           ├── review_patch.zig     # Patch review with --diff-only filtering
 │           ├── deploy_manifest.zig  # Proven deployment manifest generator
-│           ├── openapi_manifest.zig # OpenAPI spec generator
-│           ├── init_command.zig     # zigts/zigttp agent tooling installer
-│           └── hooks/               # Canonical hook scripts (embedded by init)
-│               ├── pre-edit-zts.sh  # PreToolUse: check before edits
-│               ├── post-edit-zts.sh # PostToolUse: analyze after edits
-│               ├── pre-edit-zig-module.sh
-│               ├── post-edit-zig-module.sh
-│               └── session-start.sh # SessionStart: export policy env vars
+│           └── openapi_manifest.zig # OpenAPI spec generator
 └── examples/
     ├── handler/           # Basic handler variants (TS, TSX)
     ├── jsx/               # JSX rendering demos

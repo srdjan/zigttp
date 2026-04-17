@@ -29,9 +29,6 @@
 | `docs/sound-mode.md` | Type-directed analysis across operators (arithmetic, comparison, boolean) |
 | `docs/extension-model.md` | Design note for third-party virtual modules via `zigttp-sdk` |
 | `docs/deploy-tutorial.md` | `zigttp deploy`, `zigttp login`, drift detection, self-hosted control plane |
-| `docs/threat-model.md` | Threat model for the rule review system and Claude Code integration |
-| `docs/claude-tools.md` | Developer workflow using zigts in Claude Code sessions |
-| `docs/rollout.md` | Historical rollout record for the v0.14-v0.15 rule review system |
 | `docs/mini-book.md` | Narrative guide covering runtime, verification, and sandboxing |
 | `docs/blog/` | Long-form posts (e.g., `url-shortener-in-133-lines.md`) |
 

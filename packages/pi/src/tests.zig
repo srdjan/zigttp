@@ -1,4 +1,4 @@
-//! Test aggregator for the zigttp_pi package. Root module for `test-pi`.
+//! Test aggregator for the zigttp expert app package.
 
 comptime {
     _ = @import("registry/tool.zig");

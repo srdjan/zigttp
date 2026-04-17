@@ -1,6 +1,7 @@
 //! `zigts expert` subcommand namespace.
 //!
-//! Provides a stable, versioned CLI surface for Claude Code hooks and CI.
+//! Provides a stable, versioned CLI surface for the interactive expert app
+//! and CI.
 //! Delegates to existing command implementations; adds `meta` and `verify-paths`.
 
 const std = @import("std");
