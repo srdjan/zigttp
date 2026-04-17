@@ -19,3 +19,9 @@ build_link.log
 proof-report.txt
 proof.json
 codedb.snapshot
+
+# Ephemeral 16-char scratch project dirs spawned at repo root by some
+# tool/agent workflow. Contents are single-line handler.ts stubs; never
+# user work. No legit top-level dir in this repo is 16 chars long, so
+# this glob is safe.
+/????????????????/
