@@ -36,8 +36,18 @@ For the strategic direction beyond the current implementation, see
 
 HTTP listener, CLI, request routing, static file serving, contract-aware startup.
 
+**Two binaries built from this package**:
+- `zigttp` — the runtime. Ships with deployed FaaS apps. Subcommands: `serve`, `attest`. Entry: `main.zig` → `runtime_cli.zig`.
+- `zigttp-cli` — the developer CLI. Subcommands: `init`, `dev`, `check`, `compile`, `expert`, `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, plus pass-through to `zigts` for `check`/`prove`/`mock`/`link`. Entry: `cli_main.zig` → `dev_cli.zig`.
+
+Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`, `zruntime.zig`, `contract_runtime.zig`), `self_extract.zig`, and `cli_shared.zig` (arg parsing, watch sets, size helpers). Only `zigttp-cli` links `pi_app` (the `expert` interactive agent) and the `deploy/` subtree (OCI push, control plane, provider adapter).
+
 **Key Components**:
-- `main.zig` - Entry point, CLI argument parsing
+- `main.zig` - Runtime entry trampoline
+- `cli_main.zig` - Dev CLI entry trampoline
+- `runtime_cli.zig` - Runtime subcommand dispatch
+- `dev_cli.zig` - Dev CLI subcommand dispatch
+- `cli_shared.zig` - Shared arg parsing, watch sets
 - `server.zig` - HTTP request/response handling, static file cache, route pre-filtering
 - `zruntime.zig` - HandlerPool management, JS context lifecycle
 - `contract_runtime.zig` - Runtime contract parser for startup env validation, route pre-filtering, and property logging
