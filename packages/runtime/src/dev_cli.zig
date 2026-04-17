@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const project_config_mod = @import("project_config");
-const ProjectConfig = project_config_mod.ProjectConfig;
 const zigts = @import("zigts");
 const self_extract = @import("self_extract.zig");
 const zigts_cli = @import("zigts_cli");
