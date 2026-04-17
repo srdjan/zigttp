@@ -5044,7 +5044,7 @@ pub const HandlerPool = struct {
 // Tests
 // ============================================================================
 
-const TestErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+const TestErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
 
 const TestCapturedHeader = struct {
     name: []u8,
@@ -6586,7 +6586,7 @@ test "AOT override fallback and success" {
 }
 
 test "HandlerPool concurrent stress" {
-    // Expensive opt-in stress test. Stable on 0.16.0-dev.3073+28ae5d415 (5/5 runs).
+    // Expensive opt-in stress test. Stable on Zig 0.16.0 (5/5 runs).
     // Run explicitly with: ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
     if (std.c.getenv("ZTS_RUN_STRESS_TESTS") == null) return error.SkipZigTest;
 
