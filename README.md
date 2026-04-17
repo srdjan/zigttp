@@ -7,7 +7,7 @@ A JavaScript runtime built from scratch in Zig for serverless workloads. One bin
 
 Where Node.js and Deno optimize for generality, zigttp optimizes for a single use case: running a request handler as fast as possible, then getting out of the way. It ships a pure-Zig JS engine (zigts) with a JIT compiler, NaN-boxed values, and hidden classes - but skips everything a FaaS handler doesn't need (event loop, Promises, `require`).
 
-Validated release target: Zig `0.16.0-dev.3073+28ae5d415`. The compiler/analyzer CLI is `zigts`.
+Validated release target: Zig `0.16.0`. The compiler/analyzer CLI is `zigts`.
 
 ### What makes it different
 
@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 
 Or download a tarball from [GitHub Releases](https://github.com/srdjan/zigttp/releases).
 
-To build from source (requires Zig `0.16.0-dev.3073+28ae5d415`):
+To build from source (requires Zig `0.16.0`):
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git && cd zigttp
@@ -1018,9 +1018,9 @@ Benefits:
 
 See [Performance](docs/performance.md) for detailed profiling analysis and deployment patterns.
 
-## Nightly Revalidation
+## Compiler Revalidation
 
-When updating to a new Zig nightly, run:
+When revalidating against a newer Zig compiler, run:
 
 ```bash
 zig version
@@ -1030,10 +1030,19 @@ zig build test-zigts
 zig build test-zruntime
 bash scripts/test-examples.sh
 ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
-ZTS_RUN_FLAKY_NIGHTLY_TESTS=1 zig build test -- --test-filter "parseRequest rejects long header"
+ZTS_RUN_FLAKY_IO_TESTS=1 zig build test -- --test-filter "parseRequest rejects long header"
 ```
 
-Then update the pinned version in this README and `docs/user-guide.md`.
+Then update the validated compiler version in this README and `docs/user-guide.md`.
+
+For faster local edit/build loops on ELF targets, keep incremental and new-linker usage opt-in:
+
+```bash
+zig build -fincremental --error-style=minimal_clear
+zig build -Doptimize=Debug -fincremental --error-style=minimal_clear
+```
+
+`zigttp` does not enable these by default because Zig `0.16.0` still documents incremental compilation as experimental and the new ELF linker as not yet feature-complete.
 
 ## Documentation
 

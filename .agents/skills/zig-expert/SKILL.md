@@ -7,112 +7,81 @@ description: Write idiomatic Zig code following the Zen of Zig philosophy. Use f
 
 Expert guidance for writing idiomatic Zig code that embodies the Zen of Zig: explicit intent, no hidden control flow, and compile-time over runtime.
 
-## Zen of Zig (Core Philosophy)
+> Prefer Zig 0.16.0 idioms: `std.Io` with explicit `io`, `main(init: std.process.Init|Minimal)` for args/env, destructuring, labeled switch, `@branchHint` on hot paths, `.empty` for std containers, `DebugAllocator` in debug builds, and explicit backing integers for packed types.
 
-These principles govern all idiomatic Zig code:
+## Zen of Zig
 
 | Principle | Implication |
 |-----------|-------------|
-| Communicate intent precisely | Explicit code; APIs make requirements obvious |
-| Edge cases matter | No undefined behaviors glossed over |
-| Favor reading over writing | Optimize for clarity and maintainability |
-| One obvious way | Avoid multiple complex features for same task |
-| Runtime crashes > bugs | Fail fast and loudly, never corrupt state silently |
-| Compile errors > runtime crashes | Catch issues at compile-time when possible |
-| Resource deallocation must succeed | Design APIs with allocation failure in mind |
-| Memory is a resource | Manage memory as consciously as any other resource |
-| No hidden control flow | No exceptions, no GC, no implicit allocations |
-
-## FP Conceptual Parallels
-
-Zig shares key concepts with functional programming:
-
-| FP Concept | Zig Equivalent |
-|------------|----------------|
-| Result/Either type | Error union `!T` (either error or value) |
-| Option/Maybe | Optional `?T` (nullable type) |
-| ADTs / Sum types | Tagged unions with `union(enum)` |
-| Pattern matching | `switch` with exhaustive handling |
-| Explicit effects | Allocator/Io parameters (dependency injection) |
-| Immutability preference | `const` by default, `var` only when needed |
-| Pure functions | Functions without hidden state or allocations |
+| Communicate intent precisely | APIs should make ownership, failure, and allocation obvious |
+| Edge cases matter | Handle invalid states explicitly rather than hoping they never happen |
+| Favor reading over writing | Prefer straightforward code over abstraction tricks |
+| Compile errors > runtime crashes | Push invariants into types and comptime checks |
+| Runtime crashes > silent bugs | Fail loudly rather than corrupting state |
+| Memory is a resource | Accept allocators explicitly; define ownership clearly |
+| No hidden control flow | No exceptions, GC, implicit allocations, or magical globals |
 
 ## Workflow Decision Tree
 
-1. **Declaring a binding?** → Use `const` unless mutation required
-2. **Function needs memory?** → Accept `Allocator` parameter, never global alloc
-3. **Function can fail?** → Return error union `!T`, use `try` to propagate
-4. **Handling an error?** → Use `catch` with explicit handler or `try` to propagate
-5. **Need cleanup on exit?** → Use `defer` immediately after acquisition
-6. **Cleanup only on error?** → Use `errdefer` for conditional cleanup
-7. **Need generic code?** → Use `comptime` type parameters
-8. **Compile-time known value?** → Use `comptime` to evaluate at build time
-9. **Calling C code?** → Use `@cImport` for seamless FFI
-10. **Need async I/O?** → Pass `Io` interface, use `io.async()` and `future.await()`
-11. **Optimizing hot path?** → Consider data-oriented design (SoA vs AoS)
+1. **Need mutation?** Use `var`; otherwise use `const`.
+2. **Need allocation?** Accept `std.mem.Allocator`; never hide allocation behind globals.
+3. **Can fail?** Return `!T` and propagate with `try`.
+4. **Need cleanup?** Place `defer` or `errdefer` immediately after acquisition.
+5. **Need OS interaction?** Pass `std.Io` explicitly; keep side effects at the boundary.
+6. **Need environment variables or args?** Read them in `main(init)` and pass explicit config downward.
+7. **Need generic code?** Use `comptime` parameters and exhaustive `switch`.
+8. **Need C interop?** `@cImport` still works, but prefer build-system-managed translate-c for new code when practical.
+9. **Need hot-path tuning?** Measure first, then use layout/data changes and targeted `@branchHint`.
 
 ## Essential Patterns
 
-### Error Unions (Result Type Equivalent)
+### Error Unions
 
 ```zig
+const std = @import("std");
+
 const FileError = error{ NotFound, PermissionDenied, InvalidPath };
 
-fn readConfig(path: []const u8) FileError!Config {
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+fn readConfig(io: std.Io, path: []const u8) FileError!Config {
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
         return switch (err) {
             error.FileNotFound => error.NotFound,
             error.AccessDenied => error.PermissionDenied,
             else => error.InvalidPath,
         };
     };
-    defer file.close();
+    defer file.close(io);
+
     // ... parse config
     return config;
 }
-
-// Propagate with try (like Rust's ?)
-pub fn main() !void {
-    const config = try readConfig("app.conf");
-    // ...
-}
-
-// Handle explicitly with catch
-pub fn mainSafe() void {
-    const config = readConfig("app.conf") catch |err| {
-        std.debug.print("Failed: {}\n", .{err});
-        return;
-    };
-    // ...
-}
 ```
 
-### Allocator Pattern (Explicit Effects)
+### Allocator Ownership
 
 ```zig
 const std = @import("std");
 
-// Function signature communicates: "I need to allocate"
 fn processData(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result = try allocator.alloc(u8, input.len * 2);
-    errdefer allocator.free(result); // cleanup only on error path
-    
-    // ... process into result
-    
-    return result; // caller owns this memory
+    const result = try allocator.alloc(u8, input.len * 2);
+    errdefer allocator.free(result);
+
+    // ... write into result
+
+    return result;
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-    
+    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_alloc.deinit();
+    const allocator = debug_alloc.allocator();
+
     const data = try processData(allocator, "input");
-    defer allocator.free(data); // caller responsible for cleanup
+    defer allocator.free(data);
 }
 ```
 
-### Tagged Unions (ADTs / Sum Types)
+### Tagged Unions
 
 ```zig
 const PaymentState = union(enum) {
@@ -120,8 +89,7 @@ const PaymentState = union(enum) {
     processing: struct { transaction_id: []const u8 },
     completed: Receipt,
     failed: PaymentError,
-    
-    // Methods on the union
+
     pub fn describe(self: PaymentState) []const u8 {
         return switch (self) {
             .pending => "Waiting for payment",
@@ -131,131 +99,155 @@ const PaymentState = union(enum) {
         };
     }
 };
-
-// Exhaustive switch (compiler enforces all cases)
-fn handlePayment(state: PaymentState) void {
-    switch (state) {
-        .pending => startProcessing(),
-        .processing => |p| pollStatus(p.transaction_id),
-        .completed => |receipt| sendConfirmation(receipt),
-        .failed => |err| notifyFailure(err),
-    }
-}
 ```
 
-### Compile-Time Programming
+### Resource Management with `std.Io`
 
 ```zig
-// comptime function for generics
-fn max(comptime T: type, a: T, b: T) T {
-    return if (a > b) a else b;
-}
+const std = @import("std");
 
-// Compile-time computed constants
-const LOOKUP_TABLE = blk: {
-    var table: [256]u8 = undefined;
-    for (&table, 0..) |*entry, i| {
-        entry.* = @intCast((i * 7) % 256);
-    }
-    break :blk table;
-};
+fn processFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
-// Generic container (like TypeScript generics)
-fn ArrayList(comptime T: type) type {
-    return struct {
-        items: []T,
-        allocator: std.mem.Allocator,
-        
-        const Self = @This();
-        
-        pub fn init(allocator: std.mem.Allocator) Self {
-            return .{ .items = &[_]T{}, .allocator = allocator };
-        }
-        
-        pub fn append(self: *Self, item: T) !void {
-            // ...
-        }
-    };
-}
-```
-
-### Resource Management with defer
-
-```zig
-fn processFile(allocator: std.mem.Allocator, path: []const u8) !void {
-    // Open file
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close(); // ALWAYS runs on scope exit
-    
-    // Allocate buffer
     const buffer = try allocator.alloc(u8, 4096);
-    defer allocator.free(buffer); // cleanup guaranteed
-    
-    // errdefer for conditional cleanup
-    var result = try allocator.alloc(u8, 1024);
-    errdefer allocator.free(result); // only on error
-    
-    // If we reach here successfully, caller owns result
-    // ...
+    defer allocator.free(buffer);
+
+    // ... read/write using file.reader(io, ...) or file.writer(io, ...)
 }
 ```
 
 ## Quick Reference
 
 ```zig
-// Imports
 const std = @import("std");
 
-// Variables
-const immutable: u32 = 42;        // prefer const
-var mutable: u32 = 0;             // only when needed
+// const by default
+const answer: u32 = 42;
+var counter: u32 = 0;
 
-// Optionals (?T) - like Option/Maybe
-var maybe_value: ?u32 = null;
-const unwrapped = maybe_value orelse 0;        // default value
-const ptr = maybe_value orelse return error.Missing;  // early return
+// optionals and error unions
+const maybe_value: ?u32 = null;
+const value = maybe_value orelse 0;
 
-// Error unions (!T) - like Result/Either
-fn canFail() !u32 { return error.SomeError; }
-const value = try canFail();                   // propagate error
-const safe = canFail() catch |err| handleError(err);  // catch error
+fn canFail() !u32 {
+    return error.SomeError;
+}
+const n = try canFail();
 
-// Slices (pointer + length, not null-terminated)
-const slice: []const u8 = "hello";             // string literal is []const u8
-const arr: [5]u8 = .{ 1, 2, 3, 4, 5 };
-const sub = arr[1..3];                         // slice of array
+// destructuring (0.16+)
+const sum, const overflow = @addWithOverflow(a, b);
 
-// Iteration
-for (slice, 0..) |byte, index| { }             // value and index
-for (slice) |byte| { }                         // value only
+// std containers prefer .empty
+var list: std.ArrayListUnmanaged(u8) = .empty;
+var map: std.AutoHashMapUnmanaged(u32, u32) = .empty;
 
-// Switch (exhaustive, can capture)
-switch (tagged_union) {
-    .variant => |captured| doSomething(captured),
-    else => {},  // or handle all cases
+// type info uses quoted identifiers
+switch (@typeInfo(T)) {
+    .@"struct" => |s| _ = s,
+    .@"int" => |i| _ = i,
+    else => {},
 }
 
-// Comptime
-const SIZE = comptime blk: { break :blk 64; };
-fn generic(comptime T: type, val: T) T { return val; }
+// std.Io at the boundary
+pub fn main(init: std.process.Init.Minimal) !void {
+    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_alloc.deinit();
+    const allocator = debug_alloc.allocator();
+
+    const io = std.testing.io; // use a real Io backend in non-test code
+    _ = io;
+    _ = allocator;
+    _ = init;
+}
 ```
 
-## Detailed References
+## Zig 0.16.0 Notes
 
-- **[references/idioms.md](references/idioms.md)** - Data-oriented design, memory patterns, testing
-- **[references/async-io.md](references/async-io.md)** - New async/Io model, futures, cancellation
-- **[references/c-interop.md](references/c-interop.md)** - C FFI, @cImport, ABI compatibility
+### `std.Io` Is the Default
+
+- Prefer `std.Io` APIs for filesystem, networking, time, process, and synchronization boundaries.
+- `Io.Threaded` is the stable default implementation.
+- `Io.Evented` remains experimental; do not assume feature parity, especially around networking.
+
+### Args and Environment Belong to `main(init)`
+
+- Read environment variables and CLI args in `main(init: std.process.Init|Minimal)`.
+- Pass explicit config structs, individual values, or `*const std.process.Environ.Map` to lower layers.
+- Avoid new code that reaches for process-global environment state when explicit plumbing is possible.
+
+```zig
+const std = @import("std");
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+
+    const port = init.environ.getPosix("PORT") orelse "8080";
+    var args = init.args.iterate();
+    _ = args.next(); // argv0
+
+    try run(port);
+}
+```
+
+### New Type Construction Builtins
+
+`@Type` has been replaced by specific builtins:
+
+- `@EnumLiteral()`
+- `@Int(...)`
+- `@Tuple(...)`
+- `@Pointer(...)`
+- `@Fn(...)`
+- `@Struct(...)`
+- `@Union(...)`
+- `@Enum(...)`
+
+There is no `@Array` builtin in 0.16.0; use normal array syntax. There is no `@Opaque`; write `opaque {}` directly.
+
+### Packed Types Need Explicit Backing Integers
+
+```zig
+const Flags = packed struct(u8) {
+    writable: bool = true,
+    enumerable: bool = true,
+    _reserved: u6 = 0,
+};
+```
+
+Use the same explicitness for packed unions when representation matters.
+
+### Allocator Defaults
+
+- `GeneralPurposeAllocator` is gone.
+- Prefer `DebugAllocator` in debug-heavy development workflows.
+- Prefer `std.heap.smp_allocator` or another deliberate allocator choice in release/runtime code.
+- `ArenaAllocator` is thread-safe in 0.16.0, but still use it for lifetime grouping, not as a universal default.
+
+### Small but Useful 0.16 Changes
+
+- Prefer `.empty` over old `init()` patterns for unmanaged std containers.
+- Prefer `std.mem.find*` names over old `indexOf*` names in new code.
+- `@trap()` is preferable to relying on `unreachable` when you want a defined abort in release builds.
 
 ## Forbidden Patterns
 
 | ❌ Never | ✅ Instead |
 |----------|-----------|
 | Global allocator / hidden malloc | Pass `Allocator` explicitly |
-| Exceptions / panic for errors | Return error union `!T` |
-| Null pointers without type | Use optional `?*T` |
-| Preprocessor macros | Use `comptime` and inline functions |
-| C-style strings in Zig code | Use slices `[]const u8` |
+| Hidden environment or args lookups deep in the stack | Read in `main(init)` and pass config explicitly |
+| `@Type(...)` or made-up `@StructType`/`@IntType` names | Use `@Struct`, `@Int`, `@Enum`, `@Pointer`, etc. |
+| `GeneralPurposeAllocator` | Use `DebugAllocator`, `smp_allocator`, arena, or another deliberate choice |
+| `std.fs`-style examples without `io` in 0.16-only code | Use `std.Io` APIs with explicit `io` |
+| `packed struct` or `packed union` without backing int when layout matters | Spell the backing integer explicitly |
+| Blindly enabling `Io.Evented` in production guidance | Treat it as experimental until validated |
+| `var` when `const` works | Default to `const` |
 | Ignoring errors silently | Handle with `catch` or propagate with `try` |
-| `var` when `const` works | Default to `const`, mutate only when necessary |
-| Hidden control flow | Make all branches explicit |
 | OOP inheritance hierarchies | Use composition and tagged unions |
+
+## Detailed References
+
+- **[references/idioms.md](references/idioms.md)** - Data-oriented design, memory patterns, testing
+- **[references/async-io.md](references/async-io.md)** - New async/Io model, futures, cancellation
+- **[references/c-interop.md](references/c-interop.md)** - C FFI, build-system integration, ABI compatibility

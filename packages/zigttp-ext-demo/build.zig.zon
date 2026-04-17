@@ -2,7 +2,7 @@
     .name = .zigttp_ext_demo,
     .version = "0.0.0",
     .fingerprint = 0x4fe4bf15e068ac29, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0-dev.3073+28ae5d415",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zigttp_sdk = .{
             .path = "../zigttp-sdk",
