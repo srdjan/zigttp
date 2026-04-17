@@ -73,10 +73,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try initCommand(allocator, user_args[1..]);
         return;
     }
-    if (std.mem.eql(u8, command, "agent")) {
-        try zigts_cli.run(allocator, user_args);
-        return;
-    }
     if (std.mem.eql(u8, command, "dev")) {
         try devCommand(allocator, args[0], user_args[1..]);
         return;
@@ -105,7 +101,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try compileCommand(allocator, user_args[1..]);
         return;
     }
-    if (std.mem.eql(u8, command, "pi")) {
+    if (std.mem.eql(u8, command, "expert")) {
         const pi_app = @import("pi_app");
         try pi_app.run(allocator);
         return;
@@ -1255,7 +1251,7 @@ fn printHelp() void {
         \\Usage:
         \\  zigttp serve [options] [handler.ts]    Run handler
         \\  zigttp init <name> [--template ...]    Create project
-        \\  zigttp agent init [--force]            Install local Claude skills and hooks
+        \\  zigttp expert                          Run the interactive compiler agent
         \\  zigttp dev [handler-or-project]         Watch mode
         \\  zigttp check [handler.ts] [--contract]  Verify handler
         \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary

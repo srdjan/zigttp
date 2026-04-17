@@ -2,7 +2,8 @@
 //!
 //! Runs the full analysis pipeline on proposed file content and optionally
 //! compares against the original to determine which violations are new.
-//! Used by the `zigts edit-simulate` CLI subcommand and Claude Code hooks.
+//! Used by the `zigts edit-simulate` CLI subcommand and the interactive
+//! expert loop.
 
 const std = @import("std");
 const zigts = @import("zigts");

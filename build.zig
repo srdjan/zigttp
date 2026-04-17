@@ -176,8 +176,8 @@ pub fn build(b: *std.Build) void {
     pi_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
     pi_tests.root_module.addImport("zigts_expert_examples", pi_examples_host_mod);
     const run_pi_tests = b.addRunArtifact(pi_tests);
-    const pi_test_step = b.step("test-pi", "Run pi in-process tool registry tests");
-    pi_test_step.dependOn(&run_pi_tests.step);
+    const expert_app_test_step = b.step("test-expert-app", "Run zigttp expert in-process app tests");
+    expert_app_test_step.dependOn(&run_pi_tests.step);
 
     const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");

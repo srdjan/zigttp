@@ -1,7 +1,7 @@
-//! Phase-2 loop driver. Pumps events from a `ModelClient` + the compiler veto
+//! Expert loop driver. Pumps events from a `ModelClient` + the compiler veto
 //! + the tool registry into the `turn.TurnMachine`, executes returned actions,
-//! and appends rendered messages to a `Transcript`. Closes the phase-2 spine
-//! end-to-end for one turn per call to `runTurn`.
+//! auto-applies verified edits to the workspace, and appends rendered
+//! messages to a `Transcript`.
 //!
 //! Memory model: every intra-turn allocation (model reply bodies, veto
 //! envelope, tool result body) goes into a per-turn `ArenaAllocator` that
@@ -20,6 +20,8 @@ const turn = @import("turn.zig");
 const veto = @import("veto.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
+const zigts = @import("zigts");
+const file_io = zigts.file_io;
 
 /// Opaque model-client interface. Lets the loop driver run end-to-end under
 /// test with a synthetic client returning canned replies, while leaving a
@@ -51,6 +53,12 @@ pub const TurnResult = struct {
 
 pub const RunOptions = struct {
     max_attempts: u8 = 3,
+    workspace_root: []const u8 = ".",
+};
+
+const PreparedEdit = struct {
+    edit: turn.ModelReply.Edit,
+    resolved_path: []const u8,
 };
 
 pub fn runTurn(
@@ -89,7 +97,11 @@ pub fn runTurnWith(
                 next_event = .{ .model_replied = reply };
             },
             .run_veto => |edit| {
-                const outcome = try veto.runVeto(ta, edit);
+                const prepared = try prepareEdit(ta, options.workspace_root, edit);
+                const outcome = try veto.runVeto(ta, prepared.edit);
+                if (outcome.ok) {
+                    try applyPreparedEdit(ta, prepared);
+                }
                 next_event = .{ .edit_verified = outcome };
             },
             .retry_draft => |payload| {
@@ -123,6 +135,56 @@ pub fn runTurnWith(
             .none => return .{ .final_state = machine.state, .attempt = machine.attempt },
         }
     }
+}
+
+fn prepareEdit(
+    allocator: std.mem.Allocator,
+    workspace_root: []const u8,
+    edit: turn.ModelReply.Edit,
+) !PreparedEdit {
+    const root_path = try std.fs.path.resolve(allocator, &.{workspace_root});
+    const target_path = if (std.fs.path.isAbsolute(edit.file))
+        try std.fs.path.resolve(allocator, &.{edit.file})
+    else
+        try std.fs.path.resolve(allocator, &.{ root_path, edit.file });
+
+    if (!isPathInsideRoot(root_path, target_path)) return error.EditPathOutsideWorkspace;
+
+    const before = edit.before orelse blk: {
+        const current = file_io.readFile(allocator, target_path, 1024 * 1024) catch |err| switch (err) {
+            error.FileNotFound => break :blk null,
+            else => return err,
+        };
+        break :blk current;
+    };
+
+    return .{
+        .edit = .{
+            .file = edit.file,
+            .content = edit.content,
+            .before = before,
+        },
+        .resolved_path = target_path,
+    };
+}
+
+fn applyPreparedEdit(
+    allocator: std.mem.Allocator,
+    prepared: PreparedEdit,
+) !void {
+    const parent = std.fs.path.dirname(prepared.resolved_path);
+    if (parent) |dir_path| {
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), dir_path);
+    }
+    try file_io.writeFile(allocator, prepared.resolved_path, prepared.edit.content);
+}
+
+fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {
+    if (!std.mem.startsWith(u8, candidate, root)) return false;
+    if (candidate.len == root.len) return true;
+    return candidate[root.len] == std.fs.path.sep;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +289,13 @@ test "text reply path: user -> model text -> render" {
 }
 
 test "clean edit path: veto passes, proof card in transcript" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{tmp.sub_path});
+    defer testing.allocator.free(written_path);
+
     var canned: CannedClient = .{ .reply = .{ .edit = .{
-        .file = "handler.ts",
+        .file = "src/handler.ts",
         .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
         .before = null,
     } } };
@@ -237,23 +304,32 @@ test "clean edit path: veto passes, proof card in transcript" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const result = try runTurn(
+    const result = try runTurnWith(
         testing.allocator,
         canned.asClient(),
         &registry,
         &tr,
         "add an ok response",
+        .{ .workspace_root = tmp.sub_path[0..] },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
     try testing.expectEqual(@as(usize, 2), tr.len());
     try testing.expectEqual(Tag.proof_card, tr.at(1).tag);
     try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"total\":0") != null);
+    const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings(canned.reply.edit.content, written);
 }
 
 test "broken edit path: veto fails, diagnostic box in transcript" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{tmp.sub_path});
+    defer testing.allocator.free(written_path);
+
     var canned: CannedClient = .{ .reply = .{ .edit = .{
-        .file = "handler.ts",
+        .file = "src/handler.ts",
         .content = "function handler(req: Request): Response { var x = 1; return Response.json({x}); }",
         .before = null,
     } } };
@@ -262,18 +338,20 @@ test "broken edit path: veto fails, diagnostic box in transcript" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const result = try runTurn(
+    const result = try runTurnWith(
         testing.allocator,
         canned.asClient(),
         &registry,
         &tr,
         "add a bad handler",
+        .{ .workspace_root = tmp.sub_path[0..] },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
     try testing.expectEqual(Tag.diagnostic_box, tr.at(1).tag);
     try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"ZTS001\"") != null);
     try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"introduced_by_patch\":true") != null);
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
 test "tool call path: invoke_tool -> tool_result in transcript" {
@@ -334,6 +412,11 @@ const clean_handler =
     "function handler(req: Request): Response { return Response.json({ok: true}); }";
 
 test "retry: one bad draft then one good draft lands a proof card" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{tmp.sub_path});
+    defer testing.allocator.free(written_path);
+
     var seq: SequenceClient = .{ .replies = &.{
         .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
         .{ .edit = .{ .file = "handler.ts", .content = clean_handler, .before = null } },
@@ -343,12 +426,13 @@ test "retry: one bad draft then one good draft lands a proof card" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const result = try runTurn(
+    const result = try runTurnWith(
         testing.allocator,
         seq.asClient(),
         &registry,
         &tr,
         "add a GET route",
+        .{ .workspace_root = tmp.sub_path[0..] },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
@@ -357,9 +441,17 @@ test "retry: one bad draft then one good draft lands a proof card" {
     try testing.expectEqual(Tag.proof_card, tr.at(1).tag);
     try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"total\":0") != null);
     try testing.expectEqual(@as(usize, 2), seq.index);
+    const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings(clean_handler, written);
 }
 
 test "retry: budget exhausted after three bad drafts surfaces diagnostic" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{tmp.sub_path});
+    defer testing.allocator.free(written_path);
+
     var seq: SequenceClient = .{ .replies = &.{
         .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
         .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
@@ -376,7 +468,7 @@ test "retry: budget exhausted after three bad drafts surfaces diagnostic" {
         &registry,
         &tr,
         "add a GET route",
-        .{ .max_attempts = 3 },
+        .{ .max_attempts = 3, .workspace_root = tmp.sub_path[0..] },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
@@ -385,9 +477,15 @@ test "retry: budget exhausted after three bad drafts surfaces diagnostic" {
     try testing.expectEqual(Tag.diagnostic_box, tr.at(1).tag);
     try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"ZTS001\"") != null);
     try testing.expectEqual(@as(usize, 3), seq.index);
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
 test "retry: max_attempts=2 blocks a third call" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{tmp.sub_path});
+    defer testing.allocator.free(written_path);
+
     var seq: SequenceClient = .{ .replies = &.{
         .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
         .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } },
@@ -403,15 +501,19 @@ test "retry: max_attempts=2 blocks a third call" {
         &registry,
         &tr,
         "add a GET route",
-        .{ .max_attempts = 2 },
+        .{ .max_attempts = 2, .workspace_root = tmp.sub_path[0..] },
     );
 
     try testing.expectEqual(@as(u8, 2), result.attempt);
     try testing.expectEqual(Tag.diagnostic_box, tr.at(1).tag);
     try testing.expectEqual(@as(usize, 2), seq.index);
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
 test "retry: clean first draft has attempt=1 (regression guard for happy path)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
     var canned: CannedClient = .{ .reply = .{ .edit = .{
         .file = "handler.ts",
         .content = clean_handler,
@@ -422,14 +524,32 @@ test "retry: clean first draft has attempt=1 (regression guard for happy path)" 
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const result = try runTurn(
+    const result = try runTurnWith(
         testing.allocator,
         canned.asClient(),
         &registry,
         &tr,
         "add an ok response",
+        .{ .workspace_root = tmp.sub_path[0..] },
     );
 
     try testing.expectEqual(@as(u8, 1), result.attempt);
     try testing.expectEqual(Tag.proof_card, tr.at(1).tag);
+}
+
+test "edit path outside the workspace is rejected" {
+    var canned: CannedClient = .{ .reply = .{ .edit = .{
+        .file = "../outside-handler.ts",
+        .content = clean_handler,
+        .before = null,
+    } } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    try testing.expectError(
+        error.EditPathOutsideWorkspace,
+        runTurn(testing.allocator, canned.asClient(), &registry, &tr, "escape the workspace"),
+    );
 }

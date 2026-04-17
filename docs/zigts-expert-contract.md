@@ -1,6 +1,6 @@
 # `zigts expert` v1 — Structured Output Contract
 
-This document freezes the structured output of `zigts expert` and its delegated subcommands as **v1**. Two clients rely on this contract today (Claude Code hooks and CI) and one is under construction (the `zigttp` TUI agent, described in the "agentic compiler" design). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
+This document freezes the structured output of `zigts expert` and its delegated subcommands as **v1**. Two clients rely on this contract today (`zigttp expert` and CI). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
 
 The v1 surface is the minimum set of shapes needed to drive a compiler-in-the-loop workflow. It is not everything `zigts` can emit. Anything not listed here is explicitly outside v1 and may change without notice.
 
@@ -69,7 +69,7 @@ New codes may be added in v1. Existing codes cannot move ranges or change meanin
 
 ## `zigts expert meta`
 
-Emits compiler and policy metadata. Use on session start to record which policy a session was verified against (this is what `session-start.sh` does today).
+Emits compiler and policy metadata. Use it to record which policy a session or CI run was verified against.
 
 **Invocation:** `zigts expert meta --json`
 
@@ -289,7 +289,7 @@ Substring search across rule names, descriptions, and help text.
 
 ## Proof-card envelope (from `zigts check --json`)
 
-`zigts check --json` is not reached via `zigts expert`, but it is part of the v1 contract because the TUI will call the same underlying function and the existing Claude Code hooks already rely on it. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:245-311`).
+`zigts check --json` is not reached via `zigts expert`, but it is part of the v1 contract because `zigttp expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:245-311`).
 
 **Success envelope** (emitted when analysis completes with no error-severity diagnostics):
 
@@ -380,4 +380,4 @@ A test asserting `zigts expert meta --json` returns a policy hash and version kn
 
 ## Relationship to the TUI port
 
-The "agentic compiler" design (`/Users/srdjans/.claude/plans/sleepy-forging-flamingo.md`) moves these commands from subprocess dispatch to in-process function calls. When that happens, the in-process API must remain a faithful representation of this contract so the non-interactive binary and the TUI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
+`zigttp expert` now moves these commands from subprocess dispatch to in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.

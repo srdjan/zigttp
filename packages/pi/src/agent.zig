@@ -1,8 +1,7 @@
-//! Agent-mode session wrapper around `loop.runTurn`. Carries a backend
-//! union that is either a `StubClient` (default, zero-config, fixed
-//! reply) or a live Anthropic `client.Client` built from an API key and
-//! a system prompt. Callers swap backends at session construction; the
-//! rest of the loop is agnostic.
+//! Expert session wrapper around `loop.runTurn`. Carries a backend union
+//! that is either a `StubClient` (default, zero-config, fixed reply) or a
+//! live client built from an API key and a system prompt. Callers swap
+//! backends at session construction; the rest of the loop is agnostic.
 //!
 //! The session owns a long-lived `Transcript` that grows across turns
 //! plus, in the live path, an allocator-owned copy of the system prompt
@@ -24,10 +23,7 @@ const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
 
 pub const stub_reply_text =
-    "agent stub: set ZIGTTP_PI_LIVE=1 and ANTHROPIC_API_KEY to enable the real model";
-
-/// Meta command that toggles agent mode on/off in the REPL and TUI.
-pub const toggle_command = ":agent";
+    "expert offline: no live model backend configured; set ANTHROPIC_API_KEY to enable expert mode";
 
 /// Zero-state client used when no Anthropic credentials are present.
 /// Returns a fixed reply regardless of the prompt so the loop still
@@ -110,13 +106,11 @@ pub const AgentSession = struct {
     }
 };
 
-/// Reads `ZIGTTP_PI_LIVE` and `ANTHROPIC_API_KEY` from the environment. If
-/// both are set (and `ZIGTTP_PI_LIVE=1`), builds the persona bundle and
-/// returns a live session. Otherwise returns a stub session. Callers see
-/// a single constructor regardless of which path activated.
+/// Reads `ANTHROPIC_API_KEY` from the environment. If present, builds the
+/// persona bundle and returns a live session. Otherwise returns a stub
+/// session. Callers see a single constructor regardless of which path
+/// activated.
 pub fn initFromEnv(allocator: std.mem.Allocator) !AgentSession {
-    const opt_in = envVar("ZIGTTP_PI_LIVE") orelse return initStub();
-    if (!std.mem.eql(u8, opt_in, "1")) return initStub();
     const api_key = envVar("ANTHROPIC_API_KEY") orelse return initStub();
 
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);

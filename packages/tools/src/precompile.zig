@@ -1131,7 +1131,9 @@ pub fn runCheckOnly(
     system_path: ?[]const u8,
 ) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
-        std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+        if (!json_mode) {
+            std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+        }
         return err;
     };
     defer allocator.free(source);
