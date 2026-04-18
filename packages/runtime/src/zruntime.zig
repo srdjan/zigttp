@@ -3633,13 +3633,30 @@ fn wsGetWebSocketsCallback(
     ctx: *zq.Context,
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    // Broadcast via getWebSockets requires a room-indexed array of ws
-    // proxies; W2 pairs this with the attachment layout so peers can be
-    // enumerated cheaply. For W1, handlers can broadcast explicitly by
-    // keeping their own list of ids.
-    return zq.modules.util.throwError(ctx, "Error", "getWebSockets lands in W2");
+    if (args.len < 1) {
+        return zq.modules.util.throwError(ctx, "TypeError", "getWebSockets(roomKey) requires 1 argument");
+    }
+    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+    };
+    const room_key = zq.modules.util.extractString(args[0]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "roomKey must be a string");
+    };
+
+    // Room membership snapshot: 256 peers is the W1 ceiling (see
+    // max_room_peers in ws_frame_loop). Overflow returns the first N,
+    // which W2 replaces with an iterator that doesn't cap.
+    var ids_buf: [256]websocket_pool.ConnectionId = undefined;
+    const ids = pool.collectRoom(room_key, &ids_buf);
+
+    const arr = try ctx.createArray();
+    arr.prototype = ctx.array_prototype;
+    for (ids, 0..) |id, i| {
+        const id_i32: i32 = std.math.cast(i32, id) orelse continue;
+        try ctx.setIndexChecked(arr, @as(u32, @intCast(i)), zq.JSValue.fromInt(id_i32));
+    }
+    arr.setArrayLength(@as(u32, @intCast(ids.len)));
+    return arr.toValue();
 }
 
 fn wsRoomFromPathCallback(
