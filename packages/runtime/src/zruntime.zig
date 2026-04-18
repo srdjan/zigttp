@@ -5464,6 +5464,7 @@ test {
     _ = @import("websocket_codec.zig");
     _ = @import("websocket_pool.zig");
     _ = @import("ws_gateway.zig");
+    _ = @import("ws_frame_loop.zig");
 }
 
 test "Runtime creation" {
