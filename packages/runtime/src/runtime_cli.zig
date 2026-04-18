@@ -358,10 +358,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             i += 1;
             if (i >= argv.len) return error.MissingTestFile;
             config.runtime_config.test_file_path = argv[i];
-        } else if (std.mem.eql(u8, arg, "--durable")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingDurableDir;
-            config.runtime_config.durable_oplog_dir = argv[i];
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
             std.mem.eql(u8, arg, "--force-swap"))

@@ -517,7 +517,7 @@ const ConnectionPool = struct {
         request: *const HttpRequestView,
         req_allocator: std.mem.Allocator,
     ) !RequestOutcome {
-        const pool = self.ensureWebSocketPool();
+        const pool = try self.ensureWebSocketPool();
 
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(req_allocator);
@@ -579,24 +579,20 @@ const ConnectionPool = struct {
     }
 
     /// Get (or lazily initialise) the server's WebSocket connection
-    /// pool. Returns a pointer to the live pool regardless of initial
-    /// state, so the caller can always treat the result uniformly.
-    /// When the server was started with `--durable`, the pool's
-    /// attachments dir is wired up here so `serializeAttachment` writes
-    /// land under `<durable>/ws/` and survive restarts.
-    fn ensureWebSocketPool(self: *ConnectionPool) *websocket_pool.Pool {
+    /// pool. When `--durable` is set, the pool's attachments dir is
+    /// wired up so `serializeAttachment` writes land under
+    /// `<durable>/ws/` and survive restarts. Fails hard on persistence
+    /// setup errors: a misconfigured durable dir should not silently
+    /// degrade to in-memory behaviour.
+    fn ensureWebSocketPool(self: *ConnectionPool) !*websocket_pool.Pool {
         if (self.server.ws_pool == null) {
             var pool = websocket_pool.Pool.init(self.server.allocator);
+            errdefer pool.deinit();
             if (self.server.config.runtime_config.durable_oplog_dir) |dir| {
                 var store = durable_store_mod.DurableStore.initFs(self.server.allocator, dir);
-                if (store.subtreeDir(self.server.allocator, "ws")) |ws_dir| {
-                    defer self.server.allocator.free(ws_dir);
-                    pool.setAttachmentsDir(ws_dir) catch |err| {
-                        std.log.warn("websocket: failed to enable attachment persistence: {s}", .{@errorName(err)});
-                    };
-                } else |err| {
-                    std.log.warn("websocket: failed to open durable subtree: {s}", .{@errorName(err)});
-                }
+                const ws_dir = try store.subtreeDir(self.server.allocator, "ws");
+                defer self.server.allocator.free(ws_dir);
+                try pool.setAttachmentsDir(ws_dir);
             }
             self.server.ws_pool = pool;
         }
