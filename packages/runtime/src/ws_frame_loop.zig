@@ -26,11 +26,14 @@ const std = @import("std");
 const Io = std.Io;
 const websocket_codec = @import("websocket_codec.zig");
 const websocket_pool = @import("websocket_pool.zig");
-const trace = @import("zigts").trace;
+const zruntime = @import("zruntime.zig");
+const zq = @import("zigts");
+const trace = zq.trace;
 
 const Pool = websocket_pool.Pool;
 const ConnectionId = websocket_pool.ConnectionId;
 const Opcode = websocket_codec.Opcode;
+const HandlerPool = zruntime.HandlerPool;
 
 /// Maximum incoming frame payload we will accept. RFC 6455 allows up to
 /// 2^63 - 1, but real applications don't need anything like that. 64 KiB
@@ -58,9 +61,15 @@ pub const Config = struct {
     io: Io,
     fd: std.posix.fd_t,
     id: ConnectionId,
-    /// Echo each inbound message back to the sender. W1-d.4-a default;
-    /// W1-d.4-b will set this to false and route events through JS.
+    /// Echo each inbound message back to the sender in Zig. Used as a
+    /// fallback path and in tests; live handlers set this to false so
+    /// inbound frames flow into the `onMessage` JS export instead.
     echo: bool = true,
+    /// Handler-pool reference. When set and `echo` is false, the frame
+    /// loop borrows a runtime per inbound frame and dispatches
+    /// `onMessage(ws, data)` to JS. When null the loop behaves as a pure
+    /// codec echo (unit tests, degraded mode).
+    handler_pool: ?*HandlerPool = null,
 };
 
 /// Run the frame loop until the connection closes. Owns the fd: on
@@ -115,8 +124,11 @@ pub fn run(cfg: Config) void {
             .text, .binary => {
                 if (cfg.echo) {
                     ws.writeMessage(msg.data, msg.opcode) catch return;
+                } else if (cfg.handler_pool) |pool| {
+                    dispatchOnMessage(pool, cfg.pool, cfg.id, msg.data) catch |err| {
+                        std.log.warn("ws onMessage dispatch failed (id={d}): {}", .{ cfg.id, err });
+                    };
                 }
-                // W1-d.4-b will dispatch here when `echo` is false.
             },
             .pong => {
                 // `readSmallMessage` already filters pongs; this arm is
@@ -158,6 +170,40 @@ fn sendCloseSilently(ws: *std.http.Server.WebSocket, code: u16) void {
 
 fn unixMillisNow() i64 {
     return trace.unixMillis();
+}
+
+/// Borrow a runtime, install the WS callback table, and invoke the
+/// handler's `onMessage(ws, data)` export. The `ws` argument for W1 is
+/// the connection id as an integer; handlers treat it as an opaque
+/// token they pass back to `send`/`close`. W2 upgrades this to a real
+/// JS proxy object with fields.
+fn dispatchOnMessage(
+    handler_pool: *HandlerPool,
+    ws_pool: *Pool,
+    id: ConnectionId,
+    data: []const u8,
+) !void {
+    var lease = try handler_pool.acquireWorkerRuntime();
+    defer lease.deinit();
+
+    try lease.runtime.installWebSocketModuleState(ws_pool);
+
+    const prev_connection = zruntime.active_ws_connection;
+    zruntime.active_ws_connection = id;
+    defer zruntime.active_ws_connection = prev_connection;
+
+    // Connection ids larger than i32 max would truncate; W2 widens the
+    // proxy to a full object so the id range stops mattering. For W1 we
+    // accept the limit (~2 billion live connections per process, which
+    // is far past any other bottleneck).
+    const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
+    const ws_val = zq.JSValue.fromInt(id_i32);
+    const data_val = try lease.runtime.ctx.createString(data);
+
+    _ = lease.runtime.callGlobalFunction("onMessage", &.{ ws_val, data_val }) catch |err| {
+        std.log.warn("onMessage handler raised: {}", .{err});
+        return err;
+    };
 }
 
 // ---------------------------------------------------------------------------

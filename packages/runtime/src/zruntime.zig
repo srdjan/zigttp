@@ -21,6 +21,7 @@ const bytecode_cache = zq.bytecode_cache;
 
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
+const websocket_pool = @import("websocket_pool.zig");
 pub const QueryParam = http_types.QueryParam;
 pub const HttpRequestView = http_types.HttpRequestView;
 pub const HttpRequestOwned = http_types.HttpRequestOwned;
@@ -218,6 +219,10 @@ pub const Runtime = struct {
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
+    /// WebSocket connection pool pointer, installed lazily by the frame
+    /// loop on first dispatch. Remains null on handlers that never
+    /// accept a WebSocket upgrade. See `installWebSocketModuleState`.
+    ws_pool_ref: ?*websocket_pool.Pool = null,
 
     const Self = @This();
 
@@ -359,6 +364,7 @@ pub const Runtime = struct {
             .pending_durable_recovery = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
+            .ws_pool_ref = null,
         };
         self.strings = &self.owned_strings.?;
         errdefer self.owned_strings.?.deinit();
@@ -422,6 +428,7 @@ pub const Runtime = struct {
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
+            .ws_pool_ref = null,
         };
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
@@ -898,6 +905,25 @@ pub const Runtime = struct {
 
     fn installFetchModuleState(self: *Self) !void {
         try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback);
+    }
+
+    /// Install the WebSocket callback table on this runtime, pointed at
+    /// the server-owned connection pool. Called lazily by the frame
+    /// loop on first dispatch; idempotent re-installation rewrites the
+    /// pool pointer in place. Runtimes that never see a WS event
+    /// dispatch skip this entirely and pay no cost.
+    pub fn installWebSocketModuleState(self: *Self, pool: *websocket_pool.Pool) !void {
+        self.ws_pool_ref = pool;
+        try zq.modules.websocket.installState(self.ctx, .{
+            .runtime_ptr = self,
+            .send_fn = wsSendCallback,
+            .close_fn = wsCloseCallback,
+            .serialize_attachment_fn = wsSerializeAttachmentCallback,
+            .deserialize_attachment_fn = wsDeserializeAttachmentCallback,
+            .get_web_sockets_fn = wsGetWebSocketsCallback,
+            .room_from_path_fn = wsRoomFromPathCallback,
+            .set_auto_response_fn = wsSetAutoResponseCallback,
+        });
     }
 
     /// Load and compile JavaScript code
@@ -3478,6 +3504,162 @@ fn fetchModuleCallback(
 ) anyerror!zq.JSValue {
     _ = runtime_ptr;
     return fetchSyncNative(@ptrCast(ctx), zq.JSValue.undefined_val, args);
+}
+
+// ===========================================================================
+// WebSocket runtime callbacks (W1-d.4-b)
+// ===========================================================================
+
+/// Connection id for the WS frame currently being dispatched to JS.
+/// Frame loop sets this before invoking onOpen/onMessage/onClose and
+/// clears it afterwards. Callbacks like `send(ws, data)` read from this
+/// when the first JS argument is omitted or when we need to double-check
+/// the dispatched connection matches the one JS claims.
+///
+/// Thread-local: each ws frame-loop thread runs independent dispatches,
+/// so per-thread storage keeps connections cleanly separated.
+pub threadlocal var active_ws_connection: ?u64 = null;
+
+fn wsConnectionIdFromArg(arg: zq.JSValue) ?u64 {
+    if (arg.isInt()) {
+        const raw = arg.getInt();
+        if (raw <= 0) return null;
+        return @as(u64, @intCast(raw));
+    }
+    return null;
+}
+
+fn wsPoolFromRuntime(runtime_ptr: *anyopaque) ?*websocket_pool.Pool {
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    return rt.ws_pool_ref;
+}
+
+/// Raw RFC 6455 frame write for server→client messages (unmasked).
+/// Used by the `send` callback; symmetric with what the frame loop
+/// reads. Payload size is capped at 64 KiB to match the inbound cap.
+fn writeWebSocketFrame(fd: std.posix.fd_t, opcode: u4, payload: []const u8) !void {
+    var header_buf: [10]u8 = undefined;
+    header_buf[0] = 0x80 | @as(u8, opcode); // FIN = 1
+    var header_len: usize = 2;
+    if (payload.len < 126) {
+        header_buf[1] = @as(u8, @intCast(payload.len));
+    } else if (payload.len <= 0xFFFF) {
+        header_buf[1] = 126;
+        std.mem.writeInt(u16, header_buf[2..4], @as(u16, @intCast(payload.len)), .big);
+        header_len = 4;
+    } else {
+        header_buf[1] = 127;
+        std.mem.writeInt(u64, header_buf[2..10], payload.len, .big);
+        header_len = 10;
+    }
+
+    try writeAllPosix(fd, header_buf[0..header_len]);
+    if (payload.len > 0) try writeAllPosix(fd, payload);
+}
+
+fn writeAllPosix(fd: std.posix.fd_t, data: []const u8) !void {
+    var remaining = data;
+    while (remaining.len > 0) {
+        const result = std.c.write(fd, remaining.ptr, remaining.len);
+        if (result < 0) return error.WriteFailed;
+        const n: usize = @intCast(result);
+        if (n == 0) return error.WriteFailed;
+        remaining = remaining[n..];
+    }
+}
+
+fn wsSendCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    if (args.len < 2) {
+        return zq.modules.util.throwError(ctx, "TypeError", "send(ws, data) requires 2 arguments");
+    }
+    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+    };
+    const id = wsConnectionIdFromArg(args[0]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
+    };
+    const bytes = zq.modules.util.extractString(args[1]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "data must be a string (binary frames land in W2)");
+    };
+    const snap = pool.snapshot(id) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
+    };
+    writeWebSocketFrame(snap.fd, 0x1, bytes) catch |err| {
+        std.log.warn("ws send failed (id={d}): {}", .{ id, err });
+        return zq.modules.util.throwError(ctx, "Error", "ws send failed");
+    };
+    return zq.JSValue.undefined_val;
+}
+
+fn wsCloseCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    _ = args;
+    // W2 implements graceful close with status code + reason propagation.
+    // For W1 the frame loop shuts the socket down when JS returns; this
+    // callback throws so handlers can detect the unsupported surface.
+    return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket close() not implemented in W1");
+}
+
+fn wsSerializeAttachmentCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    _ = args;
+    return zq.modules.util.throwError(ctx, "Error", "serializeAttachment lands in W2");
+}
+
+fn wsDeserializeAttachmentCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    _ = args;
+    return zq.modules.util.throwError(ctx, "Error", "deserializeAttachment lands in W2");
+}
+
+fn wsGetWebSocketsCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    _ = args;
+    // Broadcast via getWebSockets requires a room-indexed array of ws
+    // proxies; W2 pairs this with the attachment layout so peers can be
+    // enumerated cheaply. For W1, handlers can broadcast explicitly by
+    // keeping their own list of ids.
+    return zq.modules.util.throwError(ctx, "Error", "getWebSockets lands in W2");
+}
+
+fn wsRoomFromPathCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    _ = args;
+    return zq.modules.util.throwError(ctx, "Error", "roomFromPath lands in W2");
+}
+
+fn wsSetAutoResponseCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    _ = args;
+    return zq.modules.util.throwError(ctx, "Error", "setAutoResponse lands in W2");
 }
 
 fn serviceCallCallback(
