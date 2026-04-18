@@ -1,4 +1,4 @@
-//! Single source of truth for the `zigts expert meta` v1 envelope.
+//! Single source of truth for the `zigts meta` v1 envelope.
 //! See docs/zigts-expert-contract.md.
 
 const std = @import("std");
@@ -67,7 +67,7 @@ pub fn writeJson(writer: anytype, info: *const MetaInfo) !void {
 
 pub fn writeText(writer: anytype, info: *const MetaInfo) !void {
     try writer.print(
-        \\zigts expert policy
+        \\zigts policy
         \\  compiler: {s}
         \\  policy:   {s}
         \\  hash:     {s}
@@ -124,7 +124,7 @@ test "writeText emits the human-readable report with pinned versions" {
     buf = aw.toArrayList();
     const s = buf.items;
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "zigts expert policy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "zigts policy") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "compiler: 0.16.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "policy:   2026.04.2") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "mode:     embedded") != null);

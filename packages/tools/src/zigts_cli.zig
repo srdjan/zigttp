@@ -73,6 +73,18 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try runModulesCommand(argv[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "meta")) {
+        try expert.runMeta(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "verify-paths")) {
+        try expert.runVerifyPaths(allocator, argv[1..]);
+        return;
+    }
+    if (std.mem.eql(u8, command, "verify-modules")) {
+        try expert.runVerifyModules(allocator, argv[1..]);
+        return;
+    }
     if (std.mem.eql(u8, command, "edit-simulate")) {
         try edit_simulate.runWithArgs(allocator, argv[1..]);
         return;
@@ -89,11 +101,6 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try review_patch.runWithArgs(allocator, argv[1..]);
         return;
     }
-    if (std.mem.eql(u8, command, "expert")) {
-        try expert.runWithArgs(allocator, argv[1..]);
-        return;
-    }
-
     printHelp();
     return error.UnknownCommand;
 }
@@ -328,11 +335,15 @@ fn printHelp() void {
         \\  zigts rollout <old-system.json> <new-system.json> [--output-dir <dir>]
         \\  zigts features [--json]
         \\  zigts modules [--json]
+        \\  zigts meta [--json]
+        \\  zigts verify-paths <file>... [--json]
+        \\  zigts verify-modules <file>... [--strict] [--json]
+        \\  zigts verify-modules --builtins [--strict] [--json]
         \\  zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-        \\  zigts expert <subcommand> [options]   (hook-oriented interface)
+        \\  zigts expert                          (interactive coding agent)
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

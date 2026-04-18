@@ -17,6 +17,7 @@ const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("anthropic/client.zig");
+const tools_schema = @import("anthropic/tools_schema.zig");
 const expert_persona = @import("expert_persona.zig");
 
 const Registry = registry_mod.Registry;
@@ -32,10 +33,12 @@ pub const StubClient = struct {
     fn requestFn(
         ctx: *anyopaque,
         arena: std.mem.Allocator,
+        transcript: *const Transcript,
         user_text: []const u8,
     ) anyerror!turn.ModelReply {
         _ = ctx;
         _ = arena;
+        _ = transcript;
         _ = user_text;
         return .{ .text = stub_reply_text };
     }
@@ -59,6 +62,7 @@ pub const AgentSession = struct {
     /// Allocator-owned copy of the system prompt bytes backing the live
     /// client's Config. Null for the stub path.
     system_prompt_owned: ?[]u8 = null,
+    tools_json_owned: ?[]u8 = null,
 
     pub fn initStub() AgentSession {
         return .{};
@@ -71,23 +75,32 @@ pub const AgentSession = struct {
         allocator: std.mem.Allocator,
         api_key: []const u8,
         system_prompt: []const u8,
+        tools_json: ?[]const u8,
     ) !AgentSession {
         const prompt_owned = try allocator.dupe(u8, system_prompt);
         errdefer allocator.free(prompt_owned);
         const key_owned = try allocator.dupe(u8, api_key);
         errdefer allocator.free(key_owned);
+        const tools_owned = if (tools_json) |json|
+            try allocator.dupe(u8, json)
+        else
+            null;
+        errdefer if (tools_owned) |json| allocator.free(json);
         return .{
             .backend = .{ .live = anthropic_client.Client.init(.{
                 .api_key = key_owned,
                 .system_prompt = prompt_owned,
+                .tools_json = tools_owned,
             }) },
             .system_prompt_owned = prompt_owned,
+            .tools_json_owned = tools_owned,
         };
     }
 
     pub fn deinit(self: *AgentSession, allocator: std.mem.Allocator) void {
         self.transcript.deinit(allocator);
         if (self.system_prompt_owned) |s| allocator.free(s);
+        if (self.tools_json_owned) |json| allocator.free(json);
         switch (self.backend) {
             .stub => {},
             .live => |*c| allocator.free(c.config.api_key),
@@ -111,11 +124,23 @@ pub const AgentSession = struct {
 /// session. Callers see a single constructor regardless of which path
 /// activated.
 pub fn initFromEnv(allocator: std.mem.Allocator) !AgentSession {
+    return initFromEnvWithRegistry(allocator, null);
+}
+
+pub fn initFromEnvWithRegistry(
+    allocator: std.mem.Allocator,
+    registry: ?*const Registry,
+) !AgentSession {
     const api_key = envVar("ANTHROPIC_API_KEY") orelse return initStub();
 
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
     defer allocator.free(system_prompt);
-    return try AgentSession.initLive(allocator, api_key, system_prompt);
+    const tools_json = if (registry) |reg|
+        try buildToolsJson(allocator, reg)
+    else
+        null;
+    defer if (tools_json) |json| allocator.free(json);
+    return try AgentSession.initLive(allocator, api_key, system_prompt, tools_json);
 }
 
 fn envVar(name_z: [:0]const u8) ?[]const u8 {
@@ -125,6 +150,15 @@ fn envVar(name_z: [:0]const u8) ?[]const u8 {
 
 fn initStub() AgentSession {
     return AgentSession.initStub();
+}
+
+fn buildToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try tools_schema.writeToolsArray(&aw.writer, registry);
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(allocator);
 }
 
 /// Runs one turn through the loop driver and returns an owned slice holding
@@ -138,15 +172,16 @@ pub fn runOneTurn(
     session: *AgentSession,
     registry: *const Registry,
     user_text: []const u8,
+    approval_fn: ?loop.ApprovalFn,
 ) ![]u8 {
-    _ = try loop.runTurn(
+    _ = try loop.runTurnWith(
         allocator,
         session.modelClient(),
         registry,
         &session.transcript,
         user_text,
+        .{ .approval_fn = approval_fn },
     );
-
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
@@ -164,7 +199,7 @@ test "runOneTurn: fresh stub session grows transcript by 2 and renders model rep
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const rendered = try runOneTurn(testing.allocator, &session, &registry, "add a GET route");
+    const rendered = try runOneTurn(testing.allocator, &session, &registry, "add a GET route", null);
     defer testing.allocator.free(rendered);
 
     try testing.expectEqual(@as(usize, 2), session.transcript.len());
@@ -182,9 +217,9 @@ test "runOneTurn: two turns back-to-back accumulate in the transcript" {
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const first = try runOneTurn(testing.allocator, &session, &registry, "first intent");
+    const first = try runOneTurn(testing.allocator, &session, &registry, "first intent", null);
     defer testing.allocator.free(first);
-    const second = try runOneTurn(testing.allocator, &session, &registry, "second intent");
+    const second = try runOneTurn(testing.allocator, &session, &registry, "second intent", null);
     defer testing.allocator.free(second);
 
     try testing.expectEqual(@as(usize, 4), session.transcript.len());
@@ -199,7 +234,9 @@ test "runOneTurn: two turns back-to-back accumulate in the transcript" {
 test "StubClient ignores user_text and always returns the stub reply" {
     var stub: StubClient = .{};
     const client = stub.asClient();
-    const reply = try client.request(testing.allocator, "whatever the user typed");
+    var transcript: Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    const reply = try client.request(testing.allocator, &transcript, "whatever the user typed");
     switch (reply) {
         .text => |t| try testing.expectEqualStrings(stub_reply_text, t),
         else => return error.TestFailed,
@@ -211,17 +248,19 @@ test "initLive dupes api_key and system_prompt, deinit releases both" {
         testing.allocator,
         "sk-ant-test",
         "you are a zigts expert",
+        "[{\"name\":\"zigts_expert_meta\",\"description\":\"d\",\"input_schema\":{}}]",
     );
     defer session.deinit(testing.allocator);
 
     try testing.expect(session.backend == .live);
     try testing.expectEqualStrings("sk-ant-test", session.backend.live.config.api_key);
     try testing.expectEqualStrings("you are a zigts expert", session.backend.live.config.system_prompt);
+    try testing.expect(session.backend.live.config.tools_json != null);
     try testing.expect(session.system_prompt_owned != null);
 }
 
 test "modelClient returns a live client vtable when backend is live" {
-    var session = try AgentSession.initLive(testing.allocator, "k", "p");
+    var session = try AgentSession.initLive(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
 
     const mc = session.modelClient();

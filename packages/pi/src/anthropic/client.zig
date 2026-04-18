@@ -17,6 +17,7 @@
 const std = @import("std");
 const loop = @import("../loop.zig");
 const turn = @import("../turn.zig");
+const transcript_mod = @import("../transcript.zig");
 const request_mod = @import("request.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
@@ -25,6 +26,7 @@ const apply_edit = @import("apply_edit.zig");
 const default_base_url = "https://api.anthropic.com/v1/messages";
 const default_anthropic_version = "2023-06-01";
 const max_response_body_bytes: usize = 16 * 1024 * 1024;
+const history_entry_limit: usize = 8;
 
 pub const Config = struct {
     api_key: []const u8,
@@ -57,24 +59,58 @@ pub const Client = struct {
     fn requestFn(
         ctx: *anyopaque,
         arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
         user_text: []const u8,
     ) anyerror!turn.ModelReply {
         const self: *Client = @ptrCast(@alignCast(ctx));
-        return self.sendTurn(arena, user_text);
+        return self.sendTurn(arena, transcript, user_text);
     }
 
     pub fn sendTurn(
         self: *Client,
         arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
         user_text: []const u8,
     ) !turn.ModelReply {
-        const body = try buildRequestBody(arena, self.config, user_text);
+        const contextualized = try buildConversationInput(arena, transcript, user_text);
+        const body = try buildRequestBody(arena, self.config, contextualized);
         const response_body = try postAnthropic(arena, self.config, body);
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
         return try apply_edit.maybeRemap(arena, outcome.reply);
     }
 };
+
+fn buildConversationInput(
+    arena: std.mem.Allocator,
+    transcript: *const transcript_mod.Transcript,
+    user_text: []const u8,
+) ![]const u8 {
+    var history_end = transcript.len();
+    if (history_end > 0) {
+        const last = transcript.at(history_end - 1);
+        if (last.tag == .user_text and std.mem.eql(u8, last.body, user_text)) {
+            history_end -= 1;
+        }
+    }
+    if (history_end == 0) return try arena.dupe(u8, user_text);
+
+    const history_start = if (history_end > history_entry_limit)
+        history_end - history_entry_limit
+    else
+        0;
+
+    var buf: std.ArrayList(u8) = .empty;
+    var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
+    try aw.writer.writeAll("Conversation so far:\n");
+    for (transcript.entries.items[history_start..history_end]) |*entry| {
+        try transcript_mod.renderPlain(&aw.writer, entry);
+    }
+    try aw.writer.writeAll("\nLatest request:\n");
+    try aw.writer.writeAll(user_text);
+    buf = aw.toArrayList();
+    return try buf.toOwnedSlice(arena);
+}
 
 pub fn buildRequestBody(
     arena: std.mem.Allocator,
@@ -217,6 +253,35 @@ test "Client.asModelClient: returns a ModelClient with a live function pointer" 
     try testing.expect(@intFromPtr(mc.request_fn) != 0);
 }
 
+test "buildConversationInput leaves the first turn untouched" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+
+    const input = try buildConversationInput(testing.allocator, &transcript, "add a GET route");
+    defer testing.allocator.free(input);
+
+    try testing.expectEqualStrings("add a GET route", input);
+}
+
+test "buildConversationInput folds bounded prior transcript entries into the live prompt" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "first intent" });
+    try transcript.append(testing.allocator, .{ .model_text = "first answer" });
+    try transcript.append(testing.allocator, .{ .tool_result = "{\"ok\":true}" });
+    try transcript.append(testing.allocator, .{ .user_text = "second intent" });
+
+    const input = try buildConversationInput(testing.allocator, &transcript, "second intent");
+    defer testing.allocator.free(input);
+
+    try testing.expect(std.mem.indexOf(u8, input, "Conversation so far:") != null);
+    try testing.expect(std.mem.indexOf(u8, input, "user: first intent") != null);
+    try testing.expect(std.mem.indexOf(u8, input, "model: first answer") != null);
+    try testing.expect(std.mem.indexOf(u8, input, "tool: {\"ok\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, input, "Latest request:\nsecond intent") != null);
+    try testing.expect(std.mem.indexOf(u8, input, "user: second intent") == null);
+}
+
 fn envVar(name_z: [:0]const u8) ?[]const u8 {
     const raw = std.c.getenv(name_z) orelse return null;
     return std.mem.sliceTo(raw, 0);
@@ -239,7 +304,10 @@ test "live: round-trip one turn against api.anthropic.com" {
         .max_tokens = 128,
     });
 
-    const reply = try client.sendTurn(arena.allocator(), "Say hello in three words.");
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+
+    const reply = try client.sendTurn(arena.allocator(), &transcript, "Say hello in three words.");
     try testing.expect(reply == .text);
     try testing.expect(reply.text.len > 0);
 }

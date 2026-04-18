@@ -31,10 +31,10 @@ pub fn run(
     var editor: LineEditor = .{};
     defer editor.deinit(allocator);
 
-    var session = try agent.initFromEnv(allocator);
+    var session = try agent.initFromEnvWithRegistry(allocator, registry);
     defer session.deinit(allocator);
 
-    const banner = "zigttp expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
+    const banner = "zigts expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
     writeAll(banner);
     redrawPrompt(editor.line());
 
@@ -76,7 +76,7 @@ pub fn run(
                     }
 
                     if (line_snapshot.len > 0 and !repl.shouldDispatchTool(registry, line_snapshot)) {
-                        const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot) catch |err| {
+                        const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot, approveEdit) catch |err| {
                             var msg_buf: [256]u8 = undefined;
                             const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
                             writeAll(msg);
@@ -141,6 +141,35 @@ fn writeAll(s: []const u8) void {
 fn redrawPrompt(current: []const u8) void {
     writeAll(prompt_prefix);
     if (current.len > 0) writeAll(current);
+}
+
+fn approveEdit(file: []const u8) !bool {
+    var prompt_buf: [512]u8 = undefined;
+    const prompt = std.fmt.bufPrint(&prompt_buf, "\r\nApply verified edit to {s}? [y/N] ", .{file}) catch "\r\nApply verified edit? [y/N] ";
+    writeAll(prompt);
+
+    while (true) {
+        var byte: [1]u8 = undefined;
+        const n = std.posix.read(std.posix.STDIN_FILENO, &byte) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) {
+            writeAll("\r\n");
+            return false;
+        }
+        switch (byte[0]) {
+            'y', 'Y' => {
+                writeAll("\r\n");
+                return true;
+            },
+            'n', 'N', 3, 4, 13, 10 => {
+                writeAll("\r\n");
+                return false;
+            },
+            else => {},
+        }
+    }
 }
 
 /// Writer adapter that forwards straight to stdout via std.c.write. Used by

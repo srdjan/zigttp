@@ -1,4 +1,4 @@
-//! Both this tool and `zigts expert search --json` go through
+//! Both this tool and `zigts search --json` go through
 //! `describe_rule.writeRuleJson`, so the TUI and CLI stay byte-identical.
 
 const std = @import("std");

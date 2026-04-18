@@ -98,11 +98,11 @@ pub fn run(
 ) !void {
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        const banner = "zigttp expert — type a request, 'help' for tools, or 'quit'\n";
+        const banner = "zigts expert — type a request, 'help' for tools, or 'quit'\n";
         _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
     }
 
-    var session = try agent.initFromEnv(allocator);
+    var session = try agent.initFromEnvWithRegistry(allocator, registry);
     defer session.deinit(allocator);
 
     var line_buf: [64 * 1024]u8 = undefined;
@@ -117,7 +117,7 @@ pub fn run(
 
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len > 0 and !shouldDispatchTool(registry, trimmed)) {
-            const rendered = agent.runOneTurn(allocator, &session, registry, trimmed) catch |err| {
+            const rendered = agent.runOneTurn(allocator, &session, registry, trimmed, approveEdit) catch |err| {
                 var msg_buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
                 _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
@@ -149,6 +149,19 @@ pub fn run(
             },
         }
     }
+}
+
+fn approveEdit(file: []const u8) !bool {
+    var prompt_buf: [512]u8 = undefined;
+    const prompt = std.fmt.bufPrint(&prompt_buf, "Apply verified edit to {s}? [y/N] ", .{file}) catch "Apply verified edit? [y/N] ";
+    _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
+
+    var line_buf: [256]u8 = undefined;
+    const maybe_line = try readLine(&line_buf);
+    const line = maybe_line orelse return false;
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    if (trimmed.len == 0) return false;
+    return trimmed[0] == 'y' or trimmed[0] == 'Y';
 }
 
 /// Read one line from stdin into `buf`. Returns the line (without the trailing

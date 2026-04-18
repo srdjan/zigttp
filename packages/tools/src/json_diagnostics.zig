@@ -2,7 +2,7 @@
 //!
 //! Converts internal diagnostics from the parser, BoolChecker, TypeChecker,
 //! and HandlerVerifier into machine-readable JSON for the compiler-in-the-loop
-//! workflow. `zigttp expert` calls `zigts check --json` and parses these
+//! workflow. `zigts expert` calls `zigts check --json` and parses these
 //! diagnostics to fix handler code using the `suggestion` field.
 //!
 //! Architecture: each checker's Diagnostic -> JsonDiagnostic -> JSON on stdout

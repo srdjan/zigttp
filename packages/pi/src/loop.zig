@@ -1,7 +1,7 @@
 //! Expert loop driver. Pumps events from a `ModelClient` + the compiler veto
 //! + the tool registry into the `turn.TurnMachine`, executes returned actions,
-//! auto-applies verified edits to the workspace, and appends rendered
-//! messages to a `Transcript`.
+//! applies verified edits to the workspace after optional user approval, and
+//! appends rendered messages to a `Transcript`.
 //!
 //! Memory model: every intra-turn allocation (model reply bodies, veto
 //! envelope, tool result body) goes into a per-turn `ArenaAllocator` that
@@ -31,17 +31,21 @@ pub const ModelClient = struct {
     request_fn: *const fn (
         ctx: *anyopaque,
         arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
         user_text: []const u8,
     ) anyerror!turn.ModelReply,
 
     pub fn request(
         self: ModelClient,
         arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
         user_text: []const u8,
     ) !turn.ModelReply {
-        return self.request_fn(self.context, arena, user_text);
+        return self.request_fn(self.context, arena, transcript, user_text);
     }
 };
+
+pub const ApprovalFn = *const fn (file: []const u8) anyerror!bool;
 
 pub const TurnResult = struct {
     final_state: turn.TurnState,
@@ -54,6 +58,7 @@ pub const TurnResult = struct {
 pub const RunOptions = struct {
     max_attempts: u8 = 3,
     workspace_root: []const u8 = ".",
+    approval_fn: ?ApprovalFn = null,
 };
 
 const PreparedEdit = struct {
@@ -93,13 +98,24 @@ pub fn runTurnWith(
 
         switch (action) {
             .send_to_model => |text| {
-                const reply = try client.request(ta, text);
+                const reply = try client.request(ta, transcript, text);
                 next_event = .{ .model_replied = reply };
             },
             .run_veto => |edit| {
                 const prepared = try prepareEdit(ta, options.workspace_root, edit);
                 const outcome = try veto.runVeto(ta, prepared.edit);
                 if (outcome.ok) {
+                    if (options.approval_fn) |approve| {
+                        if (!try approve(prepared.edit.file)) {
+                            const note = try std.fmt.allocPrint(
+                                ta,
+                                "edit verified but not applied: {s}",
+                                .{prepared.edit.file},
+                            );
+                            try transcript.append(allocator, .{ .tool_result = note });
+                            return .{ .final_state = .done, .attempt = machine.attempt };
+                        }
+                    }
                     try applyPreparedEdit(ta, prepared);
                 }
                 next_event = .{ .edit_verified = outcome };
@@ -112,12 +128,12 @@ pub fn runTurnWith(
                         "emit a new edit.\n\n{s}",
                     .{ payload.attempt, payload.max_attempts, payload.diagnostic },
                 );
-                const reply = try client.request(ta, prompt);
+                const reply = try client.request(ta, transcript, prompt);
                 next_event = .{ .model_replied = reply };
             },
             .invoke_tool => |tc| {
-                const args = [_][]const u8{tc.args_json};
-                const result = try registry.invoke(ta, tc.name, &args);
+                const args = try decodeToolArgs(ta, tc.args_json);
+                const result = try registry.invoke(ta, tc.name, args);
                 next_event = .{ .tool_completed = .{
                     .ok = result.ok,
                     .body = result.body,
@@ -135,6 +151,34 @@ pub fn runTurnWith(
             .none => return .{ .final_state = machine.state, .attempt = machine.attempt },
         }
     }
+}
+
+fn decodeToolArgs(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    const trimmed = std.mem.trim(u8, args_json, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "{}")) return &.{};
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, trimmed, .{}) catch {
+        return &.{trimmed};
+    };
+    if (parsed != .object) return &.{trimmed};
+
+    if (parsed.object.get("input")) |value| {
+        if (value == .string) return &.{value.string};
+    }
+
+    var it = parsed.object.iterator();
+    var only_string: ?[]const u8 = null;
+    while (it.next()) |entry| {
+        const value = entry.value_ptr.*;
+        if (value != .string) return &.{trimmed};
+        if (only_string != null) return &.{trimmed};
+        only_string = value.string;
+    }
+    if (only_string) |value| return &.{value};
+    return &.{};
 }
 
 fn prepareEdit(
@@ -204,10 +248,12 @@ const CannedClient = struct {
     fn requestFn(
         ctx: *anyopaque,
         arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
         user_text: []const u8,
     ) anyerror!turn.ModelReply {
         const self: *CannedClient = @ptrCast(@alignCast(ctx));
         _ = arena;
+        _ = transcript;
         _ = user_text;
         return self.reply;
     }
@@ -230,10 +276,12 @@ const SequenceClient = struct {
     fn requestFn(
         ctx: *anyopaque,
         arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
         user_text: []const u8,
     ) anyerror!turn.ModelReply {
         const self: *SequenceClient = @ptrCast(@alignCast(ctx));
         _ = arena;
+        _ = transcript;
         _ = user_text;
         if (self.index >= self.replies.len) return error.TestSequenceExhausted;
         const reply = self.replies[self.index];
@@ -378,6 +426,10 @@ test "tool call path: invoke_tool -> tool_result in transcript" {
     try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "\"stub\":\"ok\"") != null);
 }
 
+fn rejectEdit(_: []const u8) anyerror!bool {
+    return false;
+}
+
 test "user text is always the first transcript entry regardless of reply shape" {
     // Independent of which branch the machine takes, the user's original
     // intent should be preserved as entry 0. This protects against a future
@@ -507,6 +559,40 @@ test "retry: max_attempts=2 blocks a third call" {
     try testing.expectEqual(@as(u8, 2), result.attempt);
     try testing.expectEqual(Tag.diagnostic_box, tr.at(1).tag);
     try testing.expectEqual(@as(usize, 2), seq.index);
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
+}
+
+test "approval callback can block an otherwise verified edit from being written" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{tmp.sub_path});
+    defer testing.allocator.free(written_path);
+
+    var canned: CannedClient = .{ .reply = .{ .edit = .{
+        .file = "handler.ts",
+        .content = clean_handler,
+        .before = null,
+    } } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add a GET route",
+        .{
+            .workspace_root = tmp.sub_path[0..],
+            .approval_fn = rejectEdit,
+        },
+    );
+
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(Tag.tool_result, tr.at(1).tag);
+    try testing.expect(std.mem.indexOf(u8, tr.at(1).body, "not applied") != null);
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
