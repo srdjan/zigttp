@@ -26,6 +26,22 @@ pub const DurableStore = union(enum) {
         };
     }
 
+    /// Returns an allocated absolute path `<durable_dir>/<name>` and
+    /// ensures the directory exists. Caller owns the returned slice.
+    /// Used by non-signal subsystems (`zigttp:websocket`, `zigttp:fetch`)
+    /// to carve out namespaced storage under the shared durable root
+    /// without colliding with `signals/`, `scheduled/`, or top-level
+    /// `durable-*.jsonl` oplog files.
+    pub fn subtreeDir(
+        self: *DurableStore,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+    ) ![]u8 {
+        return switch (self.*) {
+            .fs => |*store| store.subtreeDir(allocator, name),
+        };
+    }
+
     pub fn enqueueSignal(
         self: *DurableStore,
         key: []const u8,
@@ -305,6 +321,20 @@ const FsDurableStore = struct {
             else => return error.MakeDirFailed,
         }
     }
+
+    fn subtreeDir(self: *Self, allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+        if (name.len == 0) return error.InvalidSubtreeName;
+        for (name) |ch| {
+            const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+                (ch >= '0' and ch <= '9') or ch == '_' or ch == '-';
+            if (!ok) return error.InvalidSubtreeName;
+        }
+        try self.ensureDir(self.durable_dir);
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.durable_dir, name });
+        errdefer allocator.free(path);
+        try self.ensureDir(path);
+        return path;
+    }
 };
 
 const unixMillis = trace.unixMillis;
@@ -453,6 +483,47 @@ test "durable store enqueue and consume immediate signal" {
     try std.testing.expectEqualStrings("{\"ok\":true}", consumed.payload_json);
 
     try std.testing.expect((try store.tryConsumeSignal("order:123", "approved", unixMillis())) == null);
+}
+
+test "subtreeDir creates a namespaced directory under the durable root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+
+    const ws_dir = try store.subtreeDir(allocator, "ws");
+    try std.testing.expect(std.mem.endsWith(u8, ws_dir, "/ws"));
+
+    // Idempotent: calling twice with the same name succeeds.
+    const ws_dir_again = try store.subtreeDir(allocator, "ws");
+    try std.testing.expectEqualStrings(ws_dir, ws_dir_again);
+
+    // Different names yield different paths, both coexist with signals/scheduled.
+    const fetch_dir = try store.subtreeDir(allocator, "fetch");
+    try std.testing.expect(std.mem.endsWith(u8, fetch_dir, "/fetch"));
+    try std.testing.expect(!std.mem.eql(u8, ws_dir, fetch_dir));
+}
+
+test "subtreeDir rejects names that would escape the root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const durable_dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
+
+    var store = DurableStore.initFs(allocator, durable_dir);
+
+    try std.testing.expectError(error.InvalidSubtreeName, store.subtreeDir(allocator, ""));
+    try std.testing.expectError(error.InvalidSubtreeName, store.subtreeDir(allocator, "../etc"));
+    try std.testing.expectError(error.InvalidSubtreeName, store.subtreeDir(allocator, "ws/../escape"));
+    try std.testing.expectError(error.InvalidSubtreeName, store.subtreeDir(allocator, "has space"));
 }
 
 test "durable store hides future scheduled signals until due" {

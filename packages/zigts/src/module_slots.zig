@@ -13,4 +13,5 @@ pub const Slot = enum(u4) {
     ratelimit = 8,
     service = 9,
     scope = 10,
+    fetch = 11,
 };

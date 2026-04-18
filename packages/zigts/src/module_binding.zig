@@ -629,6 +629,7 @@ pub const ContractCategory = enum {
     cors_origin,
     rate_limit_key,
     service_call,
+    fetch_host,
 };
 
 /// Transform applied to extracted literal before storing.
