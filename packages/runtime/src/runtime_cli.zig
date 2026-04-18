@@ -238,6 +238,12 @@ fn parseCommonServeFlag(
         config.runtime_config.system_config_path = argv[i.*];
         return true;
     }
+    if (std.mem.eql(u8, arg, "--durable")) {
+        i.* += 1;
+        if (i.* >= argv.len) return error.MissingDurableDir;
+        config.runtime_config.durable_oplog_dir = argv[i.*];
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--no-env-check")) {
         config.skip_env_check = true;
         return true;

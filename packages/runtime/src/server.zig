@@ -28,6 +28,7 @@ const RuntimeContract = contract_runtime.RuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
 const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
+const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -580,9 +581,24 @@ const ConnectionPool = struct {
     /// Get (or lazily initialise) the server's WebSocket connection
     /// pool. Returns a pointer to the live pool regardless of initial
     /// state, so the caller can always treat the result uniformly.
+    /// When the server was started with `--durable`, the pool's
+    /// attachments dir is wired up here so `serializeAttachment` writes
+    /// land under `<durable>/ws/` and survive restarts.
     fn ensureWebSocketPool(self: *ConnectionPool) *websocket_pool.Pool {
         if (self.server.ws_pool == null) {
-            self.server.ws_pool = websocket_pool.Pool.init(self.server.allocator);
+            var pool = websocket_pool.Pool.init(self.server.allocator);
+            if (self.server.config.runtime_config.durable_oplog_dir) |dir| {
+                var store = durable_store_mod.DurableStore.initFs(self.server.allocator, dir);
+                if (store.subtreeDir(self.server.allocator, "ws")) |ws_dir| {
+                    defer self.server.allocator.free(ws_dir);
+                    pool.setAttachmentsDir(ws_dir) catch |err| {
+                        std.log.warn("websocket: failed to enable attachment persistence: {s}", .{@errorName(err)});
+                    };
+                } else |err| {
+                    std.log.warn("websocket: failed to open durable subtree: {s}", .{@errorName(err)});
+                }
+            }
+            self.server.ws_pool = pool;
         }
         return &self.server.ws_pool.?;
     }
