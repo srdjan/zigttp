@@ -26,6 +26,7 @@ const QueryParam = http_types.QueryParam;
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const ws_gateway = @import("ws_gateway.zig");
+const ws_frame_loop = @import("ws_frame_loop.zig");
 const websocket_pool = @import("websocket_pool.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const security_logger_mod = @import("security_logger.zig");
@@ -180,7 +181,8 @@ const ConnectionPool = struct {
     }
 
     fn handleConnection(self: *ConnectionPool, fd: std.posix.fd_t) void {
-        defer std.Io.Threaded.closeFd(fd);
+        var fd_owned = true;
+        defer if (fd_owned) std.Io.Threaded.closeFd(fd);
 
         // TCP_NODELAY: disable Nagle's algorithm for lower latency
         // This reduces response latency by sending data immediately
@@ -194,27 +196,39 @@ const ConnectionPool = struct {
         while (true) {
             _ = arena.reset(.retain_capacity);
             const req_allocator = arena.allocator();
-            const keep_alive = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator) catch break;
+            const outcome = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator) catch break;
             requests_on_connection += 1;
 
-            if (!keep_alive) break;
+            if (outcome == .transferred) {
+                // A subsystem (WebSocket frame loop) owns the fd now.
+                // Skip the defer close and let that subsystem clean up.
+                fd_owned = false;
+                return;
+            }
+            if (outcome == .close) break;
             if (self.server.config.keep_alive_max_requests > 0 and
                 requests_on_connection >= self.server.config.keep_alive_max_requests) break;
         }
     }
 
-    fn handleSingleRequestSync(self: *ConnectionPool, fd: std.posix.fd_t, request_num: u32, req_allocator: std.mem.Allocator) !bool {
+    /// Outcome of a single request on a keep-alive connection. `keep_alive`
+    /// continues the loop; `close` breaks and the defer closes the fd;
+    /// `transferred` hands fd ownership to another subsystem (W1
+    /// WebSocket frame loop) — the caller must not close it.
+    const RequestOutcome = enum { keep_alive, close, transferred };
+
+    fn handleSingleRequestSync(self: *ConnectionPool, fd: std.posix.fd_t, request_num: u32, req_allocator: std.mem.Allocator) !RequestOutcome {
         _ = request_num;
 
         const request_data = self.readRequestData(fd, req_allocator) catch |err| {
-            if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return false;
+            if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return .close;
             if (err == error.UnsupportedTransferEncoding) {
                 self.sendErrorSync(fd, 501, "Not Implemented") catch {};
-                return false;
+                return .close;
             }
             return err;
         };
-        var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return false;
+        var request = self.server.parseRequestFromBuffer(req_allocator, request_data) catch return .close;
         defer request.deinit(req_allocator);
 
         // Check keep-alive using fast header slot
@@ -225,13 +239,13 @@ const ConnectionPool = struct {
             break :blk true;
         };
         const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
+        const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
         // WebSocket upgrade: if the handler contract advertises an
         // onMessage export and the request carries an RFC 6455 upgrade,
-        // hand the connection off to ws_gateway and tear down the
-        // keep-alive loop. The connection's fd ownership transfers to
-        // the gateway path; returning false from here tells the outer
-        // accept loop to stop touching the socket.
+        // hand the fd off to the ws frame-loop thread. `.transferred`
+        // signals the outer loop to skip the fd close — the frame loop
+        // owns the socket lifecycle from here on.
         if (self.server.contract) |*contract| {
             if (contract.websocket.on_message and requestIsWebSocketUpgrade(request.headers.items)) {
                 const request_view = HttpRequestView{
@@ -242,10 +256,10 @@ const ConnectionPool = struct {
                     .headers = request.headers,
                     .body = request.body,
                 };
-                self.handleWebSocketUpgradeSync(fd, &request_view, req_allocator) catch |err| {
+                return self.handleWebSocketUpgradeSync(fd, &request_view, req_allocator) catch |err| ret: {
                     std.log.warn("websocket upgrade failed: {}", .{err});
+                    break :ret .close;
                 };
-                return false;
             }
         }
 
@@ -256,7 +270,7 @@ const ConnectionPool = struct {
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
                 };
-                return keep_alive;
+                return outcome_if_alive;
             }
         }
 
@@ -264,7 +278,7 @@ const ConnectionPool = struct {
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
                 self.sendErrorSync(fd, 404, "Not Found") catch {};
-                return keep_alive;
+                return outcome_if_alive;
             }
         }
 
@@ -276,8 +290,8 @@ const ConnectionPool = struct {
                 var cached_opt = cache.get(key, req_allocator);
                 if (cached_opt != null) {
                     defer cached_opt.?.deinit();
-                    self.sendResponseSync(fd, &cached_opt.?, keep_alive) catch return false;
-                    return keep_alive;
+                    self.sendResponseSync(fd, &cached_opt.?, keep_alive) catch return .close;
+                    return outcome_if_alive;
                 }
                 proof_cache_key = key;
             }
@@ -301,7 +315,7 @@ const ConnectionPool = struct {
                 self.sendErrorSync(fd, status, message) catch |send_err| {
                     std.log.warn("failed to send error response: {}", .{send_err});
                 };
-                return false;
+                return .close;
             };
             defer handle.deinit();
 
@@ -313,10 +327,10 @@ const ConnectionPool = struct {
             }
 
             // Send response
-            self.sendResponseSync(fd, &handle.response, keep_alive) catch return false;
+            self.sendResponseSync(fd, &handle.response, keep_alive) catch return .close;
         }
 
-        return keep_alive;
+        return outcome_if_alive;
     }
 
     fn readRequestData(self: *ConnectionPool, fd: std.posix.fd_t, allocator: std.mem.Allocator) ![]u8 {
@@ -486,34 +500,40 @@ const ConnectionPool = struct {
         try writeAllFd(fd, response);
     }
 
-    /// Drive ws_gateway.upgrade for a single request. Writes the 101
-    /// response (or the RFC-specified error status) and releases the
-    /// connection slot. The fd is closed on return; a frame-exchange
-    /// loop lands in the next sub-slice, at which point this function
-    /// will hand the fd over to the gateway instead of closing it.
+    /// Drive ws_gateway.upgrade for a single request. On a successful
+    /// upgrade, writes the 101 response and hands the fd off to a
+    /// dedicated frame-loop thread (see `ws_frame_loop`). Returns
+    /// `.transferred` so `handleConnection` skips the fd close.
+    ///
+    /// W1-d.4-a lifecycle: the spawned thread is detached. On server
+    /// shutdown the fd is closed when the process exits; per-connection
+    /// clean join lands alongside the hibernation scheduler in W3. On
+    /// rejection, the fd stays in the outer loop's ownership and the
+    /// defer-close fires normally.
     fn handleWebSocketUpgradeSync(
         self: *ConnectionPool,
         fd: std.posix.fd_t,
         request: *const HttpRequestView,
         req_allocator: std.mem.Allocator,
-    ) !void {
+    ) !RequestOutcome {
         const pool = self.ensureWebSocketPool();
 
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(req_allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(req_allocator, &buf);
 
-        const outcome = try ws_gateway.upgrade(pool, &aw.writer, fd, request, unixMillisNow());
+        const upgrade_outcome = try ws_gateway.upgrade(pool, &aw.writer, fd, request, unixMillisNow());
         buf = aw.toArrayList();
 
-        switch (outcome) {
+        switch (upgrade_outcome) {
             .ok => |id| {
                 try writeAllFd(fd, buf.items);
-                // Frame loop lands in the next sub-slice. For now, tear
-                // down immediately so the handshake path is observable
-                // without a dangling fd.
-                pool.unregister(id);
-                _ = std.c.close(fd);
+                self.spawnFrameLoop(pool, fd, id) catch |err| {
+                    std.log.warn("ws frame-loop spawn failed: {}", .{err});
+                    pool.unregister(id);
+                    return .close;
+                };
+                return .transferred;
             },
             .reject => |reason| {
                 if (reason.wants_version_header) {
@@ -522,14 +542,34 @@ const ConnectionPool = struct {
                         &out_buf,
                         "HTTP/1.1 {d} {s}\r\nSec-WebSocket-Version: 13\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         .{ reason.status, reason.reason },
-                    ) catch return;
+                    ) catch return .close;
                     try writeAllFd(fd, response);
                 } else {
                     try self.sendErrorSync(fd, reason.status, reason.reason);
                 }
-                _ = std.c.close(fd);
+                return .close;
             },
         }
+    }
+
+    /// Spawn a detached frame-loop thread that owns the fd and pool
+    /// entry. Returns after the thread is running; the caller must not
+    /// touch either resource afterwards.
+    fn spawnFrameLoop(
+        self: *ConnectionPool,
+        pool: *websocket_pool.Pool,
+        fd: std.posix.fd_t,
+        id: websocket_pool.ConnectionId,
+    ) !void {
+        const cfg = ws_frame_loop.Config{
+            .pool = pool,
+            .io = self.server.io_backend.io(),
+            .fd = fd,
+            .id = id,
+            .echo = true,
+        };
+        const thread = try std.Thread.spawn(.{}, ws_frame_loop.run, .{cfg});
+        thread.detach();
     }
 
     /// Get (or lazily initialise) the server's WebSocket connection
