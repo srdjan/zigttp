@@ -497,6 +497,7 @@ pub const Runtime = struct {
         if (self.config.system_config_path) |_| {
             try self.installServiceModuleState();
         }
+        try self.installFetchModuleState();
 
         // Install io module callbacks for parallel/race (requires outbound HTTP)
         if (self.config.outbound_http_enabled) {
@@ -892,6 +893,10 @@ pub const Runtime = struct {
     fn installServiceModuleState(self: *Self) !void {
         const system_path = self.config.system_config_path orelse return;
         try zq.modules.service.installState(self.ctx, system_path, self, serviceCallCallback);
+    }
+
+    fn installFetchModuleState(self: *Self) !void {
+        try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback);
     }
 
     /// Load and compile JavaScript code
@@ -3459,6 +3464,20 @@ const ServiceRoute = struct {
     method_text: []const u8,
     path_pattern: []const u8,
 };
+
+/// `zigttp:fetch.fetch(url, init?)` callback. Delegates to the same native
+/// as the global `fetchSync`, so trace recording, replay mode, and
+/// outbound-host policy enforcement all behave identically across the two
+/// surfaces. Durable opt-in (F2) will layer on top without changing this
+/// signature.
+fn fetchModuleCallback(
+    runtime_ptr: *anyopaque,
+    ctx: *zq.Context,
+    args: []const zq.JSValue,
+) anyerror!zq.JSValue {
+    _ = runtime_ptr;
+    return fetchSyncNative(@ptrCast(ctx), zq.JSValue.undefined_val, args);
+}
 
 fn serviceCallCallback(
     runtime_ptr: *anyopaque,

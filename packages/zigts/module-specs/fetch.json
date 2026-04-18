@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:fetch",
+  "source": "packages/zigts/src/modules/fetch.zig",
+  "requiredCapabilities": [
+    "network",
+    "runtime_callback"
+  ],
+  "exports": [
+    {
+      "name": "fetch",
+      "effect": "write",
+      "returns": "object",
+      "contractExtractions": [
+        {
+          "argPosition": 0,
+          "category": "fetch_host",
+          "transform": "extract_host"
+        }
+      ]
+    }
+  ]
+}

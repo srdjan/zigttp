@@ -25,6 +25,7 @@ pub const module_graph = @import("module_graph.zig");
 pub const compiler = @import("compiler.zig");
 pub const types = @import("types.zig");
 pub const service = @import("service.zig");
+pub const fetch = @import("fetch.zig");
 
 pub const ModuleExport = resolver.ModuleExport;
 pub const ResolveResult = resolver.ResolveResult;
