@@ -5462,6 +5462,7 @@ fn seedIncompleteDurableRandomStep(
 test {
     _ = @import("handler_loader.zig");
     _ = @import("websocket_codec.zig");
+    _ = @import("websocket_pool.zig");
 }
 
 test "Runtime creation" {
