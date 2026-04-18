@@ -90,7 +90,23 @@ pub fn run(cfg: Config) void {
         .output = &writer.interface,
     };
 
+    // Dispatch onOpen once before entering the read loop. Failures are
+    // logged but do not abort the connection — a handler that throws
+    // from onOpen still keeps the socket usable for subsequent messages.
+    if (cfg.handler_pool) |hp| {
+        if (cfg.pool.snapshot(cfg.id)) |snap| {
+            dispatchOnOpen(hp, cfg.pool, cfg.id, snap.room) catch |err| {
+                std.log.warn("ws onOpen dispatch failed (id={d}): {}", .{ cfg.id, err });
+            };
+        }
+    }
+
     defer {
+        if (cfg.handler_pool) |hp| {
+            dispatchOnClose(hp, cfg.pool, cfg.id, 1000) catch |err| {
+                std.log.warn("ws onClose dispatch failed (id={d}): {}", .{ cfg.id, err });
+            };
+        }
         cfg.pool.unregister(cfg.id);
         stream.close(cfg.io);
     }
@@ -173,10 +189,13 @@ fn unixMillisNow() i64 {
 }
 
 /// Borrow a runtime, install the WS callback table, and invoke the
-/// handler's `onMessage(ws, data)` export. The `ws` argument for W1 is
-/// the connection id as an integer; handlers treat it as an opaque
-/// token they pass back to `send`/`close`. W2 upgrades this to a real
-/// JS proxy object with fields.
+/// handler's `onMessage(ws, data, room)` export. The `ws` argument is
+/// the connection id as an integer; `room` is the room key the
+/// connection registered under (derived from the upgrade URL by
+/// ws_gateway). Passing `room` on every dispatch lets broadcast
+/// handlers avoid module-scoped state, which the per-request arena
+/// doesn't let them keep anyway — W2's attachment API fills the gap
+/// for per-connection state that survives across messages.
 fn dispatchOnMessage(
     handler_pool: *HandlerPool,
     ws_pool: *Pool,
@@ -199,10 +218,73 @@ fn dispatchOnMessage(
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
     const ws_val = zq.JSValue.fromInt(id_i32);
     const data_val = try lease.runtime.ctx.createString(data);
+    const room_val = if (ws_pool.snapshot(id)) |snap|
+        try lease.runtime.ctx.createString(snap.room)
+    else
+        try lease.runtime.ctx.createString("");
 
-    _ = lease.runtime.callGlobalFunction("onMessage", &.{ ws_val, data_val }) catch |err| {
+    _ = lease.runtime.callGlobalFunction("onMessage", &.{ ws_val, data_val, room_val }) catch |err| {
         std.log.warn("onMessage handler raised: {}", .{err});
         return err;
+    };
+}
+
+/// Dispatch `onOpen(ws, url)`. Missing export is fine (NotCallable is
+/// silenced); the handler is not required to define onOpen just because
+/// it defined onMessage.
+fn dispatchOnOpen(
+    handler_pool: *HandlerPool,
+    ws_pool: *Pool,
+    id: ConnectionId,
+    url: []const u8,
+) !void {
+    var lease = try handler_pool.acquireWorkerRuntime();
+    defer lease.deinit();
+
+    try lease.runtime.installWebSocketModuleState(ws_pool);
+
+    const prev_connection = zruntime.active_ws_connection;
+    zruntime.active_ws_connection = id;
+    defer zruntime.active_ws_connection = prev_connection;
+
+    const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
+    const ws_val = zq.JSValue.fromInt(id_i32);
+    const url_val = try lease.runtime.ctx.createString(url);
+
+    _ = lease.runtime.callGlobalFunction("onOpen", &.{ ws_val, url_val }) catch |err| switch (err) {
+        error.NotCallable => return,
+        else => return err,
+    };
+}
+
+/// Dispatch `onClose(ws, code, reason)`. Same tolerance as onOpen —
+/// handlers don't have to define it. `reason` is empty for W1 because
+/// the peer-sent close payload isn't surfaced by `readSmallMessage`
+/// (std returns `error.ConnectionClose` without the body). W2 will
+/// parse the close frame explicitly to thread the reason through.
+fn dispatchOnClose(
+    handler_pool: *HandlerPool,
+    ws_pool: *Pool,
+    id: ConnectionId,
+    code: u16,
+) !void {
+    var lease = try handler_pool.acquireWorkerRuntime();
+    defer lease.deinit();
+
+    try lease.runtime.installWebSocketModuleState(ws_pool);
+
+    const prev_connection = zruntime.active_ws_connection;
+    zruntime.active_ws_connection = id;
+    defer zruntime.active_ws_connection = prev_connection;
+
+    const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
+    const ws_val = zq.JSValue.fromInt(id_i32);
+    const code_val = zq.JSValue.fromInt(@as(i32, code));
+    const reason_val = try lease.runtime.ctx.createString("");
+
+    _ = lease.runtime.callGlobalFunction("onClose", &.{ ws_val, code_val, reason_val }) catch |err| switch (err) {
+        error.NotCallable => return,
+        else => return err,
     };
 }
 
