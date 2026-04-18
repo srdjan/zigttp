@@ -14,6 +14,7 @@ const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
 const http_parser = @import("http_parser.zig");
 const contract_runtime = @import("contract_runtime.zig");
+pub const websocket_codec = @import("websocket_codec.zig");
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
@@ -5460,6 +5461,7 @@ fn seedIncompleteDurableRandomStep(
 // test_runner, and durable_recovery) needs an explicit hook here.
 test {
     _ = @import("handler_loader.zig");
+    _ = @import("websocket_codec.zig");
 }
 
 test "Runtime creation" {
