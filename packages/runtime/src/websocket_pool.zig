@@ -44,6 +44,12 @@ pub const Connection = struct {
     /// Wall-clock ms of the last inbound frame. Hibernation eligibility
     /// is `now - last_frame_at_ms > idle_threshold_ms` (W3 uses this).
     last_frame_at_ms: i64,
+    /// Allocator-owned per-connection attachment bytes, set by the
+    /// handler via `serializeAttachment` and read back via
+    /// `deserializeAttachment`. null until first write. W2-a keeps
+    /// attachments in memory only; W2-b persists them under the
+    /// `ws/` subtree so they survive process restarts.
+    attachment: ?[]u8 = null,
 };
 
 pub const Pool = struct {
@@ -77,6 +83,7 @@ pub const Pool = struct {
         while (id_it.next()) |entry| {
             const conn = entry.value_ptr.*;
             self.allocator.free(conn.room);
+            if (conn.attachment) |bytes| self.allocator.free(bytes);
             self.allocator.destroy(conn);
         }
         self.by_id.deinit(self.allocator);
@@ -115,6 +122,7 @@ pub const Pool = struct {
             .room = room_owned,
             .state = .parked,
             .last_frame_at_ms = now_ms,
+            .attachment = null,
         };
 
         try self.by_id.put(self.allocator, id, conn);
@@ -135,6 +143,7 @@ pub const Pool = struct {
 
         self.removeFromRoomLocked(conn.room, id);
         self.allocator.free(conn.room);
+        if (conn.attachment) |bytes| self.allocator.free(bytes);
         self.allocator.destroy(conn);
     }
 
@@ -169,6 +178,37 @@ pub const Pool = struct {
         defer self.unlockLock();
         const list = self.by_room.getPtr(room_key) orelse return 0;
         return list.items.len;
+    }
+
+    /// Store an allocator-owned copy of `bytes` as the connection's
+    /// attachment. Overwrites any prior value. Returns `false` if the
+    /// id no longer exists.
+    pub fn setAttachment(self: *Pool, id: ConnectionId, bytes: []const u8) !bool {
+        self.lock();
+        defer self.unlockLock();
+        const conn = self.by_id.get(id) orelse return false;
+
+        const owned = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(owned);
+
+        if (conn.attachment) |prev| self.allocator.free(prev);
+        conn.attachment = owned;
+        return true;
+    }
+
+    /// Return an allocator-owned copy of the connection's attachment.
+    /// The caller takes ownership of the returned slice. Returns `null`
+    /// when the connection is missing or has no attachment yet.
+    pub fn copyAttachment(
+        self: *Pool,
+        id: ConnectionId,
+        out_allocator: std.mem.Allocator,
+    ) !?[]u8 {
+        self.lock();
+        defer self.unlockLock();
+        const conn = self.by_id.get(id) orelse return null;
+        const bytes = conn.attachment orelse return null;
+        return try out_allocator.dupe(u8, bytes);
     }
 
     /// Update lifecycle metadata for a single connection. Returns
@@ -318,4 +358,41 @@ test "collectRoom truncates to output buffer capacity" {
     const got = pool.collectRoom("alpha", &buf);
     try testing.expectEqual(@as(usize, 4), got.len);
     try testing.expectEqual(@as(usize, 10), pool.countInRoom("alpha"));
+}
+
+test "attachment round-trip owns bytes independent of caller" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    const id = try pool.register(100, "alpha", 1000);
+
+    // Nothing stored yet.
+    try testing.expect((try pool.copyAttachment(id, testing.allocator)) == null);
+
+    // Caller-owned buffer: we mutate it after storing to prove the
+    // pool doesn't just retain the caller's slice.
+    var src_buf: [16]u8 = .{0} ** 16;
+    @memcpy(src_buf[0..5], "hello");
+    try testing.expect(try pool.setAttachment(id, src_buf[0..5]));
+    @memset(&src_buf, 'X');
+
+    const copied = (try pool.copyAttachment(id, testing.allocator)) orelse return error.TestFailed;
+    defer testing.allocator.free(copied);
+    try testing.expectEqualStrings("hello", copied);
+
+    // Overwrite replaces the prior attachment cleanly.
+    try testing.expect(try pool.setAttachment(id, "world!"));
+    const copied2 = (try pool.copyAttachment(id, testing.allocator)) orelse return error.TestFailed;
+    defer testing.allocator.free(copied2);
+    try testing.expectEqualStrings("world!", copied2);
+
+    // Unregister frees the attachment (verified by testing.allocator
+    // not leaking at deinit time).
+    pool.unregister(id);
+}
+
+test "setAttachment reports false for missing id" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    try testing.expect(!(try pool.setAttachment(9999, "x")));
 }

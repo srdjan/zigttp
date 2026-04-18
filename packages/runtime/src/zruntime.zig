@@ -3600,12 +3600,54 @@ fn wsCloseCallback(
     ctx: *zq.Context,
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    // W2 implements graceful close with status code + reason propagation.
-    // For W1 the frame loop shuts the socket down when JS returns; this
-    // callback throws so handlers can detect the unsupported surface.
-    return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket close() not implemented in W1");
+    if (args.len < 1) {
+        return zq.modules.util.throwError(ctx, "TypeError", "close(ws, code?, reason?) requires at least 1 argument");
+    }
+    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+    };
+    const id = wsConnectionIdFromArg(args[0]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
+    };
+    const code: u16 = blk: {
+        if (args.len < 2) break :blk 1000;
+        if (args[1].isInt()) {
+            const raw = args[1].getInt();
+            if (raw < 1000 or raw > 4999) {
+                return zq.modules.util.throwError(ctx, "RangeError", "close code must be in [1000, 4999]");
+            }
+            break :blk @as(u16, @intCast(raw));
+        }
+        return zq.modules.util.throwError(ctx, "TypeError", "close code must be a number");
+    };
+    const reason: []const u8 = if (args.len >= 3)
+        zq.modules.util.extractString(args[2]) orelse ""
+    else
+        "";
+
+    const snap = pool.snapshot(id) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
+    };
+
+    // RFC 6455 §5.5.1: close payload is [status_u16_be][reason_utf8].
+    // Reason length is capped at 123 so total payload fits in a 125-byte
+    // short frame (126+ would force extended-length headers the peer
+    // has to honour).
+    var payload_buf: [125]u8 = undefined;
+    std.mem.writeInt(u16, payload_buf[0..2], code, .big);
+    const reason_len = @min(reason.len, 123);
+    if (reason_len > 0) {
+        @memcpy(payload_buf[2..][0..reason_len], reason[0..reason_len]);
+    }
+    writeWebSocketFrame(snap.fd, 0x8, payload_buf[0 .. 2 + reason_len]) catch |err| {
+        std.log.warn("ws close write failed (id={d}): {}", .{ id, err });
+    };
+    // Shutting down the write half lets the peer's read return EOS
+    // promptly; the frame loop will then exit and clean up. Ignoring
+    // the shutdown error here is intentional — the connection is
+    // already being torn down. SHUT_WR == 1 on every supported platform.
+    _ = std.c.shutdown(snap.fd, 1);
+    return zq.JSValue.undefined_val;
 }
 
 fn wsSerializeAttachmentCallback(
@@ -3613,9 +3655,30 @@ fn wsSerializeAttachmentCallback(
     ctx: *zq.Context,
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    return zq.modules.util.throwError(ctx, "Error", "serializeAttachment lands in W2");
+    if (args.len < 2) {
+        return zq.modules.util.throwError(ctx, "TypeError", "serializeAttachment(ws, value) requires 2 arguments");
+    }
+    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+    };
+    const id = wsConnectionIdFromArg(args[0]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
+    };
+    // W2-a accepts raw strings only. Handlers with structured state
+    // pre-serialize (JSON.stringify will arrive with the structured
+    // clone work; for now a string payload is the contract). W2-b
+    // extends this into a typed-array path for binary attachments.
+    const bytes = zq.modules.util.extractString(args[1]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "attachment must be a string (W2-a); binary lands in W2-b");
+    };
+    const ok = pool.setAttachment(id, bytes) catch |err| {
+        std.log.warn("ws setAttachment failed (id={d}): {}", .{ id, err });
+        return zq.modules.util.throwError(ctx, "Error", "attachment write failed");
+    };
+    if (!ok) {
+        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
+    }
+    return zq.JSValue.undefined_val;
 }
 
 fn wsDeserializeAttachmentCallback(
@@ -3623,9 +3686,24 @@ fn wsDeserializeAttachmentCallback(
     ctx: *zq.Context,
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    return zq.modules.util.throwError(ctx, "Error", "deserializeAttachment lands in W2");
+    if (args.len < 1) {
+        return zq.modules.util.throwError(ctx, "TypeError", "deserializeAttachment(ws) requires 1 argument");
+    }
+    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+    };
+    const id = wsConnectionIdFromArg(args[0]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
+    };
+    // The pool hands us a freshly-duped slice; ctx.createString copies
+    // into a JSString, so the interim allocation is short-lived and we
+    // free it before returning.
+    const bytes = pool.copyAttachment(id, ctx.allocator) catch |err| {
+        std.log.warn("ws copyAttachment failed (id={d}): {}", .{ id, err });
+        return zq.modules.util.throwError(ctx, "Error", "attachment read failed");
+    } orelse return zq.JSValue.undefined_val;
+    defer ctx.allocator.free(bytes);
+    return try ctx.createString(bytes);
 }
 
 fn wsGetWebSocketsCallback(
