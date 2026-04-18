@@ -16,6 +16,48 @@ pub const VerifyPathsOutcome = struct {
     ok: bool,
 };
 
+pub const Diagnostic = json_diag.JsonDiagnostic;
+
+/// Walk `paths`, run the full analysis per file, and invoke `ctx.emit(*const
+/// Diagnostic)` for every violation (including synthesized ZTS000 entries for
+/// files that fail to load). The diagnostic's string fields are only
+/// guaranteed valid for the duration of the `emit` call; consumers that need
+/// to persist them must copy inside the callback. `file` is normalized to the
+/// caller-supplied argv path so temp-file checker paths stay invisible.
+pub fn collect(
+    scratch: std.mem.Allocator,
+    paths: []const []const u8,
+    ctx: anytype,
+) !VerifyPathsOutcome {
+    var has_errors = false;
+    for (paths) |path| {
+        var result = precompile.runCheckOnly(scratch, path, null, true, null) catch |err| {
+            const fake: Diagnostic = .{
+                .code = "ZTS000",
+                .severity = "error",
+                .message = @errorName(err),
+                .file = path,
+                .line = 0,
+                .column = 0,
+                .suggestion = null,
+            };
+            try ctx.emit(&fake);
+            has_errors = true;
+            continue;
+        };
+        defer result.deinit(scratch);
+
+        if (result.totalErrors() > 0) has_errors = true;
+
+        for (result.json_diagnostics.items) |diag| {
+            var with_file = diag;
+            with_file.file = path;
+            try ctx.emit(&with_file);
+        }
+    }
+    return .{ .ok = !has_errors };
+}
+
 /// Run full analysis on `paths` and write the v1 JSON envelope to `writer`.
 /// `scratch` is used for per-file CheckResult allocations and an internal
 /// violations buffer; neither outlives this call. The writer's bytes are
@@ -25,56 +67,21 @@ pub fn writeJsonEnvelope(
     writer: anytype,
     paths: []const []const u8,
 ) !VerifyPathsOutcome {
-    const hash = rule_registry.policyHash();
-
     var violations_buf: std.ArrayList(u8) = .empty;
     defer violations_buf.deinit(scratch);
     var vio_aw: std.Io.Writer.Allocating = .fromArrayList(scratch, &violations_buf);
-    const vw = &vio_aw.writer;
 
-    var has_errors = false;
-    var first_violation = true;
-
-    for (paths) |path| {
-        var result = precompile.runCheckOnly(scratch, path, null, true, null) catch |err| {
-            if (!first_violation) try vw.writeByte(',');
-            first_violation = false;
-            const fake: json_diag.JsonDiagnostic = .{
-                .code = "ZTS000",
-                .severity = "error",
-                .message = @errorName(err),
-                .file = path,
-                .line = 0,
-                .column = 0,
-                .suggestion = null,
-            };
-            try json_diag.writeDiagnosticJson(vw, &fake);
-            has_errors = true;
-            continue;
-        };
-        defer result.deinit(scratch);
-
-        if (result.totalErrors() > 0) has_errors = true;
-
-        for (result.json_diagnostics.items) |diag| {
-            if (!first_violation) try vw.writeByte(',');
-            first_violation = false;
-            // Normalize `file` to the original path; the checker may substitute
-            // a scratch path internally (see edit-simulate's temp file path).
-            var with_file = diag;
-            with_file.file = path;
-            try json_diag.writeDiagnosticJson(vw, &with_file);
-        }
-    }
+    var emitter = JsonEmitter{ .writer = &vio_aw.writer, .first = true };
+    const outcome = try collect(scratch, paths, &emitter);
 
     violations_buf = vio_aw.toArrayList();
 
     try writer.print(
         "{{\"ok\":{s},\"policy_version\":\"{s}\",\"policy_hash\":\"{s}\",\"checked_files\":[",
         .{
-            if (has_errors) "false" else "true",
+            if (outcome.ok) "true" else "false",
             expert_meta.policy_version,
-            hash,
+            rule_registry.policyHash(),
         },
     );
     for (paths, 0..) |path, i| {
@@ -85,8 +92,19 @@ pub fn writeJsonEnvelope(
     try writer.writeAll(violations_buf.items);
     try writer.writeAll("]}\n");
 
-    return .{ .ok = !has_errors };
+    return outcome;
 }
+
+const JsonEmitter = struct {
+    writer: *std.Io.Writer,
+    first: bool,
+
+    pub fn emit(self: *JsonEmitter, diag: *const Diagnostic) !void {
+        if (!self.first) try self.writer.writeByte(',');
+        self.first = false;
+        try json_diag.writeDiagnosticJson(self.writer, diag);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Tests
