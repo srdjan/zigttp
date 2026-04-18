@@ -19,12 +19,18 @@
 //! `unregister` before the fd is closed. `unregister` is idempotent.
 
 const std = @import("std");
+const zq = @import("zigts");
 
 const c = @cImport({
     @cInclude("dirent.h");
 });
 
 pub const ConnectionId = u64;
+
+/// Cap on a single attachment's bytes when reading from disk. Attachments
+/// are per-connection scratch space, not blob storage; 1 MiB is already
+/// well beyond any realistic handler use.
+const max_attachment_bytes: usize = 1 * 1024 * 1024;
 
 pub const ConnectionState = enum {
     /// Handler currently executing against this connection.
@@ -50,9 +56,7 @@ pub const Connection = struct {
     last_frame_at_ms: i64,
     /// Allocator-owned per-connection attachment bytes, set by the
     /// handler via `serializeAttachment` and read back via
-    /// `deserializeAttachment`. null until first write. W2-a keeps
-    /// attachments in memory only; W2-b persists them under the
-    /// `ws/` subtree so they survive process restarts.
+    /// `deserializeAttachment`. null until first write.
     attachment: ?[]u8 = null,
 };
 
@@ -63,10 +67,7 @@ pub const Pool = struct {
     by_room: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(ConnectionId)) = .empty,
     next_id: std.atomic.Value(u64) = std.atomic.Value(u64).init(1),
     /// Directory where per-connection attachment bytes are persisted as
-    /// `<id>.att`. When null the pool is in-memory only. W2-b wires this
-    /// through from `--durable` so attachments survive process restarts;
-    /// in-process tests and the no-durable path keep the historical
-    /// in-memory behaviour.
+    /// `<id>.att`. When null the pool is in-memory only.
     attachments_dir: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) Pool {
@@ -161,8 +162,8 @@ pub const Pool = struct {
     /// Remove a connection. Idempotent: double-unregister is a no-op.
     /// Does not close the fd — the caller owns the socket lifecycle.
     /// Clean shutdown: the on-disk attachment (if any) is also removed
-    /// so a subsequent `listPersistedAttachmentIds` only reports ids that
-    /// crashed rather than exited cleanly.
+    /// so a subsequent `listPersistedAttachmentIds` only reports ids
+    /// that crashed rather than exited cleanly.
     pub fn unregister(self: *Pool, id: ConnectionId) void {
         self.lock();
         defer self.unlockLock();
@@ -175,7 +176,7 @@ pub const Pool = struct {
         if (conn.attachment) |bytes| self.allocator.free(bytes);
         self.allocator.destroy(conn);
 
-        self.deleteAttachmentFileLocked(id);
+        if (self.attachments_dir) |dir| deleteAttachmentFile(dir, id);
     }
 
     /// Snapshot the connection data for a given id. Returns a value,
@@ -213,8 +214,8 @@ pub const Pool = struct {
 
     /// Store an allocator-owned copy of `bytes` as the connection's
     /// attachment. Overwrites any prior value. Returns `false` if the
-    /// id no longer exists. When `attachments_dir` is set, the bytes are
-    /// also written atomically to `<dir>/<id>.att` via tmp-rename so a
+    /// id no longer exists. When `attachments_dir` is set, the bytes
+    /// also land atomically at `<dir>/<id>.att` via tmp-rename so a
     /// subsequent crash leaves the last-successful write on disk.
     pub fn setAttachment(self: *Pool, id: ConnectionId, bytes: []const u8) !bool {
         self.lock();
@@ -224,7 +225,9 @@ pub const Pool = struct {
         const owned = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(owned);
 
-        try self.writeAttachmentFileLocked(id, bytes);
+        if (self.attachments_dir) |dir| {
+            try writeAttachmentFileAtomic(self.allocator, dir, id, bytes);
+        }
 
         if (conn.attachment) |prev| self.allocator.free(prev);
         conn.attachment = owned;
@@ -279,15 +282,12 @@ pub const Pool = struct {
         const bytes = (try readAttachmentFile(self.allocator, dir, prior_id)) orelse return false;
         defer self.allocator.free(bytes);
 
-        try self.writeAttachmentFileLocked(new_id, bytes);
+        try writeAttachmentFileAtomic(self.allocator, dir, new_id, bytes);
         const owned = try self.allocator.dupe(u8, bytes);
         if (conn.attachment) |prev| self.allocator.free(prev);
         conn.attachment = owned;
 
-        // Only delete the prior file if it differs from the new one
-        // (new_id == prior_id is a legitimate no-op after a crash that
-        // re-used the id, though in practice ids are monotonic).
-        if (prior_id != new_id) deleteAttachmentFileStatic(dir, prior_id);
+        if (prior_id != new_id) deleteAttachmentFile(dir, prior_id);
         return true;
     }
 
@@ -307,21 +307,6 @@ pub const Pool = struct {
         if (dir == null) return &.{};
 
         return listAttachmentIds(out_allocator, dir.?);
-    }
-
-    // ------------------------------------------------------------
-    // Disk helpers (must be called with the pool lock held, except
-    // the static path helpers which do not touch pool state).
-    // ------------------------------------------------------------
-
-    fn writeAttachmentFileLocked(self: *Pool, id: ConnectionId, bytes: []const u8) !void {
-        const dir = self.attachments_dir orelse return;
-        try writeAttachmentFileAtomic(self.allocator, dir, id, bytes);
-    }
-
-    fn deleteAttachmentFileLocked(self: *Pool, id: ConnectionId) void {
-        const dir = self.attachments_dir orelse return;
-        deleteAttachmentFileStatic(dir, id);
     }
 
     fn appendRoomLocked(self: *Pool, room_key_owned: []const u8, id: ConnectionId) !void {
@@ -364,23 +349,16 @@ pub const Pool = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Static disk helpers (no pool state; safe to call without the lock).
+// Static disk helpers.
 // ---------------------------------------------------------------------------
 
 fn allocAttachmentPath(
     allocator: std.mem.Allocator,
     dir: []const u8,
     id: ConnectionId,
-) ![:0]u8 {
-    return std.fmt.allocPrintSentinel(allocator, "{s}/{d}.att", .{ dir, id }, 0);
-}
-
-fn allocAttachmentTmpPath(
-    allocator: std.mem.Allocator,
-    dir: []const u8,
-    id: ConnectionId,
-) ![:0]u8 {
-    return std.fmt.allocPrintSentinel(allocator, "{s}/{d}.att.tmp", .{ dir, id }, 0);
+    suffix: []const u8,
+) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{d}.att{s}", .{ dir, id, suffix });
 }
 
 fn writeAttachmentFileAtomic(
@@ -389,31 +367,20 @@ fn writeAttachmentFileAtomic(
     id: ConnectionId,
     bytes: []const u8,
 ) !void {
-    const tmp_path = try allocAttachmentTmpPath(allocator, dir, id);
+    const tmp_path = try allocAttachmentPath(allocator, dir, id, ".tmp");
     defer allocator.free(tmp_path);
-    const final_path = try allocAttachmentPath(allocator, dir, id);
+    const final_path = try allocAttachmentPath(allocator, dir, id, "");
     defer allocator.free(final_path);
 
-    const fd = try std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        tmp_path,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
-        0o644,
-    );
-    {
-        defer std.Io.Threaded.closeFd(fd);
-        var remaining = bytes;
-        while (remaining.len > 0) {
-            const n = std.c.write(fd, remaining.ptr, remaining.len);
-            if (n <= 0) return error.AttachmentWriteFailed;
-            remaining = remaining[@as(usize, @intCast(n))..];
-        }
-    }
+    try zq.file_io.writeFile(allocator, tmp_path, bytes);
 
-    // rename(tmp, final) is atomic on POSIX; readers never see a
-    // partially-written file.
-    if (std.c.rename(tmp_path, final_path) != 0) {
-        _ = std.c.unlink(tmp_path);
+    // rename(2) is atomic on POSIX; readers never observe a partial file.
+    const tmp_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_z);
+    const final_z = try allocator.dupeZ(u8, final_path);
+    defer allocator.free(final_z);
+    if (std.c.rename(tmp_z, final_z) != 0) {
+        _ = std.c.unlink(tmp_z);
         return error.AttachmentRenameFailed;
     }
 }
@@ -423,44 +390,20 @@ fn readAttachmentFile(
     dir: []const u8,
     id: ConnectionId,
 ) !?[]u8 {
-    const path = try allocAttachmentPath(allocator, dir, id);
+    const path = try allocAttachmentPath(allocator, dir, id, "");
     defer allocator.free(path);
-
-    const fd = std.posix.openatZ(
-        std.posix.AT.FDCWD,
-        path,
-        .{ .ACCMODE = .RDONLY },
-        0,
-    ) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
+    return zq.file_io.readFile(allocator, path, max_attachment_bytes) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => err,
     };
-    defer std.Io.Threaded.closeFd(fd);
-
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const n = std.c.read(fd, &chunk, chunk.len);
-        if (n < 0) return error.AttachmentReadFailed;
-        if (n == 0) break;
-        try buf.appendSlice(allocator, chunk[0..@as(usize, @intCast(n))]);
-    }
-    return try buf.toOwnedSlice(allocator);
 }
 
-fn deleteAttachmentFileStatic(dir: []const u8, id: ConnectionId) void {
-    var stack_buf: [256]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&stack_buf);
-    const path = allocAttachmentPath(fba.allocator(), dir, id) catch {
-        // Path didn't fit in the stack buffer — fall through to the
-        // heap allocator. This only happens with absurdly long dirs.
-        const heap_path = allocAttachmentPath(std.heap.c_allocator, dir, id) catch return;
-        defer std.heap.c_allocator.free(heap_path);
-        _ = std.c.unlink(heap_path);
-        return;
-    };
-    _ = std.c.unlink(path);
+fn deleteAttachmentFile(dir: []const u8, id: ConnectionId) void {
+    const path = allocAttachmentPath(std.heap.c_allocator, dir, id, "") catch return;
+    defer std.heap.c_allocator.free(path);
+    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return;
+    defer std.heap.c_allocator.free(path_z);
+    _ = std.c.unlink(path_z);
 }
 
 fn listAttachmentIds(
