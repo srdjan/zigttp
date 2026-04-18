@@ -1,0 +1,1 @@
+{"name":"unchecked_result_value","code":"ZTS303","category":"verifier","description":"result.value is accessed without checking result.ok first.","example":"const r = jwtVerify(token, secret); return Response.json(r.value);","help":"Check result.ok before accessing result.value."}

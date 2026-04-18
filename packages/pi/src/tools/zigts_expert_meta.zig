@@ -10,7 +10,7 @@ const name = "zigts_expert_meta";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "policy meta",
-    .description = "Show compiler version, policy version, policy hash, and rule counts.",
+    .description = "Show compiler version, policy version, policy hash, and rule counts. Takes no arguments.",
     .execute = execute,
 };
 
@@ -18,10 +18,7 @@ fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
-    // Args are ignored in v1. A future slice may accept `--text` to flip
-    // formatters; for now the tool always emits the JSON envelope so the
-    // output is directly consumable by a v1 client.
-    _ = args;
+    if (args.len != 0) return registry_mod.ToolResult.err(allocator, name ++ ": v1 takes no arguments\n");
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -51,6 +48,14 @@ test "execute returns v1 meta envelope" {
     try testing.expect(std.mem.indexOf(u8, result.body, "\"compiler_version\":\"0.16.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, result.body, "\"policy_version\":\"2026.04.2\"") != null);
     try testing.expect(std.mem.indexOf(u8, result.body, "\"mode\":\"embedded\"") != null);
+}
+
+test "execute rejects unexpected arguments" {
+    var result = try execute(testing.allocator, &.{"unexpected"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "takes no arguments") != null);
 }
 
 test "registry invokes the tool end-to-end" {

@@ -354,6 +354,50 @@ pub fn build(b: *std.Build) void {
     const module_governance_step = b.step("test-module-governance", "Run built-in module governance audit");
     module_governance_step.dependOn(&run_module_governance.step);
 
+    // Golden-output checks that run the built `zigts` binary and assert
+    // stdout is byte-identical to a fixture. Covers the v1 JSON contract for
+    // `expert meta`, `expert verify-paths`, and `expert describe-rule`.
+    // Regenerate the fixtures with `scripts/update-expert-goldens.sh` (or by
+    // rerunning each command and redirecting into
+    // packages/tools/tests/fixtures/expert/) after a deliberate contract
+    // change; see docs/zigts-expert-contract.md.
+    const expert_golden_step = b.step("test-expert-golden", "Check zigts expert --json against golden fixtures");
+    const fixtures_root = "packages/tools/tests/fixtures/expert";
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "expert", "meta", "--json" }, fixtures_root ++ "/meta.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+        "expert",
+        "verify-paths",
+        fixtures_root ++ "/clean_handler.ts",
+        "--json",
+    }, fixtures_root ++ "/verify_paths_clean.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+        "expert",
+        "verify-paths",
+        fixtures_root ++ "/missing.ts",
+        "--json",
+    }, fixtures_root ++ "/verify_paths_missing.golden.json", 1);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "expert", "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+        "expert",
+        "verify-paths",
+        fixtures_root ++ "/clean_handler.ts",
+    }, fixtures_root ++ "/verify_paths_clean_text.golden.txt", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{
+        "expert",
+        "verify-paths",
+        fixtures_root ++ "/missing.ts",
+    }, fixtures_root ++ "/verify_paths_missing_text.golden.txt", 1);
+
+    // Exit-code contract for help/error paths. Stdout isn't pinned because
+    // help text edits should not break tests; only the exit code is part of
+    // the contract.
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "meta", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "verify-paths", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "no-such-sub" }, 1);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "verify-paths" }, 1);
+
     // Run command: runs the runtime binary directly, without triggering the
     // full install step (which would also link the dev CLI and bench binaries).
     const run_cmd = b.addRunArtifact(runtime_exe);
@@ -426,6 +470,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(&run_zigts_tests.step);
+    test_step.dependOn(expert_golden_step);
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{
@@ -490,4 +535,48 @@ pub fn build(b: *std.Build) void {
         const system_step = b.step("system", "Cross-handler contract linking");
         system_step.dependOn(&run_system.step);
     }
+}
+
+fn addExpertGolden(
+    b: *std.Build,
+    step: *std.Build.Step,
+    zigts_exe: *std.Build.Step.Compile,
+    args: []const []const u8,
+    golden_rel: []const u8,
+    expected_exit: u8,
+) void {
+    addExpertRun(b, step, zigts_exe, args, expected_exit, golden_rel);
+}
+
+/// When `golden_rel` is null, only the exit code is asserted — help/error
+/// text is not part of the contract, so editorial changes don't break the
+/// build.
+fn addExpertExitCheck(
+    b: *std.Build,
+    step: *std.Build.Step,
+    zigts_exe: *std.Build.Step.Compile,
+    args: []const []const u8,
+    expected_exit: u8,
+) void {
+    addExpertRun(b, step, zigts_exe, args, expected_exit, null);
+}
+
+fn addExpertRun(
+    b: *std.Build,
+    step: *std.Build.Step,
+    zigts_exe: *std.Build.Step.Compile,
+    args: []const []const u8,
+    expected_exit: u8,
+    golden_rel: ?[]const u8,
+) void {
+    const run = b.addRunArtifact(zigts_exe);
+    run.addArgs(args);
+    run.expectExitCode(expected_exit);
+    if (golden_rel) |rel| {
+        const expected = b.build_root.handle.readFileAlloc(b.graph.io, rel, b.allocator, .unlimited) catch |err| {
+            std.debug.panic("missing expert golden fixture {s}: {s}", .{ rel, @errorName(err) });
+        };
+        run.expectStdOutEqual(expected);
+    }
+    step.dependOn(&run.step);
 }

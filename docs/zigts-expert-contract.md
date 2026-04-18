@@ -8,8 +8,8 @@ The v1 surface is the minimum set of shapes needed to drive a compiler-in-the-lo
 
 Three identifiers appear in almost every response:
 
-- `compiler_version` — the embedded zigts compiler version. Currently `"0.16.0"` (see `packages/tools/src/expert.zig:18`).
-- `policy_version` — the rule-set calendar version. Currently `"2026.04.2"` (see `packages/tools/src/expert.zig:19`).
+- `compiler_version` — the embedded zigts compiler version. Currently `"0.16.0"` (see `packages/tools/src/expert_meta.zig`).
+- `policy_version` — the rule-set calendar version. Currently `"2026.04.2"` (see `packages/tools/src/expert_meta.zig`).
 - `policy_hash` — a content hash over the full rule registry, computed at startup from `zigts.rule_registry.policyHash()`. Stable across runs of the same binary; changes when rules are added, removed, or edited.
 
 A client that pins to v1 should also pin to a `policy_hash` and re-verify when it changes. The hash is the fastest way to detect that a rule's text or code moved without a version bump.
@@ -369,7 +369,7 @@ This document is v1 as of `2026-04-14`. The file is the source of truth. Any cha
 1. Be additive (a new field, a new code, a new category) and leave v1 intact, or
 2. Ship as v2, bumping `compiler_version` or an explicit `contract_version` field and updating this document.
 
-A test asserting `zigts expert meta --json` returns a policy hash and version known to this document belongs in `packages/tools/src/expert.zig` alongside the existing tests; it is the contract's tripwire. Adding that test is the first executable consequence of this freeze.
+Two tripwires guard this contract and run under `zig build test`: the in-tree tests in `packages/tools/src/expert.zig` pin versions and rule-count invariants, and the `test-expert-golden` step asserts byte-identical stdout from the built `zigts` binary against fixtures in `packages/tools/tests/fixtures/expert/`. Regenerate a fixture only after a deliberate contract change and update this document in the same commit.
 
 ## What is explicitly out of scope for v1
 

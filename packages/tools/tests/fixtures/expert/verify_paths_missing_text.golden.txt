@@ -1,0 +1,2 @@
+Verified 1 file(s): 1 violation(s)
+  ZTS000 packages/tools/tests/fixtures/expert/missing.ts:0:0: FileNotFound
