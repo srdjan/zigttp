@@ -14,4 +14,5 @@ pub const Slot = enum(u4) {
     service = 9,
     scope = 10,
     fetch = 11,
+    websocket = 12,
 };

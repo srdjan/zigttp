@@ -33,6 +33,7 @@ const time_mod = @import("modules/time.zig");
 const ratelimit_mod = @import("modules/ratelimit.zig");
 const service_mod = @import("modules/service.zig");
 const fetch_mod = @import("modules/fetch.zig");
+const websocket_mod = @import("modules/websocket.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -57,6 +58,7 @@ pub const builtins = [_]ModuleBinding{
     ratelimit_mod.binding,
     service_mod.binding,
     fetch_mod.binding,
+    websocket_mod.binding,
 };
 
 /// Unified module registry: core built-ins plus explicitly registered extensions.
@@ -93,6 +95,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:ratelimit", .module_path = "packages/zigts/src/modules/ratelimit.zig", .spec_path = "packages/zigts/module-specs/ratelimit.json" },
     .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/service.zig", .spec_path = "packages/zigts/module-specs/service.json" },
     .{ .specifier = "zigttp:fetch", .module_path = "packages/zigts/src/modules/fetch.zig", .spec_path = "packages/zigts/module-specs/fetch.json" },
+    .{ .specifier = "zigttp:websocket", .module_path = "packages/zigts/src/modules/websocket.zig", .spec_path = "packages/zigts/module-specs/websocket.json" },
 };
 
 comptime {
@@ -303,5 +306,5 @@ test "governance entries stay aligned with public built-ins" {
     try std.testing.expectEqualStrings("zigttp:env", entries[0].specifier);
     try std.testing.expectEqualStrings("packages/zigts/src/modules/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/zigts/module-specs/env.json", entries[0].spec_path);
-    try std.testing.expectEqualStrings("zigttp:fetch", entries[entries.len - 1].specifier);
+    try std.testing.expectEqualStrings("zigttp:websocket", entries[entries.len - 1].specifier);
 }

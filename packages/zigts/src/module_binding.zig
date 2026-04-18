@@ -524,6 +524,7 @@ pub const ModuleCapability = enum {
     filesystem,
     network,
     policy_check,
+    websocket,
 };
 
 pub const capability_count: usize = @typeInfo(ModuleCapability).@"enum".fields.len;

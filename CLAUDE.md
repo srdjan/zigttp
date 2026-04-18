@@ -73,6 +73,7 @@ Import via `import { fn } from "zigttp:module"`. Implementations in `packages/zi
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
 | `zigttp:service` | `serviceCall` |
 | `zigttp:fetch` | `fetch` (web-standard `fetch(url, init?) -> Response`) |
+| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` |
 | `zigttp:io` | `parallel`, `race` |
 | `zigttp:durable` | `run`, `step`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
 | `zigttp:compose` | `guard`, `pipe` |
