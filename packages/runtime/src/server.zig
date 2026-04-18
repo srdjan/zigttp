@@ -554,19 +554,24 @@ const ConnectionPool = struct {
 
     /// Spawn a detached frame-loop thread that owns the fd and pool
     /// entry. Returns after the thread is running; the caller must not
-    /// touch either resource afterwards.
+    /// touch either resource afterwards. Inbound frames are routed to
+    /// the handler's JS `onMessage` export when the handler pool is
+    /// live; if it isn't (tests, degraded boot), the frame loop falls
+    /// back to codec-level echo so the socket stays responsive.
     fn spawnFrameLoop(
         self: *ConnectionPool,
         pool: *websocket_pool.Pool,
         fd: std.posix.fd_t,
         id: websocket_pool.ConnectionId,
     ) !void {
+        const handler_pool_ptr: ?*HandlerPool = if (self.server.pool) |*p| p else null;
         const cfg = ws_frame_loop.Config{
             .pool = pool,
             .io = self.server.io_backend.io(),
             .fd = fd,
             .id = id,
-            .echo = true,
+            .echo = handler_pool_ptr == null,
+            .handler_pool = handler_pool_ptr,
         };
         const thread = try std.Thread.spawn(.{}, ws_frame_loop.run, .{cfg});
         thread.detach();
