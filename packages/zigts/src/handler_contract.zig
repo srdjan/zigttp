@@ -251,6 +251,25 @@ pub const ScopeInfo = struct {
     }
 };
 
+/// WebSocket event-export presence. When a handler module exports any of
+/// `onOpen`, `onMessage`, `onClose`, or `onError` as top-level named
+/// functions, the contract records which ones are present. The runtime
+/// uses this to decide whether to enable the WebSocket gateway at
+/// startup; deploy manifests use it to emit per-platform WS routing.
+/// All fields are zero-initialised, so a handler with no WS exports
+/// produces `{on_open:false, on_message:false, on_close:false, on_error:false}`
+/// — the section is always present for shape stability.
+pub const WebSocketInfo = struct {
+    on_open: bool = false,
+    on_message: bool = false,
+    on_close: bool = false,
+    on_error: bool = false,
+
+    pub fn any(self: WebSocketInfo) bool {
+        return self.on_open or self.on_message or self.on_close or self.on_error;
+    }
+};
+
 pub const ApiSchemaInfo = struct {
     name: []const u8, // owned
     schema_json: []const u8, // owned JSON source
@@ -762,6 +781,7 @@ pub const HandlerContract = struct {
     sql: SqlInfo,
     durable: DurableInfo,
     scope: ScopeInfo,
+    websocket: WebSocketInfo = .{},
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,
@@ -868,6 +888,7 @@ pub const ContractBuilder = struct {
     scope_names: std.ArrayList([]const u8),
     scope_dynamic: bool,
     scope_max_depth: u32 = 0,
+    websocket: WebSocketInfo = .{},
     durable_used: bool,
     durable_key_literals: std.ArrayList([]const u8),
     durable_key_dynamic: bool,
@@ -1044,6 +1065,10 @@ pub const ContractBuilder = struct {
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
 
+        // Phase 2b: Scan top-level function declarations for WebSocket event
+        // exports (onOpen/onMessage/onClose/onError).
+        try self.scanWebSocketExports();
+
         if (handler_fn) |hf| {
             try self.extractScopeUsage(hf);
             try self.extractDurableWorkflow(handler_path, hf);
@@ -1162,6 +1187,7 @@ pub const ContractBuilder = struct {
                 .dynamic = self.scope_dynamic,
                 .max_depth = self.scope_max_depth,
             },
+            .websocket = self.websocket,
             .api = .{
                 .schemas = self.api_schemas,
                 .requests = .{
@@ -1210,6 +1236,37 @@ pub const ContractBuilder = struct {
     // -----------------------------------------------------------------
     // Phase 1: Import scanning
     // -----------------------------------------------------------------
+
+    /// Scan top-level function declarations for the four reserved WebSocket
+    /// event names. A match sets the corresponding `websocket` flag so the
+    /// contract's downstream consumers (runtime gateway, deploy manifest)
+    /// can decide whether WebSocket support is needed without re-parsing.
+    fn scanWebSocketExports(self: *ContractBuilder) !void {
+        const node_count = self.ir_view.nodeCount();
+        var idx_usize: usize = 0;
+        while (idx_usize < node_count) : (idx_usize += 1) {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .function_decl and tag != .var_decl) continue;
+
+            const decl = self.ir_view.getVarDecl(idx) orelse continue;
+            if (decl.binding.kind != .global) continue;
+
+            const init_tag = self.ir_view.getTag(decl.init) orelse continue;
+            if (init_tag != .function_expr and init_tag != .arrow_function) continue;
+
+            const name = self.resolveAtomName(decl.binding.slot) orelse continue;
+            if (std.mem.eql(u8, name, "onOpen")) {
+                self.websocket.on_open = true;
+            } else if (std.mem.eql(u8, name, "onMessage")) {
+                self.websocket.on_message = true;
+            } else if (std.mem.eql(u8, name, "onClose")) {
+                self.websocket.on_close = true;
+            } else if (std.mem.eql(u8, name, "onError")) {
+                self.websocket.on_error = true;
+            }
+        }
+    }
 
     fn scanImports(self: *ContractBuilder) !void {
         const node_count = self.ir_view.nodeCount();
@@ -5603,6 +5660,15 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     } else {
         try writer.writeAll("  \"verification\": null,\n");
     }
+
+    // websocket: always present for shape stability — handlers without
+    // any ws event exports still emit the section with all flags false.
+    try writer.writeAll("  \"websocket\": {");
+    try writer.print("\"onOpen\": {s}, ", .{if (contract.websocket.on_open) "true" else "false"});
+    try writer.print("\"onMessage\": {s}, ", .{if (contract.websocket.on_message) "true" else "false"});
+    try writer.print("\"onClose\": {s}, ", .{if (contract.websocket.on_close) "true" else "false"});
+    try writer.print("\"onError\": {s}", .{if (contract.websocket.on_error) "true" else "false"});
+    try writer.writeAll("},\n");
 
     // aot (optional)
     if (contract.aot) |a| {
