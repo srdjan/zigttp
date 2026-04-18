@@ -88,7 +88,7 @@ The absence of a capability does not make these modules "trusted": they still go
 
 `zig build test-capability-audit` grep-walks `packages/zigts/src/modules/` looking for direct references to sensitive operations (clock reads, RNG, crypto primitives, filesystem, stderr, sqlite handles) that bypass the checked helpers. A hit fails the build with the offending file and line. The audit is the broad helper-bypass tripwire - it watches every module implementation, including internal helpers.
 
-`zig build test-module-governance` is the public built-in governance gate. It runs `zigts expert verify-modules --builtins --strict --json` against the authoritative built-in set from `packages/zigts/src/builtin_modules.zig` and fails on:
+`zig build test-module-governance` is the public built-in governance gate. It runs `zigts verify-modules --builtins --strict --json` against the authoritative built-in set from `packages/zigts/src/builtin_modules.zig` and fails on:
 
 - direct forbidden effect usage
 - undeclared helper-capability use

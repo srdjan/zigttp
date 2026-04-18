@@ -1,4 +1,4 @@
-//! Test aggregator for the zigttp expert app package.
+//! Test aggregator for the zigts expert app package.
 
 comptime {
     _ = @import("registry/tool.zig");

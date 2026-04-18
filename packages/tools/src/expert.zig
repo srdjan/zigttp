@@ -1,16 +1,12 @@
-//! `zigts expert` subcommand namespace. Stable v1 CLI surface for the
-//! interactive expert app and CI.
+//! Shared helper implementations for the direct `zigts meta`,
+//! `zigts verify-paths`, and `zigts verify-modules` commands.
 //!
 //! Exit contract: `help`/`--help`/`-h` in any position returns cleanly (0);
-//! missing args, unknown subcommand, or unknown flag propagates an error (1).
+//! missing args or unknown flags propagate an error (1).
 
 const std = @import("std");
 const zigts = @import("zigts");
 const rule_registry = zigts.rule_registry;
-const edit_simulate = @import("edit_simulate.zig");
-const describe_rule = @import("describe_rule.zig");
-const search_rules = @import("search_rules.zig");
-const review_patch = @import("review_patch.zig");
 const module_audit = @import("module_audit.zig");
 const expert_meta = @import("expert_meta.zig");
 const verify_paths_core = @import("verify_paths_core.zig");
@@ -63,53 +59,7 @@ const TextEmitter = struct {
     }
 };
 
-pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    if (argv.len == 0 or hasHelpFlag(argv)) {
-        printExpertHelp();
-        return;
-    }
-
-    const sub = argv[0];
-    const rest = argv[1..];
-
-    if (std.mem.eql(u8, sub, "meta")) {
-        try runMeta(allocator, rest);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "verify-paths")) {
-        try runVerifyPaths(allocator, rest);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "verify-modules")) {
-        try runVerifyModules(allocator, rest);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "review-patch")) {
-        try review_patch.runWithArgs(allocator, rest);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "edit-simulate")) {
-        try edit_simulate.runWithArgs(allocator, rest);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "describe-rule")) {
-        try describe_rule.runWithArgs(allocator, rest);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "search")) {
-        try search_rules.runWithArgs(allocator, rest);
-        return;
-    }
-
-    printExpertHelp();
-    return error.UnknownSubcommand;
-}
-
-// ---------------------------------------------------------------------------
-// meta
-// ---------------------------------------------------------------------------
-
-fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+pub fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (hasHelpFlag(argv)) {
         printMetaHelp();
         return;
@@ -133,11 +83,7 @@ fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     writeOwnedToStdout(buf.items);
 }
 
-// ---------------------------------------------------------------------------
-// verify-paths
-// ---------------------------------------------------------------------------
-
-fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (hasHelpFlag(argv)) {
         printVerifyHelp();
         return;
@@ -208,7 +154,7 @@ fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void 
     if (has_errors) std.process.exit(1);
 }
 
-fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (hasHelpFlag(argv)) {
         printVerifyModulesHelp();
         return;
@@ -301,42 +247,11 @@ fn parseVerifyModulesArgs(
     return parsed;
 }
 
-// ---------------------------------------------------------------------------
-// Help
-// ---------------------------------------------------------------------------
-
-fn printExpertHelp() void {
-    const help =
-        \\zigts expert - compiler-embedded policy oracle
-        \\
-        \\Usage:
-        \\  zigts expert meta [--json]
-        \\  zigts expert verify-paths <file>... [--json]
-        \\  zigts expert verify-modules <file>... [--strict] [--json]
-        \\  zigts expert verify-modules --builtins [--strict] [--json]
-        \\  zigts expert review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-        \\  zigts expert edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
-        \\  zigts expert describe-rule [rule-name|code] [--json] [--hash]
-        \\  zigts expert search <keyword> [--json]
-        \\
-        \\Subcommands:
-        \\  meta           Show policy metadata (version, hash, rule count)
-        \\  verify-paths   Run full analysis on files and report violations
-        \\  verify-modules Audit built-in virtual module files and specs
-        \\  review-patch   Analyze a file for violations (diff-aware with --before)
-        \\  edit-simulate  Simulate an edit and report new vs preexisting violations
-        \\  describe-rule  Describe a specific rule or list all rules
-        \\  search         Search rules by keyword
-        \\
-    ;
-    writeOwnedToStdout(help);
-}
-
 fn printMetaHelp() void {
     const help =
-        \\zigts expert meta - show policy metadata
+        \\zigts meta - show policy metadata
         \\
-        \\Usage: zigts expert meta [--json]
+        \\Usage: zigts meta [--json]
         \\
         \\Outputs compiler version, policy version, policy hash, rule count,
         \\and category breakdown.
@@ -347,9 +262,9 @@ fn printMetaHelp() void {
 
 fn printVerifyHelp() void {
     const help =
-        \\zigts expert verify-paths - verify handler files
+        \\zigts verify-paths - verify handler files
         \\
-        \\Usage: zigts expert verify-paths <file>... [--json]
+        \\Usage: zigts verify-paths <file>... [--json]
         \\
         \\Runs the full analysis pipeline on each file and reports violations.
         \\Exit code 1 if any errors found.
@@ -360,11 +275,11 @@ fn printVerifyHelp() void {
 
 fn printVerifyModulesHelp() void {
     const help =
-        \\zigts expert verify-modules - audit built-in virtual module files
+        \\zigts verify-modules - audit built-in virtual module files
         \\
         \\Usage:
-        \\  zigts expert verify-modules <file>... [--strict] [--json]
-        \\  zigts expert verify-modules --builtins [--strict] [--json]
+        \\  zigts verify-modules <file>... [--strict] [--json]
+        \\  zigts verify-modules --builtins [--strict] [--json]
         \\
         \\`--builtins` audits the authoritative public built-in module/spec set.
         \\Positional paths audit individual built-in module/spec files.
@@ -383,7 +298,7 @@ fn printVerifyModulesHelp() void {
 // ---------------------------------------------------------------------------
 // v1 contract tripwire
 //
-// `docs/zigts-expert-contract.md` freezes `zigts expert meta` output as v1.
+// `docs/zigts-expert-contract.md` freezes `zigts meta` output as v1.
 // These tests fail loudly if a drive-by edit changes a pinned value. Any real
 // change must also update the contract doc.
 // ---------------------------------------------------------------------------

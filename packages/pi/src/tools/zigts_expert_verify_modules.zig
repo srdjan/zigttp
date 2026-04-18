@@ -1,4 +1,4 @@
-//! Both this tool and `zigts expert verify-modules --json` go through
+//! Both this tool and `zigts verify-modules --json` go through
 //! `module_audit.writeJsonEnvelope`, so the TUI and CLI stay byte-identical.
 //!
 //! `ToolResult.ok` mirrors the v1 envelope's `ok` field so callers can branch

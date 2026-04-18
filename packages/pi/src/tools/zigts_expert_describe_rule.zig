@@ -1,4 +1,4 @@
-//! Both this tool and `zigts expert describe-rule --json` go through
+//! Both this tool and `zigts describe-rule --json` go through
 //! `describe_rule.writeRuleJson`, so the TUI and CLI stay byte-identical.
 
 const std = @import("std");
@@ -40,11 +40,11 @@ fn execute(
     const query = args[0];
     const entry = rule_registry.findByName(query) orelse
         rule_registry.findByCode(query) orelse
-    {
-        try w.print("Unknown rule: {s}\n", .{query});
-        buf = aw.toArrayList();
-        return .{ .ok = false, .body = try buf.toOwnedSlice(allocator) };
-    };
+        {
+            try w.print("Unknown rule: {s}\n", .{query});
+            buf = aw.toArrayList();
+            return .{ .ok = false, .body = try buf.toOwnedSlice(allocator) };
+        };
 
     try describe_rule.writeRuleJson(w, entry);
     try w.writeAll("\n");

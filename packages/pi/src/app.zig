@@ -1,4 +1,4 @@
-//! Top-level entrypoint for `zigttp expert`.
+//! Top-level entrypoint for `zigts expert`.
 //!
 //! This file lives at src/ level (not inside pi/) so its module path anchors
 //! at packages/tools/src/ — the same anchoring used by pi_tests.zig. That

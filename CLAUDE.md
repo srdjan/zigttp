@@ -10,9 +10,9 @@ Validated on Zig 0.16.0-dev.3073+28ae5d415. Newer nightlies are best-effort unti
 
 The build produces three binaries:
 
-- `zigttp` — the runtime. Ships with deployed apps. Serves HTTP, executes handlers. Subcommands: `serve`, `attest`, `version`.
-- `zigttp-cli` — the developer tool. Subcommands: `init`, `dev`, `check`, `compile`, `prove`, `mock`, `link`, `expert`, `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`.
-- `zigts` — the engine/compiler CLI (not usually invoked directly; `zigttp-cli` wraps its commands).
+- `zigttp` — the primary developer CLI and local runtime entrypoint. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `prove`, `mock`, `link`, `expert` (deprecated alias), `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`.
+- `zigttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests.
+- `zigts` — the engine/compiler CLI plus the interactive `zigts expert` coding-agent entrypoint.
 
 ```bash
 zig build                                      # Debug build (all three binaries)
@@ -26,7 +26,7 @@ zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at buil
 zig build run -- examples/handler/handler.ts -p 3000       # Run zigttp
 zig build run -- examples/handler/handler.ts --watch --prove  # Proven live reload
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
-zig build cli -- expert meta --json            # Run zigttp-cli
+zig build cli -- --help                        # Run zigttp
 
 zig build test                     # All tests (runtime + CLI + engine + zruntime)
 zig build test-zigts               # Engine tests only
@@ -36,17 +36,17 @@ zig build test -- --test-filter "name"  # Single test
 bash scripts/test-examples.sh      # All example handler tests
 
 zig build bench                    # Zig-native benchmarks (packages/runtime/src/benchmark.zig)
-zigttp-cli prove old.json new.json  # Compare contracts (0=safe, 1=breaking)
-zigttp-cli mock tests.jsonl --port 3001  # Mock server from test cases
-zigttp-cli link system.json         # Cross-handler contract linking
+zigttp prove old.json new.json  # Compare contracts (0=safe, 1=breaking)
+zigttp mock tests.jsonl --port 3001  # Mock server from test cases
+zigttp link system.json         # Cross-handler contract linking
 ```
 
 ## Architecture
 
 Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Two entry points after the split:
 
-- `main.zig` → `runtime_cli.zig` — the `zigttp` runtime binary (serve, attest, self-extract startup, version, help).
-- `cli_main.zig` → `dev_cli.zig` — the `zigttp-cli` developer binary (init, dev, check, compile, expert, deploy, etc.).
+- `main.zig` → `runtime_cli.zig` — the `zigttp-runtime` runtime template binary (serve, attest, self-extract startup, version, help).
+- `cli_main.zig` → `dev_cli.zig` — the `zigttp` developer binary (init, dev, check, compile, expert, deploy, etc.).
 - `cli_shared.zig` — arg parsing, watch sets, size parsing shared by both.
 
 HTTP: `server.zig`, runtime management: `zruntime.zig`, live reload: `live_reload.zig`. Engine (`packages/zigts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zigts/src/parser/`, VM in `interpreter.zig`, values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
@@ -115,9 +115,9 @@ TS/TSX files work directly (native type stripper). JSX parsed by zigts parser, r
 
 `-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (memory limit), `-n N` (pool size), `--cors`, `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--no-env-check`.
 
-### zigttp-cli deploy
+### zigttp deploy
 
-`zigttp-cli deploy` takes no arguments. It auto-detects the handler file, service name, and `.env` in the current directory, then ships to the zigttp runtime. First run prompts for browser sign-in; credentials persist in `~/.zigttp/credentials`. `zigttp-cli logout` clears them. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
+`zigttp deploy` takes no arguments. It auto-detects the handler file, service name, and `.env` in the current directory, then ships to the zigttp runtime. First run prompts for browser sign-in; credentials persist in `~/.zigttp/credentials`. `zigttp logout` clears them. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
 ### zigts (compiler/analyzer)
 
@@ -129,20 +129,22 @@ zigts mock <tests.jsonl> [--port PORT]
 zigts link <system.json> [--output-dir <dir>]
 zigts features [--json]
 zigts modules [--json]
+zigts meta [--json]
+zigts verify-paths <file>... [--json]
+zigts verify-modules <file>... [--strict] [--json]
+zigts verify-modules --builtins [--strict] [--json]
 zigts edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
 zigts describe-rule [rule-name|code] [--json] [--hash]
 zigts search <keyword> [--json]
 zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-zigts expert meta [--json]
-zigts expert verify-paths <file>... [--json]
-zigts expert <subcommand> [options]
+zigts expert
 ```
 
-`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigttp expert` is the canonical interactive compiler-in-the-loop workflow.
+`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zigts features` and `zigts modules` list language rules and virtual module exports. `zigts expert` is the canonical interactive compiler-in-the-loop workflow.
 
 `zigts edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zigts describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zigts search` finds rules by keyword. `zigts review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations.
 
-`zigts expert` is the hook-oriented interface. `expert meta` emits policy metadata (version, hash, rule count). `expert verify-paths` runs analysis on specified files. Other expert subcommands delegate to their top-level equivalents.
+`zigts meta`, `zigts verify-paths`, and `zigts verify-modules` are the machine-facing verification surface. `zigts expert` is the interactive agent that uses the same underlying analyzers in-process.
 
 ## Conventions
 

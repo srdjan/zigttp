@@ -9,6 +9,7 @@ const deploy = @import("deploy.zig");
 const precompile = zigts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
+const embedded_handler = @import("embedded_handler");
 
 const deploy_exit_drift: u8 = 2;
 const deploy_exit_ready_timeout: u8 = 3;
@@ -32,6 +33,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const command = if (user_args.len == 0) "" else user_args[0];
 
     if (user_args.len == 0) {
+        if (embedded_handler.bytecode.len > 0) {
+            try runtime_cli.serveCommand(allocator, &.{});
+            return;
+        }
         printHelp();
         return;
     }
@@ -74,6 +79,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "expert")) {
+        if (hasHelpFlag(user_args[1..])) {
+            printExpertAliasHelp();
+            return;
+        }
+        if (user_args.len > 1) {
+            std.debug.print("zigttp expert does not accept arguments. Use direct commands like `zigts meta` or `zigts verify-paths`.\n\n", .{});
+            printExpertAliasHelp();
+            return;
+        }
+        std.debug.print("zigttp expert is deprecated; use `zigts expert`.\n", .{});
         const pi_app = @import("pi_app");
         try pi_app.run(allocator);
         return;
@@ -85,7 +100,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp-cli login only accepts --token-stdin and --device.\n\n", .{});
+                std.debug.print("zigttp login only accepts --token-stdin and --device.\n\n", .{});
                 printLoginHelp();
                 return;
             }
@@ -95,7 +110,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.TokenPromptUnavailable) {
-                std.debug.print("Interactive token entry requires a TTY. Use `zigttp-cli login --token-stdin` or `zigttp-cli login --device`.\n", .{});
+                std.debug.print("Interactive token entry requires a TTY. Use `zigttp login --token-stdin` or `zigttp login --device`.\n", .{});
                 return;
             }
             if (err == error.EmptyToken) {
@@ -118,12 +133,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp-cli deploy only accepts --confirm, --region <name>, --wait, and --no-wait.\n\n", .{});
+                std.debug.print("zigttp deploy only accepts --confirm, --region <name>, --wait, and --no-wait.\n\n", .{});
                 printDeployHelp();
                 return;
             }
             if (err == error.MissingOptionValue) {
-                std.debug.print("--region requires a value, for example: zigttp-cli deploy --region us-east\n\n", .{});
+                std.debug.print("--region requires a value, for example: zigttp deploy --region us-east\n\n", .{});
                 printDeployHelp();
                 return;
             }
@@ -157,12 +172,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp-cli review accepts <plan-id> and optional --approve|--reject, with --grant only for approvals.\n\n", .{});
+                std.debug.print("zigttp review accepts <plan-id> and optional --approve|--reject, with --grant only for approvals.\n\n", .{});
                 printReviewHelp();
                 return;
             }
             if (err == error.MissingPlanId) {
-                std.debug.print("zigttp-cli review requires a plan id.\n\n", .{});
+                std.debug.print("zigttp review requires a plan id.\n\n", .{});
                 printReviewHelp();
                 return;
             }
@@ -195,7 +210,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.UnknownOption or err == error.InvalidOptionCombination) {
-                std.debug.print("zigttp-cli grants accepts at most one optional project name.\n\n", .{});
+                std.debug.print("zigttp grants accepts at most one optional project name.\n\n", .{});
                 printGrantsHelp();
                 return;
             }
@@ -211,17 +226,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             }
             if (err == error.UnknownOption) {
-                std.debug.print("zigttp-cli revoke-grant only accepts a grant id.\n\n", .{});
+                std.debug.print("zigttp revoke-grant only accepts a grant id.\n\n", .{});
                 printRevokeGrantHelp();
                 return;
             }
             if (err == error.MissingGrantId) {
-                std.debug.print("zigttp-cli revoke-grant requires a grant id.\n\n", .{});
+                std.debug.print("zigttp revoke-grant requires a grant id.\n\n", .{});
                 printRevokeGrantHelp();
                 return;
             }
             if (err == error.InvalidOptionCombination) {
-                std.debug.print("zigttp-cli revoke-grant accepts exactly one grant id.\n\n", .{});
+                std.debug.print("zigttp revoke-grant accepts exactly one grant id.\n\n", .{});
                 printRevokeGrantHelp();
                 return;
             }
@@ -250,6 +265,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
     std.debug.print("Unknown command: {s}\n\n", .{command});
     printHelp();
     std.process.exit(1);
+}
+
+fn hasHelpFlag(argv: []const []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) return true;
+    }
+    return false;
 }
 
 fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -317,8 +339,8 @@ fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     std.debug.print("Initialized zigttp project in {s}\n", .{name});
     std.debug.print("Next steps:\n", .{});
     std.debug.print("  cd {s}\n", .{name});
-    std.debug.print("  zigttp-cli dev\n", .{});
-    std.debug.print("  zigttp-cli check\n", .{});
+    std.debug.print("  zigttp dev\n", .{});
+    std.debug.print("  zigttp check\n", .{});
 }
 
 fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
@@ -375,15 +397,22 @@ fn resolveRuntimeBinary(allocator: std.mem.Allocator, program_path: []const u8) 
     defer allocator.free(abs_self);
 
     const dir_name = std.fs.path.dirname(abs_self) orelse ".";
-    const candidate = try std.fs.path.join(allocator, &.{ dir_name, "zigttp" });
-    errdefer allocator.free(candidate);
+    const candidates = [_][]const u8{ "zigttp-runtime", "zigttp" };
+    for (candidates) |name| {
+        const candidate = try std.fs.path.join(allocator, &.{ dir_name, name });
+        errdefer allocator.free(candidate);
+        if (std.mem.eql(u8, candidate, abs_self)) {
+            allocator.free(candidate);
+            continue;
+        }
+        std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
+            allocator.free(candidate);
+            continue;
+        };
+        return candidate;
+    }
 
-    std.Io.Dir.accessAbsolute(io, candidate, .{}) catch {
-        allocator.free(candidate);
-        // Fall back to PATH resolution
-        return try allocator.dupe(u8, "zigttp");
-    };
-    return candidate;
+    return try allocator.dupe(u8, "zigttp-runtime");
 }
 
 fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -593,12 +622,12 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
 
 fn printCompileHelp() void {
     const help =
-        \\zigttp-cli compile <handler.ts> -o <output>
+        \\zigttp compile <handler.ts> -o <output>
         \\
         \\Compile a handler into a self-contained binary.
         \\Verification is mandatory: the handler must pass all checks.
-        \\The output binary wraps the zigttp runtime, which must be installed
-        \\adjacent to zigttp-cli.
+        \\The output binary wraps the zigttp runtime template, which must be
+        \\installed alongside zigttp as `zigttp-runtime`.
         \\
         \\Options:
         \\  -o, --output <PATH>   Output binary path (required)
@@ -610,7 +639,7 @@ fn printCompileHelp() void {
 
 fn printDeployHelp() void {
     const help =
-        \\zigttp-cli deploy
+        \\zigttp deploy
         \\
         \\Deploy the handler in this directory to the zigttp runtime.
         \\
@@ -630,8 +659,8 @@ fn printDeployHelp() void {
         \\  4  service failed to start
         \\
         \\Related:
-        \\  zigttp-cli login    Store deploy credentials explicitly
-        \\  zigttp-cli logout   Forget the saved sign-in credentials
+        \\  zigttp login    Store deploy credentials explicitly
+        \\  zigttp logout   Forget the saved sign-in credentials
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -639,7 +668,7 @@ fn printDeployHelp() void {
 
 fn printLoginHelp() void {
     const help =
-        \\zigttp-cli login
+        \\zigttp login
         \\
         \\Store a Zigttp access token for future deploys.
         \\
@@ -651,8 +680,8 @@ fn printLoginHelp() void {
         \\  --device        Skip token entry and use browser-based device login
         \\
         \\Related:
-        \\  zigttp-cli deploy   Deploy using saved credentials or prompt if needed
-        \\  zigttp-cli logout   Forget the saved sign-in credentials
+        \\  zigttp deploy   Deploy using saved credentials or prompt if needed
+        \\  zigttp logout   Forget the saved sign-in credentials
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -660,9 +689,9 @@ fn printLoginHelp() void {
 
 fn printReviewHelp() void {
     const help =
-        \\zigttp-cli review <plan-id>
-        \\zigttp-cli review <plan-id> --approve [--grant]
-        \\zigttp-cli review <plan-id> --reject
+        \\zigttp review <plan-id>
+        \\zigttp review <plan-id> --approve [--grant]
+        \\zigttp review <plan-id> --reject
         \\
         \\Inspect, approve, or reject a deploy capability review.
         \\
@@ -673,8 +702,8 @@ fn printReviewHelp() void {
         \\  --reject        Reject the plan
         \\
         \\Related:
-        \\  zigttp-cli deploy   Trigger a deploy and surface plan-required reviews
-        \\  zigttp-cli login    Store deploy credentials explicitly
+        \\  zigttp deploy   Trigger a deploy and surface plan-required reviews
+        \\  zigttp login    Store deploy credentials explicitly
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -682,7 +711,7 @@ fn printReviewHelp() void {
 
 fn printGrantsHelp() void {
     const help =
-        \\zigttp-cli grants [project-name]
+        \\zigttp grants [project-name]
         \\
         \\List reusable capability grants visible to the current account.
         \\
@@ -690,8 +719,8 @@ fn printGrantsHelp() void {
         \\  project-name    Optional project filter
         \\
         \\Related:
-        \\  zigttp-cli revoke-grant <grant-id>   Revoke a reusable capability grant
-        \\  zigttp-cli review <plan-id>          Inspect or approve a pending review
+        \\  zigttp revoke-grant <grant-id>   Revoke a reusable capability grant
+        \\  zigttp review <plan-id>          Inspect or approve a pending review
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -699,13 +728,13 @@ fn printGrantsHelp() void {
 
 fn printRevokeGrantHelp() void {
     const help =
-        \\zigttp-cli revoke-grant <grant-id>
+        \\zigttp revoke-grant <grant-id>
         \\
         \\Revoke a reusable capability grant so future risky deploys must be reviewed again.
         \\
         \\Related:
-        \\  zigttp-cli grants                    List reusable capability grants
-        \\  zigttp-cli review <plan-id>         Approve a new review or grant
+        \\  zigttp grants                    List reusable capability grants
+        \\  zigttp review <plan-id>         Approve a new review or grant
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -713,28 +742,44 @@ fn printRevokeGrantHelp() void {
 
 fn printHelp() void {
     const help =
-        \\zigttp-cli - developer tool for zigttp projects
+        \\zigttp - developer tool for zigttp projects
         \\
         \\Usage:
-        \\  zigttp-cli init <name> [--template ...]    Create project
-        \\  zigttp-cli dev [handler-or-project]         Watch-restart loop
-        \\  zigttp-cli serve [options] [handler.ts]    Run handler locally
-        \\  zigttp-cli expert                          Run the interactive compiler agent
-        \\  zigttp-cli check [handler.ts] [--contract]  Verify handler
-        \\  zigttp-cli compile <handler.ts> -o <bin>    Build self-contained binary
-        \\  zigttp-cli login                            Store deploy credentials
-        \\  zigttp-cli deploy                           Deploy the handler in this directory
-        \\  zigttp-cli review <plan-id>                 Inspect, approve, or reject a deploy plan
-        \\  zigttp-cli grants [project-name]            List reusable capability grants
-        \\  zigttp-cli revoke-grant <grant-id>          Revoke a reusable capability grant
-        \\  zigttp-cli logout                           Forget saved sign-in credentials
-        \\  zigttp-cli prove <old.json> <new.json>      Upgrade safety check
-        \\  zigttp-cli mock <tests.jsonl> [--port N]    Mock server from tests
-        \\  zigttp-cli link <system.json>               Cross-handler linking
-        \\  zigttp-cli doctor [path]                    Validate project
-        \\  zigttp-cli version                          Show version
+        \\  zigttp init <name> [--template ...]    Create project
+        \\  zigttp dev [handler-or-project]         Watch-restart loop
+        \\  zigttp serve [options] [handler.ts]    Run handler locally
+        \\  zigttp expert                          Deprecated alias for `zigts expert`
+        \\  zigttp check [handler.ts] [--contract]  Verify handler
+        \\  zigttp compile <handler.ts> -o <bin>    Build self-contained binary
+        \\  zigttp login                            Store deploy credentials
+        \\  zigttp deploy                           Deploy the handler in this directory
+        \\  zigttp review <plan-id>                 Inspect, approve, or reject a deploy plan
+        \\  zigttp grants [project-name]            List reusable capability grants
+        \\  zigttp revoke-grant <grant-id>          Revoke a reusable capability grant
+        \\  zigttp logout                           Forget saved sign-in credentials
+        \\  zigttp prove <old.json> <new.json>      Upgrade safety check
+        \\  zigttp mock <tests.jsonl> [--port N]    Mock server from tests
+        \\  zigttp link <system.json>               Cross-handler linking
+        \\  zigttp doctor [path]                    Validate project
+        \\  zigttp version                          Show version
         \\
-        \\The `zigttp` runtime binary is separate and is what ships with deployed apps.
+        \\The internal runtime template is installed as `zigttp-runtime`.
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn printExpertAliasHelp() void {
+    const help =
+        \\zigttp expert - deprecated interactive expert alias
+        \\
+        \\Usage:
+        \\  zigttp expert
+        \\
+        \\This alias will be removed in a future release.
+        \\Use `zigts expert` for the interactive coding-agent workflow.
+        \\Use direct `zigts` commands such as `zigts meta` and
+        \\`zigts verify-paths` for machine-facing tooling.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -853,9 +898,9 @@ const basicReadme =
     \\# zigttp app
     \\
     \\## Commands
-    \\- `zigttp-cli dev`
+    \\- `zigttp dev`
     \\- `zigttp serve`
-    \\- `zigttp-cli check`
+    \\- `zigttp check`
 ;
 
 const apiReadme = basicReadme;

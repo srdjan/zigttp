@@ -1,6 +1,6 @@
-# `zigts expert` v1 — Structured Output Contract
+# `zigts` v1 — Structured Tool Contract
 
-This document freezes the structured output of `zigts expert` and its delegated subcommands as **v1**. Two clients rely on this contract today (`zigttp expert` and CI). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
+This document freezes the structured output of the direct `zigts` tool commands as **v1**. Two clients rely on this contract today (`zigts expert` and CI). Every field below is stable within v1. Additive changes are allowed; removals, renames, and semantic changes are not.
 
 The v1 surface is the minimum set of shapes needed to drive a compiler-in-the-loop workflow. It is not everything `zigts` can emit. Anything not listed here is explicitly outside v1 and may change without notice.
 
@@ -67,11 +67,11 @@ Frozen in v1 (`packages/tools/src/json_diagnostics.zig:42-129`):
 
 New codes may be added in v1. Existing codes cannot move ranges or change meaning.
 
-## `zigts expert meta`
+## `zigts meta`
 
 Emits compiler and policy metadata. Use it to record which policy a session or CI run was verified against.
 
-**Invocation:** `zigts expert meta --json`
+**Invocation:** `zigts meta --json`
 
 **Output shape** (`packages/tools/src/expert.zig:101-105`):
 
@@ -99,11 +99,11 @@ Fields:
 
 **Exit code:** `0` on success.
 
-## `zigts expert verify-paths`
+## `zigts verify-paths`
 
 Runs the full analysis pipeline on one or more handler files. This is the primary "compile everything and tell me what's wrong" call.
 
-**Invocation:** `zigts expert verify-paths <file>... --json`
+**Invocation:** `zigts verify-paths <file>... --json`
 
 **Output shape** (`packages/tools/src/expert.zig:197-212`):
 
@@ -128,15 +128,15 @@ Fields:
 
 **Exit code:** `0` if `ok == true`, `1` if any error-severity diagnostic is present.
 
-## `zigts expert verify-modules`
+## `zigts verify-modules`
 
 Audits zigts built-in virtual module source files and their JSON specs. The authoritative public built-in set comes from `packages/zigts/src/builtin_modules.zig`; editor hooks may still point at individual files under `packages/zigts/src/modules/`, but files outside that public set are ignored so helper edits do not produce governance noise.
 
 **Invocation:**
 
 ```text
-zigts expert verify-modules <file>... [--strict] --json
-zigts expert verify-modules --builtins [--strict] --json
+zigts verify-modules <file>... [--strict] --json
+zigts verify-modules --builtins [--strict] --json
 ```
 
 **Output shape** (`packages/tools/src/expert.zig:271-286`):
@@ -162,14 +162,14 @@ Mode semantics:
 
 **Exit code:** `0` if no errors, `1` otherwise.
 
-## `zigts expert edit-simulate` (and the underlying `zigts edit-simulate`)
+## `zigts edit-simulate`
 
 Simulates running the analysis pipeline on a candidate file and, optionally, diffs the result against a baseline so the client can tell which violations are *new* vs. *pre-existing*. This is the call the TUI's compiler veto will hang from.
 
 **Invocation:**
 
 ```
-zigts expert edit-simulate [<handler.ts>] [--before <old.ts>] [--stdin-json]
+zigts edit-simulate [<handler.ts>] [--before <old.ts>] [--stdin-json]
 ```
 
 Either a handler path on argv or `--stdin-json` must be supplied. With `--stdin-json`, the command reads the following shape from stdin (`packages/tools/src/edit_simulate.zig:106-134`):
@@ -223,28 +223,28 @@ Fields on `summary`:
 
 **Exit code:** `0` always from the command itself — the surface is designed for a hook that never wants to fail the tool call. Failure signal is the presence of `summary.new > 0` or `summary.total > 0`, which the client reads.
 
-## `zigts expert review-patch` (and the underlying `zigts review-patch`)
+## `zigts review-patch`
 
 A thin wrapper over `edit-simulate` that adds `--diff-only` for filtering to new violations and has a file-driven path mode. With `--json`, the output shape is **byte-identical** to `edit-simulate`'s output (same `violations`/`summary` envelope).
 
 **Invocation:**
 
 ```
-zigts expert review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
+zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
 ```
 
 `--diff-only` filters `violations` to entries with `introduced_by_patch: true` and rewrites `summary.total` and `summary.new` to the filtered count, `summary.preexisting` to `0` (`packages/tools/src/review_patch.zig:73-88`).
 
 **Exit code:** `0` if `summary.total == 0`, `1` otherwise (`packages/tools/src/review_patch.zig:105`). This is the one place in v1 where a non-zero exit means "the client should surface this," not "the tool broke." Clients running under hooks that should not fail must either catch the exit or use `edit-simulate` directly.
 
-## `zigts expert describe-rule` (and `zigts describe-rule`)
+## `zigts describe-rule`
 
 Rule catalog introspection. Lists all rules, a specific rule by name or code, or emits just the `policy_hash` for CI assertions.
 
 **Invocation:**
 
 ```
-zigts expert describe-rule [<name-or-code>] [--json] [--hash]
+zigts describe-rule [<name-or-code>] [--json] [--hash]
 ```
 
 **`--hash` output:** a single line containing the hex `policy_hash` followed by `\n`. This is not JSON and has no `--json` variant. It is a v1 primitive for CI scripts that want to pin rule versions. Not part of the JSON contract; treat as a separate format.
@@ -277,11 +277,11 @@ Fields:
 
 **Exit code:** `0` on list, `0` when a named rule is found, `1` when a named rule is not found (`packages/tools/src/describe_rule.zig:46`).
 
-## `zigts expert search` (and `zigts search`)
+## `zigts search`
 
 Substring search across rule names, descriptions, and help text.
 
-**Invocation:** `zigts expert search <keyword> [--json]`
+**Invocation:** `zigts search <keyword> [--json]`
 
 **Output** (`packages/tools/src/search_rules.zig:36-44`): a JSON array of `Rule` objects matching the keyword, using the exact shape from `describe-rule`. An empty array is a valid result and is returned as `[]`.
 
@@ -289,7 +289,7 @@ Substring search across rule names, descriptions, and help text.
 
 ## Proof-card envelope (from `zigts check --json`)
 
-`zigts check --json` is not reached via `zigts expert`, but it is part of the v1 contract because `zigttp expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:245-311`).
+`zigts check --json` is not reached via the direct verification commands, but it is part of the v1 contract because `zigts expert` calls the same underlying functions in-process. Two envelopes exist (`packages/tools/src/json_diagnostics.zig:245-311`).
 
 **Success envelope** (emitted when analysis completes with no error-severity diagnostics):
 
@@ -346,7 +346,7 @@ These are both additive: new specifiers, exports, features, or statuses can appe
 
 ## Stability guarantees
 
-For as long as v1 is advertised by `zigts expert meta` (via `mode: "embedded"` and the `compiler_version` / `policy_version` fields), clients may rely on:
+For as long as v1 is advertised by `zigts meta` (via `mode: "embedded"` and the `compiler_version` / `policy_version` fields), clients may rely on:
 
 1. Every field and type documented above.
 2. Every `ZTS0xx`/`ZTS1xx`/`ZTS2xx`/`ZTS3xx`/`ZVM0xx` code number retaining its meaning.
@@ -380,4 +380,4 @@ Two tripwires guard this contract and run under `zig build test`: the in-tree te
 
 ## Relationship to the TUI port
 
-`zigttp expert` now moves these commands from subprocess dispatch to in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
+`zigts expert` now uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.

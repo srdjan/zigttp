@@ -176,7 +176,7 @@ pub fn build(b: *std.Build) void {
     pi_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
     pi_tests.root_module.addImport("zigts_expert_examples", pi_examples_host_mod);
     const run_pi_tests = b.addRunArtifact(pi_tests);
-    const expert_app_test_step = b.step("test-expert-app", "Run zigttp expert in-process app tests");
+    const expert_app_test_step = b.step("test-expert-app", "Run zigts expert in-process app tests");
     expert_app_test_step.dependOn(&run_pi_tests.step);
 
     const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
@@ -194,11 +194,12 @@ pub fn build(b: *std.Build) void {
     });
     precompile_exe.root_module.addImport("zigts", zigts_host_mod);
 
-    // Runtime binary — ships with deployed apps. Minimal dependencies:
+    // Runtime template binary — used for self-contained outputs and direct
+    // runtime tests. Minimal dependencies:
     // only what's needed to serve HTTP and execute a (possibly embedded)
     // handler. No pi_app, no deploy, no zigts_cli.
     const runtime_exe = b.addExecutable(.{
-        .name = "zigttp",
+        .name = "zigttp-runtime",
         .root_module = b.createModule(.{
             .root_source_file = runtime_dep.path("src/main.zig"),
             .target = target,
@@ -214,6 +215,8 @@ pub fn build(b: *std.Build) void {
     // Cost: binary size. Alternative (move live_reload out of runtime) is a
     // larger refactor — deferred.
     runtime_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
+
+    var embedded_handler_step: ?*std.Build.Step = null;
 
     // If handler is specified, precompile it and add as dependency
     if (handler_path) |path| {
@@ -292,8 +295,9 @@ pub fn build(b: *std.Build) void {
         // Create the generated directories if they don't exist
         const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated" });
         run_precompile.step.dependOn(&mkdir_step.step);
+        embedded_handler_step = &run_precompile.step;
 
-        // Runtime exe depends on precompile completing
+        // Runtime and user-facing CLI both depend on precompile completing.
         runtime_exe.step.dependOn(&run_precompile.step);
 
         // Add the generated module (with zigts dependency for transpiled handlers)
@@ -315,12 +319,12 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(runtime_exe);
 
-    // Developer CLI — installed by developers. Contains init, dev, check,
-    // compile, prove, mock, link, expert, deploy, login, logout, review,
-    // grants, revoke-grant, doctor. Links pi_app and the full deploy subtree.
-    // Does not embed a handler; never deployed to FaaS.
+    // Developer CLI — the primary user-facing `zigttp` binary. Contains init,
+    // dev, serve, check, compile, prove, mock, link, expert, deploy, login,
+    // logout, review, grants, revoke-grant, doctor. Links pi_app and the full
+    // deploy subtree.
     const cli_exe = b.addExecutable(.{
-        .name = "zigttp-cli",
+        .name = "zigttp",
         .root_module = b.createModule(.{
             .root_source_file = runtime_dep.path("src/cli_main.zig"),
             .target = target,
@@ -332,58 +336,69 @@ pub fn build(b: *std.Build) void {
     cli_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
     cli_exe.root_module.addImport("pi_app", pi_app_mod);
     cli_exe.root_module.addImport("project_config", project_config_mod);
-    // Dev CLI has no embedded handler; provide a stub so server/runtime code
-    // paths that reference `embedded_handler` still link.
-    cli_exe.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zigts", .module = zigts_mod },
-        },
-    });
+    if (embedded_handler_step) |step| {
+        cli_exe.step.dependOn(step);
+        cli_exe.root_module.addAnonymousImport("embedded_handler", .{
+            .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
+            .imports = &.{
+                .{ .name = "zigts", .module = zigts_mod },
+            },
+        });
+    } else {
+        cli_exe.root_module.addAnonymousImport("embedded_handler", .{
+            .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
+            .imports = &.{
+                .{ .name = "zigts", .module = zigts_mod },
+            },
+        });
+    }
     b.installArtifact(cli_exe);
 
-    // Compiler/analyzer CLI
+    // Compiler/analyzer + interactive expert CLI
     const zigts_exe = b.addExecutable(.{
         .name = "zigts",
-        .root_module = zigts_cli_mod,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("zigts_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
+    zigts_exe.root_module.addImport("zigts_cli", zigts_cli_mod);
+    zigts_exe.root_module.addImport("pi_app", pi_app_mod);
     b.installArtifact(zigts_exe);
 
     const run_module_governance = b.addRunArtifact(zigts_exe);
-    run_module_governance.addArgs(&.{ "expert", "verify-modules", "--builtins", "--strict", "--json" });
+    run_module_governance.addArgs(&.{ "verify-modules", "--builtins", "--strict", "--json" });
     const module_governance_step = b.step("test-module-governance", "Run built-in module governance audit");
     module_governance_step.dependOn(&run_module_governance.step);
 
     // Golden-output checks that run the built `zigts` binary and assert
-    // stdout is byte-identical to a fixture. Covers the v1 JSON contract for
-    // `expert meta`, `expert verify-paths`, and `expert describe-rule`.
+    // stdout is byte-identical to a fixture. Covers the direct-command v1 JSON
+    // contract for `meta`, `verify-paths`, and `describe-rule`.
     // Regenerate the fixtures with `scripts/update-expert-goldens.sh` (or by
     // rerunning each command and redirecting into
     // packages/tools/tests/fixtures/expert/) after a deliberate contract
     // change; see docs/zigts-expert-contract.md.
-    const expert_golden_step = b.step("test-expert-golden", "Check zigts expert --json against golden fixtures");
+    const expert_golden_step = b.step("test-expert-golden", "Check zigts direct tool contract against golden fixtures");
     const fixtures_root = "packages/tools/tests/fixtures/expert";
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "expert", "meta", "--json" }, fixtures_root ++ "/meta.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "meta", "--json" }, fixtures_root ++ "/meta.golden.json", 0);
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{
-        "expert",
         "verify-paths",
         fixtures_root ++ "/clean_handler.ts",
         "--json",
     }, fixtures_root ++ "/verify_paths_clean.golden.json", 0);
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{
-        "expert",
         "verify-paths",
         fixtures_root ++ "/missing.ts",
         "--json",
     }, fixtures_root ++ "/verify_paths_missing.golden.json", 1);
-    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "expert", "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
+    addExpertGolden(b, expert_golden_step, zigts_exe, &.{ "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{
-        "expert",
         "verify-paths",
         fixtures_root ++ "/clean_handler.ts",
     }, fixtures_root ++ "/verify_paths_clean_text.golden.txt", 0);
     addExpertGolden(b, expert_golden_step, zigts_exe, &.{
-        "expert",
         "verify-paths",
         fixtures_root ++ "/missing.ts",
     }, fixtures_root ++ "/verify_paths_missing_text.golden.txt", 1);
@@ -392,11 +407,11 @@ pub fn build(b: *std.Build) void {
     // help text edits should not break tests; only the exit code is part of
     // the contract.
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "meta", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "verify-paths", "--help" }, 0);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "meta", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "verify-paths", "--help" }, 0);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "no-such-sub" }, 1);
-    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{ "expert", "verify-paths" }, 1);
+    addExpertExitCheck(b, expert_golden_step, zigts_exe, &.{"verify-paths"}, 1);
 
     // Run command: runs the runtime binary directly, without triggering the
     // full install step (which would also link the dev CLI and bench binaries).
@@ -412,7 +427,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         cli_run_cmd.addArgs(args);
     }
-    const cli_run_step = b.step("cli", "Run the developer CLI");
+    const cli_run_step = b.step("cli", "Run the zigttp CLI");
     cli_run_step.dependOn(&cli_run_cmd.step);
 
     // Tests
@@ -519,7 +534,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Release build step (with handler precompilation if provided)
-    const release_step = b.step("release", "Build optimized release binaries (zigttp, zigttp-cli, zigts)");
+    const release_step = b.step("release", "Build optimized release binaries (zigttp, zigttp-runtime, zigts)");
     release_step.dependOn(b.getInstallStep());
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);

@@ -371,7 +371,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
     }
 
     if (!handler_set) {
-        std.log.err("No handler specified. Use `zigttp-cli init`, `zigttp serve <file>`, or build with -Dhandler=<path>.", .{});
+        std.log.err("No handler specified. Use `zigttp init`, `zigttp serve <file>`, or build with -Dhandler=<path>.", .{});
         return error.NoHandler;
     }
 
@@ -438,7 +438,8 @@ fn printHelp() void {
         \\  zigttp version                          Show version
         \\  zigttp help                             Show this help
         \\
-        \\For build, deploy, prove, and expert commands, use the zigttp-cli tool.
+        \\For compile, prove, and expert commands, use `zigts`.
+        \\For init, dev, and deploy commands, use `zigttp`.
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

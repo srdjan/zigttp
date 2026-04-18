@@ -37,10 +37,10 @@ For the strategic direction beyond the current implementation, see
 HTTP listener, CLI, request routing, static file serving, contract-aware startup.
 
 **Two binaries built from this package**:
-- `zigttp` — the runtime. Ships with deployed FaaS apps. Subcommands: `serve`, `attest`. Entry: `main.zig` → `runtime_cli.zig`.
-- `zigttp-cli` — the developer CLI. Subcommands: `init`, `dev`, `check`, `compile`, `expert`, `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, plus pass-through to `zigts` for `check`/`prove`/`mock`/`link`. Entry: `cli_main.zig` → `dev_cli.zig`.
+- `zigttp` — the primary developer CLI. Subcommands: `init`, `dev`, `serve`, `check`, `compile`, `expert` (deprecated alias), `deploy`, `login`, `logout`, `review`, `grants`, `revoke-grant`, `doctor`, plus pass-through to `zigts` for `check`/`prove`/`mock`/`link`. Entry: `cli_main.zig` → `dev_cli.zig`.
+- `zigttp-runtime` — the internal runtime template. Used for self-contained outputs and direct runtime tests. Entry: `main.zig` → `runtime_cli.zig`.
 
-Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`, `zruntime.zig`, `contract_runtime.zig`), `self_extract.zig`, and `cli_shared.zig` (arg parsing, watch sets, size helpers). Only `zigttp-cli` links `pi_app` (the `expert` interactive agent) and the `deploy/` subtree (OCI push, control plane, provider adapter).
+Both binaries share the engine (`zigts`), core server/runtime code (`server.zig`, `zruntime.zig`, `contract_runtime.zig`), `self_extract.zig`, and `cli_shared.zig` (arg parsing, watch sets, size helpers). `zigts` links `pi_app` for the interactive `zigts expert` flow. Only `zigttp` links the `deploy/` subtree (OCI push, control plane, provider adapter).
 
 **Key Components**:
 - `main.zig` - Runtime entry trampoline
@@ -300,7 +300,7 @@ zigttp/
 │       └── src/
 │           ├── precompile.zig       # Build-time bytecode compiler
 │           ├── zigts_cli.zig        # CLI dispatcher for zigts subcommands
-│           ├── expert.zig           # zigts expert namespace (meta, verify-paths, delegation)
+│           ├── expert.zig           # shared helpers for meta / verify-paths / verify-modules
 │           ├── edit_simulate.zig    # Diff-aware violation analysis
 │           ├── review_patch.zig     # Patch review with --diff-only filtering
 │           ├── deploy_manifest.zig  # Proven deployment manifest generator
