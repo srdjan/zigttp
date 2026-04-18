@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zigttp:websocket",
+  "source": "packages/zigts/src/modules/websocket.zig",
+  "requiredCapabilities": [
+    "clock",
+    "runtime_callback",
+    "filesystem",
+    "policy_check",
+    "websocket"
+  ],
+  "exports": [
+    {
+      "name": "send",
+      "effect": "write",
+      "returns": "undefined"
+    },
+    {
+      "name": "close",
+      "effect": "write",
+      "returns": "undefined"
+    },
+    {
+      "name": "serializeAttachment",
+      "effect": "write",
+      "returns": "undefined"
+    },
+    {
+      "name": "deserializeAttachment",
+      "effect": "read",
+      "returns": "optional_object"
+    },
+    {
+      "name": "getWebSockets",
+      "effect": "read",
+      "returns": "object"
+    },
+    {
+      "name": "roomFromPath",
+      "effect": "read",
+      "returns": "string"
+    },
+    {
+      "name": "setAutoResponse",
+      "effect": "write",
+      "returns": "undefined"
+    }
+  ]
+}
