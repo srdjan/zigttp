@@ -68,12 +68,27 @@ pub fn derivePoolingPolicy(contract: ?*const RuntimeContract) PoolingPolicy {
 
 /// Runtime view of the proven contract.
 /// Owns all allocated memory; call deinit() when done.
+/// Mirrors `handler_contract.WebSocketInfo` for the parsed runtime
+/// contract. The server consults `on_message` at accept time to decide
+/// whether to look for an RFC 6455 Upgrade header on incoming requests.
+pub const WebSocketInfo = struct {
+    on_open: bool = false,
+    on_message: bool = false,
+    on_close: bool = false,
+    on_error: bool = false,
+
+    pub fn any(self: WebSocketInfo) bool {
+        return self.on_open or self.on_message or self.on_close or self.on_error;
+    }
+};
+
 pub const RuntimeContract = struct {
     env_vars: []const []const u8,
     env_dynamic: bool,
     routes: []const Route,
     routes_dynamic: bool,
     properties: Properties,
+    websocket: WebSocketInfo = .{},
     /// Null when the embedded contract did not emit a sandbox block (old
     /// contract, or contract parse fell through). A non-null matrix with
     /// len == 0 is a legitimate state for handlers that import only
@@ -202,6 +217,17 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !Runt
         }
     }
 
+    // Parse websocket.{onOpen,onMessage,onClose,onError}
+    var websocket: WebSocketInfo = .{};
+    if (root.get("websocket")) |ws_val| {
+        if (ws_val == .object) {
+            websocket.on_open = getBool(ws_val.object, "onOpen");
+            websocket.on_message = getBool(ws_val.object, "onMessage");
+            websocket.on_close = getBool(ws_val.object, "onClose");
+            websocket.on_error = getBool(ws_val.object, "onError");
+        }
+    }
+
     // Parse modules[] so the startup drift check has the handler's import set
     var modules: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -223,6 +249,7 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !Runt
         .routes = try routes.toOwnedSlice(allocator),
         .routes_dynamic = routes_dynamic,
         .properties = properties,
+        .websocket = websocket,
         .capabilities = capabilities,
         .artifact_sha256 = artifact_sha256,
         .policy_hash = policy_hash,
@@ -469,6 +496,77 @@ pub fn verifyArtifactHash(contract: *const RuntimeContract, bytecode: ?[]const u
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "parseContractJson extracts websocket event presence flags" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 14,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "serviceCalls": [],
+        \\  "cache": {"namespaces": [], "dynamic": false},
+        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
+        \\  "durable": {"used": false, "keys": {"literal": [], "dynamic": false}, "steps": [], "timers": false, "signals": {"literal": [], "dynamic": false}, "producerKeys": {"literal": [], "dynamic": false}},
+        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false},
+        \\  "verification": null,
+        \\  "websocket": {"onOpen": true, "onMessage": true, "onClose": true, "onError": false},
+        \\  "aot": null,
+        \\  "faultCoverage": null,
+        \\  "rateLimiting": null,
+        \\  "properties": null,
+        \\  "behaviors": [],
+        \\  "behaviorsExhaustive": false
+        \\}
+    ;
+    var contract = try parseContractJson(allocator, source);
+    defer contract.deinit();
+
+    try std.testing.expect(contract.websocket.on_open);
+    try std.testing.expect(contract.websocket.on_message);
+    try std.testing.expect(contract.websocket.on_close);
+    try std.testing.expect(!contract.websocket.on_error);
+    try std.testing.expect(contract.websocket.any());
+}
+
+test "parseContractJson defaults websocket to all-false when section absent" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 14,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "routes": [],
+        \\  "modules": [],
+        \\  "functions": {},
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "serviceCalls": [],
+        \\  "cache": {"namespaces": [], "dynamic": false},
+        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
+        \\  "durable": {"used": false, "keys": {"literal": [], "dynamic": false}, "steps": [], "timers": false, "signals": {"literal": [], "dynamic": false}, "producerKeys": {"literal": [], "dynamic": false}},
+        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false},
+        \\  "verification": null,
+        \\  "aot": null,
+        \\  "faultCoverage": null,
+        \\  "rateLimiting": null,
+        \\  "properties": null,
+        \\  "behaviors": [],
+        \\  "behaviorsExhaustive": false
+        \\}
+    ;
+    var contract = try parseContractJson(allocator, source);
+    defer contract.deinit();
+
+    try std.testing.expect(!contract.websocket.on_open);
+    try std.testing.expect(!contract.websocket.on_message);
+    try std.testing.expect(!contract.websocket.on_close);
+    try std.testing.expect(!contract.websocket.on_error);
+    try std.testing.expect(!contract.websocket.any());
+}
 
 test "parseContractJson minimal" {
     const allocator = std.testing.allocator;

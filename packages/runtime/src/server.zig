@@ -25,6 +25,8 @@ const QueryParam = http_types.QueryParam;
 
 const contract_runtime = @import("contract_runtime.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
+const ws_gateway = @import("ws_gateway.zig");
+const websocket_pool = @import("websocket_pool.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -223,6 +225,29 @@ const ConnectionPool = struct {
             break :blk true;
         };
         const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
+
+        // WebSocket upgrade: if the handler contract advertises an
+        // onMessage export and the request carries an RFC 6455 upgrade,
+        // hand the connection off to ws_gateway and tear down the
+        // keep-alive loop. The connection's fd ownership transfers to
+        // the gateway path; returning false from here tells the outer
+        // accept loop to stop touching the socket.
+        if (self.server.contract) |*contract| {
+            if (contract.websocket.on_message and requestIsWebSocketUpgrade(request.headers.items)) {
+                const request_view = HttpRequestView{
+                    .method = request.method,
+                    .url = request.url,
+                    .path = request.path,
+                    .query_params = request.query_params,
+                    .headers = request.headers,
+                    .body = request.body,
+                };
+                self.handleWebSocketUpgradeSync(fd, &request_view, req_allocator) catch |err| {
+                    std.log.warn("websocket upgrade failed: {}", .{err});
+                };
+                return false;
+            }
+        }
 
         // Handle static files
         if (self.server.config.static_dir) |static_dir| {
@@ -461,6 +486,62 @@ const ConnectionPool = struct {
         try writeAllFd(fd, response);
     }
 
+    /// Drive ws_gateway.upgrade for a single request. Writes the 101
+    /// response (or the RFC-specified error status) and releases the
+    /// connection slot. The fd is closed on return; a frame-exchange
+    /// loop lands in the next sub-slice, at which point this function
+    /// will hand the fd over to the gateway instead of closing it.
+    fn handleWebSocketUpgradeSync(
+        self: *ConnectionPool,
+        fd: std.posix.fd_t,
+        request: *const HttpRequestView,
+        req_allocator: std.mem.Allocator,
+    ) !void {
+        const pool = self.ensureWebSocketPool();
+
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(req_allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(req_allocator, &buf);
+
+        const outcome = try ws_gateway.upgrade(pool, &aw.writer, fd, request, unixMillisNow());
+        buf = aw.toArrayList();
+
+        switch (outcome) {
+            .ok => |id| {
+                try writeAllFd(fd, buf.items);
+                // Frame loop lands in the next sub-slice. For now, tear
+                // down immediately so the handshake path is observable
+                // without a dangling fd.
+                pool.unregister(id);
+                _ = std.c.close(fd);
+            },
+            .reject => |reason| {
+                if (reason.wants_version_header) {
+                    var out_buf: [256]u8 = undefined;
+                    const response = std.fmt.bufPrint(
+                        &out_buf,
+                        "HTTP/1.1 {d} {s}\r\nSec-WebSocket-Version: 13\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        .{ reason.status, reason.reason },
+                    ) catch return;
+                    try writeAllFd(fd, response);
+                } else {
+                    try self.sendErrorSync(fd, reason.status, reason.reason);
+                }
+                _ = std.c.close(fd);
+            },
+        }
+    }
+
+    /// Get (or lazily initialise) the server's WebSocket connection
+    /// pool. Returns a pointer to the live pool regardless of initial
+    /// state, so the caller can always treat the result uniformly.
+    fn ensureWebSocketPool(self: *ConnectionPool) *websocket_pool.Pool {
+        if (self.server.ws_pool == null) {
+            self.server.ws_pool = websocket_pool.Pool.init(self.server.allocator);
+        }
+        return &self.server.ws_pool.?;
+    }
+
     fn serveStaticFileSync(
         self: *ConnectionPool,
         fd: std.posix.fd_t,
@@ -560,6 +641,29 @@ const ConnectionPool = struct {
         }
     }
 };
+
+/// Inspect request headers for a literal RFC 6455 upgrade. Checks the
+/// `Upgrade` header value only; the full validation (Connection token,
+/// version, key) happens inside ws_gateway. This predicate is a cheap
+/// prefilter so handlers without WS exports don't pay the cost of the
+/// full validation path.
+fn requestIsWebSocketUpgrade(headers: []const HttpHeader) bool {
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.key, "upgrade")) {
+            // Tolerant of multi-token upgrade values (rare, but legal).
+            var it = std.mem.splitScalar(u8, h.value, ',');
+            while (it.next()) |token| {
+                const trimmed = std.mem.trim(u8, token, " \t");
+                if (std.ascii.eqlIgnoreCase(trimmed, "websocket")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn unixMillisNow() i64 {
+    return zq.trace.unixMillis();
+}
 
 fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
     var remaining = data;
@@ -768,6 +872,9 @@ pub const Server = struct {
     contract: ?RuntimeContract,
     proof_cache: ?proof_adapter.ProofCache,
     security_logger: ?*SecurityLogger,
+    /// WebSocket connection registry. Initialised lazily on the first
+    /// upgrade attempt; a handler with no WS exports pays zero cost.
+    ws_pool: ?websocket_pool.Pool = null,
 
     const Self = @This();
     const ConnectionEvent = enum { done, timeout };
@@ -826,6 +933,7 @@ pub const Server = struct {
             .contract = null,
             .proof_cache = null,
             .security_logger = null,
+            .ws_pool = null,
         };
     }
 
@@ -835,6 +943,7 @@ pub const Server = struct {
 
         if (self.pool) |*p| p.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
+        if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
         if (self.security_logger) |logger| logger.deinit();
         zq.security_events.deinitGlobal();
