@@ -217,6 +217,9 @@ fn dispatchOnMessage(
     id: ConnectionId,
     data: []const u8,
 ) !void {
+    _ = ws_pool.beginDispatch(id);
+    defer _ = ws_pool.endDispatch(id);
+
     var lease = try handler_pool.acquireWorkerRuntime();
     defer lease.deinit();
 
@@ -253,6 +256,9 @@ fn dispatchOnOpen(
     id: ConnectionId,
     url: []const u8,
 ) !void {
+    _ = ws_pool.beginDispatch(id);
+    defer _ = ws_pool.endDispatch(id);
+
     var lease = try handler_pool.acquireWorkerRuntime();
     defer lease.deinit();
 
@@ -283,6 +289,10 @@ fn dispatchOnClose(
     id: ConnectionId,
     code: u16,
 ) !void {
+    _ = ws_pool.beginDispatch(id);
+    // Intentionally skip endDispatch on close — `unregister` is about
+    // to run and remove the connection entirely.
+
     var lease = try handler_pool.acquireWorkerRuntime();
     defer lease.deinit();
 

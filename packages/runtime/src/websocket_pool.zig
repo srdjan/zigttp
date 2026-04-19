@@ -329,6 +329,61 @@ pub const Pool = struct {
         return true;
     }
 
+    /// Mark a connection as actively dispatching to the JS handler.
+    /// Paired with `endDispatch` so the pool can report whether any
+    /// given connection is mid-flight vs. idle. Does not update the
+    /// last-frame timestamp — that belongs to inbound frame receipt,
+    /// not handler execution.
+    pub fn beginDispatch(self: *Pool, id: ConnectionId) bool {
+        self.lock();
+        defer self.unlockLock();
+        const conn = self.by_id.get(id) orelse return false;
+        conn.state = .live;
+        return true;
+    }
+
+    /// Mark a connection as parked after handler execution returns.
+    /// Paired with `beginDispatch`. A parked connection that stays
+    /// parked past the idle threshold becomes a hibernation candidate
+    /// via `scanIdle`.
+    pub fn endDispatch(self: *Pool, id: ConnectionId) bool {
+        self.lock();
+        defer self.unlockLock();
+        const conn = self.by_id.get(id) orelse return false;
+        conn.state = .parked;
+        return true;
+    }
+
+    /// Sweep parked connections whose last inbound frame was longer
+    /// than `idle_threshold_ms` ago and transition them to `dormant`.
+    /// Returns the subset of ids that crossed the boundary — callers
+    /// can feed those into an evented reader registration once the
+    /// thread-per-connection model is replaced. `live` connections
+    /// are never swept (a handler that blocks indefinitely is a
+    /// handler bug, not a hibernation case). Returns an allocator-
+    /// owned slice; caller frees.
+    pub fn scanIdle(
+        self: *Pool,
+        out_allocator: std.mem.Allocator,
+        idle_threshold_ms: i64,
+        now_ms: i64,
+    ) ![]ConnectionId {
+        self.lock();
+        defer self.unlockLock();
+        var out: std.ArrayList(ConnectionId) = .empty;
+        errdefer out.deinit(out_allocator);
+
+        var it = self.by_id.iterator();
+        while (it.next()) |entry| {
+            const conn = entry.value_ptr.*;
+            if (conn.state != .parked) continue;
+            if (now_ms - conn.last_frame_at_ms <= idle_threshold_ms) continue;
+            conn.state = .dormant;
+            try out.append(out_allocator, conn.id);
+        }
+        return try out.toOwnedSlice(out_allocator);
+    }
+
     /// Rehydrate a crashed connection's attachment onto a freshly
     /// registered one. Reads `<dir>/<prior_id>.att`, installs the bytes
     /// on `new_id` (rewriting to `<dir>/<new_id>.att`), and removes the
@@ -786,4 +841,60 @@ test "setAutoResponse returns false for missing id" {
     var pool = Pool.init(testing.allocator);
     defer pool.deinit();
     try testing.expect(!(try pool.setAutoResponse(9999, "a", "b")));
+}
+
+// ---------------------------------------------------------------------------
+// W3: connection state machine + idle scanning
+// ---------------------------------------------------------------------------
+
+test "begin/endDispatch toggle state between live and parked" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    const id = try pool.register(100, "alpha", 1000);
+    try testing.expectEqual(ConnectionState.parked, (pool.snapshot(id) orelse return error.TestFailed).state);
+
+    try testing.expect(pool.beginDispatch(id));
+    try testing.expectEqual(ConnectionState.live, (pool.snapshot(id) orelse return error.TestFailed).state);
+
+    try testing.expect(pool.endDispatch(id));
+    try testing.expectEqual(ConnectionState.parked, (pool.snapshot(id) orelse return error.TestFailed).state);
+
+    try testing.expect(!pool.beginDispatch(9999));
+    try testing.expect(!pool.endDispatch(9999));
+}
+
+test "scanIdle transitions stale parked connections to dormant" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    // Three connections registered at the same moment.
+    const a = try pool.register(100, "alpha", 1_000);
+    const b = try pool.register(101, "alpha", 1_000);
+    const c_live = try pool.register(102, "alpha", 1_000);
+
+    // `c_live` is actively dispatching and must never be swept.
+    try testing.expect(pool.beginDispatch(c_live));
+
+    // Only `b` has received a recent frame.
+    _ = pool.touch(b, .parked, 9_000);
+
+    const idle = try pool.scanIdle(testing.allocator, 1_000, 10_000);
+    defer testing.allocator.free(idle);
+
+    // `a`: last frame at 1000, now 10000, threshold 1000 → idle 9000ms > 1000 → dormant.
+    // `b`: last frame at 9000, idle 1000ms = threshold → NOT past threshold → stays parked.
+    // `c_live`: in .live, never scanned regardless of timestamp.
+    try testing.expectEqual(@as(usize, 1), idle.len);
+    try testing.expectEqual(a, idle[0]);
+
+    try testing.expectEqual(ConnectionState.dormant, (pool.snapshot(a) orelse return error.TestFailed).state);
+    try testing.expectEqual(ConnectionState.parked, (pool.snapshot(b) orelse return error.TestFailed).state);
+    try testing.expectEqual(ConnectionState.live, (pool.snapshot(c_live) orelse return error.TestFailed).state);
+
+    // A second scan finds no new candidates — the already-dormant connection
+    // isn't re-reported.
+    const idle2 = try pool.scanIdle(testing.allocator, 1_000, 10_000);
+    defer testing.allocator.free(idle2);
+    try testing.expectEqual(@as(usize, 0), idle2.len);
 }
