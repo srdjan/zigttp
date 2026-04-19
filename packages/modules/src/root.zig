@@ -14,12 +14,25 @@ pub const security = struct {
     pub const decode = @import("security/decode.zig");
 };
 
+pub const platform = struct {
+    pub const env = @import("platform/env.zig");
+    pub const id = @import("platform/id.zig");
+    pub const text = @import("platform/text.zig");
+    pub const time = @import("platform/time.zig");
+    pub const log = @import("platform/log.zig");
+};
+
 comptime {
     sdk.validateBindings(&.{
         security.crypto.binding,
         security.auth.binding,
         security.validate.binding,
         security.decode.binding,
+        platform.env.binding,
+        platform.id.binding,
+        platform.text.binding,
+        platform.time.binding,
+        platform.log.binding,
     });
 }
 
@@ -29,4 +42,9 @@ test {
     _ = security.auth;
     _ = security.validate;
     _ = security.decode;
+    _ = platform.env;
+    _ = platform.id;
+    _ = platform.text;
+    _ = platform.time;
+    _ = platform.log;
 }

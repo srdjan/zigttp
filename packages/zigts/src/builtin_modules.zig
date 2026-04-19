@@ -74,7 +74,7 @@ pub const BuiltinGovernanceEntry = struct {
 };
 
 pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
-    .{ .specifier = "zigttp:env", .module_path = "packages/zigts/src/modules/platform/env.zig", .spec_path = "packages/zigts/module-specs/platform/env.json" },
+    .{ .specifier = "zigttp:env", .module_path = "packages/modules/src/platform/env.zig", .spec_path = "packages/zigts/module-specs/platform/env.json" },
     .{ .specifier = "zigttp:crypto", .module_path = "packages/modules/src/security/crypto.zig", .spec_path = "packages/zigts/module-specs/security/crypto.json" },
     .{ .specifier = "zigttp:router", .module_path = "packages/zigts/src/modules/http/router.zig", .spec_path = "packages/zigts/module-specs/http/router.json" },
     .{ .specifier = "zigttp:auth", .module_path = "packages/modules/src/security/auth.zig", .spec_path = "packages/zigts/module-specs/security/auth.json" },
@@ -87,11 +87,11 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/workflow/compose.zig", .spec_path = "packages/zigts/module-specs/workflow/compose.json" },
     .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/workflow/durable.zig", .spec_path = "packages/zigts/module-specs/workflow/durable.json" },
     .{ .specifier = "zigttp:url", .module_path = "packages/zigts/src/modules/http/url.zig", .spec_path = "packages/zigts/module-specs/http/url.json" },
-    .{ .specifier = "zigttp:id", .module_path = "packages/zigts/src/modules/platform/id.zig", .spec_path = "packages/zigts/module-specs/platform/id.json" },
+    .{ .specifier = "zigttp:id", .module_path = "packages/modules/src/platform/id.zig", .spec_path = "packages/zigts/module-specs/platform/id.json" },
     .{ .specifier = "zigttp:http", .module_path = "packages/zigts/src/modules/http/http_mod.zig", .spec_path = "packages/zigts/module-specs/http/http-mod.json" },
-    .{ .specifier = "zigttp:log", .module_path = "packages/zigts/src/modules/platform/log.zig", .spec_path = "packages/zigts/module-specs/platform/log.json" },
-    .{ .specifier = "zigttp:text", .module_path = "packages/zigts/src/modules/platform/text.zig", .spec_path = "packages/zigts/module-specs/platform/text.json" },
-    .{ .specifier = "zigttp:time", .module_path = "packages/zigts/src/modules/platform/time.zig", .spec_path = "packages/zigts/module-specs/platform/time.json" },
+    .{ .specifier = "zigttp:log", .module_path = "packages/modules/src/platform/log.zig", .spec_path = "packages/zigts/module-specs/platform/log.json" },
+    .{ .specifier = "zigttp:text", .module_path = "packages/modules/src/platform/text.zig", .spec_path = "packages/zigts/module-specs/platform/text.json" },
+    .{ .specifier = "zigttp:time", .module_path = "packages/modules/src/platform/time.zig", .spec_path = "packages/zigts/module-specs/platform/time.json" },
     .{ .specifier = "zigttp:ratelimit", .module_path = "packages/zigts/src/modules/data/ratelimit.zig", .spec_path = "packages/zigts/module-specs/data/ratelimit.json" },
     .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/net/service.zig", .spec_path = "packages/zigts/module-specs/net/service.json" },
     .{ .specifier = "zigttp:fetch", .module_path = "packages/zigts/src/modules/net/fetch.zig", .spec_path = "packages/zigts/module-specs/net/fetch.json" },
@@ -304,7 +304,7 @@ test "governance entries stay aligned with public built-ins" {
     const entries = governanceEntries();
     try std.testing.expectEqual(builtins.len, entries.len);
     try std.testing.expectEqualStrings("zigttp:env", entries[0].specifier);
-    try std.testing.expectEqualStrings("packages/zigts/src/modules/platform/env.zig", entries[0].module_path);
+    try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/zigts/module-specs/platform/env.json", entries[0].spec_path);
     try std.testing.expectEqualStrings("zigttp:websocket", entries[entries.len - 1].specifier);
 }
