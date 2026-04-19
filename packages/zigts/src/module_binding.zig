@@ -97,8 +97,12 @@ pub fn wrapModuleFnWithCapabilities(
 /// Cast a ModuleHandle to the underlying Context. Internal use only -
 /// this function is called by the SDK free functions below, never by
 /// module authors directly.
-fn handleToContext(handle: *ModuleHandle) *context.Context {
+pub fn handleToContext(handle: *ModuleHandle) *context.Context {
     return @ptrCast(@alignCast(handle));
+}
+
+pub fn contextToHandle(ctx: *context.Context) *ModuleHandle {
+    return @ptrCast(ctx);
 }
 
 fn activeContextHasCapability(capability: ModuleCapability) bool {
@@ -629,6 +633,34 @@ pub export fn zigttpSdkSetModuleState(
     env.* = .{ .user_ptr = user_ptr, .sdk_deinit = sdk_deinit, .allocator = ctx.allocator };
     ctx.setModuleState(slot, env, SdkStateEnvelope.envelopeDeinit);
     return true;
+}
+
+pub export fn zigttpSdkIsCallable(val: value.JSValue) bool {
+    return val.isCallable();
+}
+
+pub export fn zigttpSdkReadFile(
+    handle: *ModuleHandle,
+    path_ptr: [*]const u8,
+    path_len: usize,
+    max_size: usize,
+    out_ptr: *[*]u8,
+    out_len: *usize,
+) bool {
+    const ctx = handleToContext(handle);
+    const buf = readFileChecked(ctx.allocator, path_ptr[0..path_len], max_size) catch return false;
+    out_ptr.* = buf.ptr;
+    out_len.* = buf.len;
+    return true;
+}
+
+pub export fn zigttpSdkFreeFileBuffer(
+    handle: *ModuleHandle,
+    ptr: [*]u8,
+    len: usize,
+) void {
+    const ctx = handleToContext(handle);
+    ctx.allocator.free(ptr[0..len]);
 }
 
 pub export fn zigttpSdkIsString(val: value.JSValue) bool {

@@ -377,6 +377,38 @@ pub fn isArray(val: JSValue) bool {
     return zigttpSdkIsArray(val);
 }
 
+extern fn zigttpSdkIsCallable(val: JSValue) bool;
+
+pub fn isCallable(val: JSValue) bool {
+    return zigttpSdkIsCallable(val);
+}
+
+extern fn zigttpSdkReadFile(
+    handle: *ModuleHandle,
+    path_ptr: [*]const u8,
+    path_len: usize,
+    max_size: usize,
+    out_ptr: *[*]u8,
+    out_len: *usize,
+) bool;
+
+extern fn zigttpSdkFreeFileBuffer(handle: *ModuleHandle, ptr: [*]u8, len: usize) void;
+
+/// Read a file through the capability-gated filesystem path. Requires
+/// `.filesystem` in required_capabilities. Caller frees with
+/// `freeFileBuffer` when done.
+pub fn readFile(handle: *ModuleHandle, path: []const u8, max_size: usize) ![]u8 {
+    try requireCapability(handle, .filesystem);
+    var ptr: [*]u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkReadFile(handle, path.ptr, path.len, max_size, &ptr, &len)) return error.FileReadFailed;
+    return ptr[0..len];
+}
+
+pub fn freeFileBuffer(handle: *ModuleHandle, buf: []u8) void {
+    zigttpSdkFreeFileBuffer(handle, buf.ptr, buf.len);
+}
+
 pub fn arrayLength(val: JSValue) ?u32 {
     var len: u32 = 0;
     if (!zigttpSdkArrayLength(val, &len)) return null;
@@ -731,7 +763,7 @@ pub const ModuleBinding = struct {
 };
 
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
-    @setEvalBranchQuota(5000);
+    @setEvalBranchQuota(20000);
 
     for (bindings) |binding| {
         const builtin_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp:");
