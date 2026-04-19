@@ -16,6 +16,9 @@
         .zigttp_sdk = .{
             .path = "packages/zigttp-sdk",
         },
+        .zigttp_modules = .{
+            .path = "packages/modules",
+        },
         .zigttp_ext_demo = .{
             .path = "packages/zigttp-ext-demo",
         },

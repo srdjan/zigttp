@@ -1,5 +1,5 @@
 const std = @import("std");
-const module_graph = @import("modules/module_graph.zig");
+const module_graph = @import("modules/internal/module_graph.zig");
 
 /// Read a file synchronously using POSIX operations (for use before Io is initialized).
 /// Reads in 4KB chunks without fstat to avoid libc/Linux compatibility issues.

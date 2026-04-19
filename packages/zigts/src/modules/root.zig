@@ -3,30 +3,27 @@
 //! Compile-time module resolution for zigttp:* virtual modules
 //! and relative file imports. Virtual modules map to native Zig
 //! implementations with zero JS interpretation overhead.
-//! File imports use bytecode concatenation: dependencies are compiled
-//! and executed first, exporting globals that the entry file reads.
+//!
+//! Most bindings live in `zigttp-modules`. Files below are those
+//! that need zigts-internal access (install shims, GC roots, runtime
+//! threadlocals) and stay on this side of the peer-package boundary.
 
-pub const resolver = @import("resolver.zig");
-pub const env = @import("env.zig");
-pub const crypto = @import("crypto.zig");
-pub const router = @import("router.zig");
-pub const auth = @import("auth.zig");
-pub const validate = @import("validate.zig");
-pub const decode = @import("decode.zig");
-pub const cache = @import("cache.zig");
-pub const sql = @import("sql.zig");
-pub const io = @import("io.zig");
-pub const scope = @import("scope.zig");
-pub const compose = @import("compose.zig");
-pub const durable = @import("durable.zig");
-pub const util = @import("util.zig");
-pub const file_resolver = @import("file_resolver.zig");
-pub const module_graph = @import("module_graph.zig");
-pub const compiler = @import("compiler.zig");
-pub const types = @import("types.zig");
-pub const service = @import("service.zig");
-pub const fetch = @import("fetch.zig");
-pub const websocket = @import("websocket.zig");
+pub const resolver = @import("internal/resolver.zig");
+pub const util = @import("internal/util.zig");
+pub const file_resolver = @import("internal/file_resolver.zig");
+pub const module_graph = @import("internal/module_graph.zig");
+pub const compiler = @import("internal/compiler.zig");
+pub const types = @import("internal/types.zig");
+
+pub const sql = @import("data/sql.zig");
+
+pub const io = @import("workflow/io.zig");
+pub const scope = @import("workflow/scope.zig");
+pub const durable = @import("workflow/durable.zig");
+
+pub const service = @import("net/service.zig");
+pub const fetch = @import("net/fetch.zig");
+pub const websocket = @import("net/websocket.zig");
 
 pub const ModuleExport = resolver.ModuleExport;
 pub const ResolveResult = resolver.ResolveResult;

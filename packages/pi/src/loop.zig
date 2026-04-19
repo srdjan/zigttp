@@ -345,6 +345,15 @@ fn rejectEdit(_: []const u8) anyerror!bool {
     return false;
 }
 
+// `std.testing.tmpDir` creates `.zig-cache/tmp/<sub_path>/`, but `tmp.sub_path`
+// is only the 16-char random component. Resolving it directly against CWD
+// (the repo root) would create stray `<repo>/<sub_path>/` folders that
+// `tmp.cleanup()` never deletes. Compose the full relative path so writes
+// land inside the real tmp dir.
+fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir) ![]u8 {
+    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+}
+
 const bad_handler =
     "function handler(req: Request): Response { var x = 1; return Response.json({x}); }";
 const clean_handler =
@@ -374,7 +383,9 @@ test "text reply path: user -> model text -> render" {
 test "clean edit path: veto passes and writes file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{tmp.sub_path});
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -395,7 +406,7 @@ test "clean edit path: veto passes and writes file" {
         &registry,
         &tr,
         "add an ok response",
-        .{ .workspace_root = tmp.sub_path[0..] },
+        .{ .workspace_root = workspace_root },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
@@ -411,6 +422,8 @@ test "clean edit path: veto passes and writes file" {
 test "broken edit path: veto fails with diagnostic box" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
 
     var canned: CannedClient = .{ .reply = .{
         .response = .{ .edit = .{
@@ -430,7 +443,7 @@ test "broken edit path: veto fails with diagnostic box" {
         &registry,
         &tr,
         "add a bad handler",
-        .{ .workspace_root = tmp.sub_path[0..], .max_attempts = 1 },
+        .{ .workspace_root = workspace_root, .max_attempts = 1 },
     );
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
@@ -471,7 +484,9 @@ test "tool batch path: invoke_tool_batch -> tool_result -> final model text" {
 test "retry: one bad draft then one good draft lands a proof card" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{tmp.sub_path});
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     const replies = [_]turn.AssistantReply{
@@ -490,7 +505,7 @@ test "retry: one bad draft then one good draft lands a proof card" {
         &registry,
         &tr,
         "add a GET route",
-        .{ .workspace_root = tmp.sub_path[0..] },
+        .{ .workspace_root = workspace_root },
     );
 
     try testing.expectEqual(@as(u8, 2), result.attempt);
@@ -506,7 +521,9 @@ test "retry: one bad draft then one good draft lands a proof card" {
 test "approval callback can block an otherwise verified edit from being written" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{tmp.sub_path});
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -528,7 +545,7 @@ test "approval callback can block an otherwise verified edit from being written"
         &tr,
         "add a GET route",
         .{
-            .workspace_root = tmp.sub_path[0..],
+            .workspace_root = workspace_root,
             .approval_fn = rejectEdit,
         },
     );
