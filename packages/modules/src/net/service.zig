@@ -52,13 +52,6 @@ pub const ServiceState = struct {
         }
         self.services.deinit();
     }
-
-    pub fn sdkDeinit(ptr: *anyopaque) callconv(.c) void {
-        const self: *ServiceState = @ptrCast(@alignCast(ptr));
-        const allocator = self.allocator;
-        self.deinitSelf();
-        allocator.destroy(self);
-    }
 };
 
 pub const binding = sdk.ModuleBinding{
