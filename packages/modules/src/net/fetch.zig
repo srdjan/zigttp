@@ -18,12 +18,6 @@ pub const FetchCallFn = *const fn (
 pub const FetchState = struct {
     runtime_ptr: *anyopaque,
     call_fn: FetchCallFn,
-    allocator: @import("std").mem.Allocator,
-
-    pub fn sdkDeinit(ptr: *anyopaque) callconv(.c) void {
-        const self: *FetchState = @ptrCast(@alignCast(ptr));
-        self.allocator.destroy(self);
-    }
 };
 
 pub const binding = sdk.ModuleBinding{
