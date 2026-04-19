@@ -5,6 +5,12 @@
 //! implementations with zero JS interpretation overhead.
 //! File imports use bytecode concatenation: dependencies are compiled
 //! and executed first, exporting globals that the entry file reads.
+//!
+//! Most module implementations live in the peer `zigttp-modules`
+//! package and are registered via `builtin_modules.zig`. The files
+//! here are the ones that still need zigts-internal access (runtime
+//! callback installState shims, or modules tightly coupled to the
+//! runtime): sql, service, fetch, websocket, io, scope, durable.
 
 pub const resolver = @import("internal/resolver.zig");
 pub const util = @import("internal/util.zig");
@@ -13,28 +19,10 @@ pub const module_graph = @import("internal/module_graph.zig");
 pub const compiler = @import("internal/compiler.zig");
 pub const types = @import("internal/types.zig");
 
-pub const env = @import("platform/env.zig");
-pub const id = @import("platform/id.zig");
-pub const log = @import("platform/log.zig");
-pub const text = @import("platform/text.zig");
-pub const time = @import("platform/time.zig");
-
-pub const crypto = @import("security/crypto.zig");
-pub const auth = @import("security/auth.zig");
-pub const validate = @import("security/validate.zig");
-pub const decode = @import("security/decode.zig");
-
-pub const cache = @import("data/cache.zig");
 pub const sql = @import("data/sql.zig");
-pub const ratelimit = @import("data/ratelimit.zig");
-
-pub const router = @import("http/router.zig");
-pub const http = @import("http/http_mod.zig");
-pub const url = @import("http/url.zig");
 
 pub const io = @import("workflow/io.zig");
 pub const scope = @import("workflow/scope.zig");
-pub const compose = @import("workflow/compose.zig");
 pub const durable = @import("workflow/durable.zig");
 
 pub const service = @import("net/service.zig");
