@@ -596,6 +596,91 @@ pub export fn zigttpSdkParseJson(
     return true;
 }
 
+// SDK module-state envelope. The C-ABI deinit callback SDK modules provide
+// takes only the state pointer (std.mem.Allocator is not C-ABI stable).
+// Zigts wraps the envelope so the Context's internal deinit_fn signature
+// stays unchanged; modules store their own allocator inside their state.
+const SdkStateEnvelope = struct {
+    user_ptr: *anyopaque,
+    sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+    allocator: std.mem.Allocator,
+
+    fn envelopeDeinit(ptr: *anyopaque, _: std.mem.Allocator) void {
+        const env: *SdkStateEnvelope = @ptrCast(@alignCast(ptr));
+        env.sdk_deinit(env.user_ptr);
+        env.allocator.destroy(env);
+    }
+};
+
+pub export fn zigttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque {
+    const ctx = handleToContext(handle);
+    const env = ctx.getModuleState(SdkStateEnvelope, slot) orelse return null;
+    return env.user_ptr;
+}
+
+pub export fn zigttpSdkSetModuleState(
+    handle: *ModuleHandle,
+    slot: usize,
+    user_ptr: *anyopaque,
+    sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+) bool {
+    const ctx = handleToContext(handle);
+    const env = ctx.allocator.create(SdkStateEnvelope) catch return false;
+    env.* = .{ .user_ptr = user_ptr, .sdk_deinit = sdk_deinit, .allocator = ctx.allocator };
+    ctx.setModuleState(slot, env, SdkStateEnvelope.envelopeDeinit);
+    return true;
+}
+
+pub export fn zigttpSdkIsString(val: value.JSValue) bool {
+    return val.isStringOrRope();
+}
+
+pub export fn zigttpSdkIsObject(val: value.JSValue) bool {
+    return val.isObject();
+}
+
+pub export fn zigttpSdkIsArray(val: value.JSValue) bool {
+    return val.isArray();
+}
+
+pub export fn zigttpSdkArrayLength(val: value.JSValue, out: *u32) bool {
+    if (!val.isArray()) return false;
+    const arr = val.toPtr(object.JSObject);
+    out.* = arr.getArrayLength();
+    return true;
+}
+
+pub export fn zigttpSdkArrayGet(handle: *ModuleHandle, arr_val: value.JSValue, index: u32, out: *value.JSValue) bool {
+    _ = handle;
+    if (!arr_val.isArray()) return false;
+    const arr = arr_val.toPtr(object.JSObject);
+    out.* = arr.getIndex(index) orelse return false;
+    return true;
+}
+
+pub export fn zigttpSdkArraySet(handle: *ModuleHandle, arr_val: value.JSValue, index: u32, val: value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    if (!arr_val.isArray()) return false;
+    const arr = arr_val.toPtr(object.JSObject);
+    ctx.setIndexChecked(arr, index, val) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkCreateArray(handle: *ModuleHandle, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    const arr = ctx.createArray() catch return false;
+    out.* = arr.toValue();
+    return true;
+}
+
+pub export fn zigttpSdkStringify(handle: *ModuleHandle, val: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    const http_mod = @import("http.zig");
+    const js_str = http_mod.valueToJsonString(ctx, val) catch return false;
+    out.* = value.JSValue.fromPtr(js_str);
+    return true;
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification

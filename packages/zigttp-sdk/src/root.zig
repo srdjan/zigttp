@@ -13,9 +13,30 @@ pub const JSValue = packed struct(u64) {
     const MIN_TAG_PREFIX: u64 = 0xFFFC;
     const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
 
+    pub const null_val: JSValue = .{ .raw = SPECIAL_PREFIX | 0 };
     pub const undefined_val: JSValue = .{ .raw = SPECIAL_PREFIX | 1 };
     pub const true_val: JSValue = .{ .raw = SPECIAL_PREFIX | 2 };
     pub const false_val: JSValue = .{ .raw = SPECIAL_PREFIX | 3 };
+
+    pub inline fn isNull(self: JSValue) bool {
+        return self.raw == null_val.raw;
+    }
+
+    pub inline fn isUndefined(self: JSValue) bool {
+        return self.raw == undefined_val.raw;
+    }
+
+    pub inline fn isTrue(self: JSValue) bool {
+        return self.raw == true_val.raw;
+    }
+
+    pub inline fn isNullish(self: JSValue) bool {
+        return self.isNull() or self.isUndefined();
+    }
+
+    pub inline fn isNumber(self: JSValue) bool {
+        return self.isInt() or self.isRawDouble();
+    }
 
     pub inline fn isInt(self: JSValue) bool {
         return (self.raw & PREFIX_MASK) == INT_PREFIX;
@@ -172,6 +193,19 @@ extern fn zigttpSdkSha256(data_ptr: [*]const u8, data_len: usize, out: [*]u8) bo
 extern fn zigttpSdkHmacSha256(data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
 extern fn zigttpSdkParseJson(handle: *ModuleHandle, json_ptr: [*]const u8, json_len: usize, out: *JSValue) bool;
 
+pub const StateDeinitFn = *const fn (*anyopaque) callconv(.c) void;
+extern fn zigttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque;
+extern fn zigttpSdkSetModuleState(handle: *ModuleHandle, slot: usize, ptr: *anyopaque, deinit_fn: StateDeinitFn) bool;
+
+extern fn zigttpSdkIsString(val: JSValue) bool;
+extern fn zigttpSdkIsObject(val: JSValue) bool;
+extern fn zigttpSdkIsArray(val: JSValue) bool;
+extern fn zigttpSdkArrayLength(val: JSValue, out: *u32) bool;
+extern fn zigttpSdkArrayGet(handle: *ModuleHandle, arr: JSValue, index: u32, out: *JSValue) bool;
+extern fn zigttpSdkArraySet(handle: *ModuleHandle, arr: JSValue, index: u32, val: JSValue) bool;
+extern fn zigttpSdkCreateArray(handle: *ModuleHandle, out: *JSValue) bool;
+extern fn zigttpSdkStringify(handle: *ModuleHandle, val: JSValue, out: *JSValue) bool;
+
 /// Extract a borrowed string slice from a JSValue. Handles flat, slice,
 /// and leaf rope strings. Returns null for non-string values or
 /// non-flattened concat ropes. Slice is valid for the current call.
@@ -292,6 +326,66 @@ pub fn hmacSha256(
 pub fn parseJson(handle: *ModuleHandle, json: []const u8) RuntimeError!JSValue {
     var out: JSValue = undefined;
     if (!zigttpSdkParseJson(handle, json.ptr, json.len, &out)) return error.RuntimeFailure;
+    return out;
+}
+
+/// Get typed module state from a slot. Returns null if the slot has not
+/// been initialized.
+pub fn getModuleState(handle: *ModuleHandle, comptime T: type, slot: usize) ?*T {
+    const ptr = zigttpSdkGetModuleState(handle, slot) orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+/// Install module state into a slot with a cleanup callback. The callback
+/// receives the state pointer on context teardown; modules typically store
+/// their own allocator in the state struct and free through it.
+pub fn setModuleState(
+    handle: *ModuleHandle,
+    slot: usize,
+    ptr: *anyopaque,
+    deinit_fn: StateDeinitFn,
+) RuntimeError!void {
+    if (!zigttpSdkSetModuleState(handle, slot, ptr, deinit_fn)) return error.OutOfMemory;
+}
+
+pub fn isString(val: JSValue) bool {
+    return zigttpSdkIsString(val);
+}
+
+pub fn isObject(val: JSValue) bool {
+    return zigttpSdkIsObject(val);
+}
+
+pub fn isArray(val: JSValue) bool {
+    return zigttpSdkIsArray(val);
+}
+
+pub fn arrayLength(val: JSValue) ?u32 {
+    var len: u32 = 0;
+    if (!zigttpSdkArrayLength(val, &len)) return null;
+    return len;
+}
+
+pub fn arrayGet(handle: *ModuleHandle, arr: JSValue, index: u32) ?JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkArrayGet(handle, arr, index, &out)) return null;
+    return out;
+}
+
+pub fn arraySet(handle: *ModuleHandle, arr: JSValue, index: u32, val: JSValue) RuntimeError!void {
+    if (!zigttpSdkArraySet(handle, arr, index, val)) return error.RuntimeFailure;
+}
+
+pub fn createArray(handle: *ModuleHandle) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkCreateArray(handle, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Serialize a JSValue to a JSON string.
+pub fn stringify(handle: *ModuleHandle, val: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkStringify(handle, val, &out)) return error.RuntimeFailure;
     return out;
 }
 
