@@ -5,6 +5,49 @@ const std = @import("std");
 const turn = @import("turn.zig");
 const box_widget = @import("tui/widgets/box.zig");
 
+/// Return an allocator-owned copy of `body`, capped at `max` bytes. When
+/// truncation happens, the returned slice ends with a note recording how many
+/// bytes were dropped. Callers always own the result, giving persistence
+/// workers a uniform lifetime regardless of input size.
+///
+/// If `max` is smaller than the truncation suffix itself, the function falls
+/// back to a short fixed marker so it never crashes on tiny `max` values.
+pub fn capToolResultBody(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    max: usize,
+) ![]u8 {
+    if (body.len <= max) return try allocator.dupe(u8, body);
+
+    const suffix_prefix = "\n...[truncated ";
+    const suffix_tail = " bytes]";
+
+    // Render the digit count against an upper bound on dropped bytes so the
+    // suffix width is known before sizing the keep slice. body.len fits in
+    // usize, which prints in at most 20 decimal digits.
+    var num_buf: [20]u8 = undefined;
+    const digits = std.fmt.bufPrint(&num_buf, "{d}", .{body.len}) catch unreachable;
+    const suffix_len = suffix_prefix.len + digits.len + suffix_tail.len;
+
+    if (max < suffix_len) return try allocator.dupe(u8, "...[truncated]");
+
+    const keep = max - suffix_len;
+    const dropped = body.len - keep;
+    const real_digits = std.fmt.bufPrint(&num_buf, "{d}", .{dropped}) catch unreachable;
+    const real_suffix_len = suffix_prefix.len + real_digits.len + suffix_tail.len;
+    const total = keep + real_suffix_len;
+
+    const out = try allocator.alloc(u8, total);
+    @memcpy(out[0..keep], body[0..keep]);
+    @memcpy(out[keep .. keep + suffix_prefix.len], suffix_prefix);
+    @memcpy(
+        out[keep + suffix_prefix.len .. keep + suffix_prefix.len + real_digits.len],
+        real_digits,
+    );
+    @memcpy(out[keep + suffix_prefix.len + real_digits.len ..], suffix_tail);
+    return out;
+}
+
 pub const OwnedToolCall = struct {
     id: []const u8,
     name: []const u8,
@@ -283,6 +326,37 @@ test "every entry variant renders a stable plain-text label" {
     try testing.expect(std.mem.indexOf(u8, out, "tool zigts_expert_meta: {\"ok\":true}\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "proof: contract ok\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "error: ZTS001 unsupported var\n") != null);
+}
+
+test "capToolResultBody returns original body when under the cap" {
+    const out = try capToolResultBody(testing.allocator, "hello", 100);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("hello", out);
+}
+
+test "capToolResultBody returns original body when exactly at the cap" {
+    const out = try capToolResultBody(testing.allocator, "hello", 5);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("hello", out);
+}
+
+test "capToolResultBody truncates with a byte-count suffix when over the cap" {
+    var big: [1000]u8 = undefined;
+    @memset(&big, 'a');
+
+    const out = try capToolResultBody(testing.allocator, &big, 100);
+    defer testing.allocator.free(out);
+
+    try testing.expect(out.len <= 100);
+    try testing.expect(std.mem.indexOf(u8, out, "[truncated") != null);
+
+    // The suffix must encode the exact number of dropped bytes.
+    const suffix_prefix = "\n...[truncated ";
+    const idx = std.mem.indexOf(u8, out, suffix_prefix) orelse return error.TestFailed;
+    const digits_start = idx + suffix_prefix.len;
+    const digits_end = std.mem.indexOfScalarPos(u8, out, digits_start, ' ') orelse return error.TestFailed;
+    const dropped = try std.fmt.parseInt(usize, out[digits_start..digits_end], 10);
+    try testing.expectEqual(big.len - idx, dropped);
 }
 
 test "veto -> turn -> transcript pipeline still lands a proof entry" {
