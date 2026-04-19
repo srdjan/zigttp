@@ -212,6 +212,7 @@ extern fn zigttpSdkStringify(handle: *ModuleHandle, val: JSValue, out: *JSValue)
 extern fn zigttpSdkObjectKeys(handle: *ModuleHandle, obj: JSValue, out: *JSValue) bool;
 extern fn zigttpSdkReadEnv(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, out_ptr: *[*]const u8, out_len: *usize) bool;
 extern fn zigttpSdkAllowsEnv(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
+extern fn zigttpSdkAllowsCacheNamespace(handle: *ModuleHandle, ns_ptr: [*]const u8, ns_len: usize) bool;
 
 /// Extract a borrowed string slice from a JSValue. Handles flat, slice,
 /// and leaf rope strings. Returns null for non-string values or
@@ -238,6 +239,15 @@ pub fn extractInt(val: JSValue) ?i32 {
 pub fn extractFloat(val: JSValue) ?f64 {
     if (val.toInt()) |i| return @floatFromInt(i);
     return val.toFloat();
+}
+
+/// Box a Zig f64 as a JS number, folding safe-integer values into the
+/// int32 tagged representation. Matches the runtime's allocFloat hot path.
+pub fn numberFromF64(v: f64) JSValue {
+    if (!std.math.isNan(v) and !std.math.isInf(v) and @floor(v) == v and v >= -2147483648 and v <= 2147483647) {
+        return JSValue.fromInt(@intFromFloat(v));
+    }
+    return JSValue.fromFloat(v);
 }
 
 /// Allocate a new JS string owned by the runtime GC.
@@ -417,6 +427,11 @@ pub fn readEnv(handle: *ModuleHandle, name: []const u8) ?[]const u8 {
 /// Ask the capability policy whether `env(name)` is permitted.
 pub fn allowsEnv(handle: *ModuleHandle, name: []const u8) bool {
     return zigttpSdkAllowsEnv(handle, name.ptr, name.len);
+}
+
+/// Ask the capability policy whether `cache(namespace)` is permitted.
+pub fn allowsCacheNamespace(handle: *ModuleHandle, ns: []const u8) bool {
+    return zigttpSdkAllowsCacheNamespace(handle, ns.ptr, ns.len);
 }
 
 pub const DataLabel = enum(u3) {
