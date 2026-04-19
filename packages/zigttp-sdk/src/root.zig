@@ -170,6 +170,7 @@ extern fn zigttpSdkResultErrs(handle: *ModuleHandle, payload: JSValue, out: *JSV
 extern fn zigttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator;
 extern fn zigttpSdkSha256(data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
 extern fn zigttpSdkHmacSha256(data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
+extern fn zigttpSdkParseJson(handle: *ModuleHandle, json_ptr: [*]const u8, json_len: usize, out: *JSValue) bool;
 
 /// Extract a borrowed string slice from a JSValue. Handles flat, slice,
 /// and leaf rope strings. Returns null for non-string values or
@@ -285,6 +286,13 @@ pub fn hmacSha256(
 ) ModuleCapabilityError!void {
     _ = handle;
     if (!zigttpSdkHmacSha256(data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
+}
+
+/// Parse a JSON string into a JSValue owned by the runtime GC.
+pub fn parseJson(handle: *ModuleHandle, json: []const u8) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkParseJson(handle, json.ptr, json.len, &out)) return error.RuntimeFailure;
+    return out;
 }
 
 pub const DataLabel = enum(u3) {

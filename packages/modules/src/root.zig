@@ -9,13 +9,18 @@ pub const internal = struct {
 
 pub const security = struct {
     pub const crypto = @import("security/crypto.zig");
+    pub const auth = @import("security/auth.zig");
 };
 
 comptime {
-    sdk.validateBindings(&.{security.crypto.binding});
+    sdk.validateBindings(&.{
+        security.crypto.binding,
+        security.auth.binding,
+    });
 }
 
 test {
     _ = internal.util;
     _ = security.crypto;
+    _ = security.auth;
 }

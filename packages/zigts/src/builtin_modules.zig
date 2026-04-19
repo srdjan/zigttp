@@ -77,7 +77,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:env", .module_path = "packages/zigts/src/modules/platform/env.zig", .spec_path = "packages/zigts/module-specs/platform/env.json" },
     .{ .specifier = "zigttp:crypto", .module_path = "packages/modules/src/security/crypto.zig", .spec_path = "packages/zigts/module-specs/security/crypto.json" },
     .{ .specifier = "zigttp:router", .module_path = "packages/zigts/src/modules/http/router.zig", .spec_path = "packages/zigts/module-specs/http/router.json" },
-    .{ .specifier = "zigttp:auth", .module_path = "packages/zigts/src/modules/security/auth.zig", .spec_path = "packages/zigts/module-specs/security/auth.json" },
+    .{ .specifier = "zigttp:auth", .module_path = "packages/modules/src/security/auth.zig", .spec_path = "packages/zigts/module-specs/security/auth.json" },
     .{ .specifier = "zigttp:validate", .module_path = "packages/zigts/src/modules/security/validate.zig", .spec_path = "packages/zigts/module-specs/security/validate.json" },
     .{ .specifier = "zigttp:decode", .module_path = "packages/zigts/src/modules/security/decode.zig", .spec_path = "packages/zigts/module-specs/security/decode.json" },
     .{ .specifier = "zigttp:cache", .module_path = "packages/zigts/src/modules/data/cache.zig", .spec_path = "packages/zigts/module-specs/data/cache.json" },
