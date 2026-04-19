@@ -10,7 +10,7 @@ const context = @import("../../context.zig");
 const object = @import("../../object.zig");
 const value = @import("../../value.zig");
 const mb = @import("../../module_binding.zig");
-const util = @import("../util.zig");
+const util = @import("../internal/util.zig");
 const validate = @import("validate.zig");
 
 pub const binding = mb.ModuleBinding{

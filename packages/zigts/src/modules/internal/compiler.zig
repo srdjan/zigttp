@@ -6,17 +6,17 @@
 
 const std = @import("std");
 const module_graph = @import("module_graph.zig");
-const zts_parser = @import("../parser/root.zig");
-const context = @import("../context.zig");
-const string = @import("../string.zig");
-const bytecode = @import("../bytecode.zig");
-const object = @import("../object.zig");
+const zts_parser = @import("../../parser/root.zig");
+const context = @import("../../context.zig");
+const string = @import("../../string.zig");
+const bytecode = @import("../../bytecode.zig");
+const object = @import("../../object.zig");
 
 pub const CompiledModule = struct {
     func: bytecode.FunctionBytecode,
     shapes: []const []const object.Atom,
     local_count: u8,
-    constants: []const @import("../value.zig").JSValue,
+    constants: []const @import("../../value.zig").JSValue,
     root: zts_parser.NodeIndex,
 };
 

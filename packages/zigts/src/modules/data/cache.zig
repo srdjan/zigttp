@@ -25,8 +25,8 @@ const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const object = @import("../../object.zig");
 const string = @import("../../string.zig");
-const resolver = @import("../resolver.zig");
-const util = @import("../util.zig");
+const resolver = @import("../internal/resolver.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.cache);

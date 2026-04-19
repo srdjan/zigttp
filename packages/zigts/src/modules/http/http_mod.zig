@@ -23,7 +23,7 @@ const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const object = @import("../../object.zig");
-const util = @import("../util.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 pub const binding = mb.ModuleBinding{

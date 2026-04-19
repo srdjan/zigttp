@@ -19,8 +19,8 @@ const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const object = @import("../../object.zig");
-const resolver = @import("../resolver.zig");
-const util = @import("../util.zig");
+const resolver = @import("../internal/resolver.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 /// Maximum number of concurrent operations in a single parallel/race call.

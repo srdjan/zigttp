@@ -6,12 +6,12 @@
 //! File imports use bytecode concatenation: dependencies are compiled
 //! and executed first, exporting globals that the entry file reads.
 
-pub const resolver = @import("resolver.zig");
-pub const util = @import("util.zig");
-pub const file_resolver = @import("file_resolver.zig");
-pub const module_graph = @import("module_graph.zig");
-pub const compiler = @import("compiler.zig");
-pub const types = @import("types.zig");
+pub const resolver = @import("internal/resolver.zig");
+pub const util = @import("internal/util.zig");
+pub const file_resolver = @import("internal/file_resolver.zig");
+pub const module_graph = @import("internal/module_graph.zig");
+pub const compiler = @import("internal/compiler.zig");
+pub const types = @import("internal/types.zig");
 
 pub const env = @import("platform/env.zig");
 pub const id = @import("platform/id.zig");

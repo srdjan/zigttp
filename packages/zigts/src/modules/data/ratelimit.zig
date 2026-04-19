@@ -14,7 +14,7 @@ const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const builtins_helpers = @import("../../builtins/helpers.zig");
-const util = @import("../util.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.ratelimit);

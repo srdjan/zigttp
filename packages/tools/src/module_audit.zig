@@ -659,7 +659,7 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
 test "verifyPaths ignores internal helper files outside the public built-in set" {
     var result = try verifyPaths(
         std.testing.allocator,
-        &.{"packages/zigts/src/modules/util.zig"},
+        &.{"packages/zigts/src/modules/internal/util.zig"},
         .{},
     );
     defer result.deinit(std.testing.allocator);

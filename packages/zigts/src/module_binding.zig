@@ -19,7 +19,7 @@ const context = @import("context.zig");
 const compat = @import("compat.zig");
 const file_io = @import("file_io.zig");
 const sqlite_runtime = @import("sqlite.zig");
-const resolver = @import("modules/resolver.zig");
+const resolver = @import("modules/internal/resolver.zig");
 const security_events = @import("security_events.zig");
 
 // Re-export EffectClass from resolver for backward compatibility
@@ -161,35 +161,35 @@ pub fn extractFloat(val: value.JSValue) ?f64 {
 /// Create a Result object: { ok: true, value: payload }
 pub fn resultOk(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultOk(ctx, payload);
 }
 
 /// Create a Result object: { ok: false, error: message }
 pub fn resultErr(handle: *ModuleHandle, message: []const u8) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultErr(ctx, message);
 }
 
 /// Create a Result object: { ok: false, error: payload }
 pub fn resultErrValue(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultErrValue(ctx, payload);
 }
 
 /// Create a Result object: { ok: false, errors: payload }
 pub fn resultErrs(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultErrs(ctx, payload);
 }
 
 /// Throw a JS error. Sets ctx.exception and returns exception_val.
 pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.throwError(ctx, name, message);
 }
 

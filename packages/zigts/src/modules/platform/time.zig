@@ -16,7 +16,7 @@
 const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
-const util = @import("../util.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 const epoch = std.time.epoch;

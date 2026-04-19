@@ -5,11 +5,11 @@
 //! explicitly registered packaged extensions live under `zigttp-ext:*`.
 
 const std = @import("std");
-const object = @import("../object.zig");
-const context = @import("../context.zig");
-const trace = @import("../trace.zig");
-const mb = @import("../module_binding.zig");
-const builtin_modules = @import("../builtin_modules.zig");
+const object = @import("../../object.zig");
+const context = @import("../../context.zig");
+const trace = @import("../../trace.zig");
+const mb = @import("../../module_binding.zig");
+const builtin_modules = @import("../../builtin_modules.zig");
 
 /// Effect classification for virtual module functions.
 /// Used by the contract builder to derive handler-level properties
