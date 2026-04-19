@@ -30,6 +30,10 @@ pub const JSValue = packed struct(u64) {
         return self.raw == true_val.raw;
     }
 
+    pub inline fn isFalse(self: JSValue) bool {
+        return self.raw == false_val.raw;
+    }
+
     pub inline fn isNullish(self: JSValue) bool {
         return self.isNull() or self.isUndefined();
     }
@@ -205,6 +209,9 @@ extern fn zigttpSdkArrayGet(handle: *ModuleHandle, arr: JSValue, index: u32, out
 extern fn zigttpSdkArraySet(handle: *ModuleHandle, arr: JSValue, index: u32, val: JSValue) bool;
 extern fn zigttpSdkCreateArray(handle: *ModuleHandle, out: *JSValue) bool;
 extern fn zigttpSdkStringify(handle: *ModuleHandle, val: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkObjectKeys(handle: *ModuleHandle, obj: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkReadEnv(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, out_ptr: *[*]const u8, out_len: *usize) bool;
+extern fn zigttpSdkAllowsEnv(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
 
 /// Extract a borrowed string slice from a JSValue. Handles flat, slice,
 /// and leaf rope strings. Returns null for non-string values or
@@ -387,6 +394,29 @@ pub fn stringify(handle: *ModuleHandle, val: JSValue) RuntimeError!JSValue {
     var out: JSValue = undefined;
     if (!zigttpSdkStringify(handle, val, &out)) return error.RuntimeFailure;
     return out;
+}
+
+/// Return the own enumerable property keys of an object as a JS array of
+/// strings. Iterate via `arrayLength` + `arrayGet`.
+pub fn objectKeys(handle: *ModuleHandle, obj: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkObjectKeys(handle, obj, &out)) return error.RuntimeFailure;
+    return out;
+}
+
+/// Read an environment variable through the capability-policy gate.
+/// Returns null when unset or when policy denies. The slice is valid for
+/// the current call.
+pub fn readEnv(handle: *ModuleHandle, name: []const u8) ?[]const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkReadEnv(handle, name.ptr, name.len, &ptr, &len)) return null;
+    return ptr[0..len];
+}
+
+/// Ask the capability policy whether `env(name)` is permitted.
+pub fn allowsEnv(handle: *ModuleHandle, name: []const u8) bool {
+    return zigttpSdkAllowsEnv(handle, name.ptr, name.len);
 }
 
 pub const DataLabel = enum(u3) {

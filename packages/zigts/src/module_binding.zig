@@ -681,6 +681,52 @@ pub export fn zigttpSdkStringify(handle: *ModuleHandle, val: value.JSValue, out:
     return true;
 }
 
+pub export fn zigttpSdkObjectKeys(handle: *ModuleHandle, obj_val: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    if (!obj_val.isObject()) return false;
+    const obj = obj_val.toPtr(object.JSObject);
+    const pool = ctx.hidden_class_pool orelse return false;
+
+    const atoms = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return false;
+    defer ctx.allocator.free(atoms);
+
+    const arr = ctx.createArray() catch return false;
+    for (atoms, 0..) |atom, i| {
+        const name = util_mod.atomToString(atom, &ctx.atoms) orelse continue;
+        const name_val = ctx.createString(name) catch return false;
+        ctx.setIndexChecked(arr, @intCast(i), name_val) catch return false;
+    }
+    out.* = arr.toValue();
+    return true;
+}
+
+pub export fn zigttpSdkReadEnv(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) bool {
+    _ = handle;
+    if (name_len >= 256) return false;
+    var buf: [256]u8 = undefined;
+    @memcpy(buf[0..name_len], name_ptr[0..name_len]);
+    buf[name_len] = 0;
+    const result = readEnvChecked(buf[0..name_len :0]) orelse return false;
+    out_ptr.* = result.ptr;
+    out_len.* = result.len;
+    return true;
+}
+
+pub export fn zigttpSdkAllowsEnv(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsEnvChecked(ctx, name_ptr[0..name_len]);
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification
