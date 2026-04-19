@@ -75,6 +75,18 @@ pub const DiagnosticKind = enum {
 
     // State isolation (Check 7)
     module_scope_mutation,
+
+    // WebSocket event exports (Check 8)
+    /// Handler imports `zigttp:websocket` but does not export
+    /// `onMessage`. The module surface is useless without at least
+    /// one event handler — the import almost certainly reflects an
+    /// unfinished refactor.
+    websocket_import_without_events,
+    /// Handler exports at least one of `onOpen` / `onMessage` /
+    /// `onClose` but does not import `zigttp:websocket`. The exports
+    /// would be dispatched by the runtime but `send`/`close`/etc.
+    /// are unreachable without the import.
+    websocket_events_without_import,
 };
 
 pub const Diagnostic = struct {
