@@ -11,6 +11,7 @@ pub const extractString = sdk.extractString;
 pub const extractInt = sdk.extractInt;
 pub const extractFloat = sdk.extractFloat;
 pub const createString = sdk.createString;
+pub const getAllocator = sdk.getAllocator;
 pub const createObject = sdk.createObject;
 pub const objectSet = sdk.objectSet;
 pub const objectGet = sdk.objectGet;
