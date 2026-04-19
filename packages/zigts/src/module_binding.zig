@@ -584,6 +584,18 @@ pub export fn zigttpSdkHmacSha256(
     return true;
 }
 
+pub export fn zigttpSdkParseJson(
+    handle: *ModuleHandle,
+    json_ptr: [*]const u8,
+    json_len: usize,
+    out: *value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    const json = @import("builtins/json.zig");
+    out.* = json.parseJsonValue(ctx, json_ptr[0..json_len]) catch return false;
+    return true;
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification
