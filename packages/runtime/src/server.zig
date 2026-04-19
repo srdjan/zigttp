@@ -571,6 +571,7 @@ const ConnectionPool = struct {
             .io = self.server.io_backend.io(),
             .fd = fd,
             .id = id,
+            .alloc = self.server.allocator,
             .echo = handler_pool_ptr == null,
             .handler_pool = handler_pool_ptr,
         };
