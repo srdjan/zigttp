@@ -9,9 +9,9 @@ const file_resolver = @import("file_resolver.zig");
 const resolver = @import("resolver.zig");
 
 // Engine types
-const zts_parser = @import("../parser/root.zig");
-const context = @import("../context.zig");
-const stripper = @import("../stripper.zig");
+const zts_parser = @import("../../parser/root.zig");
+const context = @import("../../context.zig");
+const stripper = @import("../../stripper.zig");
 
 pub const ModuleIndex = u16;
 

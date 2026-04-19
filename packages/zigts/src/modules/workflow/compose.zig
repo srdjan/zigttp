@@ -15,7 +15,7 @@
 //! desugared code. Native functions exist only for import validation.
 
 const value = @import("../../value.zig");
-const resolver = @import("../resolver.zig");
+const resolver = @import("../internal/resolver.zig");
 const mb = @import("../../module_binding.zig");
 
 pub const binding = mb.ModuleBinding{

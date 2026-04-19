@@ -12,8 +12,8 @@
 const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
-const resolver = @import("../resolver.zig");
-const util = @import("../util.zig");
+const resolver = @import("../internal/resolver.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 pub const binding = mb.ModuleBinding{

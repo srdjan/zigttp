@@ -12,7 +12,7 @@
 const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
-const util = @import("../util.zig");
+const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
 pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.scope);

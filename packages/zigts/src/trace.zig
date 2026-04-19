@@ -13,7 +13,7 @@ const context = @import("context.zig");
 const value = @import("value.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
-const util = @import("modules/util.zig");
+const util = @import("modules/internal/util.zig");
 
 const module_slots = @import("module_slots.zig");
 

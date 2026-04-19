@@ -5,12 +5,12 @@
 //! these patterns.
 
 const std = @import("std");
-const context = @import("../context.zig");
-const value = @import("../value.zig");
-const builtins_helpers = @import("../builtins/helpers.zig");
-const string = @import("../string.zig");
-const object = @import("../object.zig");
-const arena_mod = @import("../arena.zig");
+const context = @import("../../context.zig");
+const value = @import("../../value.zig");
+const builtins_helpers = @import("../../builtins/helpers.zig");
+const string = @import("../../string.zig");
+const object = @import("../../object.zig");
+const arena_mod = @import("../../arena.zig");
 
 /// Cast an opaque NativeFn context pointer to *Context.
 pub fn castContext(ctx_ptr: *anyopaque) *context.Context {
