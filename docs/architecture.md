@@ -167,7 +167,7 @@ synchronous and linear. When a handler needs concurrent outbound HTTP, it uses
 `parallel()` or `race()` from `zigttp:io`. Concurrency happens entirely in the
 I/O layer, invisible to the JavaScript execution model.
 
-**Three-phase collect-execute-join model** (`packages/zigts/src/modules/io.zig`,
+**Three-phase collect-execute-join model** (`packages/zigts/src/modules/workflow/io.zig`,
 `packages/runtime/src/zruntime.zig`):
 
 1. **Collect**: Each thunk is called sequentially on the main thread. A
@@ -296,15 +296,28 @@ zigttp/
 │   │       ├── durable_recovery.zig # Durable execution crash recovery
 │   │       ├── durable_store.zig    # Signal persistence backend
 │   │       └── durable_scheduler.zig # Background scheduler for durable waits
-│   └── tools/                   # CLI tools and build-time utilities
+│   ├── tools/                   # CLI tools and build-time utilities
+│   │   └── src/
+│   │       ├── precompile.zig       # Build-time bytecode compiler
+│   │       ├── zigts_cli.zig        # CLI dispatcher for zigts subcommands
+│   │       ├── expert.zig           # shared helpers for meta / verify-paths / verify-modules
+│   │       ├── edit_simulate.zig    # Diff-aware violation analysis
+│   │       ├── review_patch.zig     # Patch review with --diff-only filtering
+│   │       ├── deploy_manifest.zig  # Proven deployment manifest generator
+│   │       └── openapi_manifest.zig # OpenAPI spec generator
+│   ├── zigttp-sdk/              # Peer-package SDK: ModuleHandle, JSValue,
+│   │   └── src/root.zig         # capability-gated helpers, ModuleBinding types
+│   └── modules/                 # Virtual modules that depend only on the SDK
+│       ├── module-specs/            # JSON spec files per module
 │       └── src/
-│           ├── precompile.zig       # Build-time bytecode compiler
-│           ├── zigts_cli.zig        # CLI dispatcher for zigts subcommands
-│           ├── expert.zig           # shared helpers for meta / verify-paths / verify-modules
-│           ├── edit_simulate.zig    # Diff-aware violation analysis
-│           ├── review_patch.zig     # Patch review with --diff-only filtering
-│           ├── deploy_manifest.zig  # Proven deployment manifest generator
-│           └── openapi_manifest.zig # OpenAPI spec generator
+│           ├── root.zig             # Registers all ported bindings
+│           ├── internal/util.zig    # Shared throwers
+│           ├── security/            # crypto, auth, validate, decode
+│           ├── platform/            # env, id, text, time, log
+│           ├── http/                # router, url, http_mod
+│           ├── data/                # ratelimit, cache, sql
+│           ├── net/                 # fetch, service, websocket
+│           └── workflow/            # compose
 └── examples/
     ├── handler/           # Basic handler variants (TS, TSX)
     ├── jsx/               # JSX rendering demos
@@ -375,12 +388,12 @@ When no explicit `--policy` file is provided, the precompiler auto-derives a `Ru
 - `packages/zigts/src/handler_contract.zig` - `ContractBuilder` extracts proven facts from IR
 - `packages/zigts/src/handler_policy.zig` - `contractToRuntimePolicy()` converts contract to policy; `RuntimePolicy` enforces at runtime
 - `packages/tools/src/precompile.zig` - `validateSqlContract()` proves registered SQL against a schema snapshot and embeds the derived policy in generated code
-- `packages/zigts/src/modules/sql.zig` / `packages/zigts/src/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
+- `packages/modules/src/data/sql.zig` + `packages/zigts/src/modules/data/sql.zig` (installStore shim) / `packages/zigts/src/sqlite.zig` - runtime SQL execution over SQLite with named-query allowlisting
 
 **Enforcement points** (activated by the embedded policy and contract):
-- `packages/zigts/src/modules/env.zig` - `allowsEnv()` check on env var access
-- `packages/zigts/src/modules/cache.zig` - `allowsCacheNamespace()` on cache operations
-- `packages/zigts/src/modules/sql.zig` - `allowsSqlQuery()` on registered query execution
+- `packages/modules/src/platform/env.zig` - `allowsEnv()` check on env var access
+- `packages/modules/src/data/cache.zig` - `allowsCacheNamespace()` on cache operations
+- `packages/modules/src/data/sql.zig` - `allowsSqlQuery()` on registered query execution
 - `packages/runtime/src/zruntime.zig` - `allowsEgressHost()` on outbound HTTP
 - `packages/runtime/src/contract_runtime.zig` - startup env var validation, route pre-filtering
 - `packages/runtime/src/server.zig` - route pre-filter rejects unproven method+path at HTTP layer
@@ -415,8 +428,10 @@ Properties appear in contract.json, the build report (PROVEN/--- labels), AWS SA
 **Key files**:
 - `packages/zigts/src/module_binding.zig` - `ModuleBinding`, `FunctionBinding`, `ModuleHandle`, `ModuleCapability`, `validateBindings()`, capability-checked helpers (`clockNowMsChecked`, `fillRandomChecked`, `hmacSha256Checked`, `writeStderrChecked`, `readFileChecked`, etc.), threadlocal `ActiveModuleContext` push/pop for call-scoped enforcement
 - `packages/zigts/src/builtin_modules.zig` - registry of all built-in bindings with comptime validation (unique specifiers, unique function names, duplicate capability detection)
-- `packages/zigts/src/modules/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
+- `packages/zigts/src/modules/internal/resolver.zig` - `wrappedExportFn()` injects the capability context wrapper per export, with a comptime short-circuit for modules declaring no capabilities
 - `packages/zigts/src/module_binding_adapter.zig` - adapts SDK `ModuleBinding` to internal types with ordinal-alignment comptime assertions for `ModuleCapability`
+- `packages/zigttp-sdk/src/root.zig` - peer-package SDK surface (`ModuleHandle`, `JSValue`, `ModuleBinding`, `FunctionBinding`, capability helpers, object/array/string ops, SQLite bridge)
+- `packages/modules/src/` - per-module implementations that depend only on the SDK
 - `packages/zigts/src/handler_contract.zig` - `GenericBinding`, `getCategoryTarget()`, `computeEffectSummary()`, `computeProperties()`
 - `packages/tools/src/deploy_manifest.zig` - `ProvenFacts.retry_safe`/`read_only`, AWS tag emission
 - `packages/tools/src/openapi_manifest.zig` - `x-zigttp-properties` extension

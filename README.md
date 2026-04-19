@@ -159,6 +159,14 @@ See [examples/htmx-todo/](examples/htmx-todo/) for a complete HTMX application.
 
 zigttp provides native virtual modules via `import { ... } from "zigttp:*"` syntax. These run as native Zig code with zero JS interpretation overhead.
 
+Most modules live in their own peer package `packages/modules/`, depending
+only on `packages/zigttp-sdk/`. The zigts engine imports the module
+bindings at comptime and adapts them through `module_binding_adapter.zig`.
+A handful of modules (`io`, `scope`, `durable`, plus the install-shim
+portions of `sql`, `fetch`, `service`, `websocket`) still live in
+`packages/zigts/src/modules/` because they require direct runtime
+integration (GC roots, threadlocal fetch state, runtime bootstrap).
+
 ### Available Modules
 
 Modules are grouped by role; each cell in the Module column links to
