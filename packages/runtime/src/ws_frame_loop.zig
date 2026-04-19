@@ -61,6 +61,10 @@ pub const Config = struct {
     io: Io,
     fd: std.posix.fd_t,
     id: ConnectionId,
+    /// Allocator for per-frame short-lived work (currently the
+    /// auto-response byte copy). The frame loop frees every allocation
+    /// it makes before the next read.
+    alloc: std.mem.Allocator,
     /// Echo each inbound message back to the sender in Zig. Used as a
     /// fallback path and in tests; live handlers set this to false so
     /// inbound frames flow into the `onMessage` JS export instead.
@@ -141,9 +145,20 @@ pub fn run(cfg: Config) void {
                 if (cfg.echo) {
                     ws.writeMessage(msg.data, msg.opcode) catch return;
                 } else if (cfg.handler_pool) |pool| {
-                    dispatchOnMessage(pool, cfg.pool, cfg.id, msg.data) catch |err| {
-                        std.log.warn("ws onMessage dispatch failed (id={d}): {}", .{ cfg.id, err });
-                    };
+                    // Codec-level short-circuit: if the handler registered
+                    // a canned response for exactly these bytes, write it
+                    // and skip the JS dispatch entirely. Used for
+                    // heartbeat-style request/reply pairs that would
+                    // otherwise pay the full runtime-borrow cost.
+                    const auto = cfg.pool.tryAutoResponse(cfg.id, msg.data, cfg.alloc) catch null;
+                    if (auto) |response_bytes| {
+                        defer cfg.alloc.free(response_bytes);
+                        ws.writeMessage(response_bytes, msg.opcode) catch return;
+                    } else {
+                        dispatchOnMessage(pool, cfg.pool, cfg.id, msg.data) catch |err| {
+                            std.log.warn("ws onMessage dispatch failed (id={d}): {}", .{ cfg.id, err });
+                        };
+                    }
                 }
             },
             .pong => {

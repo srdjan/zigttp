@@ -4013,9 +4013,29 @@ fn wsSetAutoResponseCallback(
     ctx: *zq.Context,
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    _ = args;
-    return zq.modules.util.throwError(ctx, "Error", "setAutoResponse lands in W2");
+    if (args.len < 3) {
+        return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse(ws, request, response) requires 3 arguments");
+    }
+    const pool = wsPoolFromRuntime(runtime_ptr) orelse {
+        return zq.modules.util.throwError(ctx, "Error", "zigttp:websocket not bound to an active server");
+    };
+    const id = wsConnectionIdFromArg(args[0]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "ws argument must be a connection id");
+    };
+    const request_bytes = zq.modules.util.extractString(args[1]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse request must be a string");
+    };
+    const response_bytes = zq.modules.util.extractString(args[2]) orelse {
+        return zq.modules.util.throwError(ctx, "TypeError", "setAutoResponse response must be a string");
+    };
+    const ok = pool.setAutoResponse(id, request_bytes, response_bytes) catch |err| {
+        std.log.warn("ws setAutoResponse failed (id={d}): {}", .{ id, err });
+        return zq.modules.util.throwError(ctx, "Error", "auto-response registration failed");
+    };
+    if (!ok) {
+        return zq.modules.util.throwError(ctx, "Error", "ws connection no longer registered");
+    }
+    return zq.JSValue.undefined_val;
 }
 
 fn serviceCallCallback(

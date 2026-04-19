@@ -58,6 +58,12 @@ pub const Connection = struct {
     /// handler via `serializeAttachment` and read back via
     /// `deserializeAttachment`. null until first write.
     attachment: ?[]u8 = null,
+    /// Registered request/response pair for codec-level auto-reply.
+    /// When an inbound text frame's bytes match `auto_request` exactly,
+    /// the frame loop writes `auto_response` back without waking the
+    /// JS handler. Both are allocator-owned; null when unset.
+    auto_request: ?[]u8 = null,
+    auto_response: ?[]u8 = null,
 };
 
 pub const Pool = struct {
@@ -108,6 +114,8 @@ pub const Pool = struct {
             const conn = entry.value_ptr.*;
             self.allocator.free(conn.room);
             if (conn.attachment) |bytes| self.allocator.free(bytes);
+            if (conn.auto_request) |bytes| self.allocator.free(bytes);
+            if (conn.auto_response) |bytes| self.allocator.free(bytes);
             self.allocator.destroy(conn);
         }
         self.by_id.deinit(self.allocator);
@@ -150,6 +158,8 @@ pub const Pool = struct {
             .state = .parked,
             .last_frame_at_ms = now_ms,
             .attachment = null,
+            .auto_request = null,
+            .auto_response = null,
         };
 
         try self.by_id.put(self.allocator, id, conn);
@@ -174,6 +184,8 @@ pub const Pool = struct {
         self.removeFromRoomLocked(conn.room, id);
         self.allocator.free(conn.room);
         if (conn.attachment) |bytes| self.allocator.free(bytes);
+        if (conn.auto_request) |bytes| self.allocator.free(bytes);
+        if (conn.auto_response) |bytes| self.allocator.free(bytes);
         self.allocator.destroy(conn);
 
         if (self.attachments_dir) |dir| deleteAttachmentFile(dir, id);
@@ -247,6 +259,63 @@ pub const Pool = struct {
         const conn = self.by_id.get(id) orelse return null;
         const bytes = conn.attachment orelse return null;
         return try out_allocator.dupe(u8, bytes);
+    }
+
+    /// Register a codec-level auto-reply for this connection: when an
+    /// inbound text frame's bytes exactly match `request_bytes`, the
+    /// frame loop writes `response_bytes` back without dispatching to
+    /// the JS handler. Calling again replaces the prior pair.
+    /// Returns `false` if the id no longer exists. Pass empty slices
+    /// to clear (the pool retains null-state).
+    pub fn setAutoResponse(
+        self: *Pool,
+        id: ConnectionId,
+        request_bytes: []const u8,
+        response_bytes: []const u8,
+    ) !bool {
+        self.lock();
+        defer self.unlockLock();
+        const conn = self.by_id.get(id) orelse return false;
+
+        if (request_bytes.len == 0 and response_bytes.len == 0) {
+            if (conn.auto_request) |prev| self.allocator.free(prev);
+            if (conn.auto_response) |prev| self.allocator.free(prev);
+            conn.auto_request = null;
+            conn.auto_response = null;
+            return true;
+        }
+
+        const req_owned = try self.allocator.dupe(u8, request_bytes);
+        errdefer self.allocator.free(req_owned);
+        const resp_owned = try self.allocator.dupe(u8, response_bytes);
+        errdefer self.allocator.free(resp_owned);
+
+        if (conn.auto_request) |prev| self.allocator.free(prev);
+        if (conn.auto_response) |prev| self.allocator.free(prev);
+        conn.auto_request = req_owned;
+        conn.auto_response = resp_owned;
+        return true;
+    }
+
+    /// If the connection has a registered auto-response matching
+    /// `data`, return an allocator-owned copy of the stored response
+    /// bytes. The copy is so the caller can drop the pool lock before
+    /// doing the socket write — the live slice would otherwise be
+    /// invalidated if another thread called `setAutoResponse` or
+    /// `unregister` concurrently.
+    pub fn tryAutoResponse(
+        self: *Pool,
+        id: ConnectionId,
+        data: []const u8,
+        out_allocator: std.mem.Allocator,
+    ) !?[]u8 {
+        self.lock();
+        defer self.unlockLock();
+        const conn = self.by_id.get(id) orelse return null;
+        const req = conn.auto_request orelse return null;
+        const resp = conn.auto_response orelse return null;
+        if (!std.mem.eql(u8, req, data)) return null;
+        return try out_allocator.dupe(u8, resp);
     }
 
     /// Update lifecycle metadata for a single connection. Returns
@@ -678,4 +747,43 @@ test "adoptPersistedAttachment migrates bytes onto a new connection" {
 
     // Adoption of a missing prior id is a safe `false`.
     try testing.expect(!(try pool.adoptPersistedAttachment(new_id, 9999)));
+}
+
+test "setAutoResponse stores and tryAutoResponse matches exactly" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    const id = try pool.register(100, "alpha", 1000);
+
+    // No auto-response yet.
+    try testing.expect((try pool.tryAutoResponse(id, "ping", testing.allocator)) == null);
+
+    try testing.expect(try pool.setAutoResponse(id, "ping", "pong"));
+
+    // Exact match returns a caller-owned copy.
+    const resp = (try pool.tryAutoResponse(id, "ping", testing.allocator)) orelse
+        return error.TestFailed;
+    defer testing.allocator.free(resp);
+    try testing.expectEqualStrings("pong", resp);
+
+    // Mismatched input: nothing returned.
+    try testing.expect((try pool.tryAutoResponse(id, "other", testing.allocator)) == null);
+
+    // Replacing with a fresh pair works and frees the old bytes.
+    try testing.expect(try pool.setAutoResponse(id, "heartbeat", "alive"));
+    try testing.expect((try pool.tryAutoResponse(id, "ping", testing.allocator)) == null);
+    const resp2 = (try pool.tryAutoResponse(id, "heartbeat", testing.allocator)) orelse
+        return error.TestFailed;
+    defer testing.allocator.free(resp2);
+    try testing.expectEqualStrings("alive", resp2);
+
+    // Clearing with empty pair removes the auto-response.
+    try testing.expect(try pool.setAutoResponse(id, "", ""));
+    try testing.expect((try pool.tryAutoResponse(id, "heartbeat", testing.allocator)) == null);
+}
+
+test "setAutoResponse returns false for missing id" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+    try testing.expect(!(try pool.setAutoResponse(9999, "a", "b")));
 }
