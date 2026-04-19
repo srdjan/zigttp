@@ -60,7 +60,6 @@ pub fn installState(ctx: *context.Context, callbacks: WebSocketCallbacks) !void 
         .callbacks = callbacks,
         .base = .{
             .runtime_ptr = @ptrCast(installed),
-            .allocator = ctx.allocator,
             .send_fn = InstalledState.sdkDispatch("send_fn"),
             .close_fn = InstalledState.sdkDispatch("close_fn"),
             .serialize_attachment_fn = InstalledState.sdkDispatch("serialize_attachment_fn"),
@@ -73,8 +72,8 @@ pub fn installState(ctx: *context.Context, callbacks: WebSocketCallbacks) !void 
     ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(&installed.base), &stateDeinitAdapter);
 }
 
-fn stateDeinitAdapter(ptr: *anyopaque, _: std.mem.Allocator) void {
+fn stateDeinitAdapter(ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const base: *ws_module.WebSocketCallbacks = @ptrCast(@alignCast(ptr));
     const installed: *InstalledState = @fieldParentPtr("base", base);
-    base.allocator.destroy(installed);
+    allocator.destroy(installed);
 }

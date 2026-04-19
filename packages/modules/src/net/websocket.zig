@@ -17,7 +17,6 @@ pub const WsCallFn = *const fn (
 
 pub const WebSocketCallbacks = struct {
     runtime_ptr: *anyopaque,
-    allocator: std.mem.Allocator,
     send_fn: WsCallFn,
     close_fn: WsCallFn,
     serialize_attachment_fn: WsCallFn,
@@ -25,11 +24,6 @@ pub const WebSocketCallbacks = struct {
     get_web_sockets_fn: WsCallFn,
     room_from_path_fn: WsCallFn,
     set_auto_response_fn: WsCallFn,
-
-    pub fn sdkDeinit(ptr: *anyopaque) callconv(.c) void {
-        const self: *WebSocketCallbacks = @ptrCast(@alignCast(ptr));
-        self.allocator.destroy(self);
-    }
 };
 
 pub const binding = sdk.ModuleBinding{
