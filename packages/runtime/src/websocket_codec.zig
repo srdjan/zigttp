@@ -80,10 +80,10 @@ pub fn validateUpgrade(headers: []const http_types.HttpHeader) UpgradeError!Upgr
     var key_header: ?[]const u8 = null;
 
     for (headers) |h| {
-        if (asciiEqlCaseInsensitive(h.key, "upgrade")) upgrade_header = h.value;
-        if (asciiEqlCaseInsensitive(h.key, "connection")) connection_header = h.value;
-        if (asciiEqlCaseInsensitive(h.key, "sec-websocket-version")) version_header = h.value;
-        if (asciiEqlCaseInsensitive(h.key, "sec-websocket-key")) key_header = h.value;
+        if (ascii.eqlIgnoreCase(h.key, "upgrade")) upgrade_header = h.value;
+        if (ascii.eqlIgnoreCase(h.key, "connection")) connection_header = h.value;
+        if (ascii.eqlIgnoreCase(h.key, "sec-websocket-version")) version_header = h.value;
+        if (ascii.eqlIgnoreCase(h.key, "sec-websocket-key")) key_header = h.value;
     }
 
     const upgrade = upgrade_header orelse return error.MissingUpgradeHeader;
@@ -120,21 +120,13 @@ pub fn writeHandshakeResponse(writer: anytype, accept_key: *const [accept_key_le
     try writer.writeAll("\r\n\r\n");
 }
 
-fn asciiEqlCaseInsensitive(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ca, cb| {
-        if (ascii.toLower(ca) != ascii.toLower(cb)) return false;
-    }
-    return true;
-}
-
 /// Check whether a comma-separated HTTP header field-value contains a
 /// given token (case-insensitive, token-boundary-aware).
 fn tokenListContains(header_value: []const u8, needle: []const u8) bool {
     var it = std.mem.splitScalar(u8, header_value, ',');
     while (it.next()) |token| {
         const trimmed = std.mem.trim(u8, token, " \t");
-        if (asciiEqlCaseInsensitive(trimmed, needle)) return true;
+        if (ascii.eqlIgnoreCase(trimmed, needle)) return true;
     }
     return false;
 }

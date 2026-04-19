@@ -87,7 +87,7 @@ pub const Pool = struct {
     /// replaces the prior one and does not migrate existing files.
     pub fn setAttachmentsDir(self: *Pool, dir: []const u8) !void {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const owned = try self.allocator.dupe(u8, dir);
         if (self.attachments_dir) |prev| self.allocator.free(prev);
         self.attachments_dir = owned;
@@ -101,13 +101,13 @@ pub const Pool = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 
-    fn unlockLock(self: *Pool) void {
+    fn unlock(self: *Pool) void {
         self.mutex.unlock();
     }
 
     pub fn deinit(self: *Pool) void {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         var id_it = self.by_id.iterator();
         while (id_it.next()) |entry| {
@@ -142,7 +142,7 @@ pub const Pool = struct {
         now_ms: i64,
     ) !ConnectionId {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         const room_owned = try self.allocator.dupe(u8, room_key);
         errdefer self.allocator.free(room_owned);
@@ -176,7 +176,7 @@ pub const Pool = struct {
     /// that crashed rather than exited cleanly.
     pub fn unregister(self: *Pool, id: ConnectionId) void {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         const conn_entry = self.by_id.fetchRemove(id) orelse return;
         const conn = conn_entry.value;
@@ -197,7 +197,7 @@ pub const Pool = struct {
     /// safe because the snapshot is stable.
     pub fn snapshot(self: *Pool, id: ConnectionId) ?Connection {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
         return conn.*;
     }
@@ -209,7 +209,7 @@ pub const Pool = struct {
     /// them, so broadcast loops should tolerate `snapshot(id) == null`.
     pub fn collectRoom(self: *Pool, room_key: []const u8, out: []ConnectionId) []ConnectionId {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         const list = self.by_room.getPtr(room_key) orelse return out[0..0];
         const n = @min(list.items.len, out.len);
@@ -219,7 +219,7 @@ pub const Pool = struct {
 
     pub fn countInRoom(self: *Pool, room_key: []const u8) usize {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const list = self.by_room.getPtr(room_key) orelse return 0;
         return list.items.len;
     }
@@ -231,7 +231,7 @@ pub const Pool = struct {
     /// subsequent crash leaves the last-successful write on disk.
     pub fn setAttachment(self: *Pool, id: ConnectionId, bytes: []const u8) !bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
 
         const owned = try self.allocator.dupe(u8, bytes);
@@ -255,7 +255,7 @@ pub const Pool = struct {
         out_allocator: std.mem.Allocator,
     ) !?[]u8 {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
         const bytes = conn.attachment orelse return null;
         return try out_allocator.dupe(u8, bytes);
@@ -274,7 +274,7 @@ pub const Pool = struct {
         response_bytes: []const u8,
     ) !bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
 
         if (request_bytes.len == 0 and response_bytes.len == 0) {
@@ -310,7 +310,7 @@ pub const Pool = struct {
         out_allocator: std.mem.Allocator,
     ) !?[]u8 {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
         const req = conn.auto_request orelse return null;
         const resp = conn.auto_response orelse return null;
@@ -322,7 +322,7 @@ pub const Pool = struct {
     /// `false` if the id no longer exists.
     pub fn touch(self: *Pool, id: ConnectionId, state: ConnectionState, now_ms: i64) bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
         conn.state = state;
         conn.last_frame_at_ms = now_ms;
@@ -336,7 +336,7 @@ pub const Pool = struct {
     /// not handler execution.
     pub fn beginDispatch(self: *Pool, id: ConnectionId) bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
         conn.state = .live;
         return true;
@@ -348,7 +348,7 @@ pub const Pool = struct {
     /// via `scanIdle`.
     pub fn endDispatch(self: *Pool, id: ConnectionId) bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
         conn.state = .parked;
         return true;
@@ -369,7 +369,7 @@ pub const Pool = struct {
         now_ms: i64,
     ) ![]ConnectionId {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         var out: std.ArrayList(ConnectionId) = .empty;
         errdefer out.deinit(out_allocator);
 
@@ -399,7 +399,7 @@ pub const Pool = struct {
         prior_id: ConnectionId,
     ) !bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const dir = self.attachments_dir orelse return false;
         const conn = self.by_id.get(new_id) orelse return false;
 
@@ -427,7 +427,7 @@ pub const Pool = struct {
     ) ![]ConnectionId {
         self.lock();
         const dir = self.attachments_dir;
-        self.unlockLock();
+        self.unlock();
         if (dir == null) return &.{};
 
         return listAttachmentIds(out_allocator, dir.?);

@@ -554,10 +554,10 @@ fn writeParamName(w: anytype, env_var: []const u8) !void {
             continue;
         }
         if (capitalize_next) {
-            try w.writeByte(toUpper(c));
+            try w.writeByte(std.ascii.toUpper(c));
             capitalize_next = false;
         } else {
-            try w.writeByte(toLower(c));
+            try w.writeByte(std.ascii.toLower(c));
         }
     }
 }
@@ -572,22 +572,12 @@ fn writeSanitizedId(w: anytype, pattern: []const u8) !void {
             continue;
         }
         if (capitalize_next) {
-            try w.writeByte(toUpper(c));
+            try w.writeByte(std.ascii.toUpper(c));
             capitalize_next = false;
         } else {
             try w.writeByte(c);
         }
     }
-}
-
-fn toUpper(c: u8) u8 {
-    if (c >= 'a' and c <= 'z') return c - 32;
-    return c;
-}
-
-fn toLower(c: u8) u8 {
-    if (c >= 'A' and c <= 'Z') return c + 32;
-    return c;
 }
 
 const writeJsonStringContent = handler_contract.writeJsonStringContent;
