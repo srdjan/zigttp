@@ -16,6 +16,15 @@ pub const internal = struct {
     pub const util = @import("internal/util.zig");
 };
 
+pub const security = struct {
+    pub const crypto = @import("security/crypto.zig");
+};
+
+comptime {
+    sdk.validateBindings(&.{security.crypto.binding});
+}
+
 test {
     _ = internal.util;
+    _ = security.crypto;
 }

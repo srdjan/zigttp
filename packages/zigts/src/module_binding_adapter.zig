@@ -29,8 +29,10 @@ comptime {
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
-    if (!std.mem.startsWith(u8, binding.specifier, "zigttp-ext:")) {
-        @compileError("extension binding specifier must start with 'zigttp-ext:': " ++ binding.specifier);
+    const builtin_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp:");
+    const extension_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp-ext:");
+    if (!builtin_prefix and !extension_prefix) {
+        @compileError("adapted module specifier must start with 'zigttp:' or 'zigttp-ext:': " ++ binding.specifier);
     }
 
     const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);

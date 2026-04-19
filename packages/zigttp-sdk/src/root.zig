@@ -164,6 +164,9 @@ extern fn zigttpSdkResultOk(handle: *ModuleHandle, payload_raw: u64, out: *u64) 
 extern fn zigttpSdkResultErr(handle: *ModuleHandle, msg_ptr: [*]const u8, msg_len: usize, out: *u64) bool;
 extern fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
 extern fn zigttpSdkResultErrs(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
+extern fn zigttpSdkGetAllocator(handle: *ModuleHandle) *anyopaque;
+extern fn zigttpSdkSha256(handle: *ModuleHandle, data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
+extern fn zigttpSdkHmacSha256(handle: *ModuleHandle, data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
 
 /// Extract a borrowed string slice from a JSValue. Handles flat, slice,
 /// and leaf rope strings. Returns null for non-string values or
@@ -252,6 +255,34 @@ pub fn resultErrs(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue 
     var raw: u64 = 0;
     if (!zigttpSdkResultErrs(handle, payload.raw, &raw)) return error.OutOfMemory;
     return .{ .raw = raw };
+}
+
+/// Borrow the runtime's general-purpose allocator. The returned value is
+/// valid for the lifetime of the module call.
+pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
+    const ptr = zigttpSdkGetAllocator(handle);
+    const allocator_ptr: *const std.mem.Allocator = @ptrCast(@alignCast(ptr));
+    return allocator_ptr.*;
+}
+
+pub const Sha256Digest = [32]u8;
+pub const HmacSha256Mac = [32]u8;
+
+/// Compute SHA-256 under the crypto capability.
+pub fn sha256(handle: *ModuleHandle, data: []const u8, out: *Sha256Digest) ModuleCapabilityError!void {
+    try requireCapability(handle, .crypto);
+    if (!zigttpSdkSha256(handle, data.ptr, data.len, out)) return error.MissingModuleCapability;
+}
+
+/// Compute HMAC-SHA256 under the crypto capability.
+pub fn hmacSha256(
+    handle: *ModuleHandle,
+    data: []const u8,
+    key: []const u8,
+    out: *HmacSha256Mac,
+) ModuleCapabilityError!void {
+    try requireCapability(handle, .crypto);
+    if (!zigttpSdkHmacSha256(handle, data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
 }
 
 pub const DataLabel = enum(u3) {

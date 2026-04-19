@@ -7,6 +7,9 @@
         .zigttp_sdk = .{
             .path = "../zigttp-sdk",
         },
+        .zigttp_modules = .{
+            .path = "../modules",
+        },
         .zigttp_ext_demo = .{
             .path = "../zigttp-ext-demo",
         },

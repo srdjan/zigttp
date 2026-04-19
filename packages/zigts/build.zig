@@ -7,6 +7,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const modules_dep = b.dependency("zigttp_modules", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const ext_demo_dep = b.dependency("zigttp_ext_demo", .{
         .target = target,
         .optimize = optimize,
@@ -24,5 +28,6 @@ pub fn build(b: *std.Build) void {
     });
     mod.addIncludePath(b.path("deps/sqlite"));
     mod.addImport("zigttp-sdk", sdk_dep.module("zigttp-sdk"));
+    mod.addImport("zigttp-modules", modules_dep.module("zigttp-modules"));
     mod.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
 }

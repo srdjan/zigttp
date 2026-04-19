@@ -573,6 +573,35 @@ pub export fn zigttpSdkResultErrs(handle: *ModuleHandle, payload_raw: u64, out: 
     return true;
 }
 
+pub export fn zigttpSdkGetAllocator(handle: *ModuleHandle) *anyopaque {
+    const ctx = handleToContext(handle);
+    return @constCast(&ctx.allocator);
+}
+
+pub export fn zigttpSdkSha256(
+    handle: *ModuleHandle,
+    data_ptr: [*]const u8,
+    data_len: usize,
+    out: [*]u8,
+) bool {
+    _ = handle;
+    sha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len]) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkHmacSha256(
+    handle: *ModuleHandle,
+    data_ptr: [*]const u8,
+    data_len: usize,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    out: [*]u8,
+) bool {
+    _ = handle;
+    hmacSha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len], key_ptr[0..key_len]) catch return false;
+    return true;
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification
