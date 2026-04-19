@@ -7,55 +7,71 @@
 //! Third-party modules are appended to this list via build.zig options.
 
 const mb = @import("module_binding.zig");
+const adapter = @import("module_binding_adapter.zig");
 const ModuleBinding = mb.ModuleBinding;
 const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
 const std = @import("std");
+const modules = @import("zigttp-modules");
 
-const env_mod = @import("modules/platform/env.zig");
-const crypto_mod = @import("modules/security/crypto.zig");
-const router_mod = @import("modules/http/router.zig");
-const auth_mod = @import("modules/security/auth.zig");
-const validate_mod = @import("modules/security/validate.zig");
-const decode_mod = @import("modules/security/decode.zig");
-const cache_mod = @import("modules/data/cache.zig");
+// Ported modules are imported directly from the peer package. Bindings
+// are adapted (ordinal-safe cast + required_capabilities conversion) at
+// comptime, yielding zigts-internal ModuleBinding values grouped under
+// a single namespace so their top-level names don't shadow locals in
+// the assertion tests below.
+const ported = struct {
+    const env = adapter.adaptModuleBinding(modules.platform.env.binding);
+    const crypto = adapter.adaptModuleBinding(modules.security.crypto.binding);
+    const router = adapter.adaptModuleBinding(modules.http.router.binding);
+    const auth = adapter.adaptModuleBinding(modules.security.auth.binding);
+    const validate = adapter.adaptModuleBinding(modules.security.validate.binding);
+    const decode = adapter.adaptModuleBinding(modules.security.decode.binding);
+    const cache = adapter.adaptModuleBinding(modules.data.cache.binding);
+    const ratelimit = adapter.adaptModuleBinding(modules.data.ratelimit.binding);
+    const url = adapter.adaptModuleBinding(modules.http.url.binding);
+    const id = adapter.adaptModuleBinding(modules.platform.id.binding);
+    const http = adapter.adaptModuleBinding(modules.http.http_mod.binding);
+    const log = adapter.adaptModuleBinding(modules.platform.log.binding);
+    const text = adapter.adaptModuleBinding(modules.platform.text.binding);
+    const time = adapter.adaptModuleBinding(modules.platform.time.binding);
+    const compose = adapter.adaptModuleBinding(modules.workflow.compose.binding);
+};
+
+// Install-having stubs stay on the zigts side because their installState
+// helpers are called from runtime bootstrap outside any module invocation.
 const sql_mod = @import("modules/data/sql.zig");
-const io_mod = @import("modules/workflow/io.zig");
-const scope_mod = @import("modules/workflow/scope.zig");
-const compose_mod = @import("modules/workflow/compose.zig");
-const durable_mod = @import("modules/workflow/durable.zig");
-const url_mod = @import("modules/http/url.zig");
-const id_mod = @import("modules/platform/id.zig");
-const http_mod = @import("modules/http/http_mod.zig");
-const log_mod = @import("modules/platform/log.zig");
-const text_mod = @import("modules/platform/text.zig");
-const time_mod = @import("modules/platform/time.zig");
-const ratelimit_mod = @import("modules/data/ratelimit.zig");
 const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
 const websocket_mod = @import("modules/net/websocket.zig");
 
+// Genuinely-in-tree modules: io keeps a threadlocal read by fetchSync;
+// scope manipulates GC roots directly; durable's callback wrapper has a
+// function-pointer layout issue that needs further investigation.
+const io_mod = @import("modules/workflow/io.zig");
+const scope_mod = @import("modules/workflow/scope.zig");
+const durable_mod = @import("modules/workflow/durable.zig");
+
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
-    env_mod.binding,
-    crypto_mod.binding,
-    router_mod.binding,
-    auth_mod.binding,
-    validate_mod.binding,
-    decode_mod.binding,
-    cache_mod.binding,
+    ported.env,
+    ported.crypto,
+    ported.router,
+    ported.auth,
+    ported.validate,
+    ported.decode,
+    ported.cache,
     sql_mod.binding,
     io_mod.binding,
     scope_mod.binding,
-    compose_mod.binding,
+    ported.compose,
     durable_mod.binding,
-    url_mod.binding,
-    id_mod.binding,
-    http_mod.binding,
-    log_mod.binding,
-    text_mod.binding,
-    time_mod.binding,
-    ratelimit_mod.binding,
+    ported.url,
+    ported.id,
+    ported.http,
+    ported.log,
+    ported.text,
+    ported.time,
+    ported.ratelimit,
     service_mod.binding,
     fetch_mod.binding,
     websocket_mod.binding,
