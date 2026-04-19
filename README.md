@@ -161,32 +161,36 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 
 ### Available Modules
 
+Modules are grouped by role; each cell in the Module column links to
+the per-module page. See [docs/virtual-modules/README.md](docs/virtual-modules/README.md)
+for the landing page and category index.
+
 | Module | Exports | Description |
 |--------|---------|-------------|
-| `zigttp:env` | `env` | Environment variable access |
-| `zigttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Cryptographic functions |
-| `zigttp:router` | `routerMatch` | Pattern-matching HTTP router |
-| `zigttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
-| `zigttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation with format validators (email, uuid, iso-date, iso-datetime) |
-| `zigttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery` | Schema-backed typed ingress for JSON, URL-encoded forms, and query strings |
-| `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
-| `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
-| `zigttp:service` | `serviceCall` | Named internal service-to-service calls backed by `system.json` |
-| `zigttp:fetch` | `fetch` | Web-standard outbound HTTP with optional durable replay ([docs](docs/virtual-modules/fetch.md)) |
-| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | WebSocket protocol termination with rooms, attachments, and codec-level auto-replies ([docs](docs/virtual-modules/websocket.md)) |
-| `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
-| `zigttp:scope` | `scope`, `using`, `ensure` | Structured lifecycle management with deterministic cleanup at scope exit |
-| `zigttp:compose` | `guard`, `pipe` | Compile-time handler composition via pipe operator |
-| `zigttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
-| `zigttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | URL parsing and query string encoding |
-| `zigttp:id` | `uuid`, `ulid`, `nanoid` | ID generation (UUID v4, ULID, NanoID) |
-| `zigttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | HTTP utilities for cookies, content negotiation, CORS |
-| `zigttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | Structured logging to stderr |
-| `zigttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | String utilities for HTML escaping, slugs, redaction |
-| `zigttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | Time formatting and arithmetic |
-| `zigttp:ratelimit` | `rateCheck`, `rateReset` | Per-key rate limiting with sliding windows |
+| [`zigttp:env`](docs/virtual-modules/platform/env.md) | `env` | Environment variable access |
+| [`zigttp:crypto`](docs/virtual-modules/security/crypto.md) | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | Cryptographic functions |
+| [`zigttp:router`](docs/virtual-modules/http/router.md) | `routerMatch` | Pattern-matching HTTP router |
+| [`zigttp:auth`](docs/virtual-modules/security/auth.md) | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | JWT auth and webhook verification |
+| [`zigttp:validate`](docs/virtual-modules/security/validate.md) | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | JSON Schema validation with format validators (email, uuid, iso-date, iso-datetime) |
+| [`zigttp:decode`](docs/virtual-modules/security/decode.md) | `decodeJson`, `decodeForm`, `decodeQuery` | Schema-backed typed ingress for JSON, URL-encoded forms, and query strings |
+| [`zigttp:cache`](docs/virtual-modules/data/cache.md) | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
+| [`zigttp:sql`](docs/virtual-modules/data/sql.md) | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
+| [`zigttp:service`](docs/virtual-modules/net/service.md) | `serviceCall` | Named internal service-to-service calls backed by `system.json` |
+| [`zigttp:fetch`](docs/virtual-modules/net/fetch.md) | `fetch` | Web-standard outbound HTTP with optional durable replay |
+| [`zigttp:websocket`](docs/virtual-modules/net/websocket.md) | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | WebSocket protocol termination with rooms, attachments, and codec-level auto-replies |
+| [`zigttp:io`](docs/virtual-modules/workflow/io.md) | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
+| [`zigttp:scope`](docs/virtual-modules/workflow/scope.md) | `scope`, `using`, `ensure` | Structured lifecycle management with deterministic cleanup at scope exit |
+| [`zigttp:compose`](docs/virtual-modules/workflow/compose.md) | `guard`, `pipe` | Compile-time handler composition via pipe operator |
+| [`zigttp:durable`](docs/virtual-modules/workflow/durable.md) | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | Durable execution with crash recovery, timers, signals, and timeout-aware steps |
+| [`zigttp:url`](docs/virtual-modules/http/url.md) | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | URL parsing and query string encoding |
+| [`zigttp:id`](docs/virtual-modules/platform/id.md) | `uuid`, `ulid`, `nanoid` | ID generation (UUID v4, ULID, NanoID) |
+| [`zigttp:http`](docs/virtual-modules/http/http.md) | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | HTTP utilities for cookies, content negotiation, CORS |
+| [`zigttp:log`](docs/virtual-modules/platform/log.md) | `logDebug`, `logInfo`, `logWarn`, `logError` | Structured logging to stderr |
+| [`zigttp:text`](docs/virtual-modules/platform/text.md) | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | String utilities for HTML escaping, slugs, redaction |
+| [`zigttp:time`](docs/virtual-modules/platform/time.md) | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | Time formatting and arithmetic |
+| [`zigttp:ratelimit`](docs/virtual-modules/data/ratelimit.md) | `rateCheck`, `rateReset` | Per-key rate limiting with sliding windows |
 
-Each export carries an effect annotation used for handler property classification. Read-effect functions: all of env, crypto, router, auth, validate, plus `cacheGet`/`cacheStats`, `sql`/`sqlOne`/`sqlMany`. Write-effect functions: `cacheSet`/`cacheDelete`/`cacheIncr`, `sqlExec`, `serviceCall`, `parallel`/`race`, `scope`/`using`/`ensure`, and all durable functions. `guard` has no runtime effect.
+Each export carries an effect annotation used for handler property classification. See [docs/virtual-modules/README.md](docs/virtual-modules/README.md#effect-classification) for the full read/write/none breakdown across all 22 modules.
 
 Each module binding also declares the runtime capabilities its Zig implementation consumes (clock, random, crypto, stderr, filesystem, sqlite, env, runtime_callback, policy_check, network). These declarations are governance metadata for the module internals and do not affect the handler-facing effect classification or sandbox policy. Capability-checked helpers enforce them at call time: if a module reads the system clock but its binding omits `clock`, the call panics with a diagnostic naming the module and the missing capability.
 

@@ -7,26 +7,39 @@
 //! and executed first, exporting globals that the entry file reads.
 
 pub const resolver = @import("resolver.zig");
-pub const env = @import("env.zig");
-pub const crypto = @import("crypto.zig");
-pub const router = @import("router.zig");
-pub const auth = @import("auth.zig");
-pub const validate = @import("validate.zig");
-pub const decode = @import("decode.zig");
-pub const cache = @import("cache.zig");
-pub const sql = @import("sql.zig");
-pub const io = @import("io.zig");
-pub const scope = @import("scope.zig");
-pub const compose = @import("compose.zig");
-pub const durable = @import("durable.zig");
 pub const util = @import("util.zig");
 pub const file_resolver = @import("file_resolver.zig");
 pub const module_graph = @import("module_graph.zig");
 pub const compiler = @import("compiler.zig");
 pub const types = @import("types.zig");
-pub const service = @import("service.zig");
-pub const fetch = @import("fetch.zig");
-pub const websocket = @import("websocket.zig");
+
+pub const env = @import("platform/env.zig");
+pub const id = @import("platform/id.zig");
+pub const log = @import("platform/log.zig");
+pub const text = @import("platform/text.zig");
+pub const time = @import("platform/time.zig");
+
+pub const crypto = @import("security/crypto.zig");
+pub const auth = @import("security/auth.zig");
+pub const validate = @import("security/validate.zig");
+pub const decode = @import("security/decode.zig");
+
+pub const cache = @import("data/cache.zig");
+pub const sql = @import("data/sql.zig");
+pub const ratelimit = @import("data/ratelimit.zig");
+
+pub const router = @import("http/router.zig");
+pub const http = @import("http/http_mod.zig");
+pub const url = @import("http/url.zig");
+
+pub const io = @import("workflow/io.zig");
+pub const scope = @import("workflow/scope.zig");
+pub const compose = @import("workflow/compose.zig");
+pub const durable = @import("workflow/durable.zig");
+
+pub const service = @import("net/service.zig");
+pub const fetch = @import("net/fetch.zig");
+pub const websocket = @import("net/websocket.zig");
 
 pub const ModuleExport = resolver.ModuleExport;
 pub const ResolveResult = resolver.ResolveResult;
