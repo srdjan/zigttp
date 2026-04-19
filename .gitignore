@@ -3,6 +3,10 @@ zig-out/
 zig-pkg/
 .DS_Store
 
+# Local scratch dir — used for smoke-test databases, throwaway handler
+# probes, etc. Never commit.
+/temp/
+
 # Generated files (build-time precompilation)
 packages/runtime/generated/
 
