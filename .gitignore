@@ -3,6 +3,9 @@ zig-out/
 zig-pkg/
 .DS_Store
 
+# Claude Code harness worktrees
+.claude/
+
 # Local scratch dir — used for smoke-test databases, throwaway handler
 # probes, etc. Never commit.
 /temp/
