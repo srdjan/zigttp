@@ -1,7 +1,6 @@
 const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
-const mb = @import("../../module_binding.zig");
 const adapter = @import("../../module_binding_adapter.zig");
 const sdk = @import("zigttp-sdk");
 const modules = @import("zigttp-modules");
@@ -12,8 +11,6 @@ pub const exports = binding.toModuleExports();
 
 pub const MODULE_STATE_SLOT: usize = ws_module.MODULE_STATE_SLOT;
 
-/// Runtime-facing callback shape. Each of the seven websocket surfaces
-/// receives the runtime, the execution context, and the JS arg slice.
 pub const WsCallFn = *const fn (
     runtime_ptr: *anyopaque,
     ctx: *context.Context,
@@ -35,9 +32,7 @@ const InstalledState = struct {
     callbacks: WebSocketCallbacks,
     base: ws_module.WebSocketCallbacks,
 
-    fn sdkDispatch(
-        comptime field: []const u8,
-    ) ws_module.WsCallFn {
+    fn sdkDispatch(comptime field: []const u8) ws_module.WsCallFn {
         return struct {
             fn call(
                 installed_ptr: *anyopaque,
@@ -45,11 +40,9 @@ const InstalledState = struct {
                 args: []const sdk.JSValue,
             ) anyerror!sdk.JSValue {
                 const self: *InstalledState = @ptrCast(@alignCast(installed_ptr));
-                const ctx = mb.handleToContext(@ptrCast(handle));
-                const ctx_args: []const value.JSValue = @ptrCast(args);
                 const call_fn = @field(self.callbacks, field);
-                const result = try call_fn(self.callbacks.runtime_ptr, ctx, ctx_args);
-                return @bitCast(result.raw);
+                const result = try call_fn(self.callbacks.runtime_ptr, adapter.contextFromHandle(handle), adapter.internalArgs(args));
+                return adapter.sdkValue(result);
             }
         }.call;
     }
@@ -83,6 +76,5 @@ pub fn installState(ctx: *context.Context, callbacks: WebSocketCallbacks) !void 
 fn stateDeinitAdapter(ptr: *anyopaque, _: std.mem.Allocator) void {
     const base: *ws_module.WebSocketCallbacks = @ptrCast(@alignCast(ptr));
     const installed: *InstalledState = @fieldParentPtr("base", base);
-    const allocator = base.allocator;
-    allocator.destroy(installed);
+    base.allocator.destroy(installed);
 }

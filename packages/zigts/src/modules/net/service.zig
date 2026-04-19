@@ -34,10 +34,14 @@ const InstalledState = struct {
         init: sdk.JSValue,
     ) anyerror!sdk.JSValue {
         const self: *InstalledState = @ptrCast(@alignCast(installed_ptr));
-        const ctx = mb.handleToContext(@ptrCast(handle));
-        const init_v: value.JSValue = @bitCast(init.raw);
-        const result = try self.call_fn(self.runtime_ptr, ctx, base_url, route_pattern, init_v);
-        return @bitCast(result.raw);
+        const result = try self.call_fn(
+            self.runtime_ptr,
+            adapter.contextFromHandle(handle),
+            base_url,
+            route_pattern,
+            adapter.internalValue(init),
+        );
+        return adapter.sdkValue(result);
     }
 };
 

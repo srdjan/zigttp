@@ -3,14 +3,10 @@
 //! Compile-time module resolution for zigttp:* virtual modules
 //! and relative file imports. Virtual modules map to native Zig
 //! implementations with zero JS interpretation overhead.
-//! File imports use bytecode concatenation: dependencies are compiled
-//! and executed first, exporting globals that the entry file reads.
 //!
-//! Most module implementations live in the peer `zigttp-modules`
-//! package and are registered via `builtin_modules.zig`. The files
-//! here are the ones that still need zigts-internal access (runtime
-//! callback installState shims, or modules tightly coupled to the
-//! runtime): sql, service, fetch, websocket, io, scope, durable.
+//! Most bindings live in `zigttp-modules`. Files below are those
+//! that need zigts-internal access (install shims, GC roots, runtime
+//! threadlocals) and stay on this side of the peer-package boundary.
 
 pub const resolver = @import("internal/resolver.zig");
 pub const util = @import("internal/util.zig");

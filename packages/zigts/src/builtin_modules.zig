@@ -14,11 +14,8 @@ const file_io = @import("file_io.zig");
 const std = @import("std");
 const modules = @import("zigttp-modules");
 
-// Ported modules are imported directly from the peer package. Bindings
-// are adapted (ordinal-safe cast + required_capabilities conversion) at
-// comptime, yielding zigts-internal ModuleBinding values grouped under
-// a single namespace so their top-level names don't shadow locals in
-// the assertion tests below.
+// Namespaced to avoid shadowing the `<name>_binding` locals used in the
+// governance-assertion tests at the bottom of this file.
 const ported = struct {
     const env = adapter.adaptModuleBinding(modules.platform.env.binding);
     const crypto = adapter.adaptModuleBinding(modules.security.crypto.binding);
@@ -37,16 +34,16 @@ const ported = struct {
     const compose = adapter.adaptModuleBinding(modules.workflow.compose.binding);
 };
 
-// Install-having stubs stay on the zigts side because their installState
-// helpers are called from runtime bootstrap outside any module invocation.
+// installState helpers run during runtime bootstrap, outside any
+// module invocation — they can't go through the SDK's handle-gated
+// setModuleState and stay on this side of the peer-package boundary.
 const sql_mod = @import("modules/data/sql.zig");
 const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
 const websocket_mod = @import("modules/net/websocket.zig");
 
-// Genuinely-in-tree modules: io keeps a threadlocal read by fetchSync;
-// scope manipulates GC roots directly; durable's callback wrapper has a
-// function-pointer layout issue that needs further investigation.
+// Coupled to zigts internals: io reads a threadlocal set by fetchSync;
+// scope manipulates GC roots directly. durable is pending further work.
 const io_mod = @import("modules/workflow/io.zig");
 const scope_mod = @import("modules/workflow/scope.zig");
 const durable_mod = @import("modules/workflow/durable.zig");
