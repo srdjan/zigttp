@@ -13,9 +13,34 @@ pub const JSValue = packed struct(u64) {
     const MIN_TAG_PREFIX: u64 = 0xFFFC;
     const CANONICAL_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
 
+    pub const null_val: JSValue = .{ .raw = SPECIAL_PREFIX | 0 };
     pub const undefined_val: JSValue = .{ .raw = SPECIAL_PREFIX | 1 };
     pub const true_val: JSValue = .{ .raw = SPECIAL_PREFIX | 2 };
     pub const false_val: JSValue = .{ .raw = SPECIAL_PREFIX | 3 };
+
+    pub inline fn isNull(self: JSValue) bool {
+        return self.raw == null_val.raw;
+    }
+
+    pub inline fn isUndefined(self: JSValue) bool {
+        return self.raw == undefined_val.raw;
+    }
+
+    pub inline fn isTrue(self: JSValue) bool {
+        return self.raw == true_val.raw;
+    }
+
+    pub inline fn isFalse(self: JSValue) bool {
+        return self.raw == false_val.raw;
+    }
+
+    pub inline fn isNullish(self: JSValue) bool {
+        return self.isNull() or self.isUndefined();
+    }
+
+    pub inline fn isNumber(self: JSValue) bool {
+        return self.isInt() or self.isRawDouble();
+    }
 
     pub inline fn isInt(self: JSValue) bool {
         return (self.raw & PREFIX_MASK) == INT_PREFIX;
@@ -107,6 +132,7 @@ pub const ModuleCapability = enum {
     filesystem,
     network,
     policy_check,
+    websocket,
 };
 
 pub const ModuleCapabilityError = error{
@@ -148,6 +174,466 @@ pub fn writeStderr(handle: *ModuleHandle, buf: []const u8) ModuleCapabilityError
     if (!zigttpSdkWriteStderr(handle, buf.ptr, buf.len)) return error.StderrWriteFailed;
 }
 
+pub const RuntimeError = error{
+    OutOfMemory,
+    RuntimeFailure,
+};
+
+// JSValue is packed struct(u64); zigts's value.JSValue is bit-identical
+// and verified by module_binding_adapter.zig. The bridge exports below
+// can therefore pass JSValue directly across the extern boundary.
+extern fn zigttpSdkExtractString(val: JSValue, out_ptr: *[*]const u8, out_len: *usize) bool;
+extern fn zigttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *JSValue) bool;
+extern fn zigttpSdkCreateObject(handle: *ModuleHandle, out: *JSValue) bool;
+extern fn zigttpSdkObjectSet(handle: *ModuleHandle, obj: JSValue, key_ptr: [*]const u8, key_len: usize, val: JSValue) bool;
+extern fn zigttpSdkObjectGet(handle: *ModuleHandle, obj: JSValue, key_ptr: [*]const u8, key_len: usize, out: *JSValue) bool;
+extern fn zigttpSdkThrowError(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, msg_ptr: [*]const u8, msg_len: usize) JSValue;
+extern fn zigttpSdkResultOk(handle: *ModuleHandle, payload: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkResultErr(handle: *ModuleHandle, msg_ptr: [*]const u8, msg_len: usize, out: *JSValue) bool;
+extern fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkResultErrs(handle: *ModuleHandle, payload: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator;
+extern fn zigttpSdkSha256(data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
+extern fn zigttpSdkHmacSha256(data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
+extern fn zigttpSdkParseJson(handle: *ModuleHandle, json_ptr: [*]const u8, json_len: usize, out: *JSValue) bool;
+
+pub const StateDeinitFn = *const fn (*anyopaque) callconv(.c) void;
+extern fn zigttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque;
+extern fn zigttpSdkSetModuleState(handle: *ModuleHandle, slot: usize, ptr: *anyopaque, deinit_fn: StateDeinitFn) bool;
+
+extern fn zigttpSdkIsString(val: JSValue) bool;
+extern fn zigttpSdkIsObject(val: JSValue) bool;
+extern fn zigttpSdkIsArray(val: JSValue) bool;
+extern fn zigttpSdkArrayLength(val: JSValue, out: *u32) bool;
+extern fn zigttpSdkArrayGet(handle: *ModuleHandle, arr: JSValue, index: u32, out: *JSValue) bool;
+extern fn zigttpSdkArraySet(handle: *ModuleHandle, arr: JSValue, index: u32, val: JSValue) bool;
+extern fn zigttpSdkCreateArray(handle: *ModuleHandle, out: *JSValue) bool;
+extern fn zigttpSdkStringify(handle: *ModuleHandle, val: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkObjectKeys(handle: *ModuleHandle, obj: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkReadEnv(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, out_ptr: *[*]const u8, out_len: *usize) bool;
+extern fn zigttpSdkAllowsEnv(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
+extern fn zigttpSdkAllowsCacheNamespace(handle: *ModuleHandle, ns_ptr: [*]const u8, ns_len: usize) bool;
+
+/// Extract a borrowed string slice from a JSValue. Handles flat, slice,
+/// and leaf rope strings. Returns null for non-string values or
+/// non-flattened concat ropes. Slice is valid for the current call.
+pub fn extractString(val: JSValue) ?[]const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkExtractString(val, &ptr, &len)) return null;
+    return ptr[0..len];
+}
+
+/// Extract an i32 from a JSValue, handling both int and whole-number float
+/// representations.
+pub fn extractInt(val: JSValue) ?i32 {
+    if (val.toInt()) |i| return i;
+    if (val.toFloat()) |f| {
+        const i: i32 = @intFromFloat(f);
+        if (@as(f64, @floatFromInt(i)) == f) return i;
+    }
+    return null;
+}
+
+/// Extract an f64 from a JSValue, widening int values.
+pub fn extractFloat(val: JSValue) ?f64 {
+    if (val.toInt()) |i| return @floatFromInt(i);
+    return val.toFloat();
+}
+
+/// Box a Zig f64 as a JS number, folding safe-integer values into the
+/// int32 tagged representation. Matches the runtime's allocFloat hot path.
+pub fn numberFromF64(v: f64) JSValue {
+    if (!std.math.isNan(v) and !std.math.isInf(v) and @floor(v) == v and v >= -2147483648 and v <= 2147483647) {
+        return JSValue.fromInt(@intFromFloat(v));
+    }
+    return JSValue.fromFloat(v);
+}
+
+/// Allocate a new JS string owned by the runtime GC.
+pub fn createString(handle: *ModuleHandle, data: []const u8) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkCreateString(handle, data.ptr, data.len, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Allocate a new empty JS object owned by the runtime GC.
+pub fn createObject(handle: *ModuleHandle) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkCreateObject(handle, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Set a property on a JS object. Key is a UTF-8 string; the runtime
+/// interns it into an atom.
+pub fn objectSet(handle: *ModuleHandle, obj: JSValue, key: []const u8, val: JSValue) RuntimeError!void {
+    if (!zigttpSdkObjectSet(handle, obj, key.ptr, key.len, val)) return error.RuntimeFailure;
+}
+
+/// Get a property from a JS object. Returns null if the property is
+/// absent or the target is not an object.
+pub fn objectGet(handle: *ModuleHandle, obj: JSValue, key: []const u8) ?JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkObjectGet(handle, obj, key.ptr, key.len, &out)) return null;
+    return out;
+}
+
+/// Raise a JS exception. The returned JSValue is the exception sentinel;
+/// return it from your module function.
+pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) JSValue {
+    return zigttpSdkThrowError(handle, name.ptr, name.len, message.ptr, message.len);
+}
+
+/// Build `{ ok: true, value: payload }`.
+pub fn resultOk(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultOk(handle, payload, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Build `{ ok: false, error: message }`.
+pub fn resultErr(handle: *ModuleHandle, message: []const u8) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultErr(handle, message.ptr, message.len, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Build `{ ok: false, error: payload }` with a JSValue payload.
+pub fn resultErrValue(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultErrValue(handle, payload, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Build `{ ok: false, errors: payload }` with an array payload.
+pub fn resultErrs(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultErrs(handle, payload, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Borrow the runtime's general-purpose allocator. Valid for the module
+/// call's lifetime.
+pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
+    return zigttpSdkGetAllocator(handle).*;
+}
+
+pub const Sha256Digest = [32]u8;
+pub const HmacSha256Mac = [32]u8;
+
+/// Compute SHA-256. Capability enforcement lives inside the bridge;
+/// callers must declare `.crypto` in `required_capabilities`.
+pub fn sha256(handle: *ModuleHandle, data: []const u8, out: *Sha256Digest) ModuleCapabilityError!void {
+    _ = handle;
+    if (!zigttpSdkSha256(data.ptr, data.len, out)) return error.MissingModuleCapability;
+}
+
+/// Compute HMAC-SHA256. Capability enforcement lives inside the bridge.
+pub fn hmacSha256(
+    handle: *ModuleHandle,
+    data: []const u8,
+    key: []const u8,
+    out: *HmacSha256Mac,
+) ModuleCapabilityError!void {
+    _ = handle;
+    if (!zigttpSdkHmacSha256(data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
+}
+
+/// Parse a JSON string into a JSValue owned by the runtime GC.
+pub fn parseJson(handle: *ModuleHandle, json: []const u8) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkParseJson(handle, json.ptr, json.len, &out)) return error.RuntimeFailure;
+    return out;
+}
+
+/// Get typed module state from a slot. Returns null if the slot has not
+/// been initialized.
+pub fn getModuleState(handle: *ModuleHandle, comptime T: type, slot: usize) ?*T {
+    const ptr = zigttpSdkGetModuleState(handle, slot) orelse return null;
+    return @ptrCast(@alignCast(ptr));
+}
+
+/// Install module state into a slot with a cleanup callback. The callback
+/// receives the state pointer on context teardown; modules typically store
+/// their own allocator in the state struct and free through it.
+pub fn setModuleState(
+    handle: *ModuleHandle,
+    slot: usize,
+    ptr: *anyopaque,
+    deinit_fn: StateDeinitFn,
+) RuntimeError!void {
+    if (!zigttpSdkSetModuleState(handle, slot, ptr, deinit_fn)) return error.OutOfMemory;
+}
+
+pub fn isString(val: JSValue) bool {
+    return zigttpSdkIsString(val);
+}
+
+pub fn isObject(val: JSValue) bool {
+    return zigttpSdkIsObject(val);
+}
+
+pub fn isArray(val: JSValue) bool {
+    return zigttpSdkIsArray(val);
+}
+
+extern fn zigttpSdkIsCallable(val: JSValue) bool;
+
+pub fn isCallable(val: JSValue) bool {
+    return zigttpSdkIsCallable(val);
+}
+
+extern fn zigttpSdkReadFile(
+    handle: *ModuleHandle,
+    path_ptr: [*]const u8,
+    path_len: usize,
+    max_size: usize,
+    out_ptr: *[*]u8,
+    out_len: *usize,
+) bool;
+
+/// Read a file through the capability-gated filesystem path. The buffer
+/// is allocated with the runtime allocator (`getAllocator(handle)`);
+/// callers free it via `getAllocator(handle).free(buf)`.
+pub fn readFile(handle: *ModuleHandle, path: []const u8, max_size: usize) ![]u8 {
+    try requireCapability(handle, .filesystem);
+    var ptr: [*]u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkReadFile(handle, path.ptr, path.len, max_size, &ptr, &len)) return error.FileReadFailed;
+    return ptr[0..len];
+}
+
+pub fn arrayLength(val: JSValue) ?u32 {
+    var len: u32 = 0;
+    if (!zigttpSdkArrayLength(val, &len)) return null;
+    return len;
+}
+
+pub fn arrayGet(handle: *ModuleHandle, arr: JSValue, index: u32) ?JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkArrayGet(handle, arr, index, &out)) return null;
+    return out;
+}
+
+pub fn arraySet(handle: *ModuleHandle, arr: JSValue, index: u32, val: JSValue) RuntimeError!void {
+    if (!zigttpSdkArraySet(handle, arr, index, val)) return error.RuntimeFailure;
+}
+
+pub fn createArray(handle: *ModuleHandle) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkCreateArray(handle, &out)) return error.OutOfMemory;
+    return out;
+}
+
+/// Serialize a JSValue to a JSON string.
+pub fn stringify(handle: *ModuleHandle, val: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkStringify(handle, val, &out)) return error.RuntimeFailure;
+    return out;
+}
+
+/// Return the own enumerable property keys of an object as a JS array of
+/// strings. Iterate via `arrayLength` + `arrayGet`.
+pub fn objectKeys(handle: *ModuleHandle, obj: JSValue) RuntimeError!JSValue {
+    var out: JSValue = undefined;
+    if (!zigttpSdkObjectKeys(handle, obj, &out)) return error.RuntimeFailure;
+    return out;
+}
+
+/// Read an environment variable through the capability-policy gate.
+/// Returns null when unset or when policy denies. The slice is valid for
+/// the current call.
+pub fn readEnv(handle: *ModuleHandle, name: []const u8) ?[]const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkReadEnv(handle, name.ptr, name.len, &ptr, &len)) return null;
+    return ptr[0..len];
+}
+
+/// Ask the capability policy whether `env(name)` is permitted.
+pub fn allowsEnv(handle: *ModuleHandle, name: []const u8) bool {
+    return zigttpSdkAllowsEnv(handle, name.ptr, name.len);
+}
+
+/// Ask the capability policy whether `cache(namespace)` is permitted.
+pub fn allowsCacheNamespace(handle: *ModuleHandle, ns: []const u8) bool {
+    return zigttpSdkAllowsCacheNamespace(handle, ns.ptr, ns.len);
+}
+
+extern fn zigttpSdkAllowsSqlQuery(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize) bool;
+
+/// Ask the capability policy whether `sql(name)` is permitted.
+pub fn allowsSqlQuery(handle: *ModuleHandle, name: []const u8) bool {
+    return zigttpSdkAllowsSqlQuery(handle, name.ptr, name.len);
+}
+
+extern fn zigttpSdkArrayPush(handle: *ModuleHandle, arr: JSValue, val: JSValue) bool;
+
+/// Append a value to the end of a JS array.
+pub fn arrayPush(handle: *ModuleHandle, arr: JSValue, val: JSValue) RuntimeError!void {
+    if (!zigttpSdkArrayPush(handle, arr, val)) return error.RuntimeFailure;
+}
+
+// -------------------------------------------------------------------------
+// SQLite surface. Modules that declare the `.sqlite` capability can open,
+// prepare, and execute statements through these helpers. SqliteDb and
+// SqliteStmt are opaque handles; the runtime owns their lifetime until
+// close/finalize is called.
+// -------------------------------------------------------------------------
+
+pub const SqliteDb = opaque {};
+pub const SqliteStmt = opaque {};
+
+pub const sqlite_row: i32 = 100;
+pub const sqlite_done: i32 = 101;
+
+pub const sqlite_integer: i32 = 1;
+pub const sqlite_float: i32 = 2;
+pub const sqlite_text: i32 = 3;
+pub const sqlite_blob: i32 = 4;
+pub const sqlite_null: i32 = 5;
+
+pub const SqliteError = ModuleCapabilityError || error{
+    SqliteOpenFailed,
+    SqlitePrepareFailed,
+    SqliteBindFailed,
+};
+
+extern fn zigttpSdkSqliteOpen(handle: *ModuleHandle, path_ptr: [*]const u8, path_len: usize, out: **SqliteDb) bool;
+extern fn zigttpSdkSqliteClose(db: *SqliteDb) void;
+extern fn zigttpSdkSqliteChanges(db: *SqliteDb) i32;
+extern fn zigttpSdkSqliteLastInsertRowId(db: *SqliteDb) i64;
+extern fn zigttpSdkSqliteErrmsg(db: *SqliteDb, out_ptr: *[*]const u8, out_len: *usize) void;
+extern fn zigttpSdkSqlitePrepare(db: *SqliteDb, sql_ptr: [*]const u8, sql_len: usize, out: **SqliteStmt) bool;
+extern fn zigttpSdkSqliteFinalize(stmt: *SqliteStmt) void;
+extern fn zigttpSdkSqliteStep(stmt: *SqliteStmt) i32;
+extern fn zigttpSdkSqliteReadonly(stmt: *SqliteStmt) bool;
+extern fn zigttpSdkSqliteStmtErrmsg(stmt: *SqliteStmt, out_ptr: *[*]const u8, out_len: *usize) void;
+extern fn zigttpSdkSqliteParamCount(stmt: *SqliteStmt) u32;
+extern fn zigttpSdkSqliteParamName(stmt: *SqliteStmt, index: u32, out_ptr: *[*]const u8, out_len: *usize) bool;
+extern fn zigttpSdkSqliteBindNull(stmt: *SqliteStmt, index: u32) bool;
+extern fn zigttpSdkSqliteBindInt64(stmt: *SqliteStmt, index: u32, v: i64) bool;
+extern fn zigttpSdkSqliteBindDouble(stmt: *SqliteStmt, index: u32, v: f64) bool;
+extern fn zigttpSdkSqliteBindText(stmt: *SqliteStmt, index: u32, ptr: [*]const u8, len: usize) bool;
+extern fn zigttpSdkSqliteColumnCount(stmt: *SqliteStmt) u32;
+extern fn zigttpSdkSqliteColumnName(stmt: *SqliteStmt, index: u32, out_ptr: *[*]const u8, out_len: *usize) void;
+extern fn zigttpSdkSqliteColumnType(stmt: *SqliteStmt, index: u32) i32;
+extern fn zigttpSdkSqliteColumnInt64(stmt: *SqliteStmt, index: u32) i64;
+extern fn zigttpSdkSqliteColumnDouble(stmt: *SqliteStmt, index: u32) f64;
+extern fn zigttpSdkSqliteColumnText(stmt: *SqliteStmt, index: u32, out_ptr: *[*]const u8, out_len: *usize) void;
+
+/// Open a SQLite database through the capability-check path. Requires
+/// the `.sqlite` capability to be declared on the module binding.
+pub fn sqliteOpen(handle: *ModuleHandle, path: []const u8) SqliteError!*SqliteDb {
+    try requireCapability(handle, .sqlite);
+    var out: *SqliteDb = undefined;
+    if (!zigttpSdkSqliteOpen(handle, path.ptr, path.len, &out)) return error.SqliteOpenFailed;
+    return out;
+}
+
+pub fn sqliteClose(db: *SqliteDb) void {
+    zigttpSdkSqliteClose(db);
+}
+
+pub fn sqliteChanges(db: *SqliteDb) i32 {
+    return zigttpSdkSqliteChanges(db);
+}
+
+pub fn sqliteLastInsertRowId(db: *SqliteDb) i64 {
+    return zigttpSdkSqliteLastInsertRowId(db);
+}
+
+pub fn sqliteErrmsg(db: *SqliteDb) []const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    zigttpSdkSqliteErrmsg(db, &ptr, &len);
+    return ptr[0..len];
+}
+
+/// Returns a prepared statement or null on failure; on failure read the
+/// error message via `sqliteErrmsg(db)`.
+pub fn sqlitePrepare(db: *SqliteDb, sql: []const u8) ?*SqliteStmt {
+    var out: *SqliteStmt = undefined;
+    if (!zigttpSdkSqlitePrepare(db, sql.ptr, sql.len, &out)) return null;
+    return out;
+}
+
+pub fn sqliteFinalize(stmt: *SqliteStmt) void {
+    zigttpSdkSqliteFinalize(stmt);
+}
+
+pub fn sqliteStep(stmt: *SqliteStmt) i32 {
+    return zigttpSdkSqliteStep(stmt);
+}
+
+pub fn sqliteReadonly(stmt: *SqliteStmt) bool {
+    return zigttpSdkSqliteReadonly(stmt);
+}
+
+pub fn sqliteStmtErrmsg(stmt: *SqliteStmt) []const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    zigttpSdkSqliteStmtErrmsg(stmt, &ptr, &len);
+    return ptr[0..len];
+}
+
+pub fn sqliteParamCount(stmt: *SqliteStmt) u32 {
+    return zigttpSdkSqliteParamCount(stmt);
+}
+
+pub fn sqliteParamName(stmt: *SqliteStmt, index: u32) ?[]const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkSqliteParamName(stmt, index, &ptr, &len)) return null;
+    return ptr[0..len];
+}
+
+pub fn sqliteBindNull(stmt: *SqliteStmt, index: u32) SqliteError!void {
+    if (!zigttpSdkSqliteBindNull(stmt, index)) return error.SqliteBindFailed;
+}
+
+pub fn sqliteBindInt64(stmt: *SqliteStmt, index: u32, v: i64) SqliteError!void {
+    if (!zigttpSdkSqliteBindInt64(stmt, index, v)) return error.SqliteBindFailed;
+}
+
+pub fn sqliteBindDouble(stmt: *SqliteStmt, index: u32, v: f64) SqliteError!void {
+    if (!zigttpSdkSqliteBindDouble(stmt, index, v)) return error.SqliteBindFailed;
+}
+
+pub fn sqliteBindText(stmt: *SqliteStmt, index: u32, text: []const u8) SqliteError!void {
+    if (!zigttpSdkSqliteBindText(stmt, index, text.ptr, text.len)) return error.SqliteBindFailed;
+}
+
+pub fn sqliteColumnCount(stmt: *SqliteStmt) u32 {
+    return zigttpSdkSqliteColumnCount(stmt);
+}
+
+pub fn sqliteColumnName(stmt: *SqliteStmt, index: u32) []const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    zigttpSdkSqliteColumnName(stmt, index, &ptr, &len);
+    return ptr[0..len];
+}
+
+pub fn sqliteColumnType(stmt: *SqliteStmt, index: u32) i32 {
+    return zigttpSdkSqliteColumnType(stmt, index);
+}
+
+pub fn sqliteColumnInt64(stmt: *SqliteStmt, index: u32) i64 {
+    return zigttpSdkSqliteColumnInt64(stmt, index);
+}
+
+pub fn sqliteColumnDouble(stmt: *SqliteStmt, index: u32) f64 {
+    return zigttpSdkSqliteColumnDouble(stmt, index);
+}
+
+pub fn sqliteColumnText(stmt: *SqliteStmt, index: u32) []const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    zigttpSdkSqliteColumnText(stmt, index, &ptr, &len);
+    return ptr[0..len];
+}
+
 pub const DataLabel = enum(u3) {
     secret,
     credential,
@@ -175,6 +661,7 @@ pub const ContractCategory = enum {
     env,
     cache_namespace,
     sql_registration,
+    scope_name,
     durable_key,
     durable_step,
     durable_signal,
@@ -182,6 +669,11 @@ pub const ContractCategory = enum {
     schema_compile,
     request_schema,
     route_pattern,
+    cookie_name,
+    cors_origin,
+    rate_limit_key,
+    service_call,
+    fetch_host,
 };
 
 pub const ContractTransform = enum {
@@ -197,10 +689,42 @@ pub const ContractExtraction = struct {
 };
 
 pub const ContractFlags = struct {
+    sets_scope_used: bool = false,
     sets_durable_used: bool = false,
     sets_durable_timers: bool = false,
     sets_bearer_auth: bool = false,
     sets_jwt_auth: bool = false,
+};
+
+pub const LawKind = enum {
+    pure,
+    idempotent_call,
+    inverse_of,
+    absorbing,
+};
+
+pub const AbsorbingPattern = struct {
+    arg_position: u8 = 0,
+    argument_shape: ArgumentShape,
+    residue: Residue,
+
+    pub const ArgumentShape = enum {
+        empty_string_literal,
+        undefined_literal,
+    };
+
+    pub const Residue = enum {
+        result_err,
+        returns_undefined,
+        returns_false,
+    };
+};
+
+pub const Law = union(LawKind) {
+    pure: void,
+    idempotent_call: void,
+    inverse_of: []const u8,
+    absorbing: AbsorbingPattern,
 };
 
 pub const FunctionBinding = struct {
@@ -215,6 +739,7 @@ pub const FunctionBinding = struct {
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},
     failure_severity: FailureSeverity = .none,
+    laws: []const Law = &.{},
 };
 
 pub const ModuleBinding = struct {
@@ -228,14 +753,20 @@ pub const ModuleBinding = struct {
     contract_section: ?[]const u8 = null,
     sandboxable: bool = false,
     comptime_only: bool = false,
+    self_managed_io: bool = false,
 };
 
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
-    @setEvalBranchQuota(5000);
+    // Raised from the 5000 default because the O(n*m) duplicate-name
+    // and specifier checks exceed it once the full builtin roster
+    // (20+ modules) is validated in one call.
+    @setEvalBranchQuota(20000);
 
     for (bindings) |binding| {
-        if (!std.mem.startsWith(u8, binding.specifier, "zigttp-ext:")) {
-            @compileError("package module specifier must start with 'zigttp-ext:': " ++ binding.specifier);
+        const builtin_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp:");
+        const extension_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp-ext:");
+        if (!builtin_prefix and !extension_prefix) {
+            @compileError("module specifier must start with 'zigttp:' or 'zigttp-ext:': " ++ binding.specifier);
         }
 
         if (binding.state_init != null and binding.state_deinit == null) {

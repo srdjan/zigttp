@@ -253,7 +253,7 @@ fn auditPath(
         path,
         1,
         1,
-        "pass a path under packages/zigts/src/modules/ or packages/zigts/module-specs/",
+        "pass a path under packages/modules/src/, packages/zigts/src/modules/, or packages/modules/module-specs/",
     );
 }
 
@@ -275,7 +275,7 @@ fn auditModuleAndSpec(
             module_path,
             1,
             1,
-            "add packages/zigts/module-specs/<module>.json for this built-in module",
+            "add packages/modules/module-specs/<module>.json for this built-in module",
         );
         return;
     }
@@ -510,9 +510,10 @@ fn parseJsonStringField(content: []const u8, field_name: []const u8) ?[]const u8
 }
 
 fn looksLikeBuiltinAdjacentPath(path: []const u8) bool {
-    const in_modules_dir = std.mem.indexOf(u8, path, "packages/zigts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
-    const in_specs_dir = std.mem.indexOf(u8, path, "packages/zigts/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
-    return in_modules_dir or in_specs_dir;
+    const in_legacy_modules_dir = std.mem.indexOf(u8, path, "packages/zigts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_peer_modules_dir = std.mem.indexOf(u8, path, "packages/modules/src/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_specs_dir = std.mem.indexOf(u8, path, "packages/modules/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
+    return in_legacy_modules_dir or in_peer_modules_dir or in_specs_dir;
 }
 
 fn findBuiltinEntryByModulePath(path: []const u8) ?*const builtin_modules.BuiltinGovernanceEntry {
@@ -629,10 +630,10 @@ test "registry-driven companion path mapping preserves rooted paths" {
         allocator,
         module_path,
         "packages/zigts/src/modules/http_mod.zig",
-        "packages/zigts/module-specs/http-mod.json",
+        "packages/modules/module-specs/http-mod.json",
     );
     defer allocator.free(spec_path);
-    try std.testing.expectEqualStrings("/tmp/work/packages/zigts/module-specs/http-mod.json", spec_path);
+    try std.testing.expectEqualStrings("/tmp/work/packages/modules/module-specs/http-mod.json", spec_path);
 }
 
 test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
@@ -659,7 +660,7 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
 test "verifyPaths ignores internal helper files outside the public built-in set" {
     var result = try verifyPaths(
         std.testing.allocator,
-        &.{"packages/zigts/src/modules/util.zig"},
+        &.{"packages/zigts/src/modules/internal/util.zig"},
         .{},
     );
     defer result.deinit(std.testing.allocator);
@@ -674,7 +675,7 @@ test "verifyBuiltins reports the authoritative public module and spec set" {
 
     try std.testing.expectEqual(builtin_modules.governanceEntries().len * 2, result.checked_files.items.len);
     try std.testing.expect(containsString(result.checked_files.items, "packages/zigts/src/modules/env.zig"));
-    try std.testing.expect(containsString(result.checked_files.items, "packages/zigts/module-specs/env.json"));
+    try std.testing.expect(containsString(result.checked_files.items, "packages/modules/module-specs/env.json"));
 }
 
 test "pathMatchesCanonical requires a path-separator boundary" {

@@ -64,6 +64,23 @@ pub const ProvenFacts = struct {
 
     // Fault coverage
     fault_covered: bool = false,
+
+    // WebSocket event exports. When any is true the handler upgrades
+    // incoming `Upgrade: websocket` requests and dispatches through
+    // zigttp:websocket. Deploy targets that need a different binding
+    // (e.g. Cloudflare Durable Objects) can branch on `has_websocket`.
+    has_websocket: bool = false,
+    websocket_on_open: bool = false,
+    websocket_on_message: bool = false,
+    websocket_on_close: bool = false,
+    websocket_on_error: bool = false,
+
+    // `zigttp:fetch` host set. Populated from the contract's egress
+    // hosts when the handler imports `zigttp:fetch`. Rendered as a
+    // separate allow-list so targets can distinguish "fetchSync
+    // egress" (all hosts) from "zigttp:fetch egress" (the durable
+    // subset).
+    fetch_hosts: []const []const u8 = &.{},
 };
 
 // -------------------------------------------------------------------------
@@ -132,6 +149,16 @@ pub fn extractProvenFacts(
 
     const proof_level = deriveProofLevel(contract);
 
+    // `zigttp:fetch` egress subset: when the handler imports the
+    // module the whole egress set is fetch-capable. Downstream targets
+    // that want a narrower allow-list (e.g. Cloudflare egress) treat
+    // fetch_hosts as the set to configure.
+    const imports_fetch = containsString(contract.modules.items, "zigttp:fetch");
+    const fetch_hosts: []const []const u8 = if (imports_fetch) contract.egress.hosts.items else &.{};
+
+    const ws = contract.websocket;
+    const has_ws = ws.on_open or ws.on_message or ws.on_close or ws.on_error;
+
     return .{
         .facts = .{
             .handler_name = handler_name,
@@ -158,10 +185,21 @@ pub fn extractProvenFacts(
             .results_safe = if (contract.verification) |v| v.results_safe else false,
             .rate_limit_namespace = if (contract.rate_limiting) |rl| (if (rl.namespace.len > 0) rl.namespace else null) else null,
             .fault_covered = if (contract.properties) |p| p.fault_covered else false,
+            .has_websocket = has_ws,
+            .websocket_on_open = ws.on_open,
+            .websocket_on_message = ws.on_message,
+            .websocket_on_close = ws.on_close,
+            .websocket_on_error = ws.on_error,
+            .fetch_hosts = fetch_hosts,
         },
         .checks_buf = checks_buf,
         .routes_buf = routes_buf,
     };
+}
+
+fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |item| if (std.mem.eql(u8, item, needle)) return true;
+    return false;
 }
 
 fn extractHandlerName(path: []const u8) []const u8 {
@@ -241,6 +279,27 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll(if (facts.env_proven) "true" else "false");
     if (!facts.env_proven) {
         try w.writeAll(",\n      \"envReview\": \"handler uses dynamic env access - additional vars may be needed\"");
+    }
+    if (facts.has_websocket) {
+        try w.writeAll(",\n      \"websocket\": { \"onOpen\": ");
+        try w.writeAll(if (facts.websocket_on_open) "true" else "false");
+        try w.writeAll(", \"onMessage\": ");
+        try w.writeAll(if (facts.websocket_on_message) "true" else "false");
+        try w.writeAll(", \"onClose\": ");
+        try w.writeAll(if (facts.websocket_on_close) "true" else "false");
+        try w.writeAll(", \"onError\": ");
+        try w.writeAll(if (facts.websocket_on_error) "true" else "false");
+        try w.writeAll(" }");
+    }
+    if (facts.fetch_hosts.len > 0) {
+        try w.writeAll(",\n      \"fetchHosts\": [");
+        for (facts.fetch_hosts, 0..) |host, i| {
+            if (i > 0) try w.writeAll(", ");
+            try w.writeByte('"');
+            try writeJsonStringContent(w, host);
+            try w.writeByte('"');
+        }
+        try w.writeAll("]");
     }
     try w.writeAll("\n    }\n");
     try w.writeAll("  },\n");
@@ -495,10 +554,10 @@ fn writeParamName(w: anytype, env_var: []const u8) !void {
             continue;
         }
         if (capitalize_next) {
-            try w.writeByte(toUpper(c));
+            try w.writeByte(std.ascii.toUpper(c));
             capitalize_next = false;
         } else {
-            try w.writeByte(toLower(c));
+            try w.writeByte(std.ascii.toLower(c));
         }
     }
 }
@@ -513,22 +572,12 @@ fn writeSanitizedId(w: anytype, pattern: []const u8) !void {
             continue;
         }
         if (capitalize_next) {
-            try w.writeByte(toUpper(c));
+            try w.writeByte(std.ascii.toUpper(c));
             capitalize_next = false;
         } else {
             try w.writeByte(c);
         }
     }
-}
-
-fn toUpper(c: u8) u8 {
-    if (c >= 'a' and c <= 'z') return c - 32;
-    return c;
-}
-
-fn toLower(c: u8) u8 {
-    if (c >= 'A' and c <= 'Z') return c + 32;
-    return c;
 }
 
 const writeJsonStringContent = handler_contract.writeJsonStringContent;
@@ -1051,4 +1100,96 @@ test "writeSanitizedId converts route pattern" {
     try writeSanitizedId(&aw.writer, "/api/users");
     output = aw.toArrayList();
     try std.testing.expectEqualStrings("RouteApiUsers", output.items);
+}
+
+test "renderAws exposes websocket metadata when the handler has ws events" {
+    const allocator = std.testing.allocator;
+
+    const facts = ProvenFacts{
+        .handler_name = "chat",
+        .handler_path = "examples/websocket/chat.ts",
+        .env_vars = &.{},
+        .env_proven = true,
+        .egress_hosts = &.{},
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+        .checks_passed = &.{},
+        .has_websocket = true,
+        .websocket_on_open = true,
+        .websocket_on_message = true,
+        .websocket_on_close = true,
+    };
+
+    const outputs = try renderAws(allocator, &facts);
+    defer {
+        for (outputs) |o| allocator.free(o.content);
+        allocator.free(outputs);
+    }
+
+    const content = outputs[0].content;
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"websocket\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"onMessage\": true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"onError\": false") != null);
+}
+
+test "renderAws exposes fetchHosts when the handler imports zigttp:fetch" {
+    const allocator = std.testing.allocator;
+
+    const fetch_hosts = [_][]const u8{ "billing.example", "metrics.example" };
+    const facts = ProvenFacts{
+        .handler_name = "webhook",
+        .handler_path = "examples/fetch/webhook.ts",
+        .env_vars = &.{},
+        .env_proven = true,
+        .egress_hosts = &fetch_hosts,
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+        .checks_passed = &.{},
+        .fetch_hosts = &fetch_hosts,
+    };
+
+    const outputs = try renderAws(allocator, &facts);
+    defer {
+        for (outputs) |o| allocator.free(o.content);
+        allocator.free(outputs);
+    }
+
+    const content = outputs[0].content;
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"fetchHosts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"billing.example\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"metrics.example\"") != null);
+}
+
+test "renderAws omits websocket and fetch blocks when absent" {
+    const allocator = std.testing.allocator;
+
+    const facts = ProvenFacts{
+        .handler_name = "handler",
+        .handler_path = "handler.ts",
+        .env_vars = &.{},
+        .env_proven = true,
+        .egress_hosts = &.{},
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+        .checks_passed = &.{},
+    };
+
+    const outputs = try renderAws(allocator, &facts);
+    defer {
+        for (outputs) |o| allocator.free(o.content);
+        allocator.free(outputs);
+    }
+
+    const content = outputs[0].content;
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"websocket\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"fetchHosts\"") == null);
 }

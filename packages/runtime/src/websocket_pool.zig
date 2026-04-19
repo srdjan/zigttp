@@ -87,7 +87,7 @@ pub const Pool = struct {
     /// replaces the prior one and does not migrate existing files.
     pub fn setAttachmentsDir(self: *Pool, dir: []const u8) !void {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const owned = try self.allocator.dupe(u8, dir);
         if (self.attachments_dir) |prev| self.allocator.free(prev);
         self.attachments_dir = owned;
@@ -101,13 +101,13 @@ pub const Pool = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 
-    fn unlockLock(self: *Pool) void {
+    fn unlock(self: *Pool) void {
         self.mutex.unlock();
     }
 
     pub fn deinit(self: *Pool) void {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         var id_it = self.by_id.iterator();
         while (id_it.next()) |entry| {
@@ -142,7 +142,7 @@ pub const Pool = struct {
         now_ms: i64,
     ) !ConnectionId {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         const room_owned = try self.allocator.dupe(u8, room_key);
         errdefer self.allocator.free(room_owned);
@@ -176,7 +176,7 @@ pub const Pool = struct {
     /// that crashed rather than exited cleanly.
     pub fn unregister(self: *Pool, id: ConnectionId) void {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         const conn_entry = self.by_id.fetchRemove(id) orelse return;
         const conn = conn_entry.value;
@@ -197,7 +197,7 @@ pub const Pool = struct {
     /// safe because the snapshot is stable.
     pub fn snapshot(self: *Pool, id: ConnectionId) ?Connection {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
         return conn.*;
     }
@@ -209,7 +209,7 @@ pub const Pool = struct {
     /// them, so broadcast loops should tolerate `snapshot(id) == null`.
     pub fn collectRoom(self: *Pool, room_key: []const u8, out: []ConnectionId) []ConnectionId {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
 
         const list = self.by_room.getPtr(room_key) orelse return out[0..0];
         const n = @min(list.items.len, out.len);
@@ -219,7 +219,7 @@ pub const Pool = struct {
 
     pub fn countInRoom(self: *Pool, room_key: []const u8) usize {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const list = self.by_room.getPtr(room_key) orelse return 0;
         return list.items.len;
     }
@@ -231,7 +231,7 @@ pub const Pool = struct {
     /// subsequent crash leaves the last-successful write on disk.
     pub fn setAttachment(self: *Pool, id: ConnectionId, bytes: []const u8) !bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
 
         const owned = try self.allocator.dupe(u8, bytes);
@@ -255,7 +255,7 @@ pub const Pool = struct {
         out_allocator: std.mem.Allocator,
     ) !?[]u8 {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
         const bytes = conn.attachment orelse return null;
         return try out_allocator.dupe(u8, bytes);
@@ -274,7 +274,7 @@ pub const Pool = struct {
         response_bytes: []const u8,
     ) !bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
 
         if (request_bytes.len == 0 and response_bytes.len == 0) {
@@ -310,7 +310,7 @@ pub const Pool = struct {
         out_allocator: std.mem.Allocator,
     ) !?[]u8 {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return null;
         const req = conn.auto_request orelse return null;
         const resp = conn.auto_response orelse return null;
@@ -322,11 +322,66 @@ pub const Pool = struct {
     /// `false` if the id no longer exists.
     pub fn touch(self: *Pool, id: ConnectionId, state: ConnectionState, now_ms: i64) bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const conn = self.by_id.get(id) orelse return false;
         conn.state = state;
         conn.last_frame_at_ms = now_ms;
         return true;
+    }
+
+    /// Mark a connection as actively dispatching to the JS handler.
+    /// Paired with `endDispatch` so the pool can report whether any
+    /// given connection is mid-flight vs. idle. Does not update the
+    /// last-frame timestamp — that belongs to inbound frame receipt,
+    /// not handler execution.
+    pub fn beginDispatch(self: *Pool, id: ConnectionId) bool {
+        self.lock();
+        defer self.unlock();
+        const conn = self.by_id.get(id) orelse return false;
+        conn.state = .live;
+        return true;
+    }
+
+    /// Mark a connection as parked after handler execution returns.
+    /// Paired with `beginDispatch`. A parked connection that stays
+    /// parked past the idle threshold becomes a hibernation candidate
+    /// via `scanIdle`.
+    pub fn endDispatch(self: *Pool, id: ConnectionId) bool {
+        self.lock();
+        defer self.unlock();
+        const conn = self.by_id.get(id) orelse return false;
+        conn.state = .parked;
+        return true;
+    }
+
+    /// Sweep parked connections whose last inbound frame was longer
+    /// than `idle_threshold_ms` ago and transition them to `dormant`.
+    /// Returns the subset of ids that crossed the boundary — callers
+    /// can feed those into an evented reader registration once the
+    /// thread-per-connection model is replaced. `live` connections
+    /// are never swept (a handler that blocks indefinitely is a
+    /// handler bug, not a hibernation case). Returns an allocator-
+    /// owned slice; caller frees.
+    pub fn scanIdle(
+        self: *Pool,
+        out_allocator: std.mem.Allocator,
+        idle_threshold_ms: i64,
+        now_ms: i64,
+    ) ![]ConnectionId {
+        self.lock();
+        defer self.unlock();
+        var out: std.ArrayList(ConnectionId) = .empty;
+        errdefer out.deinit(out_allocator);
+
+        var it = self.by_id.iterator();
+        while (it.next()) |entry| {
+            const conn = entry.value_ptr.*;
+            if (conn.state != .parked) continue;
+            if (now_ms - conn.last_frame_at_ms <= idle_threshold_ms) continue;
+            conn.state = .dormant;
+            try out.append(out_allocator, conn.id);
+        }
+        return try out.toOwnedSlice(out_allocator);
     }
 
     /// Rehydrate a crashed connection's attachment onto a freshly
@@ -344,7 +399,7 @@ pub const Pool = struct {
         prior_id: ConnectionId,
     ) !bool {
         self.lock();
-        defer self.unlockLock();
+        defer self.unlock();
         const dir = self.attachments_dir orelse return false;
         const conn = self.by_id.get(new_id) orelse return false;
 
@@ -372,7 +427,7 @@ pub const Pool = struct {
     ) ![]ConnectionId {
         self.lock();
         const dir = self.attachments_dir;
-        self.unlockLock();
+        self.unlock();
         if (dir == null) return &.{};
 
         return listAttachmentIds(out_allocator, dir.?);
@@ -786,4 +841,60 @@ test "setAutoResponse returns false for missing id" {
     var pool = Pool.init(testing.allocator);
     defer pool.deinit();
     try testing.expect(!(try pool.setAutoResponse(9999, "a", "b")));
+}
+
+// ---------------------------------------------------------------------------
+// W3: connection state machine + idle scanning
+// ---------------------------------------------------------------------------
+
+test "begin/endDispatch toggle state between live and parked" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    const id = try pool.register(100, "alpha", 1000);
+    try testing.expectEqual(ConnectionState.parked, (pool.snapshot(id) orelse return error.TestFailed).state);
+
+    try testing.expect(pool.beginDispatch(id));
+    try testing.expectEqual(ConnectionState.live, (pool.snapshot(id) orelse return error.TestFailed).state);
+
+    try testing.expect(pool.endDispatch(id));
+    try testing.expectEqual(ConnectionState.parked, (pool.snapshot(id) orelse return error.TestFailed).state);
+
+    try testing.expect(!pool.beginDispatch(9999));
+    try testing.expect(!pool.endDispatch(9999));
+}
+
+test "scanIdle transitions stale parked connections to dormant" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    // Three connections registered at the same moment.
+    const a = try pool.register(100, "alpha", 1_000);
+    const b = try pool.register(101, "alpha", 1_000);
+    const c_live = try pool.register(102, "alpha", 1_000);
+
+    // `c_live` is actively dispatching and must never be swept.
+    try testing.expect(pool.beginDispatch(c_live));
+
+    // Only `b` has received a recent frame.
+    _ = pool.touch(b, .parked, 9_000);
+
+    const idle = try pool.scanIdle(testing.allocator, 1_000, 10_000);
+    defer testing.allocator.free(idle);
+
+    // `a`: last frame at 1000, now 10000, threshold 1000 → idle 9000ms > 1000 → dormant.
+    // `b`: last frame at 9000, idle 1000ms = threshold → NOT past threshold → stays parked.
+    // `c_live`: in .live, never scanned regardless of timestamp.
+    try testing.expectEqual(@as(usize, 1), idle.len);
+    try testing.expectEqual(a, idle[0]);
+
+    try testing.expectEqual(ConnectionState.dormant, (pool.snapshot(a) orelse return error.TestFailed).state);
+    try testing.expectEqual(ConnectionState.parked, (pool.snapshot(b) orelse return error.TestFailed).state);
+    try testing.expectEqual(ConnectionState.live, (pool.snapshot(c_live) orelse return error.TestFailed).state);
+
+    // A second scan finds no new candidates — the already-dormant connection
+    // isn't re-reported.
+    const idle2 = try pool.scanIdle(testing.allocator, 1_000, 10_000);
+    defer testing.allocator.free(idle2);
+    try testing.expectEqual(@as(usize, 0), idle2.len);
 }

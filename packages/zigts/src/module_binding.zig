@@ -19,7 +19,7 @@ const context = @import("context.zig");
 const compat = @import("compat.zig");
 const file_io = @import("file_io.zig");
 const sqlite_runtime = @import("sqlite.zig");
-const resolver = @import("modules/resolver.zig");
+const resolver = @import("modules/internal/resolver.zig");
 const security_events = @import("security_events.zig");
 
 // Re-export EffectClass from resolver for backward compatibility
@@ -97,8 +97,12 @@ pub fn wrapModuleFnWithCapabilities(
 /// Cast a ModuleHandle to the underlying Context. Internal use only -
 /// this function is called by the SDK free functions below, never by
 /// module authors directly.
-fn handleToContext(handle: *ModuleHandle) *context.Context {
+pub fn handleToContext(handle: *ModuleHandle) *context.Context {
     return @ptrCast(@alignCast(handle));
+}
+
+pub fn contextToHandle(ctx: *context.Context) *ModuleHandle {
+    return @ptrCast(ctx);
 }
 
 fn activeContextHasCapability(capability: ModuleCapability) bool {
@@ -161,35 +165,35 @@ pub fn extractFloat(val: value.JSValue) ?f64 {
 /// Create a Result object: { ok: true, value: payload }
 pub fn resultOk(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultOk(ctx, payload);
 }
 
 /// Create a Result object: { ok: false, error: message }
 pub fn resultErr(handle: *ModuleHandle, message: []const u8) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultErr(ctx, message);
 }
 
 /// Create a Result object: { ok: false, error: payload }
 pub fn resultErrValue(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultErrValue(ctx, payload);
 }
 
 /// Create a Result object: { ok: false, errors: payload }
 pub fn resultErrs(handle: *ModuleHandle, payload: value.JSValue) !value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.createPlainResultErrs(ctx, payload);
 }
 
 /// Throw a JS error. Sets ctx.exception and returns exception_val.
 pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) value.JSValue {
     const ctx = handleToContext(handle);
-    const util = @import("modules/util.zig");
+    const util = @import("modules/internal/util.zig");
     return util.throwError(ctx, name, message);
 }
 
@@ -438,7 +442,7 @@ pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) bool {
 }
 
 pub export fn zigttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
-    if (capability_tag > @intFromEnum(ModuleCapability.policy_check)) return false;
+    if (capability_tag > @intFromEnum(ModuleCapability.websocket)) return false;
     const capability: ModuleCapability = @enumFromInt(capability_tag);
     return hasCapability(handle, capability);
 }
@@ -461,6 +465,503 @@ pub export fn zigttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, 
     writeStderrForActiveModule(buf_ptr[0..len]) catch return false;
     return true;
 }
+
+// SDK bridge: handle-bound runtime operations. JSValue crosses the ABI
+// directly because zigts's value.JSValue and sdk.JSValue are packed
+// struct(u64) with layout equivalence verified in module_binding_adapter.
+
+const util_mod = @import("modules/internal/util.zig");
+
+pub export fn zigttpSdkExtractString(val: value.JSValue, out_ptr: *[*]const u8, out_len: *usize) bool {
+    const slice = util_mod.extractString(val) orelse return false;
+    out_ptr.* = slice.ptr;
+    out_len.* = slice.len;
+    return true;
+}
+
+pub export fn zigttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    out.* = ctx.createString(ptr[0..len]) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkCreateObject(handle: *ModuleHandle, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    const obj = ctx.createObject(ctx.object_prototype) catch return false;
+    out.* = obj.toValue();
+    return true;
+}
+
+pub export fn zigttpSdkObjectSet(
+    handle: *ModuleHandle,
+    obj_val: value.JSValue,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    val: value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    if (!obj_val.isObject()) return false;
+    const obj = obj_val.toPtr(object.JSObject);
+    const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
+    ctx.setPropertyChecked(obj, atom, val) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkObjectGet(
+    handle: *ModuleHandle,
+    obj_val: value.JSValue,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    out: *value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    if (!obj_val.isObject()) return false;
+    const obj = obj_val.toPtr(object.JSObject);
+    const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
+    const pool = ctx.hidden_class_pool orelse return false;
+    out.* = obj.getProperty(pool, atom) orelse return false;
+    return true;
+}
+
+pub export fn zigttpSdkThrowError(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+    msg_ptr: [*]const u8,
+    msg_len: usize,
+) value.JSValue {
+    const ctx = handleToContext(handle);
+    return util_mod.throwError(ctx, name_ptr[0..name_len], msg_ptr[0..msg_len]);
+}
+
+pub export fn zigttpSdkResultOk(handle: *ModuleHandle, payload: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    out.* = util_mod.createPlainResultOk(ctx, payload) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkResultErr(
+    handle: *ModuleHandle,
+    msg_ptr: [*]const u8,
+    msg_len: usize,
+    out: *value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    out.* = util_mod.createPlainResultErr(ctx, msg_ptr[0..msg_len]) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    out.* = util_mod.createPlainResultErrValue(ctx, payload);
+    return true;
+}
+
+pub export fn zigttpSdkResultErrs(handle: *ModuleHandle, payload: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    out.* = util_mod.createPlainResultErrs(ctx, payload) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator {
+    const ctx = handleToContext(handle);
+    return &ctx.allocator;
+}
+
+pub export fn zigttpSdkSha256(
+    data_ptr: [*]const u8,
+    data_len: usize,
+    out: [*]u8,
+) bool {
+    sha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len]) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkHmacSha256(
+    data_ptr: [*]const u8,
+    data_len: usize,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    out: [*]u8,
+) bool {
+    hmacSha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len], key_ptr[0..key_len]) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkParseJson(
+    handle: *ModuleHandle,
+    json_ptr: [*]const u8,
+    json_len: usize,
+    out: *value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    const json = @import("builtins/json.zig");
+    out.* = json.parseJsonValue(ctx, json_ptr[0..json_len]) catch return false;
+    return true;
+}
+
+// SDK module-state envelope. The C-ABI deinit callback SDK modules provide
+// takes only the state pointer (std.mem.Allocator is not C-ABI stable).
+// Zigts wraps the envelope so the Context's internal deinit_fn signature
+// stays unchanged; modules store their own allocator inside their state.
+const SdkStateEnvelope = struct {
+    user_ptr: *anyopaque,
+    sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+    allocator: std.mem.Allocator,
+
+    fn envelopeDeinit(ptr: *anyopaque, _: std.mem.Allocator) void {
+        const env: *SdkStateEnvelope = @ptrCast(@alignCast(ptr));
+        env.sdk_deinit(env.user_ptr);
+        env.allocator.destroy(env);
+    }
+};
+
+pub export fn zigttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque {
+    const ctx = handleToContext(handle);
+    const env = ctx.getModuleState(SdkStateEnvelope, slot) orelse return null;
+    return env.user_ptr;
+}
+
+pub export fn zigttpSdkSetModuleState(
+    handle: *ModuleHandle,
+    slot: usize,
+    user_ptr: *anyopaque,
+    sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+) bool {
+    const ctx = handleToContext(handle);
+    const env = ctx.allocator.create(SdkStateEnvelope) catch return false;
+    env.* = .{ .user_ptr = user_ptr, .sdk_deinit = sdk_deinit, .allocator = ctx.allocator };
+    ctx.setModuleState(slot, env, SdkStateEnvelope.envelopeDeinit);
+    return true;
+}
+
+pub export fn zigttpSdkIsCallable(val: value.JSValue) bool {
+    return val.isCallable();
+}
+
+pub export fn zigttpSdkReadFile(
+    handle: *ModuleHandle,
+    path_ptr: [*]const u8,
+    path_len: usize,
+    max_size: usize,
+    out_ptr: *[*]u8,
+    out_len: *usize,
+) bool {
+    const ctx = handleToContext(handle);
+    const buf = readFileChecked(ctx.allocator, path_ptr[0..path_len], max_size) catch return false;
+    out_ptr.* = buf.ptr;
+    out_len.* = buf.len;
+    return true;
+}
+
+pub export fn zigttpSdkIsString(val: value.JSValue) bool {
+    return val.isStringOrRope();
+}
+
+pub export fn zigttpSdkIsObject(val: value.JSValue) bool {
+    return val.isObject();
+}
+
+pub export fn zigttpSdkIsArray(val: value.JSValue) bool {
+    return val.isArray();
+}
+
+pub export fn zigttpSdkArrayLength(val: value.JSValue, out: *u32) bool {
+    if (!val.isArray()) return false;
+    const arr = val.toPtr(object.JSObject);
+    out.* = arr.getArrayLength();
+    return true;
+}
+
+pub export fn zigttpSdkArrayGet(handle: *ModuleHandle, arr_val: value.JSValue, index: u32, out: *value.JSValue) bool {
+    _ = handle;
+    if (!arr_val.isArray()) return false;
+    const arr = arr_val.toPtr(object.JSObject);
+    out.* = arr.getIndex(index) orelse return false;
+    return true;
+}
+
+pub export fn zigttpSdkArraySet(handle: *ModuleHandle, arr_val: value.JSValue, index: u32, val: value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    if (!arr_val.isArray()) return false;
+    const arr = arr_val.toPtr(object.JSObject);
+    ctx.setIndexChecked(arr, index, val) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkCreateArray(handle: *ModuleHandle, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    const arr = ctx.createArray() catch return false;
+    out.* = arr.toValue();
+    return true;
+}
+
+pub export fn zigttpSdkStringify(handle: *ModuleHandle, val: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    const http_mod = @import("http.zig");
+    const js_str = http_mod.valueToJsonString(ctx, val) catch return false;
+    out.* = value.JSValue.fromPtr(js_str);
+    return true;
+}
+
+pub export fn zigttpSdkObjectKeys(handle: *ModuleHandle, obj_val: value.JSValue, out: *value.JSValue) bool {
+    const ctx = handleToContext(handle);
+    if (!obj_val.isObject()) return false;
+    const obj = obj_val.toPtr(object.JSObject);
+    const pool = ctx.hidden_class_pool orelse return false;
+
+    const atoms = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return false;
+    defer ctx.allocator.free(atoms);
+
+    const arr = ctx.createArray() catch return false;
+    for (atoms, 0..) |atom, i| {
+        const name = util_mod.atomToString(atom, &ctx.atoms) orelse continue;
+        const name_val = ctx.createString(name) catch return false;
+        ctx.setIndexChecked(arr, @intCast(i), name_val) catch return false;
+    }
+    out.* = arr.toValue();
+    return true;
+}
+
+pub export fn zigttpSdkReadEnv(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) bool {
+    _ = handle;
+    if (name_len >= 256) return false;
+    var buf: [256]u8 = undefined;
+    @memcpy(buf[0..name_len], name_ptr[0..name_len]);
+    buf[name_len] = 0;
+    const result = readEnvChecked(buf[0..name_len :0]) orelse return false;
+    out_ptr.* = result.ptr;
+    out_len.* = result.len;
+    return true;
+}
+
+pub export fn zigttpSdkAllowsEnv(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsEnvChecked(ctx, name_ptr[0..name_len]);
+}
+
+pub export fn zigttpSdkAllowsCacheNamespace(
+    handle: *ModuleHandle,
+    ns_ptr: [*]const u8,
+    ns_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsCacheNamespaceChecked(ctx, ns_ptr[0..ns_len]);
+}
+
+pub export fn zigttpSdkAllowsSqlQuery(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsSqlQueryChecked(ctx, name_ptr[0..name_len]);
+}
+
+pub export fn zigttpSdkArrayPush(
+    handle: *ModuleHandle,
+    arr_val: value.JSValue,
+    val: value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    if (!arr_val.isArray()) return false;
+    const arr = arr_val.toPtr(object.JSObject);
+    arr.arrayPush(ctx.allocator, val) catch return false;
+    return true;
+}
+
+// -------------------------------------------------------------------------
+// SQLite bridge. Opaque handles are the raw sqlite3 / sqlite3_stmt
+// pointers; the runtime owns their lifetime until close/finalize.
+// -------------------------------------------------------------------------
+
+const SdkSqliteDb = opaque {};
+const SdkSqliteStmt = opaque {};
+
+pub export fn zigttpSdkSqliteOpen(
+    handle: *ModuleHandle,
+    path_ptr: [*]const u8,
+    path_len: usize,
+    out: **SdkSqliteDb,
+) bool {
+    const ctx = handleToContext(handle);
+    const db = openSqliteDbChecked(ctx.allocator, path_ptr[0..path_len]) catch return false;
+    out.* = @ptrCast(db.handle);
+    return true;
+}
+
+pub export fn zigttpSdkSqliteClose(opaque_db: *SdkSqliteDb) void {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    _ = sqlite_runtime.c.sqlite3_close(raw);
+}
+
+pub export fn zigttpSdkSqliteChanges(opaque_db: *SdkSqliteDb) i32 {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    return sqlite_runtime.c.sqlite3_changes(raw);
+}
+
+pub export fn zigttpSdkSqliteLastInsertRowId(opaque_db: *SdkSqliteDb) i64 {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    return sqlite_runtime.c.sqlite3_last_insert_rowid(raw);
+}
+
+pub export fn zigttpSdkSqliteErrmsg(
+    opaque_db: *SdkSqliteDb,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    const msg = std.mem.span(sqlite_runtime.c.sqlite3_errmsg(raw));
+    out_ptr.* = msg.ptr;
+    out_len.* = msg.len;
+}
+
+pub export fn zigttpSdkSqlitePrepare(
+    opaque_db: *SdkSqliteDb,
+    sql_ptr: [*]const u8,
+    sql_len: usize,
+    out: **SdkSqliteStmt,
+) bool {
+    const raw_db: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    var stmt: ?*sqlite_runtime.c.sqlite3_stmt = null;
+    const rc = sqlite_runtime.c.sqlite3_prepare_v2(raw_db, sql_ptr, @intCast(sql_len), &stmt, null);
+    if (rc != sqlite_runtime.c.SQLITE_OK or stmt == null) return false;
+    out.* = @ptrCast(stmt.?);
+    return true;
+}
+
+pub export fn zigttpSdkSqliteFinalize(opaque_stmt: *SdkSqliteStmt) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    _ = sqlite_runtime.c.sqlite3_finalize(raw);
+}
+
+pub export fn zigttpSdkSqliteStep(opaque_stmt: *SdkSqliteStmt) i32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_step(raw);
+}
+
+pub export fn zigttpSdkSqliteReadonly(opaque_stmt: *SdkSqliteStmt) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_stmt_readonly(raw) != 0;
+}
+
+pub export fn zigttpSdkSqliteStmtErrmsg(
+    opaque_stmt: *SdkSqliteStmt,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const db = sqlite_runtime.c.sqlite3_db_handle(raw);
+    const msg = std.mem.span(sqlite_runtime.c.sqlite3_errmsg(db));
+    out_ptr.* = msg.ptr;
+    out_len.* = msg.len;
+}
+
+pub export fn zigttpSdkSqliteParamCount(opaque_stmt: *SdkSqliteStmt) u32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return @intCast(sqlite_runtime.c.sqlite3_bind_parameter_count(raw));
+}
+
+pub export fn zigttpSdkSqliteParamName(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const c_name = sqlite_runtime.c.sqlite3_bind_parameter_name(raw, @intCast(index));
+    const normalized = sqlite_runtime.normalizeParamName(c_name) orelse return false;
+    out_ptr.* = normalized.ptr;
+    out_len.* = normalized.len;
+    return true;
+}
+
+pub export fn zigttpSdkSqliteBindNull(opaque_stmt: *SdkSqliteStmt, index: u32) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_null(raw, @intCast(index)) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteBindInt64(opaque_stmt: *SdkSqliteStmt, index: u32, v: i64) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_int64(raw, @intCast(index), v) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteBindDouble(opaque_stmt: *SdkSqliteStmt, index: u32, v: f64) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_double(raw, @intCast(index), v) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteBindText(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    ptr: [*]const u8,
+    len: usize,
+) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_text(raw, @intCast(index), ptr, @intCast(len), null) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteColumnCount(opaque_stmt: *SdkSqliteStmt) u32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return @intCast(sqlite_runtime.c.sqlite3_column_count(raw));
+}
+
+pub export fn zigttpSdkSqliteColumnName(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const c_name = sqlite_runtime.c.sqlite3_column_name(raw, @intCast(index));
+    const name = if (c_name) |p| std.mem.span(p) else "";
+    out_ptr.* = name.ptr;
+    out_len.* = name.len;
+}
+
+pub export fn zigttpSdkSqliteColumnType(opaque_stmt: *SdkSqliteStmt, index: u32) i32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_column_type(raw, @intCast(index));
+}
+
+pub export fn zigttpSdkSqliteColumnInt64(opaque_stmt: *SdkSqliteStmt, index: u32) i64 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_column_int64(raw, @intCast(index));
+}
+
+pub export fn zigttpSdkSqliteColumnDouble(opaque_stmt: *SdkSqliteStmt, index: u32) f64 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_column_double(raw, @intCast(index));
+}
+
+pub export fn zigttpSdkSqliteColumnText(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const text = sqlite_runtime.c.sqlite3_column_text(raw, @intCast(index));
+    if (text == null) {
+        out_ptr.* = "".ptr;
+        out_len.* = 0;
+        return;
+    }
+    const len: usize = @intCast(sqlite_runtime.c.sqlite3_column_bytes(raw, @intCast(index)));
+    out_ptr.* = text;
+    out_len.* = len;
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification

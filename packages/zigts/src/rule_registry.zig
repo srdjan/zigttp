@@ -122,6 +122,20 @@ const verifier_meta = [_]struct {
         .example = "let count = 0; function handler(req) { count = count + 1; ... }",
         .help = "Move mutable state inside the handler or use zigttp:cache.",
     },
+    .{
+        .kind = .websocket_import_without_events,
+        .code = "ZTS320",
+        .description = "Handler imports zigttp:websocket but exports no WebSocket event handlers.",
+        .example = "import { send } from 'zigttp:websocket'; // no onMessage/onOpen/onClose",
+        .help = "Export at least onMessage(ws, data, room) to handle inbound frames, or remove the import.",
+    },
+    .{
+        .kind = .websocket_events_without_import,
+        .code = "ZTS321",
+        .description = "Handler exports WebSocket event functions but does not import zigttp:websocket.",
+        .example = "export function onMessage(ws, data, room) { send(ws, data); } // send undefined",
+        .help = "Add `import { send, close, ... } from 'zigttp:websocket';` so event handlers can reply.",
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -378,8 +392,8 @@ fn computePolicyHash() [64]u8 {
 
 test "all_rules has expected count" {
     try std.testing.expectEqual(total_count, all_rules.len);
-    // Sanity: at least 11 verifier + 8 policy + 6 property = 25
-    try std.testing.expect(all_rules.len >= 25);
+    // Sanity: at least 13 verifier + 8 policy + 6 property = 27
+    try std.testing.expect(all_rules.len >= 27);
 }
 
 test "findByName returns entry" {

@@ -20,6 +20,7 @@ comptime {
     _ = @import("tools/zig_build_step.zig");
     _ = @import("tools/zig_test_step.zig");
     _ = @import("repl.zig");
+    _ = @import("commands.zig");
     _ = @import("tui/term.zig");
     _ = @import("tui/line_editor.zig");
     _ = @import("tui/app.zig");

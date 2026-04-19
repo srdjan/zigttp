@@ -125,6 +125,8 @@ fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
         .unchecked_optional_use => "ZTS308",
         .unchecked_optional_access => "ZTS309",
         .module_scope_mutation => "ZTS310",
+        .websocket_import_without_events => "ZTS320",
+        .websocket_events_without_import => "ZTS321",
     };
 }
 
