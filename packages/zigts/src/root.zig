@@ -70,6 +70,7 @@ pub const contract_diff = @import("contract_diff.zig");
 pub const system_linker = @import("system_linker.zig");
 pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
+pub const ws_consistency = @import("ws_consistency.zig");
 pub const module_binding = @import("module_binding.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
 pub const security_events = @import("security_events.zig");

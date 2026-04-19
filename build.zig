@@ -47,6 +47,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const zigttp_modules_dep = b.dependency("zigttp_modules", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const ext_demo_dep = b.dependency("zigttp_ext_demo", .{
         .target = target,
         .optimize = optimize,
@@ -83,6 +87,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_dep.module("zigttp-sdk"));
+    zigts_tests_root.addImport("zigttp-modules", zigttp_modules_dep.module("zigttp-modules"));
     zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
     zigts_tests_root.addCSourceFile(.{
         .file = zigts_dep.path("deps/sqlite/sqlite3.c"),

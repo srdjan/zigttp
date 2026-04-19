@@ -7,55 +7,68 @@
 //! Third-party modules are appended to this list via build.zig options.
 
 const mb = @import("module_binding.zig");
+const adapter = @import("module_binding_adapter.zig");
 const ModuleBinding = mb.ModuleBinding;
 const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
 const std = @import("std");
+const modules = @import("zigttp-modules");
 
-const env_mod = @import("modules/env.zig");
-const crypto_mod = @import("modules/crypto.zig");
-const router_mod = @import("modules/router.zig");
-const auth_mod = @import("modules/auth.zig");
-const validate_mod = @import("modules/validate.zig");
-const decode_mod = @import("modules/decode.zig");
-const cache_mod = @import("modules/cache.zig");
-const sql_mod = @import("modules/sql.zig");
-const io_mod = @import("modules/io.zig");
-const scope_mod = @import("modules/scope.zig");
-const compose_mod = @import("modules/compose.zig");
-const durable_mod = @import("modules/durable.zig");
-const url_mod = @import("modules/url.zig");
-const id_mod = @import("modules/id.zig");
-const http_mod = @import("modules/http_mod.zig");
-const log_mod = @import("modules/log.zig");
-const text_mod = @import("modules/text.zig");
-const time_mod = @import("modules/time.zig");
-const ratelimit_mod = @import("modules/ratelimit.zig");
-const service_mod = @import("modules/service.zig");
-const fetch_mod = @import("modules/fetch.zig");
-const websocket_mod = @import("modules/websocket.zig");
+// Namespaced to avoid shadowing the `<name>_binding` locals used in the
+// governance-assertion tests at the bottom of this file.
+const ported = struct {
+    const env = adapter.adaptModuleBinding(modules.platform.env.binding);
+    const crypto = adapter.adaptModuleBinding(modules.security.crypto.binding);
+    const router = adapter.adaptModuleBinding(modules.http.router.binding);
+    const auth = adapter.adaptModuleBinding(modules.security.auth.binding);
+    const validate = adapter.adaptModuleBinding(modules.security.validate.binding);
+    const decode = adapter.adaptModuleBinding(modules.security.decode.binding);
+    const cache = adapter.adaptModuleBinding(modules.data.cache.binding);
+    const ratelimit = adapter.adaptModuleBinding(modules.data.ratelimit.binding);
+    const url = adapter.adaptModuleBinding(modules.http.url.binding);
+    const id = adapter.adaptModuleBinding(modules.platform.id.binding);
+    const http = adapter.adaptModuleBinding(modules.http.http_mod.binding);
+    const log = adapter.adaptModuleBinding(modules.platform.log.binding);
+    const text = adapter.adaptModuleBinding(modules.platform.text.binding);
+    const time = adapter.adaptModuleBinding(modules.platform.time.binding);
+    const compose = adapter.adaptModuleBinding(modules.workflow.compose.binding);
+};
+
+// installState helpers run during runtime bootstrap, outside any
+// module invocation — they can't go through the SDK's handle-gated
+// setModuleState and stay on this side of the peer-package boundary.
+const sql_mod = @import("modules/data/sql.zig");
+const service_mod = @import("modules/net/service.zig");
+const fetch_mod = @import("modules/net/fetch.zig");
+const websocket_mod = @import("modules/net/websocket.zig");
+
+// Coupled to zigts internals: io reads a threadlocal set by fetchSync;
+// scope manipulates GC roots directly. durable is pending further work.
+const io_mod = @import("modules/workflow/io.zig");
+const scope_mod = @import("modules/workflow/scope.zig");
+const durable_mod = @import("modules/workflow/durable.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
-    env_mod.binding,
-    crypto_mod.binding,
-    router_mod.binding,
-    auth_mod.binding,
-    validate_mod.binding,
-    decode_mod.binding,
-    cache_mod.binding,
+    ported.env,
+    ported.crypto,
+    ported.router,
+    ported.auth,
+    ported.validate,
+    ported.decode,
+    ported.cache,
     sql_mod.binding,
     io_mod.binding,
     scope_mod.binding,
-    compose_mod.binding,
+    ported.compose,
     durable_mod.binding,
-    url_mod.binding,
-    id_mod.binding,
-    http_mod.binding,
-    log_mod.binding,
-    text_mod.binding,
-    time_mod.binding,
-    ratelimit_mod.binding,
+    ported.url,
+    ported.id,
+    ported.http,
+    ported.log,
+    ported.text,
+    ported.time,
+    ported.ratelimit,
     service_mod.binding,
     fetch_mod.binding,
     websocket_mod.binding,
@@ -74,28 +87,28 @@ pub const BuiltinGovernanceEntry = struct {
 };
 
 pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
-    .{ .specifier = "zigttp:env", .module_path = "packages/zigts/src/modules/env.zig", .spec_path = "packages/zigts/module-specs/env.json" },
-    .{ .specifier = "zigttp:crypto", .module_path = "packages/zigts/src/modules/crypto.zig", .spec_path = "packages/zigts/module-specs/crypto.json" },
-    .{ .specifier = "zigttp:router", .module_path = "packages/zigts/src/modules/router.zig", .spec_path = "packages/zigts/module-specs/router.json" },
-    .{ .specifier = "zigttp:auth", .module_path = "packages/zigts/src/modules/auth.zig", .spec_path = "packages/zigts/module-specs/auth.json" },
-    .{ .specifier = "zigttp:validate", .module_path = "packages/zigts/src/modules/validate.zig", .spec_path = "packages/zigts/module-specs/validate.json" },
-    .{ .specifier = "zigttp:decode", .module_path = "packages/zigts/src/modules/decode.zig", .spec_path = "packages/zigts/module-specs/decode.json" },
-    .{ .specifier = "zigttp:cache", .module_path = "packages/zigts/src/modules/cache.zig", .spec_path = "packages/zigts/module-specs/cache.json" },
-    .{ .specifier = "zigttp:sql", .module_path = "packages/zigts/src/modules/sql.zig", .spec_path = "packages/zigts/module-specs/sql.json" },
-    .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/io.zig", .spec_path = "packages/zigts/module-specs/io.json" },
-    .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/scope.zig", .spec_path = "packages/zigts/module-specs/scope.json" },
-    .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/compose.zig", .spec_path = "packages/zigts/module-specs/compose.json" },
-    .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/durable.zig", .spec_path = "packages/zigts/module-specs/durable.json" },
-    .{ .specifier = "zigttp:url", .module_path = "packages/zigts/src/modules/url.zig", .spec_path = "packages/zigts/module-specs/url.json" },
-    .{ .specifier = "zigttp:id", .module_path = "packages/zigts/src/modules/id.zig", .spec_path = "packages/zigts/module-specs/id.json" },
-    .{ .specifier = "zigttp:http", .module_path = "packages/zigts/src/modules/http_mod.zig", .spec_path = "packages/zigts/module-specs/http-mod.json" },
-    .{ .specifier = "zigttp:log", .module_path = "packages/zigts/src/modules/log.zig", .spec_path = "packages/zigts/module-specs/log.json" },
-    .{ .specifier = "zigttp:text", .module_path = "packages/zigts/src/modules/text.zig", .spec_path = "packages/zigts/module-specs/text.json" },
-    .{ .specifier = "zigttp:time", .module_path = "packages/zigts/src/modules/time.zig", .spec_path = "packages/zigts/module-specs/time.json" },
-    .{ .specifier = "zigttp:ratelimit", .module_path = "packages/zigts/src/modules/ratelimit.zig", .spec_path = "packages/zigts/module-specs/ratelimit.json" },
-    .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/service.zig", .spec_path = "packages/zigts/module-specs/service.json" },
-    .{ .specifier = "zigttp:fetch", .module_path = "packages/zigts/src/modules/fetch.zig", .spec_path = "packages/zigts/module-specs/fetch.json" },
-    .{ .specifier = "zigttp:websocket", .module_path = "packages/zigts/src/modules/websocket.zig", .spec_path = "packages/zigts/module-specs/websocket.json" },
+    .{ .specifier = "zigttp:env", .module_path = "packages/modules/src/platform/env.zig", .spec_path = "packages/modules/module-specs/platform/env.json" },
+    .{ .specifier = "zigttp:crypto", .module_path = "packages/modules/src/security/crypto.zig", .spec_path = "packages/modules/module-specs/security/crypto.json" },
+    .{ .specifier = "zigttp:router", .module_path = "packages/modules/src/http/router.zig", .spec_path = "packages/modules/module-specs/http/router.json" },
+    .{ .specifier = "zigttp:auth", .module_path = "packages/modules/src/security/auth.zig", .spec_path = "packages/modules/module-specs/security/auth.json" },
+    .{ .specifier = "zigttp:validate", .module_path = "packages/modules/src/security/validate.zig", .spec_path = "packages/modules/module-specs/security/validate.json" },
+    .{ .specifier = "zigttp:decode", .module_path = "packages/modules/src/security/decode.zig", .spec_path = "packages/modules/module-specs/security/decode.json" },
+    .{ .specifier = "zigttp:cache", .module_path = "packages/modules/src/data/cache.zig", .spec_path = "packages/modules/module-specs/data/cache.json" },
+    .{ .specifier = "zigttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/modules/module-specs/data/sql.json" },
+    .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/workflow/io.zig", .spec_path = "packages/modules/module-specs/workflow/io.json" },
+    .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },
+    .{ .specifier = "zigttp:compose", .module_path = "packages/modules/src/workflow/compose.zig", .spec_path = "packages/modules/module-specs/workflow/compose.json" },
+    .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/workflow/durable.zig", .spec_path = "packages/modules/module-specs/workflow/durable.json" },
+    .{ .specifier = "zigttp:url", .module_path = "packages/modules/src/http/url.zig", .spec_path = "packages/modules/module-specs/http/url.json" },
+    .{ .specifier = "zigttp:id", .module_path = "packages/modules/src/platform/id.zig", .spec_path = "packages/modules/module-specs/platform/id.json" },
+    .{ .specifier = "zigttp:http", .module_path = "packages/modules/src/http/http_mod.zig", .spec_path = "packages/modules/module-specs/http/http-mod.json" },
+    .{ .specifier = "zigttp:log", .module_path = "packages/modules/src/platform/log.zig", .spec_path = "packages/modules/module-specs/platform/log.json" },
+    .{ .specifier = "zigttp:text", .module_path = "packages/modules/src/platform/text.zig", .spec_path = "packages/modules/module-specs/platform/text.json" },
+    .{ .specifier = "zigttp:time", .module_path = "packages/modules/src/platform/time.zig", .spec_path = "packages/modules/module-specs/platform/time.json" },
+    .{ .specifier = "zigttp:ratelimit", .module_path = "packages/modules/src/data/ratelimit.zig", .spec_path = "packages/modules/module-specs/data/ratelimit.json" },
+    .{ .specifier = "zigttp:service", .module_path = "packages/modules/src/net/service.zig", .spec_path = "packages/modules/module-specs/net/service.json" },
+    .{ .specifier = "zigttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/modules/module-specs/net/fetch.json" },
+    .{ .specifier = "zigttp:websocket", .module_path = "packages/modules/src/net/websocket.zig", .spec_path = "packages/modules/module-specs/net/websocket.json" },
 };
 
 comptime {
@@ -304,7 +317,7 @@ test "governance entries stay aligned with public built-ins" {
     const entries = governanceEntries();
     try std.testing.expectEqual(builtins.len, entries.len);
     try std.testing.expectEqualStrings("zigttp:env", entries[0].specifier);
-    try std.testing.expectEqualStrings("packages/zigts/src/modules/env.zig", entries[0].module_path);
-    try std.testing.expectEqualStrings("packages/zigts/module-specs/env.json", entries[0].spec_path);
+    try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
+    try std.testing.expectEqualStrings("packages/modules/module-specs/platform/env.json", entries[0].spec_path);
     try std.testing.expectEqualStrings("zigttp:websocket", entries[entries.len - 1].specifier);
 }

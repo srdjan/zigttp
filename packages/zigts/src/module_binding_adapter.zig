@@ -3,6 +3,7 @@ const sdk = @import("zigttp-sdk");
 const internal = @import("module_binding.zig");
 const object = @import("object.zig");
 const value = @import("value.zig");
+const context = @import("context.zig");
 
 pub const ModuleBinding = internal.ModuleBinding;
 
@@ -11,20 +12,27 @@ comptime {
         @compileError("zigttp-sdk.JSValue must match runtime JSValue size");
     if (@bitSizeOf(sdk.JSValue) != @bitSizeOf(value.JSValue))
         @compileError("zigttp-sdk.JSValue must match runtime JSValue bit size");
-    // Enum ordinal alignment: last variant of each enum must match.
-    if (@intFromEnum(sdk.EffectClass.none) != @intFromEnum(internal.EffectClass.none))
-        @compileError("sdk.EffectClass ordinals diverge from internal");
-    if (@intFromEnum(sdk.ReturnKind.result) != @intFromEnum(internal.ReturnKind.result))
-        @compileError("sdk.ReturnKind ordinals diverge from internal");
-    if (@intFromEnum(sdk.FailureSeverity.none) != @intFromEnum(internal.FailureSeverity.none))
-        @compileError("sdk.FailureSeverity ordinals diverge from internal");
-    if (@intFromEnum(sdk.ModuleCapability.policy_check) != @intFromEnum(internal.ModuleCapability.policy_check))
-        @compileError("sdk.ModuleCapability ordinals diverge from internal");
+    // Last variant of each paired enum must share an ordinal. Covers
+    // length alignment too: if SDK adds a tail variant the internal side
+    // lacks, the ordinal check catches it before any adaptor runs.
+    assertOrdinal(sdk.EffectClass.none, internal.EffectClass.none, "EffectClass");
+    assertOrdinal(sdk.ReturnKind.result, internal.ReturnKind.result, "ReturnKind");
+    assertOrdinal(sdk.FailureSeverity.none, internal.FailureSeverity.none, "FailureSeverity");
+    assertOrdinal(sdk.ModuleCapability.websocket, internal.ModuleCapability.websocket, "ModuleCapability");
+    assertOrdinal(sdk.ContractCategory.fetch_host, internal.ContractCategory.fetch_host, "ContractCategory");
+    assertOrdinal(sdk.LawKind.absorbing, internal.LawKind.absorbing, "LawKind");
+}
+
+fn assertOrdinal(comptime sdk_variant: anytype, comptime internal_variant: anytype, comptime name: []const u8) void {
+    if (@intFromEnum(sdk_variant) != @intFromEnum(internal_variant))
+        @compileError("sdk." ++ name ++ " ordinals diverge from internal");
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
-    if (!std.mem.startsWith(u8, binding.specifier, "zigttp-ext:")) {
-        @compileError("extension binding specifier must start with 'zigttp-ext:': " ++ binding.specifier);
+    const builtin_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp:");
+    const extension_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp-ext:");
+    if (!builtin_prefix and !extension_prefix) {
+        @compileError("adapted module specifier must start with 'zigttp:' or 'zigttp-ext:': " ++ binding.specifier);
     }
 
     const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);
@@ -40,6 +48,7 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
         .contract_section = binding.contract_section,
         .sandboxable = binding.sandboxable,
         .comptime_only = binding.comptime_only,
+        .self_managed_io = binding.self_managed_io,
     };
 }
 
@@ -70,6 +79,7 @@ fn adaptFunctionBinding(
 ) internal.FunctionBinding {
     const param_types = comptime adaptReturnKinds(binding.param_types);
     const contract_extractions = comptime adaptContractExtractions(binding.contract_extractions);
+    const laws = comptime adaptLaws(binding.laws);
     const internal_required_capabilities = comptime adaptModuleCapabilities(required_capabilities);
     return .{
         .name = binding.name,
@@ -81,6 +91,7 @@ fn adaptFunctionBinding(
         .traceable = binding.traceable,
         .contract_extractions = &contract_extractions,
         .contract_flags = .{
+            .sets_scope_used = binding.contract_flags.sets_scope_used,
             .sets_durable_used = binding.contract_flags.sets_durable_used,
             .sets_durable_timers = binding.contract_flags.sets_durable_timers,
             .sets_bearer_auth = binding.contract_flags.sets_bearer_auth,
@@ -88,7 +99,25 @@ fn adaptFunctionBinding(
         },
         .return_labels = @bitCast(binding.return_labels),
         .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
+        .laws = &laws,
     };
+}
+
+fn adaptLaws(comptime laws: []const sdk.Law) [laws.len]internal.Law {
+    var out: [laws.len]internal.Law = undefined;
+    for (laws, 0..) |law, i| {
+        out[i] = switch (law) {
+            .pure => .pure,
+            .idempotent_call => .idempotent_call,
+            .inverse_of => |target| .{ .inverse_of = target },
+            .absorbing => |pattern| .{ .absorbing = .{
+                .arg_position = pattern.arg_position,
+                .argument_shape = @enumFromInt(@intFromEnum(pattern.argument_shape)),
+                .residue = @enumFromInt(@intFromEnum(pattern.residue)),
+            } },
+        };
+    }
+    return out;
 }
 
 fn adaptReturnKinds(comptime kinds: []const sdk.ReturnKind) [kinds.len]internal.ReturnKind {
@@ -113,6 +142,26 @@ fn adaptContractExtractions(comptime extractions: []const sdk.ContractExtraction
         };
     }
     return out;
+}
+
+/// Cross-boundary casts shared by the runtime-callback installState shims
+/// (packages/zigts/src/modules/net/{fetch,service,websocket}.zig). Both
+/// JSValue types are bit-identical packed structs by comptime assertion
+/// above; the opaque handle types wrap the same context pointer.
+pub inline fn contextFromHandle(handle: *sdk.ModuleHandle) *context.Context {
+    return internal.handleToContext(@ptrCast(handle));
+}
+
+pub inline fn sdkValue(v: value.JSValue) sdk.JSValue {
+    return @bitCast(v);
+}
+
+pub inline fn internalValue(v: sdk.JSValue) value.JSValue {
+    return @bitCast(v);
+}
+
+pub inline fn internalArgs(args: []const sdk.JSValue) []const value.JSValue {
+    return @ptrCast(args);
 }
 
 /// Produce a NativeFn directly from a sdk.ModuleFn, avoiding double-wrapping.
