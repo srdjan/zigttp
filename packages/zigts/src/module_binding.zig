@@ -736,6 +736,209 @@ pub export fn zigttpSdkAllowsCacheNamespace(
     return allowsCacheNamespaceChecked(ctx, ns_ptr[0..ns_len]);
 }
 
+pub export fn zigttpSdkAllowsSqlQuery(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsSqlQueryChecked(ctx, name_ptr[0..name_len]);
+}
+
+pub export fn zigttpSdkArrayPush(
+    handle: *ModuleHandle,
+    arr_val: value.JSValue,
+    val: value.JSValue,
+) bool {
+    const ctx = handleToContext(handle);
+    if (!arr_val.isArray()) return false;
+    const arr = arr_val.toPtr(object.JSObject);
+    arr.arrayPush(ctx.allocator, val) catch return false;
+    return true;
+}
+
+// -------------------------------------------------------------------------
+// SQLite bridge. Opaque handles are the raw sqlite3 / sqlite3_stmt
+// pointers; the runtime owns their lifetime until close/finalize.
+// -------------------------------------------------------------------------
+
+const SdkSqliteDb = opaque {};
+const SdkSqliteStmt = opaque {};
+
+pub export fn zigttpSdkSqliteOpen(
+    handle: *ModuleHandle,
+    path_ptr: [*]const u8,
+    path_len: usize,
+    out: **SdkSqliteDb,
+) bool {
+    const ctx = handleToContext(handle);
+    const db = openSqliteDbChecked(ctx.allocator, path_ptr[0..path_len]) catch return false;
+    out.* = @ptrCast(db.handle);
+    return true;
+}
+
+pub export fn zigttpSdkSqliteClose(opaque_db: *SdkSqliteDb) void {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    _ = sqlite_runtime.c.sqlite3_close(raw);
+}
+
+pub export fn zigttpSdkSqliteChanges(opaque_db: *SdkSqliteDb) i32 {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    return sqlite_runtime.c.sqlite3_changes(raw);
+}
+
+pub export fn zigttpSdkSqliteLastInsertRowId(opaque_db: *SdkSqliteDb) i64 {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    return sqlite_runtime.c.sqlite3_last_insert_rowid(raw);
+}
+
+pub export fn zigttpSdkSqliteErrmsg(
+    opaque_db: *SdkSqliteDb,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    const msg = std.mem.span(sqlite_runtime.c.sqlite3_errmsg(raw));
+    out_ptr.* = msg.ptr;
+    out_len.* = msg.len;
+}
+
+pub export fn zigttpSdkSqlitePrepare(
+    opaque_db: *SdkSqliteDb,
+    sql_ptr: [*]const u8,
+    sql_len: usize,
+    out: **SdkSqliteStmt,
+) bool {
+    const raw_db: *sqlite_runtime.c.sqlite3 = @ptrCast(@alignCast(opaque_db));
+    var stmt: ?*sqlite_runtime.c.sqlite3_stmt = null;
+    const rc = sqlite_runtime.c.sqlite3_prepare_v2(raw_db, sql_ptr, @intCast(sql_len), &stmt, null);
+    if (rc != sqlite_runtime.c.SQLITE_OK or stmt == null) return false;
+    out.* = @ptrCast(stmt.?);
+    return true;
+}
+
+pub export fn zigttpSdkSqliteFinalize(opaque_stmt: *SdkSqliteStmt) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    _ = sqlite_runtime.c.sqlite3_finalize(raw);
+}
+
+pub export fn zigttpSdkSqliteStep(opaque_stmt: *SdkSqliteStmt) i32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_step(raw);
+}
+
+pub export fn zigttpSdkSqliteReadonly(opaque_stmt: *SdkSqliteStmt) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_stmt_readonly(raw) != 0;
+}
+
+pub export fn zigttpSdkSqliteStmtErrmsg(
+    opaque_stmt: *SdkSqliteStmt,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const db = sqlite_runtime.c.sqlite3_db_handle(raw);
+    const msg = std.mem.span(sqlite_runtime.c.sqlite3_errmsg(db));
+    out_ptr.* = msg.ptr;
+    out_len.* = msg.len;
+}
+
+pub export fn zigttpSdkSqliteParamCount(opaque_stmt: *SdkSqliteStmt) u32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return @intCast(sqlite_runtime.c.sqlite3_bind_parameter_count(raw));
+}
+
+pub export fn zigttpSdkSqliteParamName(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const c_name = sqlite_runtime.c.sqlite3_bind_parameter_name(raw, @intCast(index));
+    const normalized = sqlite_runtime.normalizeParamName(c_name) orelse return false;
+    out_ptr.* = normalized.ptr;
+    out_len.* = normalized.len;
+    return true;
+}
+
+pub export fn zigttpSdkSqliteBindNull(opaque_stmt: *SdkSqliteStmt, index: u32) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_null(raw, @intCast(index)) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteBindInt64(opaque_stmt: *SdkSqliteStmt, index: u32, v: i64) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_int64(raw, @intCast(index), v) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteBindDouble(opaque_stmt: *SdkSqliteStmt, index: u32, v: f64) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_double(raw, @intCast(index), v) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteBindText(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    ptr: [*]const u8,
+    len: usize,
+) bool {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_bind_text(raw, @intCast(index), ptr, @intCast(len), null) == sqlite_runtime.c.SQLITE_OK;
+}
+
+pub export fn zigttpSdkSqliteColumnCount(opaque_stmt: *SdkSqliteStmt) u32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return @intCast(sqlite_runtime.c.sqlite3_column_count(raw));
+}
+
+pub export fn zigttpSdkSqliteColumnName(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const c_name = sqlite_runtime.c.sqlite3_column_name(raw, @intCast(index));
+    const name = if (c_name) |p| std.mem.span(p) else "";
+    out_ptr.* = name.ptr;
+    out_len.* = name.len;
+}
+
+pub export fn zigttpSdkSqliteColumnType(opaque_stmt: *SdkSqliteStmt, index: u32) i32 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_column_type(raw, @intCast(index));
+}
+
+pub export fn zigttpSdkSqliteColumnInt64(opaque_stmt: *SdkSqliteStmt, index: u32) i64 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_column_int64(raw, @intCast(index));
+}
+
+pub export fn zigttpSdkSqliteColumnDouble(opaque_stmt: *SdkSqliteStmt, index: u32) f64 {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    return sqlite_runtime.c.sqlite3_column_double(raw, @intCast(index));
+}
+
+pub export fn zigttpSdkSqliteColumnText(
+    opaque_stmt: *SdkSqliteStmt,
+    index: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) void {
+    const raw: *sqlite_runtime.c.sqlite3_stmt = @ptrCast(@alignCast(opaque_stmt));
+    const text = sqlite_runtime.c.sqlite3_column_text(raw, @intCast(index));
+    if (text == null) {
+        out_ptr.* = "".ptr;
+        out_len.* = 0;
+        return;
+    }
+    const len: usize = @intCast(sqlite_runtime.c.sqlite3_column_bytes(raw, @intCast(index)));
+    out_ptr.* = text;
+    out_len.* = len;
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification

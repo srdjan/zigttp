@@ -31,6 +31,7 @@ pub const http = struct {
 pub const data = struct {
     pub const ratelimit = @import("data/ratelimit.zig");
     pub const cache = @import("data/cache.zig");
+    pub const sql = @import("data/sql.zig");
 };
 
 comptime {
@@ -49,6 +50,7 @@ comptime {
         http.http_mod.binding,
         data.ratelimit.binding,
         data.cache.binding,
+        data.sql.binding,
     });
 }
 
@@ -68,4 +70,5 @@ test {
     _ = http.http_mod;
     _ = data.ratelimit;
     _ = data.cache;
+    _ = data.sql;
 }
