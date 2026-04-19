@@ -1,14 +1,5 @@
-//! zigttp-modules
-//!
-//! Peer package hosting the built-in virtual modules that ship with
-//! zigttp. Depends only on zigttp-sdk; zigts imports this package back
-//! to register the bindings.
-//!
-//! Module groups match docs/virtual-modules/:
-//!   security/ data/ net/ http/ workflow/ platform/
-//!
-//! Ports land group by group. Until a group is fully ported, zigts
-//! continues to source its modules from packages/zigts/src/modules/.
+//! zigttp-modules — built-in virtual modules, depending only on
+//! zigttp-sdk. Zigts imports this package to register bindings.
 
 pub const sdk = @import("zigttp-sdk");
 
