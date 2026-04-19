@@ -1069,6 +1069,12 @@ pub const ContractBuilder = struct {
         // exports (onOpen/onMessage/onClose/onError).
         try self.scanWebSocketExports();
 
+        // Phase 2c: Run module-level WebSocket consistency checks
+        // (ZTS320, ZTS321). Warnings go to stderr so `zig build` users
+        // see them in the build log; errors do not abort the contract
+        // build — the downstream verifier owns the hard-fail policy.
+        try self.emitWebSocketConsistencyDiagnostics();
+
         if (handler_fn) |hf| {
             try self.extractScopeUsage(hf);
             try self.extractDurableWorkflow(handler_path, hf);
@@ -1265,6 +1271,35 @@ pub const ContractBuilder = struct {
             } else if (std.mem.eql(u8, name, "onError")) {
                 self.websocket.on_error = true;
             }
+        }
+    }
+
+    fn emitWebSocketConsistencyDiagnostics(self: *ContractBuilder) !void {
+        const ws_consistency = @import("ws_consistency.zig");
+        const inputs = ws_consistency.Inputs{
+            .imports_websocket_module = containsString(self.modules_list.items, "zigttp:websocket"),
+            .exports_on_open = self.websocket.on_open,
+            .exports_on_message = self.websocket.on_message,
+            .exports_on_close = self.websocket.on_close,
+            .exports_on_error = self.websocket.on_error,
+        };
+
+        var findings: std.ArrayList(ws_consistency.Finding) = .empty;
+        defer findings.deinit(self.allocator);
+        try ws_consistency.check(self.allocator, inputs, &findings);
+
+        for (findings.items) |f| {
+            const code: []const u8 = switch (f.kind) {
+                .websocket_import_without_events => "ZTS320",
+                .websocket_events_without_import => "ZTS321",
+                else => "ZTS???",
+            };
+            std.log.warn("{s} [{s}]: {s} ({s})", .{
+                f.severity.label(),
+                code,
+                f.message,
+                f.help,
+            });
         }
     }
 

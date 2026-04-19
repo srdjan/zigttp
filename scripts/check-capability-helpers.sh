@@ -14,7 +14,7 @@ check_pattern() {
     local pattern="$2"
     local matches
 
-    matches="$(git ls-files -z 'packages/zigts/src/modules/*.zig' | xargs -0 rg -n -H --color never "$pattern" || true)"
+    matches="$(git ls-files -z 'packages/modules/src/*.zig' 'packages/zigts/src/modules/*.zig' | xargs -0 rg -n -H --color never "$pattern" || true)"
     if [ -n "$matches" ]; then
         echo ""
         echo "FAIL: $description"
@@ -39,4 +39,4 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "PASS: no direct sensitive operations found in packages/zigts/src/modules"
+echo "PASS: no direct sensitive operations found in packages/modules/src/ or packages/zigts/src/modules/"

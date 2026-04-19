@@ -42,20 +42,6 @@ const HandlerPool = zruntime.HandlerPool;
 /// support anyway — it rejects fragmented frames as `MessageOversize`).
 const max_message_bytes: usize = 64 * 1024;
 
-/// Room slot-count budget for broadcasts. `collectRoom` writes into this
-/// fixed buffer; rooms larger than this truncate. W1 gives us
-/// in-process-single-replica semantics, so 256 peers per room is an
-/// honest upper bound — Phase W3 will revisit with measured data.
-const max_room_peers: usize = 256;
-
-/// The payload of a handler-dispatched event. W1-d.4-a keeps this
-/// internal to the frame loop (echo only); W1-d.4-b will use the same
-/// shape to feed the JS dispatcher.
-pub const FrameEvent = union(enum) {
-    text: []const u8,
-    binary: []const u8,
-};
-
 pub const Config = struct {
     pool: *Pool,
     io: Io,
@@ -134,7 +120,7 @@ pub fn run(cfg: Config) void {
             error.ReadFailed => return,
         };
 
-        _ = cfg.pool.touch(cfg.id, .parked, unixMillisNow());
+        _ = cfg.pool.touch(cfg.id, .parked, trace.unixMillis());
 
         switch (msg.opcode) {
             .ping => {
@@ -199,10 +185,6 @@ fn sendCloseSilently(ws: *std.http.Server.WebSocket, code: u16) void {
     ws.writeMessage(&payload, .connection_close) catch {};
 }
 
-fn unixMillisNow() i64 {
-    return trace.unixMillis();
-}
-
 /// Borrow a runtime, install the WS callback table, and invoke the
 /// handler's `onMessage(ws, data, room)` export. The `ws` argument is
 /// the connection id as an integer; `room` is the room key the
@@ -217,6 +199,9 @@ fn dispatchOnMessage(
     id: ConnectionId,
     data: []const u8,
 ) !void {
+    _ = ws_pool.beginDispatch(id);
+    defer _ = ws_pool.endDispatch(id);
+
     var lease = try handler_pool.acquireWorkerRuntime();
     defer lease.deinit();
 
@@ -253,6 +238,9 @@ fn dispatchOnOpen(
     id: ConnectionId,
     url: []const u8,
 ) !void {
+    _ = ws_pool.beginDispatch(id);
+    defer _ = ws_pool.endDispatch(id);
+
     var lease = try handler_pool.acquireWorkerRuntime();
     defer lease.deinit();
 
@@ -283,6 +271,10 @@ fn dispatchOnClose(
     id: ConnectionId,
     code: u16,
 ) !void {
+    _ = ws_pool.beginDispatch(id);
+    // Intentionally skip endDispatch on close — `unregister` is about
+    // to run and remove the connection entirely.
+
     var lease = try handler_pool.acquireWorkerRuntime();
     defer lease.deinit();
 
@@ -308,16 +300,6 @@ fn dispatchOnClose(
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-
-test "FrameEvent tag shape is stable for W1-d.4-b dispatch" {
-    // The union tag layout is part of the dispatch contract between
-    // W1-d.4-a (echo) and W1-d.4-b (JS). This test pins the expected
-    // active-tag names so a rename doesn't silently break dispatch.
-    const evt_text: FrameEvent = .{ .text = "hi" };
-    const evt_binary: FrameEvent = .{ .binary = "\x01\x02" };
-    try testing.expect(evt_text == .text);
-    try testing.expect(evt_binary == .binary);
-}
 
 test "max_message_bytes fits the default read buffer" {
     // readSmallMessage requires the entire payload to fit in the

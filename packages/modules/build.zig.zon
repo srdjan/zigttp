@@ -1,0 +1,16 @@
+.{
+    .name = .zigttp_modules,
+    .version = "0.0.0",
+    .fingerprint = 0x4268ffadc9be3f5a, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zigttp_sdk = .{
+            .path = "../zigttp-sdk",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

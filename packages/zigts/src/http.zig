@@ -11,7 +11,7 @@ const value = @import("value.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const string = @import("string.zig");
-const util = @import("modules/util.zig");
+const util = @import("modules/internal/util.zig");
 
 // ============================================================================
 // Function Component Callback
