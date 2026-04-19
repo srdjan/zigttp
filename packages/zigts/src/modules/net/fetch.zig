@@ -52,14 +52,13 @@ pub fn installState(
         .base = .{
             .runtime_ptr = @ptrCast(installed),
             .call_fn = InstalledState.sdkCall,
-            .allocator = ctx.allocator,
         },
     };
     ctx.setModuleState(MODULE_STATE_SLOT, @ptrCast(&installed.base), &stateDeinitAdapter);
 }
 
-fn stateDeinitAdapter(ptr: *anyopaque, _: std.mem.Allocator) void {
+fn stateDeinitAdapter(ptr: *anyopaque, allocator: std.mem.Allocator) void {
     const base: *fetch_module.FetchState = @ptrCast(@alignCast(ptr));
     const installed: *InstalledState = @fieldParentPtr("base", base);
-    installed.base.allocator.destroy(installed);
+    allocator.destroy(installed);
 }
