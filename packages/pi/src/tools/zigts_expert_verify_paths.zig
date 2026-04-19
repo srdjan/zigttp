@@ -11,8 +11,17 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "verify handler(s)",
     .description = "Run full analysis on one or more handler files and emit the v1 envelope.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"One or more handler paths.\"}},\"required\":[\"paths\"]}",
+    .decode_json = decodeJson,
     .execute = execute,
 };
+
+fn decodeJson(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    return registry_mod.helpers.decodeStringArrayField(allocator, args_json, "paths");
+}
 
 fn execute(
     allocator: std.mem.Allocator,

@@ -34,13 +34,13 @@ pub const StubClient = struct {
         ctx: *anyopaque,
         arena: std.mem.Allocator,
         transcript: *const Transcript,
-        user_text: []const u8,
-    ) anyerror!turn.ModelReply {
+        extra_user_text: ?[]const u8,
+    ) anyerror!turn.AssistantReply {
         _ = ctx;
         _ = arena;
         _ = transcript;
-        _ = user_text;
-        return .{ .text = stub_reply_text };
+        _ = extra_user_text;
+        return .{ .response = .{ .final_text = stub_reply_text } };
     }
 
     pub fn asClient(self: *StubClient) loop.ModelClient {
@@ -203,9 +203,14 @@ test "runOneTurn: fresh stub session grows transcript by 2 and renders model rep
     defer testing.allocator.free(rendered);
 
     try testing.expectEqual(@as(usize, 2), session.transcript.len());
-    try testing.expectEqual(transcript_mod.Tag.user_text, session.transcript.at(0).tag);
-    try testing.expectEqualStrings("add a GET route", session.transcript.at(0).body);
-    try testing.expectEqual(transcript_mod.Tag.model_text, session.transcript.at(1).tag);
+    switch (session.transcript.at(0).*) {
+        .user_text => |body| try testing.expectEqualStrings("add a GET route", body),
+        else => return error.TestFailed,
+    }
+    switch (session.transcript.at(1).*) {
+        .model_text => |body| try testing.expectEqualStrings(stub_reply_text, body),
+        else => return error.TestFailed,
+    }
     try testing.expect(std.mem.startsWith(u8, rendered, "model: "));
     try testing.expect(std.mem.indexOf(u8, rendered, stub_reply_text) != null);
     try testing.expect(rendered[rendered.len - 1] == '\n');
@@ -223,8 +228,14 @@ test "runOneTurn: two turns back-to-back accumulate in the transcript" {
     defer testing.allocator.free(second);
 
     try testing.expectEqual(@as(usize, 4), session.transcript.len());
-    try testing.expectEqualStrings("first intent", session.transcript.at(0).body);
-    try testing.expectEqualStrings("second intent", session.transcript.at(2).body);
+    switch (session.transcript.at(0).*) {
+        .user_text => |body| try testing.expectEqualStrings("first intent", body),
+        else => return error.TestFailed,
+    }
+    switch (session.transcript.at(2).*) {
+        .user_text => |body| try testing.expectEqualStrings("second intent", body),
+        else => return error.TestFailed,
+    }
     // The second render is the second turn's model reply only, not a
     // cumulative dump of the whole transcript.
     try testing.expect(std.mem.indexOf(u8, second, "first intent") == null);
@@ -237,8 +248,8 @@ test "StubClient ignores user_text and always returns the stub reply" {
     var transcript: Transcript = .{};
     defer transcript.deinit(testing.allocator);
     const reply = try client.request(testing.allocator, &transcript, "whatever the user typed");
-    switch (reply) {
-        .text => |t| try testing.expectEqualStrings(stub_reply_text, t),
+    switch (reply.response) {
+        .final_text => |t| try testing.expectEqualStrings(stub_reply_text, t),
         else => return error.TestFailed,
     }
 }

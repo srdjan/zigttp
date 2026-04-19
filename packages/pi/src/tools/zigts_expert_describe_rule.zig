@@ -13,8 +13,17 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "describe rule",
     .description = "Describe a rule by name or code, or list all rules when called with no args.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"description\":\"Optional rule code or name.\"}},\"required\":[]}",
+    .decode_json = decodeJson,
     .execute = execute,
 };
+
+fn decodeJson(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    return registry_mod.helpers.decodeOptionalSingleStringField(allocator, args_json, "rule");
+}
 
 fn execute(
     allocator: std.mem.Allocator,

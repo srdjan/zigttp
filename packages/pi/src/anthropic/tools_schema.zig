@@ -1,34 +1,23 @@
-//! Serializes the tool catalog the model sees into the Anthropic Messages
-//! API tool-use JSON shape. Every `Registry` tool accepts a single
-//! free-form string argument today, so they share one minimal
-//! `input_schema`. The synthetic `apply_edit` tool is prepended with its
-//! own richer schema; it appears in the catalog so the model knows how
-//! to propose an edit but is intercepted by the assembler's remap before
-//! it reaches `Registry.invoke`.
+//! Serializes the structured tool catalog the model sees into the Anthropic
+//! Messages API tool-use JSON shape. The synthetic `apply_edit` tool is
+//! prepended with its own schema and intercepted before it reaches the
+//! registry.
 
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
 const json_writer = @import("json_writer.zig");
 const apply_edit = @import("apply_edit.zig");
 
-const registry_tool_schema =
-    "{\"type\":\"object\"," ++
-    "\"properties\":{\"input\":{\"type\":\"string\"," ++
-    "\"description\":\"Raw argument string passed to the tool.\"}}," ++
-    "\"required\":[]}";
-
 fn writeToolEntry(
     writer: anytype,
-    name: []const u8,
-    description: []const u8,
-    input_schema: []const u8,
+    tool: ToolDef,
 ) !void {
     try writer.writeAll("{\"name\":");
-    try json_writer.writeString(writer, name);
+    try json_writer.writeString(writer, tool.name);
     try writer.writeAll(",\"description\":");
-    try json_writer.writeString(writer, description);
+    try json_writer.writeString(writer, tool.description);
     try writer.writeAll(",\"input_schema\":");
-    try writer.writeAll(input_schema);
+    try writer.writeAll(tool.input_schema);
     try writer.writeByte('}');
 }
 
@@ -37,15 +26,17 @@ pub fn writeToolsArray(
     registry: *const registry_mod.Registry,
 ) !void {
     try writer.writeByte('[');
-    try writeToolEntry(
-        writer,
-        apply_edit.tool_name,
-        apply_edit.tool_description,
-        apply_edit.input_schema_literal,
-    );
+    try writeToolEntry(writer, .{
+        .name = apply_edit.tool_name,
+        .label = "apply edit",
+        .description = apply_edit.tool_description,
+        .input_schema = apply_edit.input_schema_literal,
+        .decode_json = registry_mod.helpers.decodeJsonPassthrough,
+        .execute = unusedExecute,
+    });
     for (registry.list()) |entry| {
         try writer.writeByte(',');
-        try writeToolEntry(writer, entry.name, entry.description, registry_tool_schema);
+        try writeToolEntry(writer, entry);
     }
     try writer.writeByte(']');
 }
@@ -112,6 +103,8 @@ test "writeToolsArray: registered tool appears alongside apply_edit, found by na
         .name = "zigts_expert_meta",
         .label = "meta",
         .description = "Emit policy metadata.",
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = unusedExecute,
     });
 
@@ -138,12 +131,16 @@ test "writeToolsArray: multiple registered tools preserve insertion order" {
         .name = "alpha",
         .label = "a",
         .description = "first",
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = unusedExecute,
     });
     try reg.register(testing.allocator, .{
         .name = "beta",
         .label = "b",
         .description = "second",
+        .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = unusedExecute,
     });
 
@@ -167,6 +164,8 @@ test "writeToolsArray: description with quotes and backslashes is escaped" {
         .name = "tricky",
         .label = "tricky",
         .description = "has \"quotes\" and \\ backslash",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}",
+        .decode_json = registry_mod.helpers.decodeJsonPassthrough,
         .execute = unusedExecute,
     });
 
@@ -180,4 +179,6 @@ test "writeToolsArray: description with quotes and backslashes is escaped" {
         "has \"quotes\" and \\ backslash",
         tricky.object.get("description").?.string,
     );
+    const schema = tricky.object.get("input_schema").?.object;
+    try testing.expectEqualStrings("string", schema.get("properties").?.object.get("query").?.object.get("type").?.string);
 }

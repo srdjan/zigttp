@@ -15,6 +15,8 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "review patch",
     .description = "Simulate an edit with optional diff_only filter; report new vs preexisting violations.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"before\":{\"type\":\"string\"},\"diff_only\":{\"type\":\"boolean\"}},\"required\":[\"file\",\"content\"]}",
+    .decode_json = registry_mod.helpers.decodeJsonPassthrough,
     .execute = execute,
 };
 

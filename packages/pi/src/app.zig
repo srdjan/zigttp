@@ -19,6 +19,12 @@ const review_patch_tool = @import("tools/zigts_expert_review_patch.zig");
 const features_tool = @import("tools/zigts_expert_features.zig");
 const modules_tool = @import("tools/zigts_expert_modules.zig");
 const verify_modules_tool = @import("tools/zigts_expert_verify_modules.zig");
+const workspace_list_files_tool = @import("tools/workspace_list_files.zig");
+const workspace_read_file_tool = @import("tools/workspace_read_file.zig");
+const workspace_search_text_tool = @import("tools/workspace_search_text.zig");
+const zigts_check_tool = @import("tools/zigts_check.zig");
+const zig_build_step_tool = @import("tools/zig_build_step.zig");
+const zig_test_step_tool = @import("tools/zig_test_step.zig");
 
 const Registry = registry_mod.Registry;
 
@@ -35,6 +41,12 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, features_tool.tool);
     try reg.register(allocator, modules_tool.tool);
     try reg.register(allocator, verify_modules_tool.tool);
+    try reg.register(allocator, workspace_list_files_tool.tool);
+    try reg.register(allocator, workspace_read_file_tool.tool);
+    try reg.register(allocator, workspace_search_text_tool.tool);
+    try reg.register(allocator, zigts_check_tool.tool);
+    try reg.register(allocator, zig_build_step_tool.tool);
+    try reg.register(allocator, zig_test_step_tool.tool);
 
     return reg;
 }
@@ -61,7 +73,7 @@ test "buildRegistry registers every first-party compiler primitive" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 9), reg.count());
+    try testing.expectEqual(@as(usize, 15), reg.count());
     for ([_][]const u8{
         "zigts_expert_meta",
         "zigts_expert_verify_paths",
@@ -72,6 +84,12 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zigts_expert_features",
         "zigts_expert_modules",
         "zigts_expert_verify_modules",
+        "workspace_list_files",
+        "workspace_read_file",
+        "workspace_search_text",
+        "zigts_check",
+        "zig_build_step",
+        "zig_test_step",
     }) |expected| {
         if (reg.findByName(expected) == null) {
             std.debug.print("missing tool: {s}\n", .{expected});
