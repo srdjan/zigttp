@@ -8,10 +8,15 @@
 //! alongside the legacy global `fetchSync` primitive; this module gets
 //! wired in at runtime init via `installState`.
 //!
-//! F1 scope: non-durable only. Ephemeral outbound calls with egress-host
-//! policy enforcement inherited from the underlying primitive. Per-call
-//! durable opt-in (`durable: { key, retries }`) is F2 work and is not
-//! implemented here.
+//! Two modes:
+//!   - Non-durable (default): ephemeral outbound call with egress-host
+//!     policy enforcement.
+//!   - Durable: pass `init.durable = { key, retries?, backoff?, ttl_s? }`
+//!     to oplog-wrap the call. A cached response within TTL is returned
+//!     without hitting the network; a miss executes (with retry on 5xx
+//!     per the backoff policy) and persists the terminal 2xx/3xx/4xx
+//!     response under `<--durable>/fetch/<hash>.step`. 5xx are not
+//!     cached so transient upstream failures don't freeze the caller.
 
 const std = @import("std");
 const context = @import("../context.zig");
