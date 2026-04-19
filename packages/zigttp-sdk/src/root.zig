@@ -149,6 +149,111 @@ pub fn writeStderr(handle: *ModuleHandle, buf: []const u8) ModuleCapabilityError
     if (!zigttpSdkWriteStderr(handle, buf.ptr, buf.len)) return error.StderrWriteFailed;
 }
 
+pub const RuntimeError = error{
+    OutOfMemory,
+    RuntimeFailure,
+};
+
+extern fn zigttpSdkExtractString(val_raw: u64, out_ptr: *[*]const u8, out_len: *usize) bool;
+extern fn zigttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *u64) bool;
+extern fn zigttpSdkCreateObject(handle: *ModuleHandle, out: *u64) bool;
+extern fn zigttpSdkObjectSet(handle: *ModuleHandle, obj_raw: u64, key_ptr: [*]const u8, key_len: usize, val_raw: u64) bool;
+extern fn zigttpSdkObjectGet(handle: *ModuleHandle, obj_raw: u64, key_ptr: [*]const u8, key_len: usize, out: *u64) bool;
+extern fn zigttpSdkThrowError(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, msg_ptr: [*]const u8, msg_len: usize) u64;
+extern fn zigttpSdkResultOk(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
+extern fn zigttpSdkResultErr(handle: *ModuleHandle, msg_ptr: [*]const u8, msg_len: usize, out: *u64) bool;
+extern fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
+extern fn zigttpSdkResultErrs(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
+
+/// Extract a borrowed string slice from a JSValue. Handles flat, slice,
+/// and leaf rope strings. Returns null for non-string values or
+/// non-flattened concat ropes. Slice is valid for the current call.
+pub fn extractString(val: JSValue) ?[]const u8 {
+    var ptr: [*]const u8 = undefined;
+    var len: usize = 0;
+    if (!zigttpSdkExtractString(val.raw, &ptr, &len)) return null;
+    return ptr[0..len];
+}
+
+/// Extract an i32 from a JSValue, handling both int and whole-number float
+/// representations.
+pub fn extractInt(val: JSValue) ?i32 {
+    if (val.toInt()) |i| return i;
+    if (val.toFloat()) |f| {
+        const i: i32 = @intFromFloat(f);
+        if (@as(f64, @floatFromInt(i)) == f) return i;
+    }
+    return null;
+}
+
+/// Extract an f64 from a JSValue, widening int values.
+pub fn extractFloat(val: JSValue) ?f64 {
+    if (val.toInt()) |i| return @floatFromInt(i);
+    return val.toFloat();
+}
+
+/// Allocate a new JS string owned by the runtime GC.
+pub fn createString(handle: *ModuleHandle, data: []const u8) RuntimeError!JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkCreateString(handle, data.ptr, data.len, &raw)) return error.OutOfMemory;
+    return .{ .raw = raw };
+}
+
+/// Allocate a new empty JS object owned by the runtime GC.
+pub fn createObject(handle: *ModuleHandle) RuntimeError!JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkCreateObject(handle, &raw)) return error.OutOfMemory;
+    return .{ .raw = raw };
+}
+
+/// Set a property on a JS object. Key is a UTF-8 string; the runtime
+/// interns it into an atom.
+pub fn objectSet(handle: *ModuleHandle, obj: JSValue, key: []const u8, val: JSValue) RuntimeError!void {
+    if (!zigttpSdkObjectSet(handle, obj.raw, key.ptr, key.len, val.raw)) return error.RuntimeFailure;
+}
+
+/// Get a property from a JS object. Returns null if the property is
+/// absent or the target is not an object.
+pub fn objectGet(handle: *ModuleHandle, obj: JSValue, key: []const u8) ?JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkObjectGet(handle, obj.raw, key.ptr, key.len, &raw)) return null;
+    return .{ .raw = raw };
+}
+
+/// Raise a JS exception. The returned JSValue is the exception sentinel;
+/// return it from your module function.
+pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) JSValue {
+    return .{ .raw = zigttpSdkThrowError(handle, name.ptr, name.len, message.ptr, message.len) };
+}
+
+/// Build `{ ok: true, value: payload }`.
+pub fn resultOk(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkResultOk(handle, payload.raw, &raw)) return error.OutOfMemory;
+    return .{ .raw = raw };
+}
+
+/// Build `{ ok: false, error: message }`.
+pub fn resultErr(handle: *ModuleHandle, message: []const u8) RuntimeError!JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkResultErr(handle, message.ptr, message.len, &raw)) return error.OutOfMemory;
+    return .{ .raw = raw };
+}
+
+/// Build `{ ok: false, error: payload }` with a JSValue payload.
+pub fn resultErrValue(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkResultErrValue(handle, payload.raw, &raw)) return error.OutOfMemory;
+    return .{ .raw = raw };
+}
+
+/// Build `{ ok: false, errors: payload }` with an array payload.
+pub fn resultErrs(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
+    var raw: u64 = 0;
+    if (!zigttpSdkResultErrs(handle, payload.raw, &raw)) return error.OutOfMemory;
+    return .{ .raw = raw };
+}
+
 pub const DataLabel = enum(u3) {
     secret,
     credential,

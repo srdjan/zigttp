@@ -438,7 +438,7 @@ pub fn allowsSqlQueryChecked(ctx: *context.Context, name: []const u8) bool {
 }
 
 pub export fn zigttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
-    if (capability_tag > @intFromEnum(ModuleCapability.policy_check)) return false;
+    if (capability_tag > @intFromEnum(ModuleCapability.websocket)) return false;
     const capability: ModuleCapability = @enumFromInt(capability_tag);
     return hasCapability(handle, capability);
 }
@@ -461,6 +461,118 @@ pub export fn zigttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, 
     writeStderrForActiveModule(buf_ptr[0..len]) catch return false;
     return true;
 }
+
+// -------------------------------------------------------------------------
+// SDK bridge: handle-bound runtime operations
+// -------------------------------------------------------------------------
+//
+// These exports let the zigttp-sdk package drive zigts runtime state
+// through opaque ModuleHandle pointers. Each matches an `extern fn` on the
+// SDK side. JSValue is transferred as u64 since both packages define it as
+// packed struct(u64) and verify layout equivalence at comptime.
+
+const util_mod = @import("modules/internal/util.zig");
+
+pub export fn zigttpSdkExtractString(val_raw: u64, out_ptr: *[*]const u8, out_len: *usize) bool {
+    const val: value.JSValue = .{ .raw = val_raw };
+    const slice = util_mod.extractString(val) orelse return false;
+    out_ptr.* = slice.ptr;
+    out_len.* = slice.len;
+    return true;
+}
+
+pub export fn zigttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *u64) bool {
+    const ctx = handleToContext(handle);
+    const result = ctx.createString(ptr[0..len]) catch return false;
+    out.* = result.raw;
+    return true;
+}
+
+pub export fn zigttpSdkCreateObject(handle: *ModuleHandle, out: *u64) bool {
+    const ctx = handleToContext(handle);
+    const obj = ctx.createObject(ctx.object_prototype) catch return false;
+    out.* = obj.toValue().raw;
+    return true;
+}
+
+pub export fn zigttpSdkObjectSet(
+    handle: *ModuleHandle,
+    obj_raw: u64,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    val_raw: u64,
+) bool {
+    const ctx = handleToContext(handle);
+    const obj_val: value.JSValue = .{ .raw = obj_raw };
+    if (!obj_val.isObject()) return false;
+    const obj = obj_val.toPtr(object.JSObject);
+    const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
+    ctx.setPropertyChecked(obj, atom, .{ .raw = val_raw }) catch return false;
+    return true;
+}
+
+pub export fn zigttpSdkObjectGet(
+    handle: *ModuleHandle,
+    obj_raw: u64,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    out: *u64,
+) bool {
+    const ctx = handleToContext(handle);
+    const obj_val: value.JSValue = .{ .raw = obj_raw };
+    if (!obj_val.isObject()) return false;
+    const obj = obj_val.toPtr(object.JSObject);
+    const atom = ctx.atoms.intern(key_ptr[0..key_len]) catch return false;
+    const pool = ctx.hidden_class_pool orelse return false;
+    const val = obj.getProperty(pool, atom) orelse return false;
+    out.* = val.raw;
+    return true;
+}
+
+pub export fn zigttpSdkThrowError(
+    handle: *ModuleHandle,
+    name_ptr: [*]const u8,
+    name_len: usize,
+    msg_ptr: [*]const u8,
+    msg_len: usize,
+) u64 {
+    const ctx = handleToContext(handle);
+    const exc = util_mod.throwError(ctx, name_ptr[0..name_len], msg_ptr[0..msg_len]);
+    return exc.raw;
+}
+
+pub export fn zigttpSdkResultOk(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool {
+    const ctx = handleToContext(handle);
+    const result = util_mod.createPlainResultOk(ctx, .{ .raw = payload_raw }) catch return false;
+    out.* = result.raw;
+    return true;
+}
+
+pub export fn zigttpSdkResultErr(
+    handle: *ModuleHandle,
+    msg_ptr: [*]const u8,
+    msg_len: usize,
+    out: *u64,
+) bool {
+    const ctx = handleToContext(handle);
+    const result = util_mod.createPlainResultErr(ctx, msg_ptr[0..msg_len]) catch return false;
+    out.* = result.raw;
+    return true;
+}
+
+pub export fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool {
+    const ctx = handleToContext(handle);
+    out.* = util_mod.createPlainResultErrValue(ctx, .{ .raw = payload_raw }).raw;
+    return true;
+}
+
+pub export fn zigttpSdkResultErrs(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool {
+    const ctx = handleToContext(handle);
+    const result = util_mod.createPlainResultErrs(ctx, .{ .raw = payload_raw }) catch return false;
+    out.* = result.raw;
+    return true;
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification
