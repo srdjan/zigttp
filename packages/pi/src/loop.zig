@@ -31,6 +31,18 @@ pub const ModelClient = struct {
 
 pub const ApprovalFn = *const fn (file: []const u8) anyerror!bool;
 
+pub const ApprovalPolicy = enum { ask, auto_approve, auto_reject };
+
+pub fn autoApprove(file: []const u8) anyerror!bool {
+    _ = file;
+    return true;
+}
+
+pub fn autoReject(file: []const u8) anyerror!bool {
+    _ = file;
+    return false;
+}
+
 pub const TurnResult = struct {
     final_state: turn.TurnState,
     attempt: u8,
@@ -341,8 +353,13 @@ const stub_tool: registry_mod.ToolDef = .{
     .execute = stubExecute,
 };
 
-fn rejectEdit(_: []const u8) anyerror!bool {
-    return false;
+// `std.testing.tmpDir` creates `.zig-cache/tmp/<sub_path>/`, but `tmp.sub_path`
+// is only the 16-char random component. Resolving it directly against CWD
+// (the repo root) would create stray `<repo>/<sub_path>/` folders that
+// `tmp.cleanup()` never deletes. Compose the full relative path so writes
+// land inside the real tmp dir.
+fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir) ![]u8 {
+    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
 }
 
 // `std.testing.tmpDir` creates `.zig-cache/tmp/<sub_path>/`, but `tmp.sub_path`
@@ -546,7 +563,7 @@ test "approval callback can block an otherwise verified edit from being written"
         "add a GET route",
         .{
             .workspace_root = workspace_root,
-            .approval_fn = rejectEdit,
+            .approval_fn = autoReject,
         },
     );
 
@@ -574,4 +591,16 @@ test "edit path outside the workspace is rejected" {
         error.EditPathOutsideWorkspace,
         runTurn(testing.allocator, canned.asClient(), &registry, &tr, "escape the workspace"),
     );
+}
+
+test "autoApprove returns true for any file" {
+    try testing.expect(try autoApprove("any/file.zig"));
+}
+
+test "autoReject returns false for any file" {
+    try testing.expect(!try autoReject("any/file.zig"));
+}
+
+test "ApprovalPolicy enum is exported" {
+    try testing.expect(@sizeOf(ApprovalPolicy) > 0);
 }
