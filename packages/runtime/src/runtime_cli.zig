@@ -244,6 +244,17 @@ fn parseCommonServeFlag(
         config.runtime_config.durable_oplog_dir = argv[i.*];
         return true;
     }
+    if (std.mem.eql(u8, arg, "--outbound-http")) {
+        config.runtime_config.outbound_http_enabled = true;
+        return true;
+    }
+    if (std.mem.eql(u8, arg, "--outbound-host")) {
+        i.* += 1;
+        if (i.* >= argv.len) return error.MissingOutboundHost;
+        config.runtime_config.outbound_http_enabled = true;
+        config.runtime_config.outbound_allow_host = argv[i.*];
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--no-env-check")) {
         config.skip_env_check = true;
         return true;

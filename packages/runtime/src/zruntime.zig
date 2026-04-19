@@ -12,6 +12,7 @@ const ascii = std.ascii;
 const zq = @import("zigts");
 const embedded_handler = @import("embedded_handler");
 const durable_store_mod = @import("durable_store.zig");
+const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
 const contract_runtime = @import("contract_runtime.zig");
 pub const websocket_codec = @import("websocket_codec.zig");
@@ -3492,18 +3493,278 @@ const ServiceRoute = struct {
     path_pattern: []const u8,
 };
 
-/// `zigttp:fetch.fetch(url, init?)` callback. Delegates to the same native
-/// as the global `fetchSync`, so trace recording, replay mode, and
-/// outbound-host policy enforcement all behave identically across the two
-/// surfaces. Durable opt-in (F2) will layer on top without changing this
-/// signature.
+/// `zigttp:fetch.fetch(url, init?)` callback. Without `init.durable`
+/// this delegates straight to `fetchSync` so trace recording, replay
+/// mode, and outbound-host policy enforcement all behave identically
+/// across the two surfaces. With `init.durable = { key, retries?,
+/// backoff?, ttl_s? }` the call is wrapped in an oplog step under
+/// `<durable>/fetch/<hash>.step`: a cached response within TTL is
+/// returned without hitting the network; a miss executes the request
+/// (with retry on 5xx + connection errors per the backoff policy) and
+/// persists the final response.
 fn fetchModuleCallback(
     runtime_ptr: *anyopaque,
     ctx: *zq.Context,
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
-    _ = runtime_ptr;
-    return fetchSyncNative(@ptrCast(ctx), zq.JSValue.undefined_val, args);
+    _ = ctx;
+    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    const init_obj: ?*zq.JSObject = blk: {
+        if (args.len >= 1 and args[0].isObject()) break :blk args[0].toPtr(zq.JSObject);
+        if (args.len >= 2 and args[1].isObject()) break :blk args[1].toPtr(zq.JSObject);
+        break :blk null;
+    };
+
+    if (init_obj) |obj| {
+        switch (try parseDurableFetchOpts(rt, obj, pool)) {
+            .none => {},
+            .err => |err_val| return err_val,
+            .ok => |opts| return runDurableFetch(rt, args, opts),
+        }
+    }
+    return fetchSyncNative(@ptrCast(rt.ctx), zq.JSValue.undefined_val, args);
+}
+
+const DurableFetchOpts = durable_fetch.Options;
+
+const ParsedDurableOpts = union(enum) {
+    none,
+    ok: DurableFetchOpts,
+    err: zq.JSValue,
+};
+
+/// Extract `durable: { key, retries?, backoff?, ttl_s? }` from the
+/// init object. Returns `.none` when `durable` is absent. Returns
+/// `.err` with a JS error-response JSValue when the field is present
+/// but malformed — authors who opt in to durable semantics deserve a
+/// loud failure, not a silent fallback.
+fn parseDurableFetchOpts(
+    rt: *Runtime,
+    init: *zq.JSObject,
+    pool: *const zq.HiddenClassPool,
+) !ParsedDurableOpts {
+    const durable_val = getDynamicProperty(rt.ctx, init, pool, "durable") orelse return .none;
+    if (durable_val.isNull() or durable_val.isUndefined()) return .none;
+    if (!durable_val.isObject()) {
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable must be an object") };
+    }
+
+    const obj = durable_val.toPtr(zq.JSObject);
+
+    const key_val = getDynamicProperty(rt.ctx, obj, pool, "key") orelse {
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.key is required") };
+    };
+    const key = getStringData(key_val) orelse {
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.key must be a string") };
+    };
+    if (key.len == 0) {
+        return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.key must be non-empty") };
+    }
+
+    var opts: DurableFetchOpts = .{ .key = key };
+
+    if (getDynamicProperty(rt.ctx, obj, pool, "retries")) |retries_val| {
+        if (!retries_val.isInt()) {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.retries must be an integer") };
+        }
+        const raw = retries_val.getInt();
+        if (raw < 0 or raw > 16) {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.retries must be in [0, 16]") };
+        }
+        opts.retries = @intCast(raw);
+    }
+
+    if (getDynamicProperty(rt.ctx, obj, pool, "backoff")) |backoff_val| {
+        const text = getStringData(backoff_val) orelse {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.backoff must be \"none\" or \"exponential\"") };
+        };
+        if (std.mem.eql(u8, text, "none")) {
+            opts.backoff = .none;
+        } else if (std.mem.eql(u8, text, "exponential")) {
+            opts.backoff = .exponential;
+        } else {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.backoff must be \"none\" or \"exponential\"") };
+        }
+    }
+
+    if (getDynamicProperty(rt.ctx, obj, pool, "ttl_s")) |ttl_val| {
+        if (!ttl_val.isInt()) {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.ttl_s must be an integer") };
+        }
+        const raw = ttl_val.getInt();
+        if (raw <= 0 or raw > 7 * 24 * 3600) {
+            return .{ .err = try createFetchErrorResponse(rt, "InvalidDurable", "durable.ttl_s must be in (0, 604800]") };
+        }
+        opts.ttl_s = @intCast(raw);
+    }
+
+    return .{ .ok = opts };
+}
+
+fn runDurableFetch(
+    rt: *Runtime,
+    args: []const zq.JSValue,
+    opts: DurableFetchOpts,
+) !zq.JSValue {
+    const durable_dir = rt.config.durable_oplog_dir orelse {
+        return createFetchErrorResponse(rt, "DurableNotConfigured", "fetch durable requires --durable <dir>");
+    };
+
+    // Extract method+url+body for hashing before the network call. This
+    // duplicates a sliver of parseFetchArgs' work but keeps the hash
+    // stable even if parseFetchArgs later normalizes fields.
+    const summary = try summarizeFetchRequest(rt, args);
+    const hash = durable_fetch.computeRequestHash(opts.key, summary.method, summary.url, summary.body);
+
+    var store = durable_store_mod.DurableStore.initFs(rt.allocator, durable_dir);
+    const fetch_dir = try store.subtreeDir(rt.allocator, "fetch");
+    defer rt.allocator.free(fetch_dir);
+
+    const now_ms = unixMillis();
+
+    if (try durable_fetch.loadEntry(rt.allocator, fetch_dir, hash[0..], opts.ttl_s, now_ms)) |hit| {
+        var entry = hit;
+        defer entry.deinit(rt.allocator);
+        return try rebuildResponseFromCache(rt, entry);
+    }
+
+    var attempt: u32 = 0;
+    var last_response: zq.JSValue = zq.JSValue.undefined_val;
+    while (true) : (attempt += 1) {
+        last_response = try fetchSyncResult(rt, args);
+        const status = extractResponseStatus(rt, last_response);
+        const retryable = status >= 500;
+        const exhausted = attempt >= opts.retries;
+        if (!retryable or exhausted) break;
+        if (opts.backoff == .exponential) {
+            const delay_ms: i64 = @as(i64, 100) << @intCast(@min(attempt, 6));
+            if (rt.outbound_io_backend) |*backend| {
+                std.Io.sleep(backend.io(), .fromMilliseconds(delay_ms), .awake) catch {};
+            }
+        }
+    }
+
+    // Only cache terminal responses. 5xx (including our own 599 transport
+    // errors) are transient by convention — caching them would freeze the
+    // handler on a stale failure. A retry with the same idempotency key
+    // should try again, not replay a bad response.
+    const final_status = extractResponseStatus(rt, last_response);
+    if (final_status < 500) {
+        try persistResponseToCache(rt, fetch_dir, hash[0..], last_response, now_ms);
+    }
+    return last_response;
+}
+
+const RequestSummary = struct {
+    method: []const u8,
+    url: []const u8,
+    body: []const u8,
+};
+
+fn summarizeFetchRequest(rt: *Runtime, args: []const zq.JSValue) !RequestSummary {
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+
+    var url: []const u8 = "";
+    var method: []const u8 = "GET";
+    var body: []const u8 = "";
+
+    if (args.len >= 1) {
+        if (args[0].isObject()) {
+            const obj = args[0].toPtr(zq.JSObject);
+            if (getObjectProperty(rt.ctx, obj, pool, zq.Atom.url, "url")) |v|
+                if (getStringData(v)) |s| { url = s; };
+        } else if (getStringData(args[0])) |s| {
+            url = s;
+        }
+    }
+
+    const init_obj: ?*zq.JSObject = blk: {
+        if (args.len >= 1 and args[0].isObject()) break :blk args[0].toPtr(zq.JSObject);
+        if (args.len >= 2 and args[1].isObject()) break :blk args[1].toPtr(zq.JSObject);
+        break :blk null;
+    };
+    if (init_obj) |obj| {
+        if (getObjectProperty(rt.ctx, obj, pool, zq.Atom.method, "method")) |v|
+            if (getStringData(v)) |s| { method = s; };
+        if (getObjectProperty(rt.ctx, obj, pool, zq.Atom.body, "body")) |v|
+            if (getStringData(v)) |s| { body = s; };
+    }
+
+    return .{ .method = method, .url = url, .body = body };
+}
+
+fn extractResponseStatus(rt: *Runtime, response: zq.JSValue) u16 {
+    if (!response.isObject()) return 0;
+    const pool = rt.ctx.hidden_class_pool orelse return 0;
+    const obj = response.toPtr(zq.JSObject);
+    const status_val = obj.getProperty(pool, zq.Atom.status) orelse return 0;
+    if (!status_val.isInt()) return 0;
+    const raw = status_val.getInt();
+    if (raw < 0 or raw > 999) return 0;
+    return @intCast(raw);
+}
+
+fn rebuildResponseFromCache(rt: *Runtime, entry: durable_fetch.Entry) !zq.JSValue {
+    const created = try createFetchResponse(
+        rt,
+        entry.status,
+        entry.status_text,
+        entry.body,
+        entry.content_type,
+    );
+    return created.value;
+}
+
+fn persistResponseToCache(
+    rt: *Runtime,
+    fetch_dir: []const u8,
+    hash_hex: []const u8,
+    response: zq.JSValue,
+    now_ms: i64,
+) !void {
+    if (!response.isObject()) return;
+    const pool = rt.ctx.hidden_class_pool orelse return;
+    const obj = response.toPtr(zq.JSObject);
+
+    const status = extractResponseStatus(rt, response);
+    if (status == 0) return;
+
+    var status_text_buf: []const u8 = "";
+    if (obj.getProperty(pool, try rt.ctx.atoms.intern("statusText"))) |v|
+        if (getStringData(v)) |s| { status_text_buf = s; };
+
+    var body_bytes: []const u8 = "";
+    if (obj.getProperty(pool, zq.Atom.body)) |body_val| {
+        if (body_val.isString()) body_bytes = body_val.toPtr(zq.JSString).data();
+    }
+
+    var content_type_opt: ?[]const u8 = null;
+    if (obj.getProperty(pool, zq.Atom.headers)) |headers_val| {
+        if (headers_val.isObject()) {
+            const headers_obj = headers_val.toPtr(zq.JSObject);
+            if (headers_obj.getProperty(pool, try getHeaderAtom(rt.ctx, "content-type"))) |ct_val| {
+                if (getStringData(ct_val)) |s| content_type_opt = s;
+            }
+        }
+    }
+
+    const status_text_owned = try rt.allocator.dupe(u8, status_text_buf);
+    defer rt.allocator.free(status_text_owned);
+    const body_owned = try rt.allocator.dupe(u8, body_bytes);
+    defer rt.allocator.free(body_owned);
+    var ct_owned: ?[]u8 = null;
+    defer if (ct_owned) |b| rt.allocator.free(b);
+    if (content_type_opt) |s| ct_owned = try rt.allocator.dupe(u8, s);
+
+    try durable_fetch.writeEntry(rt.allocator, fetch_dir, hash_hex, .{
+        .at_ms = now_ms,
+        .status = status,
+        .status_text = status_text_owned,
+        .content_type = ct_owned,
+        .body = body_owned,
+    });
 }
 
 // ===========================================================================
@@ -5742,6 +6003,7 @@ test {
     _ = @import("websocket_pool.zig");
     _ = @import("ws_gateway.zig");
     _ = @import("ws_frame_loop.zig");
+    _ = @import("durable_fetch.zig");
 }
 
 test "Runtime creation" {
