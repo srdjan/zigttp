@@ -20,6 +20,12 @@ comptime {
         @compileError("sdk.FailureSeverity ordinals diverge from internal");
     if (@intFromEnum(sdk.ModuleCapability.policy_check) != @intFromEnum(internal.ModuleCapability.policy_check))
         @compileError("sdk.ModuleCapability ordinals diverge from internal");
+    if (@intFromEnum(sdk.ModuleCapability.websocket) != @intFromEnum(internal.ModuleCapability.websocket))
+        @compileError("sdk.ModuleCapability.websocket ordinal diverges from internal");
+    if (@intFromEnum(sdk.ContractCategory.fetch_host) != @intFromEnum(internal.ContractCategory.fetch_host))
+        @compileError("sdk.ContractCategory ordinals diverge from internal");
+    if (@intFromEnum(sdk.LawKind.absorbing) != @intFromEnum(internal.LawKind.absorbing))
+        @compileError("sdk.LawKind ordinals diverge from internal");
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
@@ -40,6 +46,7 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
         .contract_section = binding.contract_section,
         .sandboxable = binding.sandboxable,
         .comptime_only = binding.comptime_only,
+        .self_managed_io = binding.self_managed_io,
     };
 }
 
@@ -70,6 +77,7 @@ fn adaptFunctionBinding(
 ) internal.FunctionBinding {
     const param_types = comptime adaptReturnKinds(binding.param_types);
     const contract_extractions = comptime adaptContractExtractions(binding.contract_extractions);
+    const laws = comptime adaptLaws(binding.laws);
     const internal_required_capabilities = comptime adaptModuleCapabilities(required_capabilities);
     return .{
         .name = binding.name,
@@ -81,6 +89,7 @@ fn adaptFunctionBinding(
         .traceable = binding.traceable,
         .contract_extractions = &contract_extractions,
         .contract_flags = .{
+            .sets_scope_used = binding.contract_flags.sets_scope_used,
             .sets_durable_used = binding.contract_flags.sets_durable_used,
             .sets_durable_timers = binding.contract_flags.sets_durable_timers,
             .sets_bearer_auth = binding.contract_flags.sets_bearer_auth,
@@ -88,7 +97,25 @@ fn adaptFunctionBinding(
         },
         .return_labels = @bitCast(binding.return_labels),
         .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
+        .laws = &laws,
     };
+}
+
+fn adaptLaws(comptime laws: []const sdk.Law) [laws.len]internal.Law {
+    var out: [laws.len]internal.Law = undefined;
+    for (laws, 0..) |law, i| {
+        out[i] = switch (law) {
+            .pure => .pure,
+            .idempotent_call => .idempotent_call,
+            .inverse_of => |target| .{ .inverse_of = target },
+            .absorbing => |pattern| .{ .absorbing = .{
+                .arg_position = pattern.arg_position,
+                .argument_shape = @enumFromInt(@intFromEnum(pattern.argument_shape)),
+                .residue = @enumFromInt(@intFromEnum(pattern.residue)),
+            } },
+        };
+    }
+    return out;
 }
 
 fn adaptReturnKinds(comptime kinds: []const sdk.ReturnKind) [kinds.len]internal.ReturnKind {
