@@ -12,28 +12,28 @@ const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
 const std = @import("std");
 
-const env_mod = @import("modules/env.zig");
-const crypto_mod = @import("modules/crypto.zig");
-const router_mod = @import("modules/router.zig");
-const auth_mod = @import("modules/auth.zig");
-const validate_mod = @import("modules/validate.zig");
-const decode_mod = @import("modules/decode.zig");
-const cache_mod = @import("modules/cache.zig");
-const sql_mod = @import("modules/sql.zig");
-const io_mod = @import("modules/io.zig");
-const scope_mod = @import("modules/scope.zig");
-const compose_mod = @import("modules/compose.zig");
-const durable_mod = @import("modules/durable.zig");
-const url_mod = @import("modules/url.zig");
-const id_mod = @import("modules/id.zig");
-const http_mod = @import("modules/http_mod.zig");
-const log_mod = @import("modules/log.zig");
-const text_mod = @import("modules/text.zig");
-const time_mod = @import("modules/time.zig");
-const ratelimit_mod = @import("modules/ratelimit.zig");
-const service_mod = @import("modules/service.zig");
-const fetch_mod = @import("modules/fetch.zig");
-const websocket_mod = @import("modules/websocket.zig");
+const env_mod = @import("modules/platform/env.zig");
+const crypto_mod = @import("modules/security/crypto.zig");
+const router_mod = @import("modules/http/router.zig");
+const auth_mod = @import("modules/security/auth.zig");
+const validate_mod = @import("modules/security/validate.zig");
+const decode_mod = @import("modules/security/decode.zig");
+const cache_mod = @import("modules/data/cache.zig");
+const sql_mod = @import("modules/data/sql.zig");
+const io_mod = @import("modules/workflow/io.zig");
+const scope_mod = @import("modules/workflow/scope.zig");
+const compose_mod = @import("modules/workflow/compose.zig");
+const durable_mod = @import("modules/workflow/durable.zig");
+const url_mod = @import("modules/http/url.zig");
+const id_mod = @import("modules/platform/id.zig");
+const http_mod = @import("modules/http/http_mod.zig");
+const log_mod = @import("modules/platform/log.zig");
+const text_mod = @import("modules/platform/text.zig");
+const time_mod = @import("modules/platform/time.zig");
+const ratelimit_mod = @import("modules/data/ratelimit.zig");
+const service_mod = @import("modules/net/service.zig");
+const fetch_mod = @import("modules/net/fetch.zig");
+const websocket_mod = @import("modules/net/websocket.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -74,28 +74,28 @@ pub const BuiltinGovernanceEntry = struct {
 };
 
 pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
-    .{ .specifier = "zigttp:env", .module_path = "packages/zigts/src/modules/env.zig", .spec_path = "packages/zigts/module-specs/env.json" },
-    .{ .specifier = "zigttp:crypto", .module_path = "packages/zigts/src/modules/crypto.zig", .spec_path = "packages/zigts/module-specs/crypto.json" },
-    .{ .specifier = "zigttp:router", .module_path = "packages/zigts/src/modules/router.zig", .spec_path = "packages/zigts/module-specs/router.json" },
-    .{ .specifier = "zigttp:auth", .module_path = "packages/zigts/src/modules/auth.zig", .spec_path = "packages/zigts/module-specs/auth.json" },
-    .{ .specifier = "zigttp:validate", .module_path = "packages/zigts/src/modules/validate.zig", .spec_path = "packages/zigts/module-specs/validate.json" },
-    .{ .specifier = "zigttp:decode", .module_path = "packages/zigts/src/modules/decode.zig", .spec_path = "packages/zigts/module-specs/decode.json" },
-    .{ .specifier = "zigttp:cache", .module_path = "packages/zigts/src/modules/cache.zig", .spec_path = "packages/zigts/module-specs/cache.json" },
-    .{ .specifier = "zigttp:sql", .module_path = "packages/zigts/src/modules/sql.zig", .spec_path = "packages/zigts/module-specs/sql.json" },
-    .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/io.zig", .spec_path = "packages/zigts/module-specs/io.json" },
-    .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/scope.zig", .spec_path = "packages/zigts/module-specs/scope.json" },
-    .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/compose.zig", .spec_path = "packages/zigts/module-specs/compose.json" },
-    .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/durable.zig", .spec_path = "packages/zigts/module-specs/durable.json" },
-    .{ .specifier = "zigttp:url", .module_path = "packages/zigts/src/modules/url.zig", .spec_path = "packages/zigts/module-specs/url.json" },
-    .{ .specifier = "zigttp:id", .module_path = "packages/zigts/src/modules/id.zig", .spec_path = "packages/zigts/module-specs/id.json" },
-    .{ .specifier = "zigttp:http", .module_path = "packages/zigts/src/modules/http_mod.zig", .spec_path = "packages/zigts/module-specs/http-mod.json" },
-    .{ .specifier = "zigttp:log", .module_path = "packages/zigts/src/modules/log.zig", .spec_path = "packages/zigts/module-specs/log.json" },
-    .{ .specifier = "zigttp:text", .module_path = "packages/zigts/src/modules/text.zig", .spec_path = "packages/zigts/module-specs/text.json" },
-    .{ .specifier = "zigttp:time", .module_path = "packages/zigts/src/modules/time.zig", .spec_path = "packages/zigts/module-specs/time.json" },
-    .{ .specifier = "zigttp:ratelimit", .module_path = "packages/zigts/src/modules/ratelimit.zig", .spec_path = "packages/zigts/module-specs/ratelimit.json" },
-    .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/service.zig", .spec_path = "packages/zigts/module-specs/service.json" },
-    .{ .specifier = "zigttp:fetch", .module_path = "packages/zigts/src/modules/fetch.zig", .spec_path = "packages/zigts/module-specs/fetch.json" },
-    .{ .specifier = "zigttp:websocket", .module_path = "packages/zigts/src/modules/websocket.zig", .spec_path = "packages/zigts/module-specs/websocket.json" },
+    .{ .specifier = "zigttp:env", .module_path = "packages/zigts/src/modules/platform/env.zig", .spec_path = "packages/zigts/module-specs/platform/env.json" },
+    .{ .specifier = "zigttp:crypto", .module_path = "packages/zigts/src/modules/security/crypto.zig", .spec_path = "packages/zigts/module-specs/security/crypto.json" },
+    .{ .specifier = "zigttp:router", .module_path = "packages/zigts/src/modules/http/router.zig", .spec_path = "packages/zigts/module-specs/http/router.json" },
+    .{ .specifier = "zigttp:auth", .module_path = "packages/zigts/src/modules/security/auth.zig", .spec_path = "packages/zigts/module-specs/security/auth.json" },
+    .{ .specifier = "zigttp:validate", .module_path = "packages/zigts/src/modules/security/validate.zig", .spec_path = "packages/zigts/module-specs/security/validate.json" },
+    .{ .specifier = "zigttp:decode", .module_path = "packages/zigts/src/modules/security/decode.zig", .spec_path = "packages/zigts/module-specs/security/decode.json" },
+    .{ .specifier = "zigttp:cache", .module_path = "packages/zigts/src/modules/data/cache.zig", .spec_path = "packages/zigts/module-specs/data/cache.json" },
+    .{ .specifier = "zigttp:sql", .module_path = "packages/zigts/src/modules/data/sql.zig", .spec_path = "packages/zigts/module-specs/data/sql.json" },
+    .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/workflow/io.zig", .spec_path = "packages/zigts/module-specs/workflow/io.json" },
+    .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/workflow/scope.zig", .spec_path = "packages/zigts/module-specs/workflow/scope.json" },
+    .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/workflow/compose.zig", .spec_path = "packages/zigts/module-specs/workflow/compose.json" },
+    .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/workflow/durable.zig", .spec_path = "packages/zigts/module-specs/workflow/durable.json" },
+    .{ .specifier = "zigttp:url", .module_path = "packages/zigts/src/modules/http/url.zig", .spec_path = "packages/zigts/module-specs/http/url.json" },
+    .{ .specifier = "zigttp:id", .module_path = "packages/zigts/src/modules/platform/id.zig", .spec_path = "packages/zigts/module-specs/platform/id.json" },
+    .{ .specifier = "zigttp:http", .module_path = "packages/zigts/src/modules/http/http_mod.zig", .spec_path = "packages/zigts/module-specs/http/http-mod.json" },
+    .{ .specifier = "zigttp:log", .module_path = "packages/zigts/src/modules/platform/log.zig", .spec_path = "packages/zigts/module-specs/platform/log.json" },
+    .{ .specifier = "zigttp:text", .module_path = "packages/zigts/src/modules/platform/text.zig", .spec_path = "packages/zigts/module-specs/platform/text.json" },
+    .{ .specifier = "zigttp:time", .module_path = "packages/zigts/src/modules/platform/time.zig", .spec_path = "packages/zigts/module-specs/platform/time.json" },
+    .{ .specifier = "zigttp:ratelimit", .module_path = "packages/zigts/src/modules/data/ratelimit.zig", .spec_path = "packages/zigts/module-specs/data/ratelimit.json" },
+    .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/net/service.zig", .spec_path = "packages/zigts/module-specs/net/service.json" },
+    .{ .specifier = "zigttp:fetch", .module_path = "packages/zigts/src/modules/net/fetch.zig", .spec_path = "packages/zigts/module-specs/net/fetch.json" },
+    .{ .specifier = "zigttp:websocket", .module_path = "packages/zigts/src/modules/net/websocket.zig", .spec_path = "packages/zigts/module-specs/net/websocket.json" },
 };
 
 comptime {
@@ -304,7 +304,7 @@ test "governance entries stay aligned with public built-ins" {
     const entries = governanceEntries();
     try std.testing.expectEqual(builtins.len, entries.len);
     try std.testing.expectEqualStrings("zigttp:env", entries[0].specifier);
-    try std.testing.expectEqualStrings("packages/zigts/src/modules/env.zig", entries[0].module_path);
-    try std.testing.expectEqualStrings("packages/zigts/module-specs/env.json", entries[0].spec_path);
+    try std.testing.expectEqualStrings("packages/zigts/src/modules/platform/env.zig", entries[0].module_path);
+    try std.testing.expectEqualStrings("packages/zigts/module-specs/platform/env.json", entries[0].spec_path);
     try std.testing.expectEqualStrings("zigttp:websocket", entries[entries.len - 1].specifier);
 }
