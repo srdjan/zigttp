@@ -81,7 +81,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:validate", .module_path = "packages/modules/src/security/validate.zig", .spec_path = "packages/zigts/module-specs/security/validate.json" },
     .{ .specifier = "zigttp:decode", .module_path = "packages/modules/src/security/decode.zig", .spec_path = "packages/zigts/module-specs/security/decode.json" },
     .{ .specifier = "zigttp:cache", .module_path = "packages/modules/src/data/cache.zig", .spec_path = "packages/zigts/module-specs/data/cache.json" },
-    .{ .specifier = "zigttp:sql", .module_path = "packages/zigts/src/modules/data/sql.zig", .spec_path = "packages/zigts/module-specs/data/sql.json" },
+    .{ .specifier = "zigttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/zigts/module-specs/data/sql.json" },
     .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/workflow/io.zig", .spec_path = "packages/zigts/module-specs/workflow/io.json" },
     .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/workflow/scope.zig", .spec_path = "packages/zigts/module-specs/workflow/scope.json" },
     .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/workflow/compose.zig", .spec_path = "packages/zigts/module-specs/workflow/compose.json" },
