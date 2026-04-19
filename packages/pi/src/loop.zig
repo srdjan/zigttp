@@ -362,15 +362,6 @@ fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
 }
 
-// `std.testing.tmpDir` creates `.zig-cache/tmp/<sub_path>/`, but `tmp.sub_path`
-// is only the 16-char random component. Resolving it directly against CWD
-// (the repo root) would create stray `<repo>/<sub_path>/` folders that
-// `tmp.cleanup()` never deletes. Compose the full relative path so writes
-// land inside the real tmp dir.
-fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir) ![]u8 {
-    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-}
-
 const bad_handler =
     "function handler(req: Request): Response { var x = 1; return Response.json({x}); }";
 const clean_handler =
