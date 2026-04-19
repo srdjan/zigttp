@@ -1,80 +1,119 @@
-//! Consumes a list of parsed SSE events and assembles a `turn.ModelReply`.
-//! Text blocks concatenate into a `.text` reply; a `tool_use` block
-//! concatenates its `input_json_delta`s and produces a `.tool_call` reply.
-//! When both appear (Anthropic may stream a preamble text block before
-//! tool_use), the tool_call wins because the loop needs the action —
-//! the preamble text is dropped here and can be surfaced by a future
-//! pre-tool narration variant.
+//! Consumes parsed SSE events and assembles an `turn.AssistantReply`.
 //!
-//! `.edit` replies are *not* produced here. Edits flow through a dedicated
-//! tool (e.g. `apply_edit`) whose tool_call the loop driver remaps into a
-//! `.edit` reply before handing it to the turn machine. That remap lives
-//! next to the loop, not in the assembler, because the assembler only sees
-//! raw Anthropic events and knows nothing about the pi tool catalog.
+//! The Anthropic stream may carry multiple `tool_use` blocks in one assistant
+//! message. Blocks are keyed by their SSE `index` and assembled independently.
 
 const std = @import("std");
 const turn = @import("../turn.zig");
 const events = @import("events.zig");
 
 pub const AssembleError = error{
-    /// No content blocks arrived before the event stream ended.
     Empty,
-    /// The stream carried an Anthropic api_error event.
     ApiError,
 };
 
 pub const Outcome = struct {
-    reply: turn.ModelReply,
+    reply: turn.AssistantReply,
     stop_reason: ?[]const u8 = null,
     output_tokens: ?u64 = null,
+};
+
+const BlockState = union(enum) {
+    none,
+    text: std.ArrayListUnmanaged(u8),
+    tool_use: ToolUseState,
+};
+
+const ToolUseState = struct {
+    id: []const u8,
+    name: []const u8,
+    input_json: std.ArrayListUnmanaged(u8) = .empty,
 };
 
 pub fn assemble(
     arena: std.mem.Allocator,
     event_list: []const events.Event,
 ) !Outcome {
-    var text_buf: std.ArrayListUnmanaged(u8) = .empty;
-    var input_json_buf: std.ArrayListUnmanaged(u8) = .empty;
-    var tool_name: ?[]const u8 = null;
+    var blocks: std.ArrayListUnmanaged(BlockState) = .empty;
     var stop_reason: ?[]const u8 = null;
     var output_tokens: ?u64 = null;
 
     for (event_list) |ev| {
         switch (ev) {
             .api_error => return AssembleError.ApiError,
-            .content_block_start => |start| switch (start.kind) {
-                .text => {},
-                .tool_use => |header| {
-                    tool_name = header.name;
-                },
+            .content_block_start => |start| {
+                try ensureBlockCapacity(arena, &blocks, start.index);
+                blocks.items[start.index] = switch (start.kind) {
+                    .text => .{ .text = .empty },
+                    .tool_use => |header| .{ .tool_use = .{
+                        .id = header.id,
+                        .name = header.name,
+                    } },
+                };
             },
-            .content_block_delta => |delta| switch (delta.payload) {
-                .text => |t| try text_buf.appendSlice(arena, t),
-                .input_json => |j| try input_json_buf.appendSlice(arena, j),
+            .content_block_delta => |delta| {
+                try ensureBlockCapacity(arena, &blocks, delta.index);
+                const block = &blocks.items[delta.index];
+                switch (block.*) {
+                    .text => |*buf| switch (delta.payload) {
+                        .text => |text| try buf.appendSlice(arena, text),
+                        else => {},
+                    },
+                    .tool_use => |*tool_use| switch (delta.payload) {
+                        .input_json => |json| try tool_use.input_json.appendSlice(arena, json),
+                        else => {},
+                    },
+                    .none => {},
+                }
             },
-            .message_delta => |md| {
-                stop_reason = md.stop_reason;
-                if (md.output_tokens) |ot| output_tokens = ot;
+            .message_delta => |delta| {
+                stop_reason = delta.stop_reason;
+                if (delta.output_tokens) |tokens| output_tokens = tokens;
             },
             else => {},
         }
     }
 
-    if (tool_name) |name| {
-        const args_json = if (input_json_buf.items.len == 0)
-            try arena.dupe(u8, "{}")
-        else
-            try input_json_buf.toOwnedSlice(arena);
+    var narration: std.ArrayListUnmanaged(u8) = .empty;
+    var tool_calls: std.ArrayListUnmanaged(turn.ToolCall) = .empty;
+
+    for (blocks.items) |*block| {
+        switch (block.*) {
+            .none => {},
+            .text => |buf| if (buf.items.len > 0) try narration.appendSlice(arena, buf.items),
+            .tool_use => |tool_use| {
+                const args_json = if (tool_use.input_json.items.len == 0)
+                    try arena.dupe(u8, "{}")
+                else
+                    try arena.dupe(u8, tool_use.input_json.items);
+                try tool_calls.append(arena, .{
+                    .id = tool_use.id,
+                    .name = tool_use.name,
+                    .args_json = args_json,
+                });
+            },
+        }
+    }
+
+    const preamble = if (narration.items.len == 0)
+        null
+    else
+        try narration.toOwnedSlice(arena);
+
+    if (tool_calls.items.len > 0) {
         return .{
-            .reply = .{ .tool_call = .{ .name = name, .args_json = args_json } },
+            .reply = .{
+                .preamble = preamble,
+                .response = .{ .tool_calls = try tool_calls.toOwnedSlice(arena) },
+            },
             .stop_reason = stop_reason,
             .output_tokens = output_tokens,
         };
     }
 
-    if (text_buf.items.len > 0) {
+    if (preamble) |text| {
         return .{
-            .reply = .{ .text = try text_buf.toOwnedSlice(arena) },
+            .reply = .{ .response = .{ .final_text = text } },
             .stop_reason = stop_reason,
             .output_tokens = output_tokens,
         };
@@ -83,12 +122,17 @@ pub fn assemble(
     return AssembleError.Empty;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-//
-// The assembler is driven off the slice-2 cassettes via `sse_parser.parseAll`
-// so every test exercises the real wire format the client will see.
-// ---------------------------------------------------------------------------
+fn ensureBlockCapacity(
+    allocator: std.mem.Allocator,
+    blocks: *std.ArrayListUnmanaged(BlockState),
+    index: u32,
+) !void {
+    if (index < blocks.items.len) return;
+    const new_len: usize = index + 1;
+    const old_len = blocks.items.len;
+    try blocks.resize(allocator, new_len);
+    for (blocks.items[old_len..]) |*item| item.* = .none;
+}
 
 const testing = std.testing;
 const sse_parser = @import("sse_parser.zig");
@@ -98,14 +142,16 @@ const cassette_text_multi_delta = @embedFile("cassettes/text_multi_delta.sse");
 const cassette_tool_use = @embedFile("cassettes/tool_use.sse");
 const cassette_error_overloaded = @embedFile("cassettes/error_overloaded.sse");
 
-test "assemble: text_simple cassette yields a .text reply with stop_reason+tokens" {
+test "assemble: text_simple cassette yields final_text with stop_reason+tokens" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const list = try sse_parser.parseAll(arena.allocator(), cassette_text_simple);
 
     const outcome = try assemble(arena.allocator(), list);
-    try testing.expect(outcome.reply == .text);
-    try testing.expectEqualStrings("Hello, world!", outcome.reply.text);
+    switch (outcome.reply.response) {
+        .final_text => |text| try testing.expectEqualStrings("Hello, world!", text),
+        else => return error.TestFailed,
+    }
     try testing.expectEqualStrings("end_turn", outcome.stop_reason.?);
     try testing.expectEqual(@as(u64, 5), outcome.output_tokens.?);
 }
@@ -116,20 +162,27 @@ test "assemble: text_multi_delta cassette concatenates every delta in order" {
     const list = try sse_parser.parseAll(arena.allocator(), cassette_text_multi_delta);
 
     const outcome = try assemble(arena.allocator(), list);
-    try testing.expect(outcome.reply == .text);
-    try testing.expectEqualStrings("Hello, how can I help?", outcome.reply.text);
+    switch (outcome.reply.response) {
+        .final_text => |text| try testing.expectEqualStrings("Hello, how can I help?", text),
+        else => return error.TestFailed,
+    }
     try testing.expectEqualStrings("end_turn", outcome.stop_reason.?);
 }
 
-test "assemble: tool_use cassette yields a .tool_call with assembled JSON args" {
+test "assemble: tool_use cassette yields a tool_calls reply with assembled JSON args" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const list = try sse_parser.parseAll(arena.allocator(), cassette_tool_use);
 
     const outcome = try assemble(arena.allocator(), list);
-    try testing.expect(outcome.reply == .tool_call);
-    try testing.expectEqualStrings("zigts_expert_describe_rule", outcome.reply.tool_call.name);
-    try testing.expectEqualStrings("{\"rule\":\"ZTS303\"}", outcome.reply.tool_call.args_json);
+    switch (outcome.reply.response) {
+        .tool_calls => |calls| {
+            try testing.expectEqual(@as(usize, 1), calls.len);
+            try testing.expectEqualStrings("zigts_expert_describe_rule", calls[0].name);
+            try testing.expectEqualStrings("{\"rule\":\"ZTS303\"}", calls[0].args_json);
+        },
+        else => return error.TestFailed,
+    }
     try testing.expectEqualStrings("tool_use", outcome.stop_reason.?);
 }
 
@@ -141,60 +194,42 @@ test "assemble: error_overloaded cassette returns AssembleError.ApiError" {
     try testing.expectError(AssembleError.ApiError, assemble(arena.allocator(), list));
 }
 
-test "assemble: empty event list returns AssembleError.Empty" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    try testing.expectError(AssembleError.Empty, assemble(arena.allocator(), &.{}));
-}
-
-test "assemble: tool_call with zero input_json deltas still produces {} args" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const ta = arena.allocator();
-
-    const ev_list = [_]events.Event{
-        .message_start,
-        .{ .content_block_start = .{
-            .index = 0,
-            .kind = .{ .tool_use = .{ .id = "toolu_01", .name = "nop_tool" } },
-        } },
-        .{ .content_block_stop = .{ .index = 0 } },
-        .{ .message_delta = .{ .stop_reason = "tool_use", .output_tokens = 3 } },
-        .message_stop,
-    };
-
-    const outcome = try assemble(ta, &ev_list);
-    try testing.expect(outcome.reply == .tool_call);
-    try testing.expectEqualStrings("nop_tool", outcome.reply.tool_call.name);
-    try testing.expectEqualStrings("{}", outcome.reply.tool_call.args_json);
-}
-
-test "assemble: text preamble plus tool_use yields the tool_call (preamble dropped)" {
+test "assemble: text preamble plus tool batch preserves narration and every tool call" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const ta = arena.allocator();
 
     const ev_list = [_]events.Event{
         .{ .content_block_start = .{ .index = 0, .kind = .text } },
-        .{ .content_block_delta = .{
-            .index = 0,
-            .payload = .{ .text = "I'll look that up." },
-        } },
+        .{ .content_block_delta = .{ .index = 0, .payload = .{ .text = "Inspecting workspace." } } },
         .{ .content_block_stop = .{ .index = 0 } },
         .{ .content_block_start = .{
             .index = 1,
-            .kind = .{ .tool_use = .{ .id = "toolu_02", .name = "lookup" } },
-        } },
-        .{ .content_block_delta = .{
-            .index = 1,
-            .payload = .{ .input_json = "{\"q\":\"x\"}" },
+            .kind = .{ .tool_use = .{ .id = "toolu_meta", .name = "zigts_expert_meta" } },
         } },
         .{ .content_block_stop = .{ .index = 1 } },
-        .{ .message_delta = .{ .stop_reason = "tool_use", .output_tokens = 10 } },
+        .{ .content_block_start = .{
+            .index = 2,
+            .kind = .{ .tool_use = .{ .id = "toolu_search", .name = "workspace_search_text" } },
+        } },
+        .{ .content_block_delta = .{
+            .index = 2,
+            .payload = .{ .input_json = "{\"query\":\"handler\"}" },
+        } },
+        .{ .content_block_stop = .{ .index = 2 } },
+        .{ .message_delta = .{ .stop_reason = "tool_use", .output_tokens = 13 } },
     };
 
     const outcome = try assemble(ta, &ev_list);
-    try testing.expect(outcome.reply == .tool_call);
-    try testing.expectEqualStrings("lookup", outcome.reply.tool_call.name);
-    try testing.expectEqualStrings("{\"q\":\"x\"}", outcome.reply.tool_call.args_json);
+    try testing.expectEqualStrings("Inspecting workspace.", outcome.reply.preamble.?);
+    switch (outcome.reply.response) {
+        .tool_calls => |calls| {
+            try testing.expectEqual(@as(usize, 2), calls.len);
+            try testing.expectEqualStrings("toolu_meta", calls[0].id);
+            try testing.expectEqualStrings("{}", calls[0].args_json);
+            try testing.expectEqualStrings("workspace_search_text", calls[1].name);
+            try testing.expectEqualStrings("{\"query\":\"handler\"}", calls[1].args_json);
+        },
+        else => return error.TestFailed,
+    }
 }

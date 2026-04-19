@@ -17,7 +17,7 @@ const turn = @import("turn.zig");
 /// (v1 edit-simulate JSON envelope) that the caller must free.
 pub fn runVeto(
     allocator: std.mem.Allocator,
-    edit: turn.ModelReply.Edit,
+    edit: turn.Edit,
 ) !turn.EditOutcome {
     const input: edit_simulate.EditSimulateInput = .{
         .file = edit.file,

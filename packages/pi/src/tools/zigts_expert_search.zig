@@ -13,8 +13,17 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "search rules",
     .description = "Search diagnostic rules by keyword substring across name, description, and help.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Keyword substring to search for.\"}},\"required\":[\"query\"]}",
+    .decode_json = decodeJson,
     .execute = execute,
 };
+
+fn decodeJson(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    return registry_mod.helpers.decodeSingleStringField(allocator, args_json, "query");
+}
 
 fn execute(
     allocator: std.mem.Allocator,

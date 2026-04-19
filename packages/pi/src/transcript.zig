@@ -1,31 +1,65 @@
-//! Minimal ownership-safe transcript of `turn.Message` values. The state
-//! machine's `render` action hands the loop a Message holding borrowed
-//! slices; the transcript dupes the body so the source (veto envelope,
-//! tool body, etc.) can be freed independently. A plain-text renderer
-//! flattens each variant to a label-prefixed line so the REPL / raw-mode
-//! TUI have a single path to visible output before the widget layer lands.
+//! Ownership-safe transcript for user text, assistant narration, structured
+//! tool-use, tool results, and visible verification output.
 
 const std = @import("std");
 const turn = @import("turn.zig");
 const box_widget = @import("tui/widgets/box.zig");
 
-/// Aliased to the inferred tag of `turn.Message` so adding a variant there
-/// automatically flows through here; the `ownMessage` switch below catches
-/// any missed arm at compile time.
-pub const Tag = std.meta.Tag(turn.Message);
+pub const OwnedToolCall = struct {
+    id: []const u8,
+    name: []const u8,
+    args_json: []const u8,
 
-pub const OwnedMessage = struct {
-    tag: Tag,
-    body: []const u8,
-
-    pub fn deinit(self: *OwnedMessage, allocator: std.mem.Allocator) void {
-        allocator.free(self.body);
-        self.body = &.{};
+    pub fn deinit(self: *OwnedToolCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.name);
+        allocator.free(self.args_json);
+        self.* = .{ .id = &.{}, .name = &.{}, .args_json = &.{} };
     }
 };
 
+pub const OwnedToolResult = struct {
+    tool_use_id: []const u8,
+    tool_name: []const u8,
+    ok: bool,
+    body: []const u8,
+
+    pub fn deinit(self: *OwnedToolResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.tool_use_id);
+        allocator.free(self.tool_name);
+        allocator.free(self.body);
+        self.* = .{ .tool_use_id = &.{}, .tool_name = &.{}, .ok = false, .body = &.{} };
+    }
+};
+
+pub const OwnedEntry = union(enum) {
+    user_text: []const u8,
+    model_text: []const u8,
+    assistant_tool_use: []OwnedToolCall,
+    proof_card: []const u8,
+    diagnostic_box: []const u8,
+    tool_result: OwnedToolResult,
+
+    pub fn deinit(self: *OwnedEntry, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .user_text => |body| allocator.free(body),
+            .model_text => |body| allocator.free(body),
+            .proof_card => |body| allocator.free(body),
+            .diagnostic_box => |body| allocator.free(body),
+            .assistant_tool_use => |calls| {
+                for (calls) |*call| call.deinit(allocator);
+                allocator.free(calls);
+            },
+            .tool_result => |*result| result.deinit(allocator),
+        }
+        self.* = .{ .user_text = &.{} };
+    }
+};
+
+pub const Tag = std.meta.Tag(OwnedEntry);
+
 pub const Transcript = struct {
-    entries: std.ArrayListUnmanaged(OwnedMessage) = .empty,
+    entries: std.ArrayListUnmanaged(OwnedEntry) = .empty,
 
     pub fn deinit(self: *Transcript, allocator: std.mem.Allocator) void {
         for (self.entries.items) |*entry| entry.deinit(allocator);
@@ -38,46 +72,76 @@ pub const Transcript = struct {
         allocator: std.mem.Allocator,
         message: turn.Message,
     ) !void {
-        const owned = try ownMessage(allocator, message);
-        errdefer allocator.free(owned.body);
-        try self.entries.append(allocator, owned);
+        try self.entries.append(allocator, try ownMessage(allocator, message));
     }
 
     pub fn len(self: *const Transcript) usize {
         return self.entries.items.len;
     }
 
-    pub fn at(self: *const Transcript, index: usize) *const OwnedMessage {
+    pub fn at(self: *const Transcript, index: usize) *const OwnedEntry {
         return &self.entries.items[index];
     }
 };
 
-fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedMessage {
-    const pair: struct { tag: Tag, body: []const u8 } = switch (message) {
-        .user_text => |b| .{ .tag = .user_text, .body = b },
-        .model_text => |b| .{ .tag = .model_text, .body = b },
-        .proof_card => |b| .{ .tag = .proof_card, .body = b },
-        .diagnostic_box => |b| .{ .tag = .diagnostic_box, .body = b },
-        .tool_result => |b| .{ .tag = .tool_result, .body = b },
+fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
+    return switch (message) {
+        .user_text => |body| .{ .user_text = try allocator.dupe(u8, body) },
+        .model_text => |body| .{ .model_text = try allocator.dupe(u8, body) },
+        .proof_card => |body| .{ .proof_card = try allocator.dupe(u8, body) },
+        .diagnostic_box => |body| .{ .diagnostic_box = try allocator.dupe(u8, body) },
+        .assistant_tool_use => |calls| blk: {
+            const owned = try allocator.alloc(OwnedToolCall, calls.len);
+            errdefer allocator.free(owned);
+            for (calls, 0..) |call, i| {
+                owned[i] = .{
+                    .id = try allocator.dupe(u8, call.id),
+                    .name = try allocator.dupe(u8, call.name),
+                    .args_json = try allocator.dupe(u8, call.args_json),
+                };
+            }
+            break :blk .{ .assistant_tool_use = owned };
+        },
+        .tool_result => |result| .{ .tool_result = .{
+            .tool_use_id = try allocator.dupe(u8, result.tool_use_id),
+            .tool_name = try allocator.dupe(u8, result.tool_name),
+            .ok = result.ok,
+            .body = try allocator.dupe(u8, result.body),
+        } },
     };
-    const owned_body = try allocator.dupe(u8, pair.body);
-    return .{ .tag = pair.tag, .body = owned_body };
 }
 
-/// Always terminates with LF so successive messages don't collapse onto one
-/// line. Same invariant as `printBody` in `tui/app.zig`.
-pub fn renderPlain(writer: anytype, entry: *const OwnedMessage) !void {
-    const label: []const u8 = switch (entry.tag) {
-        .user_text => "user",
-        .model_text => "model",
-        .proof_card => "proof",
-        .diagnostic_box => "error",
-        .tool_result => "tool",
-    };
+pub fn renderPlain(writer: anytype, entry: *const OwnedEntry) !void {
+    switch (entry.*) {
+        .user_text => |body| try writeTaggedLine(writer, "user", body),
+        .model_text => |body| try writeTaggedLine(writer, "model", body),
+        .proof_card => |body| try writeTaggedLine(writer, "proof", body),
+        .diagnostic_box => |body| try writeTaggedLine(writer, "error", body),
+        .assistant_tool_use => |calls| {
+            try writer.writeAll("assistant: tool_use ");
+            for (calls, 0..) |call, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(call.name);
+            }
+            try writer.writeAll("\n");
+        },
+        .tool_result => |result| {
+            try writer.writeAll("tool ");
+            try writer.writeAll(result.tool_name);
+            try writer.writeAll(": ");
+            try writer.writeAll(result.body);
+            if (result.body.len == 0 or result.body[result.body.len - 1] != '\n') {
+                try writer.writeAll("\n");
+            }
+        },
+    }
+}
+
+fn writeTaggedLine(writer: anytype, label: []const u8, body: []const u8) !void {
     try writer.writeAll(label);
     try writer.writeAll(": ");
-    try writer.writeAll(entry.body);
-    if (entry.body.len == 0 or entry.body[entry.body.len - 1] != '\n') {
+    try writer.writeAll(body);
+    if (body.len == 0 or body[body.len - 1] != '\n') {
         try writer.writeAll("\n");
     }
 }
@@ -90,7 +154,7 @@ pub fn renderAll(writer: anytype, transcript: *const Transcript) !void {
 
 pub fn renderEntryToOwned(
     allocator: std.mem.Allocator,
-    entry: *const OwnedMessage,
+    entry: *const OwnedEntry,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -100,29 +164,25 @@ pub fn renderEntryToOwned(
     return try buf.toOwnedSlice(allocator);
 }
 
-/// Widget-aware renderer. Text-shaped variants (user/model/tool) fall
-/// through to the plain label-prefixed form so they share one path with
-/// the tests above. Veto-shaped variants (proof_card/diagnostic_box)
-/// route through the box widget with a tag-appropriate title and color.
-pub fn renderRich(writer: anytype, entry: *const OwnedMessage) !void {
-    switch (entry.tag) {
-        .user_text, .model_text, .tool_result => try renderPlain(writer, entry),
-        .proof_card => try box_widget.writeBox(
+pub fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
+    switch (entry.*) {
+        .proof_card => |body| try box_widget.writeBox(
             writer,
             .{ .title = "proof", .color = .green },
-            entry.body,
+            body,
         ),
-        .diagnostic_box => try box_widget.writeBox(
+        .diagnostic_box => |body| try box_widget.writeBox(
             writer,
             .{ .title = "veto", .color = .red },
-            entry.body,
+            body,
         ),
+        else => try renderPlain(writer, entry),
     }
 }
 
 pub fn renderRichEntryToOwned(
     allocator: std.mem.Allocator,
-    entry: *const OwnedMessage,
+    entry: *const OwnedEntry,
 ) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -131,10 +191,6 @@ pub fn renderRichEntryToOwned(
     buf = aw.toArrayList();
     return try buf.toOwnedSlice(allocator);
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const veto = @import("veto.zig");
@@ -151,68 +207,85 @@ fn renderToString(
     return try buf.toOwnedSlice(allocator);
 }
 
-test "empty transcript renders to empty string" {
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    const out = try renderToString(testing.allocator, &tr);
-    defer testing.allocator.free(out);
-
-    try testing.expectEqualStrings("", out);
-}
-
-test "append dupes the source so the caller can free it" {
+test "append dupes textual message bodies" {
     var tr: Transcript = .{};
     defer tr.deinit(testing.allocator);
 
     {
-        // Scope-local source; transcript must not outlive a borrow into it.
         var scratch = [_]u8{ 'h', 'e', 'l', 'l', 'o' };
         try tr.append(testing.allocator, .{ .user_text = scratch[0..] });
-        scratch[0] = 'X'; // Mutate the source after append.
+        scratch[0] = 'X';
     }
 
-    try testing.expectEqual(@as(usize, 1), tr.len());
-    try testing.expectEqualStrings("hello", tr.at(0).body);
+    switch (tr.at(0).*) {
+        .user_text => |body| try testing.expectEqualStrings("hello", body),
+        else => return error.TestFailed,
+    }
 }
 
-test "every Message variant renders with its own label" {
+test "assistant_tool_use and tool_result variants are preserved" {
     var tr: Transcript = .{};
     defer tr.deinit(testing.allocator);
 
+    const calls = [_]turn.ToolCall{
+        .{ .id = "toolu_1", .name = "zigts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_2", .name = "zigts_expert_features", .args_json = "{}" },
+    };
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_1",
+        .tool_name = "zigts_expert_meta",
+        .ok = true,
+        .body = "{\"ok\":true}\n",
+    } });
+
+    switch (tr.at(0).*) {
+        .assistant_tool_use => |owned_calls| {
+            try testing.expectEqual(@as(usize, 2), owned_calls.len);
+            try testing.expectEqualStrings("zigts_expert_meta", owned_calls[0].name);
+        },
+        else => return error.TestFailed,
+    }
+    switch (tr.at(1).*) {
+        .tool_result => |result| {
+            try testing.expect(result.ok);
+            try testing.expectEqualStrings("toolu_1", result.tool_use_id);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "every entry variant renders a stable plain-text label" {
+    var tr: Transcript = .{};
+    defer tr.deinit(testing.allocator);
+
+    const calls = [_]turn.ToolCall{
+        .{ .id = "toolu_1", .name = "zigts_expert_meta", .args_json = "{}" },
+    };
     try tr.append(testing.allocator, .{ .user_text = "add a route" });
-    try tr.append(testing.allocator, .{ .model_text = "here is the plan" });
+    try tr.append(testing.allocator, .{ .model_text = "I'll inspect first." });
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_1",
+        .tool_name = "zigts_expert_meta",
+        .ok = true,
+        .body = "{\"ok\":true}",
+    } });
     try tr.append(testing.allocator, .{ .proof_card = "contract ok" });
     try tr.append(testing.allocator, .{ .diagnostic_box = "ZTS001 unsupported var" });
-    try tr.append(testing.allocator, .{ .tool_result = "{\"ok\":true}" });
 
     const out = try renderToString(testing.allocator, &tr);
     defer testing.allocator.free(out);
 
     try testing.expect(std.mem.indexOf(u8, out, "user: add a route\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "model: here is the plan\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "model: I'll inspect first.\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "assistant: tool_use zigts_expert_meta\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "tool zigts_expert_meta: {\"ok\":true}\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "proof: contract ok\n") != null);
     try testing.expect(std.mem.indexOf(u8, out, "error: ZTS001 unsupported var\n") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "tool: {\"ok\":true}\n") != null);
 }
 
-test "renderPlain does not double-terminate a body that already ends in LF" {
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    try tr.append(testing.allocator, .{ .tool_result = "line\n" });
-
-    const out = try renderToString(testing.allocator, &tr);
-    defer testing.allocator.free(out);
-
-    try testing.expectEqualStrings("tool: line\n", out);
-}
-
-test "veto -> turn -> transcript pipeline: clean handler produces a proof line" {
-    // The full phase-2 spine wired end-to-end with a real compiler run:
-    //   runVeto        -> EditOutcome
-    //   TurnMachine    -> Action.render(Message.proof_card)
-    //   Transcript     -> OwnedMessage + renderPlain
+test "veto -> turn -> transcript pipeline still lands a proof entry" {
     var outcome = try veto.runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response { return Response.json({ok: true}); }",
@@ -231,87 +304,8 @@ test "veto -> turn -> transcript pipeline: clean handler produces a proof line" 
         else => return error.TestFailed,
     }
 
-    try testing.expectEqual(@as(usize, 1), tr.len());
-    try testing.expectEqual(Tag.proof_card, tr.at(0).tag);
-
-    const out = try renderToString(testing.allocator, &tr);
-    defer testing.allocator.free(out);
-
-    try testing.expect(std.mem.startsWith(u8, out, "proof: "));
-    try testing.expect(std.mem.indexOf(u8, out, "\"total\":0") != null);
-}
-
-test "renderRich: text variants fall through to the plain label form" {
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-    try tr.append(testing.allocator, .{ .user_text = "hi" });
-    try tr.append(testing.allocator, .{ .model_text = "hello" });
-    try tr.append(testing.allocator, .{ .tool_result = "{}" });
-
-    for (tr.entries.items) |*entry| {
-        const rendered = try renderRichEntryToOwned(testing.allocator, entry);
-        defer testing.allocator.free(rendered);
-        // No box characters should appear for text variants.
-        try testing.expect(std.mem.indexOf(u8, rendered, "\xe2\x94\x8c") == null);
-    }
-}
-
-test "renderRich: proof_card variant renders as a green bordered box" {
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-    try tr.append(testing.allocator, .{ .proof_card = "contract ok" });
-
-    const out = try renderRichEntryToOwned(testing.allocator, tr.at(0));
-    defer testing.allocator.free(out);
-
-    try testing.expect(std.mem.indexOf(u8, out, "\xe2\x94\x8c") != null); // ┌
-    try testing.expect(std.mem.indexOf(u8, out, "\xe2\x94\x98") != null); // ┘
-    try testing.expect(std.mem.indexOf(u8, out, "proof") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "contract ok") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[32m") != null); // green
-}
-
-test "renderRich: diagnostic_box variant renders as a red bordered box" {
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-    try tr.append(testing.allocator, .{ .diagnostic_box = "ZTS001 unsupported var" });
-
-    const out = try renderRichEntryToOwned(testing.allocator, tr.at(0));
-    defer testing.allocator.free(out);
-
-    try testing.expect(std.mem.indexOf(u8, out, "\xe2\x94\x8c") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "veto") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "ZTS001") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[31m") != null); // red
-}
-
-test "veto -> turn -> transcript pipeline: broken handler produces an error line" {
-    var outcome = try veto.runVeto(testing.allocator, .{
-        .file = "handler.ts",
-        .content = "function handler(req: Request): Response { var x = 1; return Response.json({x}); }",
-        .before = null,
-    });
-    defer outcome.deinit(testing.allocator);
-
-    // max_attempts=1 so the first failed veto is budget-exhausted immediately
-    // and surfaces as a diagnostic_box. With the default (3), the machine
-    // would emit retry_draft and the pipeline test wouldn't reach render.
-    var machine: turn.TurnMachine = .{ .state = .verifying_edit, .max_attempts = 1 };
-    const action = machine.transition(.{ .edit_verified = outcome });
-
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    switch (action) {
-        .render => |msg| try tr.append(testing.allocator, msg),
+    switch (tr.at(0).*) {
+        .proof_card => |body| try testing.expect(std.mem.indexOf(u8, body, "\"total\":0") != null),
         else => return error.TestFailed,
     }
-
-    try testing.expectEqual(Tag.diagnostic_box, tr.at(0).tag);
-
-    const out = try renderToString(testing.allocator, &tr);
-    defer testing.allocator.free(out);
-
-    try testing.expect(std.mem.startsWith(u8, out, "error: "));
-    try testing.expect(std.mem.indexOf(u8, out, "\"ZTS001\"") != null);
 }

@@ -12,6 +12,13 @@ comptime {
     _ = @import("tools/zigts_expert_features.zig");
     _ = @import("tools/zigts_expert_modules.zig");
     _ = @import("tools/zigts_expert_verify_modules.zig");
+    _ = @import("tools/common.zig");
+    _ = @import("tools/workspace_list_files.zig");
+    _ = @import("tools/workspace_read_file.zig");
+    _ = @import("tools/workspace_search_text.zig");
+    _ = @import("tools/zigts_check.zig");
+    _ = @import("tools/zig_build_step.zig");
+    _ = @import("tools/zig_test_step.zig");
     _ = @import("repl.zig");
     _ = @import("tui/term.zig");
     _ = @import("tui/line_editor.zig");

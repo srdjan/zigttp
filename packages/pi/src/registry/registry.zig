@@ -1,15 +1,14 @@
 //! In-process tool registry.
 //!
-//! Minimal phase-1 shape: append-only ToolDef list with unique-name insertion,
-//! lookup by name, and a one-shot invoke that forwards to the tool's execute
-//! function. No schemas, no async, no budgets yet — those land alongside the
-//! agent loop in phase 2.
+//! Append-only ToolDef list with unique-name insertion, lookup by name, and
+//! model-facing JSON invocation alongside direct argv-style invocation.
 
 const std = @import("std");
 const tool_mod = @import("tool.zig");
 
 pub const ToolDef = tool_mod.ToolDef;
 pub const ToolResult = tool_mod.ToolResult;
+pub const helpers = tool_mod;
 
 pub const RegistryError = error{
     DuplicateTool,
@@ -57,6 +56,19 @@ pub const Registry = struct {
         const tool = self.findByName(name) orelse return RegistryError.ToolNotFound;
         return try tool.execute(allocator, args);
     }
+
+    pub fn invokeJson(
+        self: *const Registry,
+        allocator: std.mem.Allocator,
+        name: []const u8,
+        args_json: []const u8,
+    ) !ToolResult {
+        const tool = self.findByName(name) orelse return RegistryError.ToolNotFound;
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const args = try tool.decode_json(arena.allocator(), args_json);
+        return try tool.execute(allocator, args);
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -81,8 +93,19 @@ const echo_tool: ToolDef = .{
     .name = "echo",
     .label = "Echo",
     .description = "Concatenate args with spaces",
+    .input_schema =
+    \\{"type":"object","properties":{"parts":{"type":"array","items":{"type":"string"}}},"required":["parts"]}
+    ,
+    .decode_json = decodeEchoJson,
     .execute = echoExecute,
 };
+
+fn decodeEchoJson(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    return tool_mod.decodeStringArrayField(allocator, args_json, "parts");
+}
 
 test "register + findByName + invoke round-trip" {
     var reg: Registry = .{};
@@ -98,6 +121,18 @@ test "register + findByName + invoke round-trip" {
     defer result.deinit(testing.allocator);
     try testing.expect(result.ok);
     try testing.expectEqualStrings("hello world", result.body);
+}
+
+test "invokeJson decodes structured args before calling execute" {
+    var reg: Registry = .{};
+    defer reg.deinit(testing.allocator);
+
+    try reg.register(testing.allocator, echo_tool);
+
+    var result = try reg.invokeJson(testing.allocator, "echo", "{\"parts\":[\"hello\",\"json\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.ok);
+    try testing.expectEqualStrings("hello json", result.body);
 }
 
 test "duplicate registration fails" {

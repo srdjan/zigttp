@@ -1,13 +1,11 @@
 //! Tool definition and result types for the in-process tool registry.
 //!
-//! A ToolDef is a first-party function the agent (or a keystroke in the phase-1
-//! scaffold) can invoke. It carries enough metadata to render in a TUI and
-//! eventually enough schema to advertise to an LLM tool-use API. For now the
-//! input shape is an opaque argv-style slice; structured parameters land when
-//! the registry grows a JSON Schema layer.
+//! A ToolDef has two invocation surfaces:
+//! - `execute` for direct CLI/TUI dispatch with argv-style slices
+//! - `decode_json` + `input_schema` for LLM tool-use
 //!
-//! See docs/zigts-expert-contract.md for the v1 output contract the first
-//! first-party tools wrap.
+//! This lets the human-facing shell stay ergonomic while the model-facing
+//! surface is fully structured and schema-driven.
 
 const std = @import("std");
 
@@ -28,6 +26,17 @@ pub const ToolResult = struct {
         const owned = try allocator.dupe(u8, msg);
         return .{ .ok = false, .body = owned };
     }
+
+    pub fn errFmt(
+        allocator: std.mem.Allocator,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) !ToolResult {
+        return .{
+            .ok = false,
+            .body = try std.fmt.allocPrint(allocator, fmt, args),
+        };
+    }
 };
 
 /// Execute signature. Implementations must allocate `ToolResult.body` with the
@@ -37,6 +46,11 @@ const ExecuteFn = *const fn (
     args: []const []const u8,
 ) anyerror!ToolResult;
 
+const DecodeJsonFn = *const fn (
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) anyerror![]const []const u8;
+
 pub const ToolDef = struct {
     /// Stable snake_case identifier. Matches the eventual LLM tool name.
     name: []const u8,
@@ -44,5 +58,86 @@ pub const ToolDef = struct {
     label: []const u8,
     /// One-line description; displayed inline with the label.
     description: []const u8,
+    /// Anthropic Messages API `input_schema` JSON literal.
+    input_schema: []const u8,
+    /// Structured JSON decoder used by the model-facing registry surface.
+    decode_json: DecodeJsonFn,
     execute: ExecuteFn,
 };
+
+pub fn decodeNoArgs(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    const trimmed = std.mem.trim(u8, args_json, " \t\r\n");
+    if (trimmed.len == 0 or std.mem.eql(u8, trimmed, "{}")) return &.{};
+
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, trimmed, .{}) catch {
+        return error.InvalidToolArgsJson;
+    };
+    if (parsed != .object or parsed.object.count() != 0) return error.InvalidToolArgsJson;
+    return &.{};
+}
+
+pub fn decodeSingleStringField(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+    field: []const u8,
+) ![]const []const u8 {
+    const parsed = try parseObject(allocator, args_json);
+    const value = parsed.get(field) orelse return error.InvalidToolArgsJson;
+    if (value != .string) return error.InvalidToolArgsJson;
+    return &.{value.string};
+}
+
+pub fn decodeOptionalSingleStringField(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+    field: []const u8,
+) ![]const []const u8 {
+    const parsed = try parseObject(allocator, args_json);
+    if (parsed.get(field)) |value| {
+        if (value != .string) return error.InvalidToolArgsJson;
+        return &.{value.string};
+    }
+    return &.{};
+}
+
+pub fn decodeStringArrayField(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+    field: []const u8,
+) ![]const []const u8 {
+    const parsed = try parseObject(allocator, args_json);
+    const value = parsed.get(field) orelse return error.InvalidToolArgsJson;
+    if (value != .array) return error.InvalidToolArgsJson;
+
+    const out = try allocator.alloc([]const u8, value.array.items.len);
+    for (value.array.items, 0..) |item, i| {
+        if (item != .string) return error.InvalidToolArgsJson;
+        out[i] = item.string;
+    }
+    return out;
+}
+
+pub fn decodeJsonPassthrough(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) ![]const []const u8 {
+    const trimmed = std.mem.trim(u8, args_json, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidToolArgsJson;
+    return &.{try allocator.dupe(u8, trimmed)};
+}
+
+fn parseObject(
+    allocator: std.mem.Allocator,
+    args_json: []const u8,
+) !std.json.ObjectMap {
+    const trimmed = std.mem.trim(u8, args_json, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidToolArgsJson;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, trimmed, .{}) catch {
+        return error.InvalidToolArgsJson;
+    };
+    if (parsed != .object) return error.InvalidToolArgsJson;
+    return parsed.object;
+}

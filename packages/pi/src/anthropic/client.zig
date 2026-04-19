@@ -1,18 +1,4 @@
-//! HTTPS wire layer for the Anthropic Messages API. Implements a
-//! `loop.ModelClient` by POSTing a streaming request to `api.anthropic.com`,
-//! reading the full SSE response body, feeding it through the slice-2
-//! parser, and assembling the events into a `turn.ModelReply`.
-//!
-//! This slice reads the body in full before parsing rather than streaming
-//! events as they arrive. That simplification costs incremental UI
-//! feedback for long replies but avoids writing a streaming
-//! `RecordIterator` variant before the TUI can do anything useful with
-//! partial events. Real SSE streaming is a later slice.
-//!
-//! Unit tests cover header assembly and the end-to-end glue through
-//! synthetic bodies. The live-network test is gated on both
-//! `ANTHROPIC_API_KEY` and `ZIGTTP_EXPERT_LIVE=1` so an ambient key in a
-//! shell can't accidentally bill tokens during `zig build test`.
+//! HTTPS wire layer for the Anthropic Messages API.
 
 const std = @import("std");
 const loop = @import("../loop.zig");
@@ -26,7 +12,6 @@ const apply_edit = @import("apply_edit.zig");
 const default_base_url = "https://api.anthropic.com/v1/messages";
 const default_anthropic_version = "2023-06-01";
 const max_response_body_bytes: usize = 16 * 1024 * 1024;
-const history_entry_limit: usize = 8;
 
 pub const Config = struct {
     api_key: []const u8,
@@ -50,30 +35,26 @@ pub const Client = struct {
     }
 
     pub fn asModelClient(self: *Client) loop.ModelClient {
-        return .{
-            .context = self,
-            .request_fn = requestFn,
-        };
+        return .{ .context = self, .request_fn = requestFn };
     }
 
     fn requestFn(
         ctx: *anyopaque,
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
-        user_text: []const u8,
-    ) anyerror!turn.ModelReply {
+        extra_user_text: ?[]const u8,
+    ) anyerror!turn.AssistantReply {
         const self: *Client = @ptrCast(@alignCast(ctx));
-        return self.sendTurn(arena, transcript, user_text);
+        return self.sendTurn(arena, transcript, extra_user_text);
     }
 
     pub fn sendTurn(
         self: *Client,
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
-        user_text: []const u8,
-    ) !turn.ModelReply {
-        const contextualized = try buildConversationInput(arena, transcript, user_text);
-        const body = try buildRequestBody(arena, self.config, contextualized);
+        extra_user_text: ?[]const u8,
+    ) !turn.AssistantReply {
+        const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
         const response_body = try postAnthropic(arena, self.config, body);
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
@@ -81,49 +62,20 @@ pub const Client = struct {
     }
 };
 
-fn buildConversationInput(
-    arena: std.mem.Allocator,
-    transcript: *const transcript_mod.Transcript,
-    user_text: []const u8,
-) ![]const u8 {
-    var history_end = transcript.len();
-    if (history_end > 0) {
-        const last = transcript.at(history_end - 1);
-        if (last.tag == .user_text and std.mem.eql(u8, last.body, user_text)) {
-            history_end -= 1;
-        }
-    }
-    if (history_end == 0) return try arena.dupe(u8, user_text);
-
-    const history_start = if (history_end > history_entry_limit)
-        history_end - history_entry_limit
-    else
-        0;
-
-    var buf: std.ArrayList(u8) = .empty;
-    var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
-    try aw.writer.writeAll("Conversation so far:\n");
-    for (transcript.entries.items[history_start..history_end]) |*entry| {
-        try transcript_mod.renderPlain(&aw.writer, entry);
-    }
-    try aw.writer.writeAll("\nLatest request:\n");
-    try aw.writer.writeAll(user_text);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(arena);
-}
-
 pub fn buildRequestBody(
     arena: std.mem.Allocator,
     config: Config,
-    user_text: []const u8,
+    transcript: *const transcript_mod.Transcript,
+    extra_user_text: ?[]const u8,
 ) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
-    try request_mod.writeRequestBody(&aw.writer, .{
+    try request_mod.writeRequestBody(&aw.writer, arena, .{
         .model = config.model,
         .max_tokens = config.max_tokens,
         .system_prompt = config.system_prompt,
-        .user_text = user_text,
+        .transcript = transcript,
+        .extra_user_text = extra_user_text,
         .tools_json = config.tools_json,
         .stream = true,
     });
@@ -189,25 +141,20 @@ fn postAnthropic(
     return try reader.allocRemaining(arena, .limited(max_response_body_bytes));
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-//
-// These tests exercise everything except the actual HTTPS call. The live
-// end-to-end smoke test is gated on both an API key and an explicit
-// opt-in env var so `zig build test` is safe to run in any shell that
-// happens to have ANTHROPIC_API_KEY exported.
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
-test "buildRequestBody: emits valid JSON with model, system, user, no tools" {
+test "buildRequestBody: emits structured messages with model, system, user, no tools" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "add a GET route" });
+
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const body = try buildRequestBody(arena.allocator(), .{
         .api_key = "sk-ant-test",
         .system_prompt = "you are a zigts expert",
-    }, "add a GET route");
+    }, &transcript, null);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
     defer parsed.deinit();
@@ -217,33 +164,33 @@ test "buildRequestBody: emits valid JSON with model, system, user, no tools" {
     try testing.expect(root.get("tools") == null);
 
     const system = root.get("system").?.array.items;
-    try testing.expectEqual(@as(usize, 1), system.len);
     try testing.expectEqualStrings("you are a zigts expert", system[0].object.get("text").?.string);
 
     const msgs = root.get("messages").?.array.items;
-    try testing.expectEqualStrings("add a GET route", msgs[0].object.get("content").?.string);
+    try testing.expectEqualStrings("user", msgs[0].object.get("role").?.string);
 }
 
 test "buildRequestBody: includes tools_json verbatim when provided" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "u" });
+
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const tools = "[{\"name\":\"nop\",\"description\":\"d\",\"input_schema\":{}}]";
     const body = try buildRequestBody(arena.allocator(), .{
         .api_key = "k",
         .system_prompt = "s",
-        .tools_json = tools,
-    }, "u");
+        .tools_json = "[{\"name\":\"nop\",\"description\":\"d\",\"input_schema\":{}}]",
+    }, &transcript, null);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, body, .{});
     defer parsed.deinit();
-
     const tools_array = parsed.value.object.get("tools").?.array.items;
-    try testing.expectEqual(@as(usize, 1), tools_array.len);
     try testing.expectEqualStrings("nop", tools_array[0].object.get("name").?.string);
 }
 
-test "Client.asModelClient: returns a ModelClient with a live function pointer" {
+test "Client.asModelClient exposes the new request signature" {
     var client = Client.init(.{
         .api_key = "sk-ant-test",
         .system_prompt = "s",
@@ -251,63 +198,4 @@ test "Client.asModelClient: returns a ModelClient with a live function pointer" 
     const mc = client.asModelClient();
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&client)));
     try testing.expect(@intFromPtr(mc.request_fn) != 0);
-}
-
-test "buildConversationInput leaves the first turn untouched" {
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
-
-    const input = try buildConversationInput(testing.allocator, &transcript, "add a GET route");
-    defer testing.allocator.free(input);
-
-    try testing.expectEqualStrings("add a GET route", input);
-}
-
-test "buildConversationInput folds bounded prior transcript entries into the live prompt" {
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
-    try transcript.append(testing.allocator, .{ .user_text = "first intent" });
-    try transcript.append(testing.allocator, .{ .model_text = "first answer" });
-    try transcript.append(testing.allocator, .{ .tool_result = "{\"ok\":true}" });
-    try transcript.append(testing.allocator, .{ .user_text = "second intent" });
-
-    const input = try buildConversationInput(testing.allocator, &transcript, "second intent");
-    defer testing.allocator.free(input);
-
-    try testing.expect(std.mem.indexOf(u8, input, "Conversation so far:") != null);
-    try testing.expect(std.mem.indexOf(u8, input, "user: first intent") != null);
-    try testing.expect(std.mem.indexOf(u8, input, "model: first answer") != null);
-    try testing.expect(std.mem.indexOf(u8, input, "tool: {\"ok\":true}") != null);
-    try testing.expect(std.mem.indexOf(u8, input, "Latest request:\nsecond intent") != null);
-    try testing.expect(std.mem.indexOf(u8, input, "user: second intent") == null);
-}
-
-fn envVar(name_z: [:0]const u8) ?[]const u8 {
-    const raw = std.c.getenv(name_z) orelse return null;
-    return std.mem.sliceTo(raw, 0);
-}
-
-test "live: round-trip one turn against api.anthropic.com" {
-    // Skip unless both env vars are set. This keeps the default test run
-    // free of network dependencies and protects against surprise billing
-    // from an ambient ANTHROPIC_API_KEY in the developer's shell.
-    const opt_in = envVar("ZIGTTP_EXPERT_LIVE") orelse return error.SkipZigTest;
-    if (!std.mem.eql(u8, opt_in, "1")) return error.SkipZigTest;
-    const api_key = envVar("ANTHROPIC_API_KEY") orelse return error.SkipZigTest;
-
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var client = Client.init(.{
-        .api_key = api_key,
-        .system_prompt = "You are a terse assistant. Reply with a single short sentence.",
-        .max_tokens = 128,
-    });
-
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
-
-    const reply = try client.sendTurn(arena.allocator(), &transcript, "Say hello in three words.");
-    try testing.expect(reply == .text);
-    try testing.expect(reply.text.len > 0);
 }

@@ -12,6 +12,8 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "language features",
     .description = "List allowed and blocked JS/TS features with suggested alternatives. Takes no arguments.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
+    .decode_json = registry_mod.helpers.decodeNoArgs,
     .execute = execute,
 };
 
