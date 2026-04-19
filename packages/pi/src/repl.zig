@@ -7,6 +7,7 @@
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
 const agent = @import("agent.zig");
+const commands = @import("commands.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -15,11 +16,6 @@ pub const DispatchOutcome = union(enum) {
     noop,
     quit,
     result: ToolResult,
-};
-
-const LocalCommand = struct {
-    tool_name: []const u8,
-    args: []const []const u8,
 };
 
 pub fn dispatchLine(
@@ -35,10 +31,10 @@ pub fn dispatchLine(
     const argv = tokens.items;
     if (argv.len == 0) return .noop;
 
-    if (isQuit(argv[0])) return .quit;
-    if (isHelp(argv[0])) return .{ .result = try renderHelp(allocator, registry) };
+    if (commands.isQuit(argv[0])) return .quit;
+    if (commands.isHelp(argv[0])) return .{ .result = try renderHelp(allocator, registry) };
 
-    if (parseSlashCommand(argv) orelse parseExplicitCommand(argv)) |cmd| {
+    if (commands.lookup(argv)) |cmd| {
         return .{ .result = try invokeTool(allocator, registry, cmd.tool_name, cmd.args) };
     }
 
@@ -57,7 +53,7 @@ pub fn shouldDispatchTool(registry: *const Registry, line: []const u8) bool {
 
     var first_token_iter = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
     const first = first_token_iter.next() orelse return true;
-    if (isQuit(first) or isHelp(first)) return true;
+    if (commands.isQuit(first) or commands.isHelp(first)) return true;
     if (first.len > 0 and first[0] == '/') return true;
     if (std.mem.eql(u8, first, "zigts") or std.mem.eql(u8, first, "zig")) return true;
     return registry.findByName(first) != null;
@@ -94,53 +90,6 @@ fn tokenizeLine(
         try tokens.append(allocator, token);
     }
     return tokens;
-}
-
-fn parseSlashCommand(argv: []const []const u8) ?LocalCommand {
-    if (argv.len == 0 or argv[0].len == 0 or argv[0][0] != '/') return null;
-    if (std.mem.eql(u8, argv[0], "/meta")) return .{ .tool_name = "zigts_expert_meta", .args = &.{} };
-    if (std.mem.eql(u8, argv[0], "/features")) return .{ .tool_name = "zigts_expert_features", .args = &.{} };
-    if (std.mem.eql(u8, argv[0], "/modules")) return .{ .tool_name = "zigts_expert_modules", .args = &.{} };
-    if (std.mem.eql(u8, argv[0], "/rule")) return .{ .tool_name = "zigts_expert_describe_rule", .args = argv[1..] };
-    if (std.mem.eql(u8, argv[0], "/search")) return .{ .tool_name = "zigts_expert_search", .args = argv[1..] };
-    if (std.mem.eql(u8, argv[0], "/verify")) return .{ .tool_name = "zigts_expert_verify_paths", .args = argv[1..] };
-    if (std.mem.eql(u8, argv[0], "/check")) return .{ .tool_name = "zigts_check", .args = argv[1..] };
-    if (std.mem.eql(u8, argv[0], "/build")) return .{ .tool_name = "zig_build_step", .args = argv[1..] };
-    if (std.mem.eql(u8, argv[0], "/test")) return .{ .tool_name = "zig_test_step", .args = argv[1..] };
-    return null;
-}
-
-fn parseExplicitCommand(argv: []const []const u8) ?LocalCommand {
-    if (argv.len == 0) return null;
-    if (std.mem.eql(u8, argv[0], "zigts")) {
-        if (argv.len < 2) return null;
-        if (std.mem.eql(u8, argv[1], "meta")) return .{ .tool_name = "zigts_expert_meta", .args = &.{} };
-        if (std.mem.eql(u8, argv[1], "features")) return .{ .tool_name = "zigts_expert_features", .args = &.{} };
-        if (std.mem.eql(u8, argv[1], "modules")) return .{ .tool_name = "zigts_expert_modules", .args = &.{} };
-        if (std.mem.eql(u8, argv[1], "search")) return .{ .tool_name = "zigts_expert_search", .args = argv[2..] };
-        if (std.mem.eql(u8, argv[1], "describe-rule")) return .{ .tool_name = "zigts_expert_describe_rule", .args = argv[2..] };
-        if (std.mem.eql(u8, argv[1], "verify-paths")) return .{ .tool_name = "zigts_expert_verify_paths", .args = argv[2..] };
-        if (std.mem.eql(u8, argv[1], "verify-modules")) return .{ .tool_name = "zigts_expert_verify_modules", .args = argv[2..] };
-        if (std.mem.eql(u8, argv[1], "check")) return .{ .tool_name = "zigts_check", .args = argv[2..] };
-        return null;
-    }
-    if (std.mem.eql(u8, argv[0], "zig") and argv.len >= 3 and std.mem.eql(u8, argv[1], "build")) {
-        if (std.mem.eql(u8, argv[2], "test") or std.mem.startsWith(u8, argv[2], "test-")) {
-            return .{ .tool_name = "zig_test_step", .args = argv[2..3] };
-        }
-        return .{ .tool_name = "zig_build_step", .args = argv[2..3] };
-    }
-    return null;
-}
-
-fn isQuit(name: []const u8) bool {
-    return std.mem.eql(u8, name, "quit") or
-        std.mem.eql(u8, name, "exit") or
-        std.mem.eql(u8, name, ":q");
-}
-
-fn isHelp(name: []const u8) bool {
-    return std.mem.eql(u8, name, "help") or std.mem.eql(u8, name, ":h");
 }
 
 fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResult {
