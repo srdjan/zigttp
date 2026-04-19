@@ -22,6 +22,12 @@ pub const platform = struct {
     pub const log = @import("platform/log.zig");
 };
 
+pub const http = struct {
+    pub const router = @import("http/router.zig");
+    pub const url = @import("http/url.zig");
+    pub const http_mod = @import("http/http_mod.zig");
+};
+
 comptime {
     sdk.validateBindings(&.{
         security.crypto.binding,
@@ -33,6 +39,9 @@ comptime {
         platform.text.binding,
         platform.time.binding,
         platform.log.binding,
+        http.router.binding,
+        http.url.binding,
+        http.http_mod.binding,
     });
 }
 
@@ -47,4 +56,7 @@ test {
     _ = platform.text;
     _ = platform.time;
     _ = platform.log;
+    _ = http.router;
+    _ = http.url;
+    _ = http.http_mod;
 }
