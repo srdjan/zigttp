@@ -727,6 +727,15 @@ pub export fn zigttpSdkAllowsEnv(
     return allowsEnvChecked(ctx, name_ptr[0..name_len]);
 }
 
+pub export fn zigttpSdkAllowsCacheNamespace(
+    handle: *ModuleHandle,
+    ns_ptr: [*]const u8,
+    ns_len: usize,
+) bool {
+    const ctx = handleToContext(handle);
+    return allowsCacheNamespaceChecked(ctx, ns_ptr[0..ns_len]);
+}
+
 
 // -------------------------------------------------------------------------
 // Return type classification

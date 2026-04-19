@@ -28,6 +28,11 @@ pub const http = struct {
     pub const http_mod = @import("http/http_mod.zig");
 };
 
+pub const data = struct {
+    pub const ratelimit = @import("data/ratelimit.zig");
+    pub const cache = @import("data/cache.zig");
+};
+
 comptime {
     sdk.validateBindings(&.{
         security.crypto.binding,
@@ -42,6 +47,8 @@ comptime {
         http.router.binding,
         http.url.binding,
         http.http_mod.binding,
+        data.ratelimit.binding,
+        data.cache.binding,
     });
 }
 
@@ -59,4 +66,6 @@ test {
     _ = http.router;
     _ = http.url;
     _ = http.http_mod;
+    _ = data.ratelimit;
+    _ = data.cache;
 }
