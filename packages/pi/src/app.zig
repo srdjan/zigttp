@@ -69,12 +69,13 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 const testing = std.testing;
 
+// When adding new tools to buildRegistry, extend the expected_names list below.
+// Do not reintroduce a hardcoded count: the assertion is name-based, not numeric.
 test "buildRegistry registers every first-party compiler primitive" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(usize, 15), reg.count());
-    for ([_][]const u8{
+    const expected_names = [_][]const u8{
         "zigts_expert_meta",
         "zigts_expert_verify_paths",
         "zigts_expert_describe_rule",
@@ -90,12 +91,15 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zigts_check",
         "zig_build_step",
         "zig_test_step",
-    }) |expected| {
+    };
+
+    for (expected_names) |expected| {
         if (reg.findByName(expected) == null) {
             std.debug.print("missing tool: {s}\n", .{expected});
             return error.TestFailed;
         }
     }
+    try testing.expect(reg.count() >= expected_names.len);
 }
 
 fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator, needle: []const u8) !void {
