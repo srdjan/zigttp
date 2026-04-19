@@ -154,19 +154,22 @@ pub const RuntimeError = error{
     RuntimeFailure,
 };
 
-extern fn zigttpSdkExtractString(val_raw: u64, out_ptr: *[*]const u8, out_len: *usize) bool;
-extern fn zigttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *u64) bool;
-extern fn zigttpSdkCreateObject(handle: *ModuleHandle, out: *u64) bool;
-extern fn zigttpSdkObjectSet(handle: *ModuleHandle, obj_raw: u64, key_ptr: [*]const u8, key_len: usize, val_raw: u64) bool;
-extern fn zigttpSdkObjectGet(handle: *ModuleHandle, obj_raw: u64, key_ptr: [*]const u8, key_len: usize, out: *u64) bool;
-extern fn zigttpSdkThrowError(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, msg_ptr: [*]const u8, msg_len: usize) u64;
-extern fn zigttpSdkResultOk(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
-extern fn zigttpSdkResultErr(handle: *ModuleHandle, msg_ptr: [*]const u8, msg_len: usize, out: *u64) bool;
-extern fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
-extern fn zigttpSdkResultErrs(handle: *ModuleHandle, payload_raw: u64, out: *u64) bool;
-extern fn zigttpSdkGetAllocator(handle: *ModuleHandle) *anyopaque;
-extern fn zigttpSdkSha256(handle: *ModuleHandle, data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
-extern fn zigttpSdkHmacSha256(handle: *ModuleHandle, data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
+// JSValue is packed struct(u64); zigts's value.JSValue is bit-identical
+// and verified by module_binding_adapter.zig. The bridge exports below
+// can therefore pass JSValue directly across the extern boundary.
+extern fn zigttpSdkExtractString(val: JSValue, out_ptr: *[*]const u8, out_len: *usize) bool;
+extern fn zigttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *JSValue) bool;
+extern fn zigttpSdkCreateObject(handle: *ModuleHandle, out: *JSValue) bool;
+extern fn zigttpSdkObjectSet(handle: *ModuleHandle, obj: JSValue, key_ptr: [*]const u8, key_len: usize, val: JSValue) bool;
+extern fn zigttpSdkObjectGet(handle: *ModuleHandle, obj: JSValue, key_ptr: [*]const u8, key_len: usize, out: *JSValue) bool;
+extern fn zigttpSdkThrowError(handle: *ModuleHandle, name_ptr: [*]const u8, name_len: usize, msg_ptr: [*]const u8, msg_len: usize) JSValue;
+extern fn zigttpSdkResultOk(handle: *ModuleHandle, payload: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkResultErr(handle: *ModuleHandle, msg_ptr: [*]const u8, msg_len: usize, out: *JSValue) bool;
+extern fn zigttpSdkResultErrValue(handle: *ModuleHandle, payload: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkResultErrs(handle: *ModuleHandle, payload: JSValue, out: *JSValue) bool;
+extern fn zigttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator;
+extern fn zigttpSdkSha256(data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
+extern fn zigttpSdkHmacSha256(data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
 
 /// Extract a borrowed string slice from a JSValue. Handles flat, slice,
 /// and leaf rope strings. Returns null for non-string values or
@@ -174,7 +177,7 @@ extern fn zigttpSdkHmacSha256(handle: *ModuleHandle, data_ptr: [*]const u8, data
 pub fn extractString(val: JSValue) ?[]const u8 {
     var ptr: [*]const u8 = undefined;
     var len: usize = 0;
-    if (!zigttpSdkExtractString(val.raw, &ptr, &len)) return null;
+    if (!zigttpSdkExtractString(val, &ptr, &len)) return null;
     return ptr[0..len];
 }
 
@@ -197,92 +200,91 @@ pub fn extractFloat(val: JSValue) ?f64 {
 
 /// Allocate a new JS string owned by the runtime GC.
 pub fn createString(handle: *ModuleHandle, data: []const u8) RuntimeError!JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkCreateString(handle, data.ptr, data.len, &raw)) return error.OutOfMemory;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkCreateString(handle, data.ptr, data.len, &out)) return error.OutOfMemory;
+    return out;
 }
 
 /// Allocate a new empty JS object owned by the runtime GC.
 pub fn createObject(handle: *ModuleHandle) RuntimeError!JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkCreateObject(handle, &raw)) return error.OutOfMemory;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkCreateObject(handle, &out)) return error.OutOfMemory;
+    return out;
 }
 
 /// Set a property on a JS object. Key is a UTF-8 string; the runtime
 /// interns it into an atom.
 pub fn objectSet(handle: *ModuleHandle, obj: JSValue, key: []const u8, val: JSValue) RuntimeError!void {
-    if (!zigttpSdkObjectSet(handle, obj.raw, key.ptr, key.len, val.raw)) return error.RuntimeFailure;
+    if (!zigttpSdkObjectSet(handle, obj, key.ptr, key.len, val)) return error.RuntimeFailure;
 }
 
 /// Get a property from a JS object. Returns null if the property is
 /// absent or the target is not an object.
 pub fn objectGet(handle: *ModuleHandle, obj: JSValue, key: []const u8) ?JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkObjectGet(handle, obj.raw, key.ptr, key.len, &raw)) return null;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkObjectGet(handle, obj, key.ptr, key.len, &out)) return null;
+    return out;
 }
 
 /// Raise a JS exception. The returned JSValue is the exception sentinel;
 /// return it from your module function.
 pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) JSValue {
-    return .{ .raw = zigttpSdkThrowError(handle, name.ptr, name.len, message.ptr, message.len) };
+    return zigttpSdkThrowError(handle, name.ptr, name.len, message.ptr, message.len);
 }
 
 /// Build `{ ok: true, value: payload }`.
 pub fn resultOk(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkResultOk(handle, payload.raw, &raw)) return error.OutOfMemory;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultOk(handle, payload, &out)) return error.OutOfMemory;
+    return out;
 }
 
 /// Build `{ ok: false, error: message }`.
 pub fn resultErr(handle: *ModuleHandle, message: []const u8) RuntimeError!JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkResultErr(handle, message.ptr, message.len, &raw)) return error.OutOfMemory;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultErr(handle, message.ptr, message.len, &out)) return error.OutOfMemory;
+    return out;
 }
 
 /// Build `{ ok: false, error: payload }` with a JSValue payload.
 pub fn resultErrValue(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkResultErrValue(handle, payload.raw, &raw)) return error.OutOfMemory;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultErrValue(handle, payload, &out)) return error.OutOfMemory;
+    return out;
 }
 
 /// Build `{ ok: false, errors: payload }` with an array payload.
 pub fn resultErrs(handle: *ModuleHandle, payload: JSValue) RuntimeError!JSValue {
-    var raw: u64 = 0;
-    if (!zigttpSdkResultErrs(handle, payload.raw, &raw)) return error.OutOfMemory;
-    return .{ .raw = raw };
+    var out: JSValue = undefined;
+    if (!zigttpSdkResultErrs(handle, payload, &out)) return error.OutOfMemory;
+    return out;
 }
 
-/// Borrow the runtime's general-purpose allocator. The returned value is
-/// valid for the lifetime of the module call.
+/// Borrow the runtime's general-purpose allocator. Valid for the module
+/// call's lifetime.
 pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
-    const ptr = zigttpSdkGetAllocator(handle);
-    const allocator_ptr: *const std.mem.Allocator = @ptrCast(@alignCast(ptr));
-    return allocator_ptr.*;
+    return zigttpSdkGetAllocator(handle).*;
 }
 
 pub const Sha256Digest = [32]u8;
 pub const HmacSha256Mac = [32]u8;
 
-/// Compute SHA-256 under the crypto capability.
+/// Compute SHA-256. Capability enforcement lives inside the bridge;
+/// callers must declare `.crypto` in `required_capabilities`.
 pub fn sha256(handle: *ModuleHandle, data: []const u8, out: *Sha256Digest) ModuleCapabilityError!void {
-    try requireCapability(handle, .crypto);
-    if (!zigttpSdkSha256(handle, data.ptr, data.len, out)) return error.MissingModuleCapability;
+    _ = handle;
+    if (!zigttpSdkSha256(data.ptr, data.len, out)) return error.MissingModuleCapability;
 }
 
-/// Compute HMAC-SHA256 under the crypto capability.
+/// Compute HMAC-SHA256. Capability enforcement lives inside the bridge.
 pub fn hmacSha256(
     handle: *ModuleHandle,
     data: []const u8,
     key: []const u8,
     out: *HmacSha256Mac,
 ) ModuleCapabilityError!void {
-    try requireCapability(handle, .crypto);
-    if (!zigttpSdkHmacSha256(handle, data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
+    _ = handle;
+    if (!zigttpSdkHmacSha256(data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
 }
 
 pub const DataLabel = enum(u3) {

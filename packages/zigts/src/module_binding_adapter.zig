@@ -11,21 +11,20 @@ comptime {
         @compileError("zigttp-sdk.JSValue must match runtime JSValue size");
     if (@bitSizeOf(sdk.JSValue) != @bitSizeOf(value.JSValue))
         @compileError("zigttp-sdk.JSValue must match runtime JSValue bit size");
-    // Enum ordinal alignment: last variant of each enum must match.
-    if (@intFromEnum(sdk.EffectClass.none) != @intFromEnum(internal.EffectClass.none))
-        @compileError("sdk.EffectClass ordinals diverge from internal");
-    if (@intFromEnum(sdk.ReturnKind.result) != @intFromEnum(internal.ReturnKind.result))
-        @compileError("sdk.ReturnKind ordinals diverge from internal");
-    if (@intFromEnum(sdk.FailureSeverity.none) != @intFromEnum(internal.FailureSeverity.none))
-        @compileError("sdk.FailureSeverity ordinals diverge from internal");
-    if (@intFromEnum(sdk.ModuleCapability.policy_check) != @intFromEnum(internal.ModuleCapability.policy_check))
-        @compileError("sdk.ModuleCapability ordinals diverge from internal");
-    if (@intFromEnum(sdk.ModuleCapability.websocket) != @intFromEnum(internal.ModuleCapability.websocket))
-        @compileError("sdk.ModuleCapability.websocket ordinal diverges from internal");
-    if (@intFromEnum(sdk.ContractCategory.fetch_host) != @intFromEnum(internal.ContractCategory.fetch_host))
-        @compileError("sdk.ContractCategory ordinals diverge from internal");
-    if (@intFromEnum(sdk.LawKind.absorbing) != @intFromEnum(internal.LawKind.absorbing))
-        @compileError("sdk.LawKind ordinals diverge from internal");
+    // Last variant of each paired enum must share an ordinal. Covers
+    // length alignment too: if SDK adds a tail variant the internal side
+    // lacks, the ordinal check catches it before any adaptor runs.
+    assertOrdinal(sdk.EffectClass.none, internal.EffectClass.none, "EffectClass");
+    assertOrdinal(sdk.ReturnKind.result, internal.ReturnKind.result, "ReturnKind");
+    assertOrdinal(sdk.FailureSeverity.none, internal.FailureSeverity.none, "FailureSeverity");
+    assertOrdinal(sdk.ModuleCapability.websocket, internal.ModuleCapability.websocket, "ModuleCapability");
+    assertOrdinal(sdk.ContractCategory.fetch_host, internal.ContractCategory.fetch_host, "ContractCategory");
+    assertOrdinal(sdk.LawKind.absorbing, internal.LawKind.absorbing, "LawKind");
+}
+
+fn assertOrdinal(comptime sdk_variant: anytype, comptime internal_variant: anytype, comptime name: []const u8) void {
+    if (@intFromEnum(sdk_variant) != @intFromEnum(internal_variant))
+        @compileError("sdk." ++ name ++ " ordinals diverge from internal");
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
