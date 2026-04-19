@@ -84,7 +84,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/zigts/module-specs/data/sql.json" },
     .{ .specifier = "zigttp:io", .module_path = "packages/zigts/src/modules/workflow/io.zig", .spec_path = "packages/zigts/module-specs/workflow/io.json" },
     .{ .specifier = "zigttp:scope", .module_path = "packages/zigts/src/modules/workflow/scope.zig", .spec_path = "packages/zigts/module-specs/workflow/scope.json" },
-    .{ .specifier = "zigttp:compose", .module_path = "packages/zigts/src/modules/workflow/compose.zig", .spec_path = "packages/zigts/module-specs/workflow/compose.json" },
+    .{ .specifier = "zigttp:compose", .module_path = "packages/modules/src/workflow/compose.zig", .spec_path = "packages/zigts/module-specs/workflow/compose.json" },
     .{ .specifier = "zigttp:durable", .module_path = "packages/zigts/src/modules/workflow/durable.zig", .spec_path = "packages/zigts/module-specs/workflow/durable.json" },
     .{ .specifier = "zigttp:url", .module_path = "packages/modules/src/http/url.zig", .spec_path = "packages/zigts/module-specs/http/url.json" },
     .{ .specifier = "zigttp:id", .module_path = "packages/modules/src/platform/id.zig", .spec_path = "packages/zigts/module-specs/platform/id.json" },
@@ -93,9 +93,9 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zigttp:text", .module_path = "packages/modules/src/platform/text.zig", .spec_path = "packages/zigts/module-specs/platform/text.json" },
     .{ .specifier = "zigttp:time", .module_path = "packages/modules/src/platform/time.zig", .spec_path = "packages/zigts/module-specs/platform/time.json" },
     .{ .specifier = "zigttp:ratelimit", .module_path = "packages/modules/src/data/ratelimit.zig", .spec_path = "packages/zigts/module-specs/data/ratelimit.json" },
-    .{ .specifier = "zigttp:service", .module_path = "packages/zigts/src/modules/net/service.zig", .spec_path = "packages/zigts/module-specs/net/service.json" },
-    .{ .specifier = "zigttp:fetch", .module_path = "packages/zigts/src/modules/net/fetch.zig", .spec_path = "packages/zigts/module-specs/net/fetch.json" },
-    .{ .specifier = "zigttp:websocket", .module_path = "packages/zigts/src/modules/net/websocket.zig", .spec_path = "packages/zigts/module-specs/net/websocket.json" },
+    .{ .specifier = "zigttp:service", .module_path = "packages/modules/src/net/service.zig", .spec_path = "packages/zigts/module-specs/net/service.json" },
+    .{ .specifier = "zigttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/zigts/module-specs/net/fetch.json" },
+    .{ .specifier = "zigttp:websocket", .module_path = "packages/modules/src/net/websocket.zig", .spec_path = "packages/zigts/module-specs/net/websocket.json" },
 };
 
 comptime {

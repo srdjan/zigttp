@@ -34,6 +34,16 @@ pub const data = struct {
     pub const sql = @import("data/sql.zig");
 };
 
+pub const net = struct {
+    pub const fetch = @import("net/fetch.zig");
+    pub const service = @import("net/service.zig");
+    pub const websocket = @import("net/websocket.zig");
+};
+
+pub const workflow = struct {
+    pub const compose = @import("workflow/compose.zig");
+};
+
 comptime {
     sdk.validateBindings(&.{
         security.crypto.binding,
@@ -51,6 +61,10 @@ comptime {
         data.ratelimit.binding,
         data.cache.binding,
         data.sql.binding,
+        net.fetch.binding,
+        net.service.binding,
+        net.websocket.binding,
+        workflow.compose.binding,
     });
 }
 
@@ -71,4 +85,8 @@ test {
     _ = data.ratelimit;
     _ = data.cache;
     _ = data.sql;
+    _ = net.fetch;
+    _ = net.service;
+    _ = net.websocket;
+    _ = workflow.compose;
 }
