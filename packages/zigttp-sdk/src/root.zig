@@ -392,21 +392,15 @@ extern fn zigttpSdkReadFile(
     out_len: *usize,
 ) bool;
 
-extern fn zigttpSdkFreeFileBuffer(handle: *ModuleHandle, ptr: [*]u8, len: usize) void;
-
-/// Read a file through the capability-gated filesystem path. Requires
-/// `.filesystem` in required_capabilities. Caller frees with
-/// `freeFileBuffer` when done.
+/// Read a file through the capability-gated filesystem path. The buffer
+/// is allocated with the runtime allocator (`getAllocator(handle)`);
+/// callers free it via `getAllocator(handle).free(buf)`.
 pub fn readFile(handle: *ModuleHandle, path: []const u8, max_size: usize) ![]u8 {
     try requireCapability(handle, .filesystem);
     var ptr: [*]u8 = undefined;
     var len: usize = 0;
     if (!zigttpSdkReadFile(handle, path.ptr, path.len, max_size, &ptr, &len)) return error.FileReadFailed;
     return ptr[0..len];
-}
-
-pub fn freeFileBuffer(handle: *ModuleHandle, buf: []u8) void {
-    zigttpSdkFreeFileBuffer(handle, buf.ptr, buf.len);
 }
 
 pub fn arrayLength(val: JSValue) ?u32 {
@@ -763,6 +757,9 @@ pub const ModuleBinding = struct {
 };
 
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
+    // Raised from the 5000 default because the O(n*m) duplicate-name
+    // and specifier checks exceed it once the full builtin roster
+    // (20+ modules) is validated in one call.
     @setEvalBranchQuota(20000);
 
     for (bindings) |binding| {

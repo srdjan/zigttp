@@ -3,6 +3,7 @@ const sdk = @import("zigttp-sdk");
 const internal = @import("module_binding.zig");
 const object = @import("object.zig");
 const value = @import("value.zig");
+const context = @import("context.zig");
 
 pub const ModuleBinding = internal.ModuleBinding;
 
@@ -141,6 +142,26 @@ fn adaptContractExtractions(comptime extractions: []const sdk.ContractExtraction
         };
     }
     return out;
+}
+
+/// Cross-boundary casts shared by the runtime-callback installState shims
+/// (packages/zigts/src/modules/net/{fetch,service,websocket}.zig). Both
+/// JSValue types are bit-identical packed structs by comptime assertion
+/// above; the opaque handle types wrap the same context pointer.
+pub inline fn contextFromHandle(handle: *sdk.ModuleHandle) *context.Context {
+    return internal.handleToContext(@ptrCast(handle));
+}
+
+pub inline fn sdkValue(v: value.JSValue) sdk.JSValue {
+    return @bitCast(v);
+}
+
+pub inline fn internalValue(v: sdk.JSValue) value.JSValue {
+    return @bitCast(v);
+}
+
+pub inline fn internalArgs(args: []const sdk.JSValue) []const value.JSValue {
+    return @ptrCast(args);
 }
 
 /// Produce a NativeFn directly from a sdk.ModuleFn, avoiding double-wrapping.

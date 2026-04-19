@@ -654,15 +654,6 @@ pub export fn zigttpSdkReadFile(
     return true;
 }
 
-pub export fn zigttpSdkFreeFileBuffer(
-    handle: *ModuleHandle,
-    ptr: [*]u8,
-    len: usize,
-) void {
-    const ctx = handleToContext(handle);
-    ctx.allocator.free(ptr[0..len]);
-}
-
 pub export fn zigttpSdkIsString(val: value.JSValue) bool {
     return val.isStringOrRope();
 }
