@@ -107,6 +107,7 @@ pub const ModuleCapability = enum {
     filesystem,
     network,
     policy_check,
+    websocket,
 };
 
 pub const ModuleCapabilityError = error{
@@ -175,6 +176,7 @@ pub const ContractCategory = enum {
     env,
     cache_namespace,
     sql_registration,
+    scope_name,
     durable_key,
     durable_step,
     durable_signal,
@@ -182,6 +184,11 @@ pub const ContractCategory = enum {
     schema_compile,
     request_schema,
     route_pattern,
+    cookie_name,
+    cors_origin,
+    rate_limit_key,
+    service_call,
+    fetch_host,
 };
 
 pub const ContractTransform = enum {
@@ -197,10 +204,42 @@ pub const ContractExtraction = struct {
 };
 
 pub const ContractFlags = struct {
+    sets_scope_used: bool = false,
     sets_durable_used: bool = false,
     sets_durable_timers: bool = false,
     sets_bearer_auth: bool = false,
     sets_jwt_auth: bool = false,
+};
+
+pub const LawKind = enum {
+    pure,
+    idempotent_call,
+    inverse_of,
+    absorbing,
+};
+
+pub const AbsorbingPattern = struct {
+    arg_position: u8 = 0,
+    argument_shape: ArgumentShape,
+    residue: Residue,
+
+    pub const ArgumentShape = enum {
+        empty_string_literal,
+        undefined_literal,
+    };
+
+    pub const Residue = enum {
+        result_err,
+        returns_undefined,
+        returns_false,
+    };
+};
+
+pub const Law = union(LawKind) {
+    pure: void,
+    idempotent_call: void,
+    inverse_of: []const u8,
+    absorbing: AbsorbingPattern,
 };
 
 pub const FunctionBinding = struct {
@@ -215,6 +254,7 @@ pub const FunctionBinding = struct {
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},
     failure_severity: FailureSeverity = .none,
+    laws: []const Law = &.{},
 };
 
 pub const ModuleBinding = struct {
@@ -228,14 +268,17 @@ pub const ModuleBinding = struct {
     contract_section: ?[]const u8 = null,
     sandboxable: bool = false,
     comptime_only: bool = false,
+    self_managed_io: bool = false,
 };
 
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
     @setEvalBranchQuota(5000);
 
     for (bindings) |binding| {
-        if (!std.mem.startsWith(u8, binding.specifier, "zigttp-ext:")) {
-            @compileError("package module specifier must start with 'zigttp-ext:': " ++ binding.specifier);
+        const builtin_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp:");
+        const extension_prefix = std.mem.startsWith(u8, binding.specifier, "zigttp-ext:");
+        if (!builtin_prefix and !extension_prefix) {
+            @compileError("module specifier must start with 'zigttp:' or 'zigttp-ext:': " ++ binding.specifier);
         }
 
         if (binding.state_init != null and binding.state_deinit == null) {
