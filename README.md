@@ -172,6 +172,8 @@ zigttp provides native virtual modules via `import { ... } from "zigttp:*"` synt
 | `zigttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | In-memory key-value cache with TTL and LRU |
 | `zigttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | Registered SQLite queries with build-time schema validation |
 | `zigttp:service` | `serviceCall` | Named internal service-to-service calls backed by `system.json` |
+| `zigttp:fetch` | `fetch` | Web-standard outbound HTTP with optional durable replay ([docs](docs/virtual-modules/fetch.md)) |
+| `zigttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `roomFromPath`, `setAutoResponse` | WebSocket protocol termination with rooms, attachments, and codec-level auto-replies ([docs](docs/virtual-modules/websocket.md)) |
 | `zigttp:io` | `parallel`, `race` | Structured concurrent I/O (overlaps fetchSync calls using OS threads) |
 | `zigttp:scope` | `scope`, `using`, `ensure` | Structured lifecycle management with deterministic cleanup at scope exit |
 | `zigttp:compose` | `guard`, `pipe` | Compile-time handler composition via pipe operator |
