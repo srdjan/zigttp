@@ -32,16 +32,6 @@ pub fn build(b: *std.Build) void {
     });
     const pi_app_mod = pi_dep.module("pi_app");
 
-    // Canonical zigts handler examples consumed by expert_persona as
-    // few-shot content. Rooted at examples/ so @embedFile reaches the
-    // sibling subdirectories without escaping the module-path sandbox.
-    const examples_mod = b.addModule("zigts_expert_examples", .{
-        .root_source_file = b.path("examples/data.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    pi_app_mod.addImport("zigts_expert_examples", examples_mod);
-
     // Sub-dependencies needed for zigts test module construction
     const zigttp_sdk_dep = b.dependency("zigttp_sdk", .{
         .target = target,
@@ -163,11 +153,8 @@ pub fn build(b: *std.Build) void {
     });
     const pi_zigts_cli_host_mod = pi_host_tools_dep.module("zigts_cli");
     const pi_zigts_expert_skill_host_mod = pi_host_tools_dep.module("zigts_expert_skill");
-    const pi_examples_host_mod = b.createModule(.{
-        .root_source_file = b.path("examples/data.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
+    const pi_zigts_expert_examples_host_mod = pi_host_tools_dep.module("zigts_expert_examples");
+    pi_app_mod.addImport("zigts_expert_examples", pi_zigts_expert_examples_host_mod);
     const pi_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = pi_dep.path("src/tests.zig"),
@@ -179,7 +166,7 @@ pub fn build(b: *std.Build) void {
     pi_tests.root_module.addImport("zigts", zigts_host_mod);
     pi_tests.root_module.addImport("zigts_cli", pi_zigts_cli_host_mod);
     pi_tests.root_module.addImport("zigts_expert_skill", pi_zigts_expert_skill_host_mod);
-    pi_tests.root_module.addImport("zigts_expert_examples", pi_examples_host_mod);
+    pi_tests.root_module.addImport("zigts_expert_examples", pi_zigts_expert_examples_host_mod);
     const run_pi_tests = b.addRunArtifact(pi_tests);
     const expert_app_test_step = b.step("test-expert-app", "Run zigts expert in-process app tests");
     expert_app_test_step.dependOn(&run_pi_tests.step);
