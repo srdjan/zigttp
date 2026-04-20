@@ -43,6 +43,14 @@ pub fn autoReject(file: []const u8) anyerror!bool {
     return false;
 }
 
+pub fn resolveApprovalFn(policy: ApprovalPolicy, ask_fn: ?ApprovalFn) ApprovalFn {
+    return switch (policy) {
+        .auto_approve => autoApprove,
+        .auto_reject => autoReject,
+        .ask => ask_fn orelse autoReject,
+    };
+}
+
 pub const TurnResult = struct {
     final_state: turn.TurnState,
     attempt: u8,

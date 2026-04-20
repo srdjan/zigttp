@@ -1,9 +1,4 @@
 //! Top-level entrypoint for `zigts expert`.
-//!
-//! This file lives at src/ level (not inside pi/) so its module path anchors
-//! at packages/tools/src/ — the same anchoring used by pi_tests.zig. That
-//! lets the pi subtree's sibling imports (`../../expert_meta.zig` etc.) stay
-//! inside the module sandbox Zig 0.16 enforces.
 
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
@@ -53,12 +48,10 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     return reg;
 }
 
-/// Module-level argv snapshot. Callers that can supply argv (currently
-/// `zigts_main.zig` for the `zigts expert` path) set this immediately before
-/// invoking `run`. Callers without argv access (the deprecated
-/// `zigttp expert` path in `dev_cli.zig`) leave it null; `run` then treats
-/// the policy as `.ask`. Kept module-local so the public `run(allocator)`
-/// signature remains stable.
+/// Long flags whose next token is a value. `zigts_main.zig` consults this
+/// list so it can skip the value while scanning for stray positional args.
+pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode" };
+
 var captured_argv: ?[]const []const u8 = null;
 
 pub fn setInvocationArgv(argv: []const []const u8) void {
@@ -109,36 +102,24 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer registry.deinit(allocator);
 
     if (flags.print != null) {
-        // Non-interactive default: auto_reject. Only honor `.ask` style
-        // default by silently promoting to `.auto_reject` when the user
-        // did not pass `--yes` or `--no-edit` explicitly.
-        const effective_policy: loop.ApprovalPolicy = if (flags.policy_explicit)
-            flags.policy
-        else
-            .auto_reject;
-        try print_mode.run(allocator, &registry, flags, effective_policy);
+        try print_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject);
         return;
     }
 
+    const interactive_policy = flags.policy orelse .ask;
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        try tui_app.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
+        try tui_app.run(allocator, &registry, interactive_policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
     } else {
-        try repl.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
+        try repl.run(allocator, &registry, interactive_policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
     }
 }
 
-/// Flags parsed from `zigts expert` argv. `policy` folds `--yes`/`--no-edit`
-/// into an `ApprovalPolicy`; `no_session` and `no_persist_tool_output` are
-/// plumbing for Batch 4's events.jsonl writer and are merely carried through
-/// `run` today. `print` and `json_mode` drive non-interactive one-shot runs
-/// (Batch 5): when `print` is set, `run` bypasses both the REPL and the TUI.
+/// Flags parsed from `zigts expert` argv. `policy == null` means the user
+/// did not pass `--yes` or `--no-edit`; callers pick an appropriate default
+/// (`.ask` for interactive, `.auto_reject` for `--print`).
 pub const ExpertFlags = struct {
-    policy: loop.ApprovalPolicy = .ask,
-    /// True when the user explicitly passed `--yes` or `--no-edit`.
-    /// Non-interactive dispatch uses this to decide whether to override
-    /// the default `ask` policy with a safer `auto_reject`.
-    policy_explicit: bool = false,
+    policy: ?loop.ApprovalPolicy = null,
     no_session: bool = false,
     no_persist_tool_output: bool = false,
     session_id: ?[]const u8 = null,
@@ -201,10 +182,8 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     if (out.json_mode and out.print == null) return error.JsonModeRequiresPrint;
     if (saw_yes) {
         out.policy = .auto_approve;
-        out.policy_explicit = true;
     } else if (saw_no_edit) {
         out.policy = .auto_reject;
-        out.policy_explicit = true;
     }
     return out;
 }
@@ -261,7 +240,7 @@ fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator
 
 test "parseExpertFlags: empty argv yields defaults" {
     const flags = try parseExpertFlags(&.{});
-    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expect(flags.policy == null);
     try testing.expectEqual(false, flags.no_session);
     try testing.expectEqual(false, flags.no_persist_tool_output);
 }
@@ -269,7 +248,7 @@ test "parseExpertFlags: empty argv yields defaults" {
 test "parseExpertFlags: --yes yields auto_approve" {
     const argv = [_][]const u8{ "zigts", "expert", "--yes" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy.?);
     try testing.expectEqual(false, flags.no_session);
     try testing.expectEqual(false, flags.no_persist_tool_output);
 }
@@ -277,13 +256,13 @@ test "parseExpertFlags: --yes yields auto_approve" {
 test "parseExpertFlags: --no-edit yields auto_reject" {
     const argv = [_][]const u8{ "zigts", "expert", "--no-edit" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_reject, flags.policy);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_reject, flags.policy.?);
 }
 
 test "parseExpertFlags: --no-session alone flips only that field" {
     const argv = [_][]const u8{ "zigts", "expert", "--no-session" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expect(flags.policy == null);
     try testing.expectEqual(true, flags.no_session);
     try testing.expectEqual(false, flags.no_persist_tool_output);
 }
@@ -291,7 +270,7 @@ test "parseExpertFlags: --no-session alone flips only that field" {
 test "parseExpertFlags: --no-persist-tool-output alone flips only that field" {
     const argv = [_][]const u8{ "zigts", "expert", "--no-persist-tool-output" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expect(flags.policy == null);
     try testing.expectEqual(false, flags.no_session);
     try testing.expectEqual(true, flags.no_persist_tool_output);
 }
@@ -299,7 +278,7 @@ test "parseExpertFlags: --no-persist-tool-output alone flips only that field" {
 test "parseExpertFlags: --yes --no-session --no-persist-tool-output combine" {
     const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-session", "--no-persist-tool-output" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy.?);
     try testing.expectEqual(true, flags.no_session);
     try testing.expectEqual(true, flags.no_persist_tool_output);
 }
@@ -312,7 +291,7 @@ test "parseExpertFlags: --yes + --no-edit still errors regardless of session fla
 test "parseExpertFlags: unknown --frobnicate is ignored, defaults preserved" {
     const argv = [_][]const u8{ "zigts", "expert", "--frobnicate" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expect(flags.policy == null);
     try testing.expectEqual(false, flags.no_session);
     try testing.expectEqual(false, flags.no_persist_tool_output);
 }
@@ -321,7 +300,7 @@ test "parseExpertFlags: repeated --no-session is idempotent" {
     const argv = [_][]const u8{ "zigts", "expert", "--no-session", "--no-session" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.no_session);
-    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expect(flags.policy == null);
 }
 
 test "parseExpertFlags: --session-id <id> two-argv form captures value" {
@@ -402,8 +381,7 @@ test "parseExpertFlags: --mode bogus errors UnsupportedMode" {
 test "parseExpertFlags: --print + --yes combines policy with print" {
     const argv = [_][]const u8{ "zigts", "expert", "--print", "hello", "--yes" };
     const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy);
-    try testing.expectEqual(true, flags.policy_explicit);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy.?);
     try testing.expect(flags.print != null);
     try testing.expectEqualStrings("hello", flags.print.?);
 }

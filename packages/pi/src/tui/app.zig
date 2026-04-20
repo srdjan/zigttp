@@ -217,11 +217,7 @@ fn printBody(writer: anytype, body: []const u8) !void {
 }
 
 fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
-    return switch (policy) {
-        .ask => approveEdit,
-        .auto_approve => loop.autoApprove,
-        .auto_reject => loop.autoReject,
-    };
+    return loop.resolveApprovalFn(policy, approveEdit);
 }
 
 
