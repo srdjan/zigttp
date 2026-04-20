@@ -102,7 +102,7 @@ pub fn appendEvent(
     }
 }
 
-fn writeEventLine(writer: *std.Io.Writer, record: EventRecord) !void {
+pub fn writeEventLine(writer: *std.Io.Writer, record: EventRecord) !void {
     var stream: std.json.Stringify = .{ .writer = writer };
     try stream.beginObject();
 

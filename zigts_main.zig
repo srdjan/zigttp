@@ -20,11 +20,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !void {
-    // Unknown long flags flow through to pi_app unchanged. Known value-
-    // taking flags consume their next token so `zigts expert --print hello`
-    // does not get rejected as if `hello` were a subcommand.
-    const value_taking = [_][]const u8{ "--session-id", "--print", "--mode" };
-
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
@@ -33,7 +28,7 @@ fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !voi
             return;
         }
         if (std.mem.startsWith(u8, arg, "--")) {
-            for (value_taking) |name| {
+            for (pi_app.value_taking_flags) |name| {
                 if (std.mem.eql(u8, arg, name)) {
                     if (i + 1 < argv.len) i += 1;
                     break;

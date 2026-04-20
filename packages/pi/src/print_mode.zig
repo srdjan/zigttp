@@ -1,12 +1,10 @@
 //! Non-interactive `--print` mode for `zigts expert`.
 //!
-//! Builds a session, runs exactly one turn through the agent, emits either
-//! the rendered text or an NDJSON event stream, then returns. Bypasses the
-//! REPL and TUI entirely.
+//! Runs exactly one turn through the agent, emits either the rendered text
+//! or an NDJSON event stream, and returns. Bypasses the REPL and TUI.
 //!
-//! The approval-fn seam lives here (not in `loop`) so it can default to
-//! `auto_reject` when no TTY is available to prompt on. Callers that want
-//! their verified edits to land must pass `--yes` alongside `--print`.
+//! JSON mode emits the same event shape as `session/events.zig` so consumers
+//! can reuse one parser across live stdout and persisted `events.jsonl`.
 
 const std = @import("std");
 
@@ -14,13 +12,13 @@ const agent = @import("agent.zig");
 const loop = @import("loop.zig");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
+const session_events = @import("session/events.zig");
 const app = @import("app.zig");
 
 const Registry = registry_mod.Registry;
 const ExpertFlags = app.ExpertFlags;
+const EventRecord = session_events.EventRecord;
 
-/// Drive one non-interactive turn through the real session factory
-/// (`agent.initFromEnvWithSessionConfig`). Emits to stdout.
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
@@ -63,14 +61,12 @@ fn runWithSession(
     client_override: ?loop.ModelClient,
     out_writer: ?*std.Io.Writer,
 ) !void {
-    const approval_fn = selectApprovalFn(policy);
+    const approval_fn = loop.resolveApprovalFn(policy, null);
     const prompt = flags.print orelse return error.MissingPrintPrompt;
 
-    var emitter: Emitter = .init(allocator, out_writer);
-
-    // Emit the prompt up-front so JSON consumers always see it even if the
-    // turn errors out before the user_text entry lands.
-    if (flags.json_mode) try emitSimpleEvent(&emitter, "user_text", prompt);
+    // Emit the prompt first so JSON consumers see it even if the turn errors
+    // before the user_text entry lands.
+    if (flags.json_mode) try emitRecord(allocator, out_writer, .{ .user_text = prompt });
 
     const start_len = session.transcript.len();
 
@@ -81,9 +77,9 @@ fn runWithSession(
     defer allocator.free(rendered);
 
     if (!flags.json_mode) {
-        try emitter.write(rendered);
+        try writeOut(out_writer, rendered);
         if (rendered.len == 0 or rendered[rendered.len - 1] != '\n') {
-            try emitter.write("\n");
+            try writeOut(out_writer, "\n");
         }
         return;
     }
@@ -92,13 +88,11 @@ fn runWithSession(
     var idx: usize = start_len;
     while (idx < tr.len()) : (idx += 1) {
         const entry = tr.at(idx);
-        // The prompt was already emitted; skip any user_text entry the
-        // agent appended for this turn to avoid duplicates.
-        if (entry.* == .user_text) continue;
-        try emitEntryEvent(&emitter, entry);
+        if (entry.* == .user_text) continue; // already emitted above
+        try emitEntry(allocator, out_writer, entry);
     }
 
-    try emitEndEvent(&emitter);
+    try emitEndEvent(allocator, out_writer);
 }
 
 fn runOneTurnWithClient(
@@ -125,172 +119,61 @@ fn runOneTurnWithClient(
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
-fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
-    return switch (policy) {
-        .auto_approve => loop.autoApprove,
-        .auto_reject => loop.autoReject,
-        // No TTY is available in --print mode. Warn once, then fall back
-        // to the safer default so a stray `.ask` policy can't hang.
-        .ask => blk: {
-            const msg = "warning: --print has no TTY to prompt on; defaulting to auto_reject\n";
-            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-            break :blk loop.autoReject;
+fn writeOut(out: ?*std.Io.Writer, bytes: []const u8) !void {
+    if (out) |w| {
+        try w.writeAll(bytes);
+    } else {
+        _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+    }
+}
+
+fn emitRecord(allocator: std.mem.Allocator, out: ?*std.Io.Writer, record: EventRecord) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try session_events.writeEventLine(&aw.writer, record);
+    buf = aw.toArrayList();
+    try writeOut(out, buf.items);
+}
+
+fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const transcript_mod.OwnedEntry) !void {
+    switch (entry.*) {
+        .user_text => |body| try emitRecord(allocator, out, .{ .user_text = body }),
+        .model_text => |body| try emitRecord(allocator, out, .{ .model_text = body }),
+        .proof_card => |body| try emitRecord(allocator, out, .{ .proof_card = body }),
+        .diagnostic_box => |body| try emitRecord(allocator, out, .{ .diagnostic_box = body }),
+        .assistant_tool_use => |calls| {
+            for (calls) |call| {
+                try emitRecord(allocator, out, .{ .tool_use = .{
+                    .id = call.id,
+                    .name = call.name,
+                    .args_json = call.args_json,
+                } });
+            }
         },
-    };
+        .tool_result => |tr| try emitRecord(allocator, out, .{ .tool_result = .{
+            .tool_use_id = tr.tool_use_id,
+            .tool_name = tr.tool_name,
+            .ok = tr.ok,
+            .body = tr.body,
+        } }),
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Output sink: either an injected writer (for tests) or stdout via std.c.write.
-// ---------------------------------------------------------------------------
-
-const Emitter = struct {
-    allocator: std.mem.Allocator,
-    out: ?*std.Io.Writer,
-
-    fn init(allocator: std.mem.Allocator, out: ?*std.Io.Writer) Emitter {
-        return .{ .allocator = allocator, .out = out };
-    }
-
-    fn write(self: *Emitter, bytes: []const u8) !void {
-        if (self.out) |w| {
-            try w.writeAll(bytes);
-        } else {
-            _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
-        }
-    }
-
-    /// Build one line into a scratch buffer, then flush it in one write.
-    /// Takes a closure `writeFn(*std.Io.Writer, ctx)` that streams the
-    /// line body (without the trailing newline).
-    fn emitLine(
-        self: *Emitter,
-        ctx: anytype,
-        comptime writeFn: fn (*std.Io.Writer, @TypeOf(ctx)) anyerror!void,
-    ) !void {
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(self.allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &buf);
-        try writeFn(&aw.writer, ctx);
-        try aw.writer.writeByte('\n');
-        buf = aw.toArrayList();
-        try self.write(buf.items);
-    }
-};
-
-// ---------------------------------------------------------------------------
-// NDJSON event shapes.
-// ---------------------------------------------------------------------------
-
-const SimpleEvent = struct { kind: []const u8, body: []const u8 };
-
-fn emitSimpleEvent(emitter: *Emitter, kind: []const u8, body: []const u8) !void {
-    try emitter.emitLine(
-        SimpleEvent{ .kind = kind, .body = body },
-        writeSimpleEvent,
-    );
-}
-
-fn writeSimpleEvent(writer: *std.Io.Writer, ev: SimpleEvent) !void {
-    var s: std.json.Stringify = .{ .writer = writer };
+fn emitEndEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var s: std.json.Stringify = .{ .writer = &aw.writer };
     try s.beginObject();
-    try s.objectField("k");
-    try s.write(ev.kind);
-    try s.objectField("d");
-    try s.write(ev.body);
-    try s.endObject();
-}
-
-fn emitEndEvent(emitter: *Emitter) !void {
-    try emitter.emitLine({}, writeEndEvent);
-}
-
-fn writeEndEvent(writer: *std.Io.Writer, _: void) !void {
-    var s: std.json.Stringify = .{ .writer = writer };
-    try s.beginObject();
+    try s.objectField("v");
+    try s.write(session_events.schema_version);
     try s.objectField("k");
     try s.write("end");
     try s.endObject();
-}
-
-fn emitEntryEvent(emitter: *Emitter, entry: *const transcript_mod.OwnedEntry) !void {
-    switch (entry.*) {
-        .user_text => |body| try emitSimpleEvent(emitter, "user_text", body),
-        .model_text => |body| try emitSimpleEvent(emitter, "assistant_text", body),
-        .proof_card => |body| try emitter.emitLine(
-            BoxEvent{ .kind = "proof_card", .body = body },
-            writeBoxEvent,
-        ),
-        .diagnostic_box => |body| try emitter.emitLine(
-            BoxEvent{ .kind = "diagnostic_box", .body = body },
-            writeBoxEvent,
-        ),
-        .assistant_tool_use => |calls| {
-            // One event per call to match the session persister's shape.
-            for (calls) |call| {
-                try emitter.emitLine(
-                    ToolUseEvent{ .id = call.id, .name = call.name, .args = call.args_json },
-                    writeToolUseEvent,
-                );
-            }
-        },
-        .tool_result => |tr| try emitter.emitLine(
-            ToolResultEvent{ .id = tr.tool_use_id, .ok = tr.ok, .body = tr.body },
-            writeToolResultEvent,
-        ),
-    }
-}
-
-const BoxEvent = struct { kind: []const u8, body: []const u8 };
-
-fn writeBoxEvent(writer: *std.Io.Writer, ev: BoxEvent) !void {
-    var s: std.json.Stringify = .{ .writer = writer };
-    try s.beginObject();
-    try s.objectField("k");
-    try s.write(ev.kind);
-    try s.objectField("d");
-    try s.beginObject();
-    try s.objectField("body");
-    try s.write(ev.body);
-    try s.endObject();
-    try s.endObject();
-}
-
-const ToolUseEvent = struct { id: []const u8, name: []const u8, args: []const u8 };
-
-fn writeToolUseEvent(writer: *std.Io.Writer, ev: ToolUseEvent) !void {
-    var s: std.json.Stringify = .{ .writer = writer };
-    try s.beginObject();
-    try s.objectField("k");
-    try s.write("tool_use");
-    try s.objectField("d");
-    try s.beginObject();
-    try s.objectField("id");
-    try s.write(ev.id);
-    try s.objectField("name");
-    try s.write(ev.name);
-    try s.objectField("args");
-    try s.write(ev.args);
-    try s.endObject();
-    try s.endObject();
-}
-
-const ToolResultEvent = struct { id: []const u8, ok: bool, body: []const u8 };
-
-fn writeToolResultEvent(writer: *std.Io.Writer, ev: ToolResultEvent) !void {
-    var s: std.json.Stringify = .{ .writer = writer };
-    try s.beginObject();
-    try s.objectField("k");
-    try s.write("tool_result");
-    try s.objectField("d");
-    try s.beginObject();
-    try s.objectField("id");
-    try s.write(ev.id);
-    try s.objectField("ok");
-    try s.write(ev.ok);
-    try s.objectField("body");
-    try s.write(ev.body);
-    try s.endObject();
-    try s.endObject();
+    try aw.writer.writeByte('\n');
+    buf = aw.toArrayList();
+    try writeOut(out, buf.items);
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +220,7 @@ fn findLine(lines: []const []const u8, needle: []const u8) ?usize {
     return null;
 }
 
-test "runWithClient: json mode emits user_text, assistant_text, end in order" {
+test "runWithClient: json mode emits user_text, model_text, end in order" {
     const allocator = testing.allocator;
     var reg = try buildMiniRegistry(allocator);
     defer reg.deinit(allocator);
@@ -371,12 +254,13 @@ test "runWithClient: json mode emits user_text, assistant_text, end in order" {
     try testing.expect(lines.items.len >= 3);
 
     const user_line = findLine(lines.items, "\"k\":\"user_text\"") orelse return error.TestFailed;
-    const asst_line = findLine(lines.items, "\"k\":\"assistant_text\"") orelse return error.TestFailed;
+    const model_line = findLine(lines.items, "\"k\":\"model_text\"") orelse return error.TestFailed;
     const end_line = findLine(lines.items, "\"k\":\"end\"") orelse return error.TestFailed;
-    try testing.expect(user_line < asst_line);
-    try testing.expect(asst_line < end_line);
+    try testing.expect(user_line < model_line);
+    try testing.expect(model_line < end_line);
     try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "hello") != null);
-    try testing.expect(std.mem.indexOf(u8, lines.items[asst_line], "hi") != null);
+    try testing.expect(std.mem.indexOf(u8, lines.items[model_line], "hi") != null);
+    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":1") != null);
 }
 
 test "runWithClient: non-json mode writes rendered text" {
