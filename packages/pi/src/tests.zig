@@ -41,4 +41,5 @@ comptime {
     _ = @import("anthropic/client.zig");
     _ = @import("app.zig");
     _ = @import("context/loader.zig");
+    _ = @import("session/paths.zig");
 }
