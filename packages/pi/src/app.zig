@@ -72,6 +72,16 @@ pub fn run(allocator: std.mem.Allocator) !void {
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
+        error.MissingSessionId => {
+            const msg = "error: --session-id requires a value\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.MutuallyExclusiveResumeFlags => {
+            const msg = "error: --resume and --session-id are mutually exclusive\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
     };
 
     var registry = try buildRegistry(allocator);
@@ -79,9 +89,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        try tui_app.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output);
+        try tui_app.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
     } else {
-        try repl.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output);
+        try repl.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
     }
 }
 
@@ -93,6 +103,8 @@ pub const ExpertFlags = struct {
     policy: loop.ApprovalPolicy = .ask,
     no_session: bool = false,
     no_persist_tool_output: bool = false,
+    session_id: ?[]const u8 = null,
+    resume_latest: bool = false,
 };
 
 /// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
@@ -103,13 +115,26 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     var out: ExpertFlags = .{};
     var saw_yes = false;
     var saw_no_edit = false;
-    for (argv) |arg| {
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--yes")) saw_yes = true;
         if (std.mem.eql(u8, arg, "--no-edit")) saw_no_edit = true;
         if (std.mem.eql(u8, arg, "--no-session")) out.no_session = true;
         if (std.mem.eql(u8, arg, "--no-persist-tool-output")) out.no_persist_tool_output = true;
+        if (std.mem.eql(u8, arg, "--resume")) out.resume_latest = true;
+        if (std.mem.eql(u8, arg, "--session-id")) {
+            if (i + 1 >= argv.len) return error.MissingSessionId;
+            i += 1;
+            out.session_id = argv[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--session-id=")) {
+            out.session_id = arg["--session-id=".len..];
+        }
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
+    if (out.resume_latest and out.session_id != null) return error.MutuallyExclusiveResumeFlags;
     if (saw_yes) {
         out.policy = .auto_approve;
     } else if (saw_no_edit) {
@@ -231,6 +256,38 @@ test "parseExpertFlags: repeated --no-session is idempotent" {
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(true, flags.no_session);
     try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+}
+
+test "parseExpertFlags: --session-id <id> two-argv form captures value" {
+    const argv = [_][]const u8{ "zigts", "expert", "--session-id", "abc123" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.session_id != null);
+    try testing.expectEqualStrings("abc123", flags.session_id.?);
+    try testing.expectEqual(false, flags.resume_latest);
+}
+
+test "parseExpertFlags: --session-id=<id> one-argv form captures value" {
+    const argv = [_][]const u8{ "zigts", "expert", "--session-id=xyz" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.session_id != null);
+    try testing.expectEqualStrings("xyz", flags.session_id.?);
+}
+
+test "parseExpertFlags: --session-id without a value errors" {
+    const argv = [_][]const u8{ "zigts", "expert", "--session-id" };
+    try testing.expectError(error.MissingSessionId, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --resume alone sets the flag" {
+    const argv = [_][]const u8{ "zigts", "expert", "--resume" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.resume_latest);
+    try testing.expect(flags.session_id == null);
+}
+
+test "parseExpertFlags: --resume + --session-id is an error" {
+    const argv = [_][]const u8{ "zigts", "expert", "--resume", "--session-id", "x" };
+    try testing.expectError(error.MutuallyExclusiveResumeFlags, parseExpertFlags(argv[0..]));
 }
 
 test "buildRegistry + dispatchLine end-to-end against every tool" {

@@ -45,4 +45,6 @@ comptime {
     _ = @import("session/events.zig");
     _ = @import("session/persister.zig");
     _ = @import("session/reconstructor.zig");
+    _ = @import("session/session_id.zig");
+    _ = @import("session/replay_test.zig");
 }

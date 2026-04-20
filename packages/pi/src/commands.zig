@@ -82,6 +82,14 @@ pub fn isHelp(name: []const u8) bool {
     return std.mem.eql(u8, name, "help") or std.mem.eql(u8, name, ":h");
 }
 
+pub fn isSessionResume(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/resume");
+}
+
+pub fn isSessionNew(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/new");
+}
+
 const testing = std.testing;
 
 test "lookup slash /meta returns meta tool" {
@@ -134,4 +142,11 @@ test "isQuit and isHelp recognize aliases" {
     try testing.expect(isHelp("help"));
     try testing.expect(isHelp(":h"));
     try testing.expect(!isHelp("quit"));
+}
+
+test "isSessionResume and isSessionNew recognize slash commands" {
+    try testing.expect(isSessionResume("/resume"));
+    try testing.expect(!isSessionResume("/new"));
+    try testing.expect(isSessionNew("/new"));
+    try testing.expect(!isSessionNew("/resume"));
 }

@@ -17,6 +17,8 @@ pub const DispatchOutcome = union(enum) {
     noop,
     quit,
     result: ToolResult,
+    session_resume,
+    session_new,
 };
 
 pub fn dispatchLine(
@@ -34,6 +36,8 @@ pub fn dispatchLine(
 
     if (commands.isQuit(argv[0])) return .quit;
     if (commands.isHelp(argv[0])) return .{ .result = try renderHelp(allocator, registry) };
+    if (commands.isSessionResume(argv[0])) return .session_resume;
+    if (commands.isSessionNew(argv[0])) return .session_new;
 
     if (commands.lookup(argv)) |cmd| {
         return .{ .result = try invokeTool(allocator, registry, cmd.tool_name, cmd.args) };
@@ -55,6 +59,7 @@ pub fn shouldDispatchTool(registry: *const Registry, line: []const u8) bool {
     var first_token_iter = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
     const first = first_token_iter.next() orelse return true;
     if (commands.isQuit(first) or commands.isHelp(first)) return true;
+    if (commands.isSessionResume(first) or commands.isSessionNew(first)) return true;
     if (first.len > 0 and first[0] == '/') return true;
     if (std.mem.eql(u8, first, "zigts") or std.mem.eql(u8, first, "zig")) return true;
     return registry.findByName(first) != null;
@@ -103,12 +108,15 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("Explicit local commands:\n");
     try w.writeAll("  /meta  /features  /modules  /rule <code>  /search <term>\n");
     try w.writeAll("  /verify <path...>  /check <path>  /build <step>  /test [step]\n");
+    try w.writeAll("  /resume  /new\n");
     try w.writeAll("  zigts meta|features|modules|search|describe-rule|verify-paths|verify-modules|check ...\n");
     try w.writeAll("  zig build <step>  zig build test[-...] \n\n");
     try w.writeAll("Approval flags (pass on launch):\n");
     try w.writeAll("  --yes      auto-approve every verified edit\n");
     try w.writeAll("  --no-edit  auto-reject every verified edit\n");
     try w.writeAll("Session flags (pass on launch):\n");
+    try w.writeAll("  --session-id <id>          resume or create a named session\n");
+    try w.writeAll("  --resume                   resume the newest session for this cwd\n");
     try w.writeAll("  --no-session               disable session persistence for this run\n");
     try w.writeAll("  --no-persist-tool-output   omit tool output bodies from persisted session\n\n");
     try w.writeAll("Registered tools:\n");
@@ -127,10 +135,9 @@ pub fn run(
     policy: loop.ApprovalPolicy,
     no_session: bool,
     no_persist_tool_output: bool,
+    session_id: ?[]const u8,
+    resume_latest: bool,
 ) !void {
-    // consumed by Batch 4 session persistence
-    _ = no_session;
-    _ = no_persist_tool_output;
     const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
@@ -138,7 +145,12 @@ pub fn run(
         _ = std.c.write(std.c.STDOUT_FILENO, banner.ptr, banner.len);
     }
 
-    var session = try agent.initFromEnvWithRegistry(allocator, registry);
+    var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+        .no_session = no_session,
+        .no_persist_tool_output = no_persist_tool_output,
+        .session_id = session_id,
+        .resume_latest = resume_latest,
+    });
     defer session.deinit(allocator);
 
     var line_buf: [64 * 1024]u8 = undefined;
@@ -183,6 +195,8 @@ pub fn run(
                     }
                 }
             },
+            .session_resume => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, true),
+            .session_new => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, false),
         }
     }
 }
