@@ -9,6 +9,7 @@ const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
 const repl = @import("repl.zig");
 const tui_app = @import("tui/app.zig");
+const loop = @import("loop.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
@@ -51,16 +52,54 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     return reg;
 }
 
+/// Module-level argv snapshot. Callers that can supply argv (currently
+/// `zigts_main.zig` for the `zigts expert` path) set this immediately before
+/// invoking `run`. Callers without argv access (the deprecated
+/// `zigttp expert` path in `dev_cli.zig`) leave it null; `run` then treats
+/// the policy as `.ask`. Kept module-local so the public `run(allocator)`
+/// signature remains stable.
+var captured_argv: ?[]const []const u8 = null;
+
+pub fn setInvocationArgv(argv: []const []const u8) void {
+    captured_argv = argv;
+}
+
 pub fn run(allocator: std.mem.Allocator) !void {
+    const argv = captured_argv orelse &[_][]const u8{};
+    const policy = parseApprovalFlags(argv) catch |err| switch (err) {
+        error.MutuallyExclusiveApprovalFlags => {
+            const msg = "error: --yes and --no-edit are mutually exclusive\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+    };
+
     var registry = try buildRegistry(allocator);
     defer registry.deinit(allocator);
 
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        try tui_app.run(allocator, &registry);
+        try tui_app.run(allocator, &registry, policy);
     } else {
-        try repl.run(allocator, &registry);
+        try repl.run(allocator, &registry, policy);
     }
+}
+
+/// Scan argv for `--yes` and `--no-edit` and fold into an `ApprovalPolicy`.
+/// Unknown flags are ignored so future slices can add their own without
+/// breaking this parser. Both flags present returns an error so the caller
+/// can report a clear diagnostic.
+pub fn parseApprovalFlags(argv: []const []const u8) !loop.ApprovalPolicy {
+    var saw_yes = false;
+    var saw_no_edit = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--yes")) saw_yes = true;
+        if (std.mem.eql(u8, arg, "--no-edit")) saw_no_edit = true;
+    }
+    if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
+    if (saw_yes) return .auto_approve;
+    if (saw_no_edit) return .auto_reject;
+    return .ask;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +150,34 @@ fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator
         },
         else => return error.TestFailed,
     }
+}
+
+test "parseApprovalFlags: empty argv yields ask" {
+    const policy = try parseApprovalFlags(&.{});
+    try testing.expectEqual(loop.ApprovalPolicy.ask, policy);
+}
+
+test "parseApprovalFlags: --yes yields auto_approve" {
+    const argv = [_][]const u8{ "zigts", "expert", "--yes" };
+    const policy = try parseApprovalFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, policy);
+}
+
+test "parseApprovalFlags: --no-edit yields auto_reject" {
+    const argv = [_][]const u8{ "zigts", "expert", "--no-edit" };
+    const policy = try parseApprovalFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_reject, policy);
+}
+
+test "parseApprovalFlags: both flags error" {
+    const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-edit" };
+    try testing.expectError(error.MutuallyExclusiveApprovalFlags, parseApprovalFlags(argv[0..]));
+}
+
+test "parseApprovalFlags: unknown flag is ignored and --yes still wins" {
+    const argv = [_][]const u8{ "zigts", "expert", "--foo", "--yes" };
+    const policy = try parseApprovalFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, policy);
 }
 
 test "buildRegistry + dispatchLine end-to-end against every tool" {
