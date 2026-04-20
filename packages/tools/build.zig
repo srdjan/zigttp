@@ -28,20 +28,12 @@ pub fn build(b: *std.Build) void {
     zigts_cli_mod.addImport("zigts", zigts_mod);
     zigts_cli_mod.addImport("project_config", project_config_mod);
 
-    // Embedded zigts-expert skill content, consumed by the pi package's
-    // `expert_persona` bundle builder. Rooted inside the skill directory so
-    // `@embedFile` can reach the sibling markdown files directly.
+    // Embedded zigts-expert catalog (skill prose + vendored canonical
+    // handler examples), consumed by the pi package's `expert_persona`
+    // bundle builder. Rooted inside the skill directory so @embedFile
+    // reaches the sibling markdown and example subtrees directly.
     _ = b.addModule("zigts_expert_skill", .{
         .root_source_file = b.path("src/skills/zigts-expert/skill_data.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Canonical zigts handler examples consumed by expert_persona as
-    // few-shot content. Rooted at examples/ so @embedFile reaches the
-    // sibling subdirectories without escaping the module-path sandbox.
-    _ = b.addModule("zigts_expert_examples", .{
-        .root_source_file = b.path("../../examples/data.zig"),
         .target = target,
         .optimize = optimize,
     });
