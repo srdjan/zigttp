@@ -14,6 +14,8 @@ const std = @import("std");
 const zigts = @import("zigts");
 const file_io = zigts.file_io;
 
+const events_mod = @import("events.zig");
+
 const testing = std.testing;
 
 /// Lowercase hex SHA-256 of the workspace realpath. 64 chars.
@@ -85,6 +87,84 @@ pub fn writeWorkspacePointer(
     defer allocator.free(body);
 
     try file_io.writeFile(allocator, pointer_path, body);
+}
+
+pub const SessionEntry = struct {
+    session_id: []const u8,
+    dir_path: []const u8,
+    created_at_unix_ms: i64,
+
+    pub fn deinit(self: *SessionEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_id);
+        allocator.free(self.dir_path);
+    }
+};
+
+/// Enumerates sessions under `$ROOT/<cwd_hash_hex>/`. Returns an owned
+/// slice sorted newest-first by `created_at_unix_ms`. Each entry is
+/// owned; caller must call `entry.deinit(allocator)` on each, then
+/// `allocator.free(slice)`.
+///
+/// Missing root or missing cwd-hash dir -> returns an empty slice, not
+/// an error. `created_at_unix_ms` is read from `<dir>/meta.json`.
+/// Sessions with a missing or unreadable meta.json are skipped.
+pub fn listSessions(
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    cwd_hash_hex: []const u8,
+) ![]SessionEntry {
+    var list: std.ArrayListUnmanaged(SessionEntry) = .empty;
+    errdefer {
+        for (list.items) |*entry| entry.deinit(allocator);
+        list.deinit(allocator);
+    }
+
+    const cwd_dir_path = try std.fs.path.join(allocator, &.{ root_path, cwd_hash_hex });
+    defer allocator.free(cwd_dir_path);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var cwd_dir = std.Io.Dir.openDirAbsolute(io, cwd_dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return try list.toOwnedSlice(allocator),
+        else => return err,
+    };
+    defer cwd_dir.close(io);
+
+    var it = cwd_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+
+        const session_dir_path = try std.fs.path.join(allocator, &.{ cwd_dir_path, entry.name });
+        errdefer allocator.free(session_dir_path);
+
+        const meta_path = try std.fs.path.join(allocator, &.{ session_dir_path, "meta.json" });
+        defer allocator.free(meta_path);
+
+        var meta = events_mod.readMeta(allocator, meta_path) catch {
+            allocator.free(session_dir_path);
+            continue;
+        };
+        defer events_mod.freeMeta(allocator, &meta);
+
+        const session_id = try allocator.dupe(u8, entry.name);
+        errdefer allocator.free(session_id);
+
+        try list.append(allocator, .{
+            .session_id = session_id,
+            .dir_path = session_dir_path,
+            .created_at_unix_ms = meta.created_at_unix_ms,
+        });
+    }
+
+    const items = try list.toOwnedSlice(allocator);
+    std.mem.sort(SessionEntry, items, {}, sessionNewestFirst);
+    return items;
+}
+
+fn sessionNewestFirst(_: void, a: SessionEntry, b: SessionEntry) bool {
+    return a.created_at_unix_ms > b.created_at_unix_ms;
 }
 
 fn hexLowerFixed(digest: [std.crypto.hash.sha2.Sha256.digest_length]u8) CwdHash {
@@ -259,4 +339,107 @@ test "writeWorkspacePointer round-trips with trailing newline" {
     const contents2 = try file_io.readFile(allocator, pointer_path, 4096);
     defer allocator.free(contents2);
     try testing.expectEqualStrings(expected, contents2);
+}
+
+fn writeMetaAt(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    session_id: []const u8,
+    created_at_unix_ms: i64,
+) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), dir_path);
+
+    const meta_path = try std.fs.path.join(allocator, &.{ dir_path, "meta.json" });
+    defer allocator.free(meta_path);
+
+    try events_mod.writeMeta(allocator, meta_path, .{
+        .session_id = session_id,
+        .workspace_realpath = "/workspace/test",
+        .created_at_unix_ms = created_at_unix_ms,
+    });
+}
+
+fn freeSessionList(allocator: std.mem.Allocator, list: []SessionEntry) void {
+    for (list) |*entry| entry.deinit(allocator);
+    allocator.free(list);
+}
+
+test "listSessions returns an empty slice when the root is missing" {
+    const allocator = testing.allocator;
+    const hash = try cwdHashFull(allocator);
+    const entries = try listSessions(allocator, "/tmp/zigttp-nonexistent-root-xyz", hash[0..]);
+    defer freeSessionList(allocator, entries);
+    try testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "listSessions returns an empty slice when the cwd-hash dir is missing" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const hash = try cwdHashFull(allocator);
+    const entries = try listSessions(allocator, tmp.abs_path, hash[0..]);
+    defer freeSessionList(allocator, entries);
+    try testing.expectEqual(@as(usize, 0), entries.len);
+}
+
+test "listSessions returns three sessions sorted newest-first" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const fake_hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const cwd_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, fake_hash });
+    defer allocator.free(cwd_dir);
+
+    const dir_a = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-a" });
+    defer allocator.free(dir_a);
+    const dir_b = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-b" });
+    defer allocator.free(dir_b);
+    const dir_c = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-c" });
+    defer allocator.free(dir_c);
+
+    try writeMetaAt(allocator, dir_a, "sess-a", 100);
+    try writeMetaAt(allocator, dir_b, "sess-b", 300);
+    try writeMetaAt(allocator, dir_c, "sess-c", 200);
+
+    const entries = try listSessions(allocator, tmp.abs_path, fake_hash);
+    defer freeSessionList(allocator, entries);
+
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqualStrings("sess-b", entries[0].session_id);
+    try testing.expectEqualStrings("sess-c", entries[1].session_id);
+    try testing.expectEqualStrings("sess-a", entries[2].session_id);
+    try testing.expectEqual(@as(i64, 300), entries[0].created_at_unix_ms);
+    try testing.expectEqual(@as(i64, 200), entries[1].created_at_unix_ms);
+    try testing.expectEqual(@as(i64, 100), entries[2].created_at_unix_ms);
+}
+
+test "listSessions skips session dirs that have no meta.json" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    const fake_hash = "1111111111111111111111111111111111111111111111111111111111111111";
+    const cwd_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, fake_hash });
+    defer allocator.free(cwd_dir);
+
+    const good_dir = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-good" });
+    defer allocator.free(good_dir);
+    const bare_dir = try std.fs.path.join(allocator, &.{ cwd_dir, "sess-bare" });
+    defer allocator.free(bare_dir);
+
+    try writeMetaAt(allocator, good_dir, "sess-good", 500);
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), bare_dir);
+
+    const entries = try listSessions(allocator, tmp.abs_path, fake_hash);
+    defer freeSessionList(allocator, entries);
+
+    try testing.expectEqual(@as(usize, 1), entries.len);
+    try testing.expectEqualStrings("sess-good", entries[0].session_id);
 }
