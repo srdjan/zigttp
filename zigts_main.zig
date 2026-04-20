@@ -20,20 +20,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !void {
-    if (argv.len == 0) {
-        try pi_app.run(allocator);
-        return;
-    }
-
+    // Unknown long flags are reserved for future slices (--print, --mode, ...)
+    // and flow through to pi_app unchanged. Bare positional tokens remain
+    // unsupported: `zigts expert` does not take subcommands.
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
             printExpertHelp();
             return;
         }
+        if (std.mem.startsWith(u8, arg, "--")) continue;
+        std.debug.print("zigts expert does not accept subcommands; use direct commands like `zigts meta` or `zigts verify-paths`.\n", .{});
+        return error.InvalidArgument;
     }
 
-    std.debug.print("zigts expert does not accept subcommands; use direct commands like `zigts meta` or `zigts verify-paths`.\n", .{});
-    return error.InvalidArgument;
+    pi_app.setInvocationArgv(argv);
+    try pi_app.run(allocator);
 }
 
 fn printExpertHelp() void {
@@ -41,7 +42,11 @@ fn printExpertHelp() void {
         \\zigts expert - interactive coding agent for zigttp
         \\
         \\Usage:
-        \\  zigts expert
+        \\  zigts expert [--yes | --no-edit]
+        \\
+        \\Flags:
+        \\  --yes      auto-approve every verified edit (non-interactive)
+        \\  --no-edit  auto-reject every verified edit (veto-only)
         \\
         \\Launches the interactive compiler-in-the-loop expert session.
         \\For machine-facing tooling, use direct commands such as:
