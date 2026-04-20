@@ -11,14 +11,14 @@
 const std = @import("std");
 const events = @import("events.zig");
 
-pub const ParseError = error{
+const ParseError = error{
     MalformedSse,
     MissingType,
     UnknownEventType,
     UnexpectedJsonShape,
 };
 
-pub const LineRecord = struct {
+const LineRecord = struct {
     event_name: []const u8,
     data: []const u8,
 };
@@ -28,11 +28,11 @@ pub const LineRecord = struct {
 /// optional leading space after the colon. A blank line dispatches the
 /// accumulated record. `event:` sets the name; `data:` lines are joined with
 /// `\n`. `:`-prefixed comment lines and unknown fields are ignored.
-pub const RecordIterator = struct {
+const RecordIterator = struct {
     input: []const u8,
     pos: usize = 0,
 
-    pub fn next(self: *RecordIterator, arena: std.mem.Allocator) !?LineRecord {
+    fn next(self: *RecordIterator, arena: std.mem.Allocator) !?LineRecord {
         var event_name: []const u8 = "";
         var data_buf: std.ArrayListUnmanaged(u8) = .empty;
         var have_any_field = false;
@@ -100,7 +100,7 @@ pub fn parseAll(arena: std.mem.Allocator, input: []const u8) ![]events.Event {
     return try out.toOwnedSlice(arena);
 }
 
-pub fn decodeRecord(
+fn decodeRecord(
     arena: std.mem.Allocator,
     record: LineRecord,
 ) !events.Event {
