@@ -42,11 +42,13 @@ fn printExpertHelp() void {
         \\zigts expert - interactive coding agent for zigttp
         \\
         \\Usage:
-        \\  zigts expert [--yes | --no-edit]
+        \\  zigts expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
         \\
         \\Flags:
-        \\  --yes      auto-approve every verified edit (non-interactive)
-        \\  --no-edit  auto-reject every verified edit (veto-only)
+        \\  --yes                      auto-approve every verified edit (non-interactive)
+        \\  --no-edit                  auto-reject every verified edit (veto-only)
+        \\  --no-session               disable session persistence for this run
+        \\  --no-persist-tool-output   omit tool output bodies from persisted session
         \\
         \\Launches the interactive compiler-in-the-loop expert session.
         \\For machine-facing tooling, use direct commands such as:

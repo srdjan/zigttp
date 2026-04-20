@@ -26,7 +26,12 @@ pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
     policy: loop.ApprovalPolicy,
+    no_session: bool,
+    no_persist_tool_output: bool,
 ) !void {
+    // consumed by Batch 4 session persistence
+    _ = no_session;
+    _ = no_persist_tool_output;
     const approval_fn = selectApprovalFn(policy);
 
     var raw = try term.RawMode.enter();
