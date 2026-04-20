@@ -107,7 +107,10 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("  zig build <step>  zig build test[-...] \n\n");
     try w.writeAll("Approval flags (pass on launch):\n");
     try w.writeAll("  --yes      auto-approve every verified edit\n");
-    try w.writeAll("  --no-edit  auto-reject every verified edit\n\n");
+    try w.writeAll("  --no-edit  auto-reject every verified edit\n");
+    try w.writeAll("Session flags (pass on launch):\n");
+    try w.writeAll("  --no-session               disable session persistence for this run\n");
+    try w.writeAll("  --no-persist-tool-output   omit tool output bodies from persisted session\n\n");
     try w.writeAll("Registered tools:\n");
     for (registry.list()) |entry| {
         try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
@@ -122,7 +125,12 @@ pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
     policy: loop.ApprovalPolicy,
+    no_session: bool,
+    no_persist_tool_output: bool,
 ) !void {
+    // consumed by Batch 4 session persistence
+    _ = no_session;
+    _ = no_persist_tool_output;
     const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
