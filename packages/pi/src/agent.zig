@@ -1,11 +1,11 @@
 //! Expert session wrapper around `loop.runTurn`. Carries a backend union
-//! that is either a `StubClient` (default, zero-config, fixed reply) or a
-//! live client built from an API key and a system prompt. Callers swap
+//! that is either a `StubClient` (default, zero-config, fixed reply) or an
+//! Anthropic client built from an API key and a system prompt. Callers swap
 //! backends at session construction; the rest of the loop is agnostic.
 //!
 //! The session owns a long-lived `Transcript` that grows across turns
-//! plus, in the live path, an allocator-owned copy of the system prompt
-//! so the persona bytes outlive whatever buffer produced them.
+//! plus, for the Anthropic backend, an allocator-owned copy of the system
+//! prompt so the persona bytes outlive whatever buffer produced them.
 //! `runOneTurn` drives one pass through the loop driver, then renders
 //! the latest appended transcript entry to an owned `[]u8` the caller
 //! frees. Rendering the whole transcript per turn would re-print
@@ -76,8 +76,8 @@ pub const Backend = union(enum) {
 pub const AgentSession = struct {
     transcript: Transcript = .{},
     backend: Backend = .{ .stub = .{} },
-    /// Allocator-owned copy of the system prompt bytes backing the live
-    /// client's Config. Null for the stub path.
+    /// Allocator-owned copy of the system prompt bytes backing the
+    /// Anthropic client's Config. Null for the stub path.
     system_prompt_owned: ?[]u8 = null,
     tools_json_owned: ?[]u8 = null,
 
@@ -100,7 +100,7 @@ pub const AgentSession = struct {
     /// Constructs a session whose backend is a real Anthropic client.
     /// Dupes the system prompt so the caller's buffer can be freed
     /// independently. Dupes the API key for the same reason.
-    pub fn initLive(
+    pub fn initAnthropic(
         allocator: std.mem.Allocator,
         api_key: []const u8,
         system_prompt: []const u8,
@@ -148,7 +148,7 @@ pub const AgentSession = struct {
     }
 };
 
-/// Build a session from the environment (`ANTHROPIC_API_KEY` -> live,
+/// Build a session from the environment (`ANTHROPIC_API_KEY` -> anthropic,
 /// else stub) and, unless `config.no_session` is true, materialize the
 /// on-disk session directory, write `meta.json` + `workspace.txt`, and
 /// wire up `events.jsonl` persistence.
@@ -174,7 +174,7 @@ pub fn initFromEnvWithSessionConfig(
         else
             null;
         defer if (tools_json) |json| allocator.free(json);
-        break :blk try AgentSession.initLive(allocator, api_key, system_prompt, tools_json);
+        break :blk try AgentSession.initAnthropic(allocator, api_key, system_prompt, tools_json);
     };
     errdefer session.deinit(allocator);
 
@@ -381,8 +381,8 @@ test "StubClient ignores user_text and always returns the stub reply" {
     }
 }
 
-test "initLive dupes api_key and system_prompt, deinit releases both" {
-    var session = try AgentSession.initLive(
+test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
+    var session = try AgentSession.initAnthropic(
         testing.allocator,
         "sk-ant-test",
         "you are a zigts expert",
@@ -398,7 +398,7 @@ test "initLive dupes api_key and system_prompt, deinit releases both" {
 }
 
 test "modelClient returns an anthropic client vtable when backend is anthropic" {
-    var session = try AgentSession.initLive(testing.allocator, "k", "p", null);
+    var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
 
     const mc = session.modelClient();
