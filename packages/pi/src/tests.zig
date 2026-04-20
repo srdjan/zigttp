@@ -44,4 +44,5 @@ comptime {
     _ = @import("session/paths.zig");
     _ = @import("session/events.zig");
     _ = @import("session/persister.zig");
+    _ = @import("session/reconstructor.zig");
 }
