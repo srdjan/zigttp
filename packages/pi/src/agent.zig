@@ -19,6 +19,7 @@ const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("anthropic/client.zig");
 const tools_schema = @import("anthropic/tools_schema.zig");
 const expert_persona = @import("expert_persona.zig");
+const context_loader = @import("context/loader.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
@@ -133,7 +134,9 @@ pub fn initFromEnvWithRegistry(
 ) !AgentSession {
     const api_key = envVar("ANTHROPIC_API_KEY") orelse return initStub();
 
-    const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+    const ctx = try context_loader.loadProjectContext(allocator);
+    defer if (ctx) |b| allocator.free(b);
+    const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, ctx);
     defer allocator.free(system_prompt);
     const tools_json = if (registry) |reg|
         try buildToolsJson(allocator, reg)
