@@ -28,10 +28,9 @@ pub fn run(
     policy: loop.ApprovalPolicy,
     no_session: bool,
     no_persist_tool_output: bool,
+    session_id: ?[]const u8,
+    resume_latest: bool,
 ) !void {
-    // consumed by Batch 4 session persistence
-    _ = no_session;
-    _ = no_persist_tool_output;
     const approval_fn = selectApprovalFn(policy);
 
     var raw = try term.RawMode.enter();
@@ -40,7 +39,12 @@ pub fn run(
     var editor: LineEditor = .{};
     defer editor.deinit(allocator);
 
-    var session = try agent.initFromEnvWithRegistry(allocator, registry);
+    var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+        .no_session = no_session,
+        .no_persist_tool_output = no_persist_tool_output,
+        .session_id = session_id,
+        .resume_latest = resume_latest,
+    });
     defer session.deinit(allocator);
 
     const banner = "zigts expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
@@ -118,6 +122,8 @@ pub fn run(
                             const stdout = StdoutAdapter{};
                             try printBody(&stdout, result.body);
                         },
+                        .session_resume => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, true),
+                        .session_new => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, false),
                     }
 
                     editor.clear();
@@ -217,6 +223,7 @@ fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
         .auto_reject => loop.autoReject,
     };
 }
+
 
 // ---------------------------------------------------------------------------
 // Tests (byte classification only; the event loop itself is I/O-driven)

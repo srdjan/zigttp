@@ -20,9 +20,25 @@ const anthropic_client = @import("anthropic/client.zig");
 const tools_schema = @import("anthropic/tools_schema.zig");
 const expert_persona = @import("expert_persona.zig");
 const context_loader = @import("context/loader.zig");
+const session_id_mod = @import("session/session_id.zig");
+const session_paths = @import("session/paths.zig");
+const session_events = @import("session/events.zig");
+const persister = @import("session/persister.zig");
+const reconstructor = @import("session/reconstructor.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
+
+pub const SessionConfig = struct {
+    no_session: bool = false,
+    no_persist_tool_output: bool = false,
+    /// Explicit session id. If both this and `resume_latest` are null/false,
+    /// a fresh id is generated on init.
+    session_id: ?[]const u8 = null,
+    /// Load the newest session for this cwd. Mutually exclusive with
+    /// `session_id`.
+    resume_latest: bool = false,
+};
 
 pub const stub_reply_text =
     "expert offline: no live model backend configured; set ANTHROPIC_API_KEY to enable expert mode";
@@ -65,6 +81,18 @@ pub const AgentSession = struct {
     system_prompt_owned: ?[]u8 = null,
     tools_json_owned: ?[]u8 = null,
 
+    session_id: ?[]u8 = null,
+    session_dir: ?[]u8 = null,
+    events_path: ?[]u8 = null,
+    meta_path: ?[]u8 = null,
+    persist_opts: persister.AppendOptions = .{},
+    /// /resume sets this; the first `runOneTurn` after resume passes
+    /// `replay_mode = true` to the loop and then clears the flag.
+    replay_next_turn: bool = false,
+    /// Cursor into `transcript.entries`. Entries from this index forward
+    /// are the ones that need to be persisted next.
+    last_persisted_len: usize = 0,
+
     pub fn initStub() AgentSession {
         return .{};
     }
@@ -102,6 +130,10 @@ pub const AgentSession = struct {
         self.transcript.deinit(allocator);
         if (self.system_prompt_owned) |s| allocator.free(s);
         if (self.tools_json_owned) |json| allocator.free(json);
+        if (self.session_id) |s| allocator.free(s);
+        if (self.session_dir) |s| allocator.free(s);
+        if (self.events_path) |s| allocator.free(s);
+        if (self.meta_path) |s| allocator.free(s);
         switch (self.backend) {
             .stub => {},
             .live => |*c| allocator.free(c.config.api_key),
@@ -132,23 +164,103 @@ pub fn initFromEnvWithRegistry(
     allocator: std.mem.Allocator,
     registry: ?*const Registry,
 ) !AgentSession {
-    const api_key = envVar("ANTHROPIC_API_KEY") orelse return initStub();
+    return initFromEnvWithSessionConfig(allocator, registry, .{ .no_session = true });
+}
 
-    const ctx = try context_loader.loadProjectContext(allocator);
-    defer if (ctx) |b| allocator.free(b);
-    const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, ctx);
-    defer allocator.free(system_prompt);
-    const tools_json = if (registry) |reg|
-        try buildToolsJson(allocator, reg)
-    else
-        null;
-    defer if (tools_json) |json| allocator.free(json);
-    return try AgentSession.initLive(allocator, api_key, system_prompt, tools_json);
+/// Build a session from the environment (`ANTHROPIC_API_KEY` -> live,
+/// else stub) and, unless `config.no_session` is true, materialize the
+/// on-disk session directory, write `meta.json` + `workspace.txt`, and
+/// wire up `events.jsonl` persistence.
+///
+/// When `config.resume_latest` is set, the newest existing session for
+/// this cwd is loaded and the transcript is replaced with a reconstruction
+/// of its events log; the first subsequent turn runs in replay mode.
+pub fn initFromEnvWithSessionConfig(
+    allocator: std.mem.Allocator,
+    registry: ?*const Registry,
+    config: SessionConfig,
+) !AgentSession {
+    std.debug.assert(!(config.resume_latest and config.session_id != null));
+
+    var session = blk: {
+        const api_key = envVar("ANTHROPIC_API_KEY") orelse break :blk AgentSession.initStub();
+        const ctx = try context_loader.loadProjectContext(allocator);
+        defer if (ctx) |b| allocator.free(b);
+        const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, ctx);
+        defer allocator.free(system_prompt);
+        const tools_json = if (registry) |reg|
+            try buildToolsJson(allocator, reg)
+        else
+            null;
+        defer if (tools_json) |json| allocator.free(json);
+        break :blk try AgentSession.initLive(allocator, api_key, system_prompt, tools_json);
+    };
+    errdefer session.deinit(allocator);
+
+    if (config.no_session) return session;
+
+    session.persist_opts = .{ .no_persist_tool_output = config.no_persist_tool_output };
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const realpath = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
+    defer allocator.free(realpath);
+
+    var resumed = false;
+    const sid: []u8 = pick: {
+        if (config.session_id) |id| break :pick try allocator.dupe(u8, id);
+        if (config.resume_latest) {
+            const root = try session_paths.sessionRoot(allocator);
+            defer allocator.free(root);
+            const hash = try session_paths.cwdHashFull(allocator);
+            const entries = try session_paths.listSessions(allocator, root, hash[0..]);
+            defer {
+                for (entries) |*e| e.deinit(allocator);
+                allocator.free(entries);
+            }
+            if (entries.len > 0) {
+                resumed = true;
+                break :pick try allocator.dupe(u8, entries[0].session_id);
+            }
+        }
+        break :pick try session_id_mod.generate(allocator);
+    };
+    session.session_id = sid;
+
+    const dir = try session_paths.sessionDir(allocator, sid);
+    session.session_dir = dir;
+    try session_paths.writeWorkspacePointer(allocator, dir, realpath);
+
+    session.events_path = try std.fs.path.join(allocator, &.{ dir, "events.jsonl" });
+    session.meta_path = try std.fs.path.join(allocator, &.{ dir, "meta.json" });
+
+    if (resumed) {
+        var tr = try reconstructor.reconstructTranscript(allocator, session.events_path.?, null);
+        session.transcript.deinit(allocator);
+        session.transcript = tr;
+        session.last_persisted_len = tr.len();
+        session.replay_next_turn = true;
+    } else {
+        try session_events.writeMeta(allocator, session.meta_path.?, .{
+            .session_id = sid,
+            .workspace_realpath = realpath,
+            .created_at_unix_ms = nowUnixMs(),
+        });
+    }
+
+    return session;
 }
 
 fn envVar(name_z: [:0]const u8) ?[]const u8 {
     const raw = std.c.getenv(name_z) orelse return null;
     return std.mem.sliceTo(raw, 0);
+}
+
+fn nowUnixMs() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 fn initStub() AgentSession {
@@ -177,17 +289,52 @@ pub fn runOneTurn(
     user_text: []const u8,
     approval_fn: ?loop.ApprovalFn,
 ) ![]u8 {
+    const replay = session.replay_next_turn;
+    session.replay_next_turn = false;
+
     _ = try loop.runTurnWith(
         allocator,
         session.modelClient(),
         registry,
         &session.transcript,
         user_text,
-        .{ .approval_fn = approval_fn },
+        .{ .approval_fn = approval_fn, .replay_mode = replay },
     );
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
+
+    if (session.events_path) |path| {
+        const entries = tr.entries.items;
+        while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
+            try persister.appendEntry(
+                allocator,
+                path,
+                &entries[session.last_persisted_len],
+                session.persist_opts,
+            );
+        }
+    }
+
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
+}
+
+/// Tear down `session` and rebuild it in place from the same environment,
+/// carrying forward `no_session` / `no_persist_tool_output` and honoring
+/// `resume_latest`. Used by `/resume` (pass true) and `/new` (pass false).
+pub fn rebuildSession(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    registry: *const Registry,
+    no_session: bool,
+    no_persist_tool_output: bool,
+    resume_latest: bool,
+) !void {
+    session.deinit(allocator);
+    session.* = try initFromEnvWithSessionConfig(allocator, registry, .{
+        .no_session = no_session,
+        .no_persist_tool_output = no_persist_tool_output,
+        .resume_latest = resume_latest,
+    });
 }
 
 // ---------------------------------------------------------------------------
