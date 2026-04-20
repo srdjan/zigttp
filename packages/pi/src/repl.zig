@@ -9,9 +9,11 @@ const registry_mod = @import("registry/registry.zig");
 const agent = @import("agent.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
+const app = @import("app.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
+const ExpertFlags = app.ExpertFlags;
 
 pub const DispatchOutcome = union(enum) {
     noop,
@@ -135,11 +137,8 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
+    flags: ExpertFlags,
     policy: loop.ApprovalPolicy,
-    no_session: bool,
-    no_persist_tool_output: bool,
-    session_id: ?[]const u8,
-    resume_latest: bool,
 ) !void {
     const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
@@ -149,10 +148,10 @@ pub fn run(
     }
 
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
-        .no_session = no_session,
-        .no_persist_tool_output = no_persist_tool_output,
-        .session_id = session_id,
-        .resume_latest = resume_latest,
+        .no_session = flags.no_session,
+        .no_persist_tool_output = flags.no_persist_tool_output,
+        .session_id = flags.session_id,
+        .resume_latest = flags.resume_latest,
     });
     defer session.deinit(allocator);
 
@@ -198,8 +197,8 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, true),
-            .session_new => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, false),
+            .session_resume => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, true),
+            .session_new => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, false),
         }
     }
 }

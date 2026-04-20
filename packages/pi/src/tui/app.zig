@@ -13,10 +13,12 @@ const line_editor = @import("line_editor.zig");
 const repl = @import("../repl.zig");
 const agent = @import("../agent.zig");
 const loop = @import("../loop.zig");
+const app = @import("../app.zig");
 
 const LineEditor = line_editor.LineEditor;
 const KeyEvent = line_editor.KeyEvent;
 const Registry = repl.Registry;
+const ExpertFlags = app.ExpertFlags;
 
 // The redraw prefix is built at comptime so one syscall covers both the
 // clear-line escape and the label instead of two per keystroke.
@@ -25,11 +27,8 @@ const prompt_prefix = "\r\x1b[2K" ++ "expert> ";
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
+    flags: ExpertFlags,
     policy: loop.ApprovalPolicy,
-    no_session: bool,
-    no_persist_tool_output: bool,
-    session_id: ?[]const u8,
-    resume_latest: bool,
 ) !void {
     const approval_fn = selectApprovalFn(policy);
 
@@ -40,10 +39,10 @@ pub fn run(
     defer editor.deinit(allocator);
 
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
-        .no_session = no_session,
-        .no_persist_tool_output = no_persist_tool_output,
-        .session_id = session_id,
-        .resume_latest = resume_latest,
+        .no_session = flags.no_session,
+        .no_persist_tool_output = flags.no_persist_tool_output,
+        .session_id = flags.session_id,
+        .resume_latest = flags.resume_latest,
     });
     defer session.deinit(allocator);
 
@@ -122,8 +121,8 @@ pub fn run(
                             const stdout = StdoutAdapter{};
                             try printBody(&stdout, result.body);
                         },
-                        .session_resume => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, true),
-                        .session_new => try agent.rebuildSession(allocator, &session, registry, no_session, no_persist_tool_output, false),
+                        .session_resume => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, true),
+                        .session_new => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, false),
                     }
 
                     editor.clear();
