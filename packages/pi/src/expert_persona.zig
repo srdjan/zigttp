@@ -15,7 +15,6 @@ const zigts_cli = @import("zigts_cli");
 const expert_meta = zigts_cli.expert_meta;
 const json_diagnostics = zigts_cli.json_diagnostics;
 const skill = @import("zigts_expert_skill");
-const examples = @import("zigts_expert_examples");
 
 // The tool list inside the prologue below must stay in sync with
 // `pi_app.buildRegistry`. Drift is a soft degradation, not a hard break:
@@ -113,9 +112,9 @@ pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
     try json_diagnostics.writeModulesText(w);
 
     try writeBanner(w, "CANONICAL EXAMPLES");
-    try writeExample(w, "basic handler (examples/handler/handler.ts)", examples.basic_handler);
-    try writeExample(w, "routing with virtual modules (examples/routing/router.ts)", examples.routing_router);
-    try writeExample(w, "cache + service + routing (examples/system/users.ts)", examples.system_users);
+    try writeExample(w, "basic handler (examples/handler/handler.ts)", skill.basic_handler);
+    try writeExample(w, "routing with virtual modules (examples/routing/router.ts)", skill.routing_router);
+    try writeExample(w, "cache + service + routing (examples/system/users.ts)", skill.system_users);
 
     try writeBanner(w, "POLICY METADATA");
     const info = expert_meta.compute();
