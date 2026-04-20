@@ -55,6 +55,7 @@ pub const RunOptions = struct {
     max_model_roundtrips_per_turn: u8 = 8,
     max_tool_calls_per_turn: usize = 16,
     max_tool_batch_size: usize = 8,
+    replay_mode: bool = false,
 };
 
 const PreparedEdit = struct {
@@ -132,7 +133,7 @@ pub fn runTurnWith(
                     .content = prepared.edit.content,
                     .before = prepared.edit.before,
                 });
-                if (outcome.ok) {
+                if (outcome.ok and !options.replay_mode) {
                     if (options.approval_fn) |approve| {
                         if (!try approve(prepared.edit.file)) {
                             try transcript.append(allocator, .{ .tool_result = .{
@@ -594,4 +595,119 @@ test "autoReject returns false for any file" {
 
 test "ApprovalPolicy enum is exported" {
     try testing.expect(@sizeOf(ApprovalPolicy) > 0);
+}
+
+test "replay_mode skips filesystem writes for a verified edit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "src/handler.ts",
+            .content = clean_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root, .replay_mode = true },
+    );
+
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    switch (tr.at(tr.len() - 1).*) {
+        .proof_card => {},
+        else => return error.TestFailed,
+    }
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
+}
+
+test "replay_mode skips the approval callback" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "handler.ts",
+            .content = clean_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add a GET route",
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = autoReject,
+            .replay_mode = true,
+        },
+    );
+
+    switch (tr.at(tr.len() - 1).*) {
+        .proof_card => {},
+        else => return error.TestFailed,
+    }
+    try testing.expect(!file_io.fileExists(testing.allocator, written_path));
+}
+
+test "replay_mode off preserves existing write behavior" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .edit = .{
+            .file = "src/handler.ts",
+            .content = clean_handler,
+            .before = null,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root, .replay_mode = false },
+    );
+
+    switch (tr.at(tr.len() - 1).*) {
+        .proof_card => {},
+        else => return error.TestFailed,
+    }
+    const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings(clean_handler, written);
 }
