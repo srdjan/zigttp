@@ -36,4 +36,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Canonical zigts handler examples consumed by expert_persona as
+    // few-shot content. Rooted at examples/ so @embedFile reaches the
+    // sibling subdirectories without escaping the module-path sandbox.
+    _ = b.addModule("zigts_expert_examples", .{
+        .root_source_file = b.path("../../examples/data.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 }
