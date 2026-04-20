@@ -12,6 +12,7 @@ const term = @import("term.zig");
 const line_editor = @import("line_editor.zig");
 const repl = @import("../repl.zig");
 const agent = @import("../agent.zig");
+const loop = @import("../loop.zig");
 
 const LineEditor = line_editor.LineEditor;
 const KeyEvent = line_editor.KeyEvent;
@@ -24,7 +25,10 @@ const prompt_prefix = "\r\x1b[2K" ++ "expert> ";
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
+    policy: loop.ApprovalPolicy,
 ) !void {
+    const approval_fn = selectApprovalFn(policy);
+
     var raw = try term.RawMode.enter();
     defer raw.exit();
 
@@ -76,7 +80,7 @@ pub fn run(
                     }
 
                     if (line_snapshot.len > 0 and !repl.shouldDispatchTool(registry, line_snapshot)) {
-                        const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot, approveEdit) catch |err| {
+                        const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot, approval_fn) catch |err| {
                             var msg_buf: [256]u8 = undefined;
                             const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
                             writeAll(msg);
@@ -201,6 +205,14 @@ fn printBody(writer: anytype, body: []const u8) !void {
     }
 }
 
+fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
+    return switch (policy) {
+        .ask => approveEdit,
+        .auto_approve => loop.autoApprove,
+        .auto_reject => loop.autoReject,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Tests (byte classification only; the event loop itself is I/O-driven)
 // ---------------------------------------------------------------------------
@@ -277,4 +289,16 @@ test "printBody: empty body writes nothing" {
     const out = try captureBody("");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("", out);
+}
+
+test "selectApprovalFn: auto_approve resolves to loop.autoApprove" {
+    try testing.expect(selectApprovalFn(.auto_approve) == loop.autoApprove);
+}
+
+test "selectApprovalFn: auto_reject resolves to loop.autoReject" {
+    try testing.expect(selectApprovalFn(.auto_reject) == loop.autoReject);
+}
+
+test "selectApprovalFn: ask resolves to the interactive approveEdit" {
+    try testing.expect(selectApprovalFn(.ask) == approveEdit);
 }

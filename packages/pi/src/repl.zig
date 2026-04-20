@@ -8,6 +8,7 @@ const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
 const agent = @import("agent.zig");
 const commands = @import("commands.zig");
+const loop = @import("loop.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -104,6 +105,9 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("  /verify <path...>  /check <path>  /build <step>  /test [step]\n");
     try w.writeAll("  zigts meta|features|modules|search|describe-rule|verify-paths|verify-modules|check ...\n");
     try w.writeAll("  zig build <step>  zig build test[-...] \n\n");
+    try w.writeAll("Approval flags (pass on launch):\n");
+    try w.writeAll("  --yes      auto-approve every verified edit\n");
+    try w.writeAll("  --no-edit  auto-reject every verified edit\n\n");
     try w.writeAll("Registered tools:\n");
     for (registry.list()) |entry| {
         try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
@@ -117,7 +121,9 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
+    policy: loop.ApprovalPolicy,
 ) !void {
+    const approval_fn = selectApprovalFn(policy);
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
         const banner = "zigts expert — NL by default, 'help' for commands, or 'quit'\n";
@@ -139,7 +145,7 @@ pub fn run(
 
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len > 0 and !shouldDispatchTool(registry, trimmed)) {
-            const rendered = agent.runOneTurn(allocator, &session, registry, trimmed, approveEdit) catch |err| {
+            const rendered = agent.runOneTurn(allocator, &session, registry, trimmed, approval_fn) catch |err| {
                 var msg_buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
                 _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
@@ -203,6 +209,14 @@ fn readLine(buf: []u8) !?[]const u8 {
         len += 1;
     }
     return buf[0..len];
+}
+
+fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
+    return switch (policy) {
+        .ask => approveEdit,
+        .auto_approve => loop.autoApprove,
+        .auto_reject => loop.autoReject,
+    };
 }
 
 const testing = std.testing;
@@ -269,4 +283,16 @@ test "shouldDispatchTool is false for plain natural language" {
     try testing.expect(!shouldDispatchTool(&reg, "add a GET route and then run tests"));
     try testing.expect(shouldDispatchTool(&reg, "/test"));
     try testing.expect(shouldDispatchTool(&reg, "zig build test-zigts"));
+}
+
+test "selectApprovalFn: auto_approve resolves to loop.autoApprove" {
+    try testing.expect(selectApprovalFn(.auto_approve) == loop.autoApprove);
+}
+
+test "selectApprovalFn: auto_reject resolves to loop.autoReject" {
+    try testing.expect(selectApprovalFn(.auto_reject) == loop.autoReject);
+}
+
+test "selectApprovalFn: ask resolves to the interactive approveEdit" {
+    try testing.expect(selectApprovalFn(.ask) == approveEdit);
 }
