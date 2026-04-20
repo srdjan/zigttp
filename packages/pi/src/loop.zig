@@ -71,16 +71,6 @@ const PreparedEdit = struct {
     resolved_path: []const u8,
 };
 
-pub fn runTurn(
-    allocator: std.mem.Allocator,
-    client: ModelClient,
-    registry: *const registry_mod.Registry,
-    transcript: *transcript_mod.Transcript,
-    user_text: []const u8,
-) !TurnResult {
-    return runTurnWith(allocator, client, registry, transcript, user_text, .{});
-}
-
 pub fn runTurnWith(
     allocator: std.mem.Allocator,
     client: ModelClient,
@@ -385,7 +375,7 @@ test "text reply path: user -> model text -> render" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    const result = try runTurn(testing.allocator, canned.asClient(), &registry, &tr, "add a GET route");
+    const result = try runTurnWith(testing.allocator, canned.asClient(), &registry, &tr, "add a GET route", .{});
     try testing.expectEqual(turn.TurnState.done, result.final_state);
     switch (tr.at(0).*) {
         .user_text => |body| try testing.expectEqualStrings("add a GET route", body),
@@ -489,7 +479,7 @@ test "tool batch path: invoke_tool_batch -> tool_result -> final model text" {
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, stub_tool);
 
-    const result = try runTurn(testing.allocator, seq.asClient(), &registry, &tr, "run the stub");
+    const result = try runTurnWith(testing.allocator, seq.asClient(), &registry, &tr, "run the stub", .{});
     try testing.expectEqual(turn.TurnState.done, result.final_state);
     switch (tr.at(1).*) {
         .model_text => |body| try testing.expectEqualStrings("I'll inspect first.", body),
@@ -589,7 +579,7 @@ test "edit path outside the workspace is rejected" {
 
     try testing.expectError(
         error.EditPathOutsideWorkspace,
-        runTurn(testing.allocator, canned.asClient(), &registry, &tr, "escape the workspace"),
+        runTurnWith(testing.allocator, canned.asClient(), &registry, &tr, "escape the workspace", .{}),
     );
 }
 

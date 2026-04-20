@@ -21,11 +21,6 @@ const zigts = @import("zigts");
 const transcript = @import("../transcript.zig");
 const events = @import("events.zig");
 
-pub const Error = error{
-    SchemaVersionTooNew,
-    CorruptEventsLog,
-};
-
 pub const Diagnostic = struct {
     line_number: usize = 0,
     message: []const u8 = "",
