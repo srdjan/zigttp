@@ -146,26 +146,7 @@ pub const AgentSession = struct {
             .live => (&self.backend.live).asModelClient(),
         };
     }
-
-    pub fn isLive(self: *const AgentSession) bool {
-        return self.backend == .live;
-    }
 };
-
-/// Reads `ANTHROPIC_API_KEY` from the environment. If present, builds the
-/// persona bundle and returns a live session. Otherwise returns a stub
-/// session. Callers see a single constructor regardless of which path
-/// activated.
-pub fn initFromEnv(allocator: std.mem.Allocator) !AgentSession {
-    return initFromEnvWithRegistry(allocator, null);
-}
-
-pub fn initFromEnvWithRegistry(
-    allocator: std.mem.Allocator,
-    registry: ?*const Registry,
-) !AgentSession {
-    return initFromEnvWithSessionConfig(allocator, registry, .{ .no_session = true });
-}
 
 /// Build a session from the environment (`ANTHROPIC_API_KEY` -> live,
 /// else stub) and, unless `config.no_session` is true, materialize the
@@ -261,10 +242,6 @@ fn nowUnixMs() i64 {
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-fn initStub() AgentSession {
-    return AgentSession.initStub();
 }
 
 fn buildToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
