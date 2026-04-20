@@ -10,6 +10,7 @@ const registry_mod = @import("registry/registry.zig");
 const repl = @import("repl.zig");
 const tui_app = @import("tui/app.zig");
 const loop = @import("loop.zig");
+const print_mode = @import("print_mode.zig");
 
 const meta_tool = @import("tools/zigts_expert_meta.zig");
 const verify_paths_tool = @import("tools/zigts_expert_verify_paths.zig");
@@ -82,10 +83,42 @@ pub fn run(allocator: std.mem.Allocator) !void {
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
+        error.MissingPrintPrompt => {
+            const msg = "error: --print requires a value\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.MissingModeValue => {
+            const msg = "error: --mode requires a value (json)\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.UnsupportedMode => {
+            const msg = "error: --mode only accepts 'json'\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.JsonModeRequiresPrint => {
+            const msg = "error: --mode json requires --print <prompt>\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
     };
 
     var registry = try buildRegistry(allocator);
     defer registry.deinit(allocator);
+
+    if (flags.print != null) {
+        // Non-interactive default: auto_reject. Only honor `.ask` style
+        // default by silently promoting to `.auto_reject` when the user
+        // did not pass `--yes` or `--no-edit` explicitly.
+        const effective_policy: loop.ApprovalPolicy = if (flags.policy_explicit)
+            flags.policy
+        else
+            .auto_reject;
+        try print_mode.run(allocator, &registry, flags, effective_policy);
+        return;
+    }
 
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
@@ -98,13 +131,20 @@ pub fn run(allocator: std.mem.Allocator) !void {
 /// Flags parsed from `zigts expert` argv. `policy` folds `--yes`/`--no-edit`
 /// into an `ApprovalPolicy`; `no_session` and `no_persist_tool_output` are
 /// plumbing for Batch 4's events.jsonl writer and are merely carried through
-/// `run` today.
+/// `run` today. `print` and `json_mode` drive non-interactive one-shot runs
+/// (Batch 5): when `print` is set, `run` bypasses both the REPL and the TUI.
 pub const ExpertFlags = struct {
     policy: loop.ApprovalPolicy = .ask,
+    /// True when the user explicitly passed `--yes` or `--no-edit`.
+    /// Non-interactive dispatch uses this to decide whether to override
+    /// the default `ask` policy with a safer `auto_reject`.
+    policy_explicit: bool = false,
     no_session: bool = false,
     no_persist_tool_output: bool = false,
     session_id: ?[]const u8 = null,
     resume_latest: bool = false,
+    print: ?[]const u8 = null,
+    json_mode: bool = false,
 };
 
 /// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
@@ -132,13 +172,39 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.startsWith(u8, arg, "--session-id=")) {
             out.session_id = arg["--session-id=".len..];
         }
+        if (std.mem.eql(u8, arg, "--print")) {
+            if (i + 1 >= argv.len) return error.MissingPrintPrompt;
+            i += 1;
+            out.print = argv[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--print=")) {
+            out.print = arg["--print=".len..];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--mode")) {
+            if (i + 1 >= argv.len) return error.MissingModeValue;
+            i += 1;
+            const val = argv[i];
+            if (!std.mem.eql(u8, val, "json")) return error.UnsupportedMode;
+            out.json_mode = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--mode=")) {
+            const val = arg["--mode=".len..];
+            if (!std.mem.eql(u8, val, "json")) return error.UnsupportedMode;
+            out.json_mode = true;
+        }
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
     if (out.resume_latest and out.session_id != null) return error.MutuallyExclusiveResumeFlags;
+    if (out.json_mode and out.print == null) return error.JsonModeRequiresPrint;
     if (saw_yes) {
         out.policy = .auto_approve;
+        out.policy_explicit = true;
     } else if (saw_no_edit) {
         out.policy = .auto_reject;
+        out.policy_explicit = true;
     }
     return out;
 }
@@ -288,6 +354,58 @@ test "parseExpertFlags: --resume alone sets the flag" {
 test "parseExpertFlags: --resume + --session-id is an error" {
     const argv = [_][]const u8{ "zigts", "expert", "--resume", "--session-id", "x" };
     try testing.expectError(error.MutuallyExclusiveResumeFlags, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --print \"hello\" captures prompt" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print", "hello" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.print != null);
+    try testing.expectEqualStrings("hello", flags.print.?);
+    try testing.expectEqual(false, flags.json_mode);
+}
+
+test "parseExpertFlags: --print=hello inline form captures prompt" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print=hello" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.print != null);
+    try testing.expectEqualStrings("hello", flags.print.?);
+}
+
+test "parseExpertFlags: --print without a value errors MissingPrintPrompt" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print" };
+    try testing.expectError(error.MissingPrintPrompt, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --mode json without --print errors JsonModeRequiresPrint" {
+    const argv = [_][]const u8{ "zigts", "expert", "--mode", "json" };
+    try testing.expectError(error.JsonModeRequiresPrint, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --mode json with --print sets json_mode" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print", "x", "--mode", "json" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.json_mode);
+    try testing.expect(flags.print != null);
+}
+
+test "parseExpertFlags: --mode=json inline form sets json_mode" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print", "x", "--mode=json" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.json_mode);
+}
+
+test "parseExpertFlags: --mode bogus errors UnsupportedMode" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print", "x", "--mode", "bogus" };
+    try testing.expectError(error.UnsupportedMode, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --print + --yes combines policy with print" {
+    const argv = [_][]const u8{ "zigts", "expert", "--print", "hello", "--yes" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy);
+    try testing.expectEqual(true, flags.policy_explicit);
+    try testing.expect(flags.print != null);
+    try testing.expectEqualStrings("hello", flags.print.?);
 }
 
 test "buildRegistry + dispatchLine end-to-end against every tool" {

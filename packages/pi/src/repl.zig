@@ -118,7 +118,10 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("  --session-id <id>          resume or create a named session\n");
     try w.writeAll("  --resume                   resume the newest session for this cwd\n");
     try w.writeAll("  --no-session               disable session persistence for this run\n");
-    try w.writeAll("  --no-persist-tool-output   omit tool output bodies from persisted session\n\n");
+    try w.writeAll("  --no-persist-tool-output   omit tool output bodies from persisted session\n");
+    try w.writeAll("Non-interactive flags (pass on launch):\n");
+    try w.writeAll("  --print <prompt>           run a single turn and exit\n");
+    try w.writeAll("  --mode json                with --print, emit NDJSON events to stdout\n\n");
     try w.writeAll("Registered tools:\n");
     for (registry.list()) |entry| {
         try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });

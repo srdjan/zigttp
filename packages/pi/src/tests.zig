@@ -40,6 +40,7 @@ comptime {
     _ = @import("anthropic/apply_edit.zig");
     _ = @import("anthropic/client.zig");
     _ = @import("app.zig");
+    _ = @import("print_mode.zig");
     _ = @import("context/loader.zig");
     _ = @import("session/paths.zig");
     _ = @import("session/events.zig");
