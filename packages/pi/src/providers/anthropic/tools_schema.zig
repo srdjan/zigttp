@@ -4,7 +4,7 @@
 //! registry.
 
 const std = @import("std");
-const registry_mod = @import("../registry/registry.zig");
+const registry_mod = @import("../../registry/registry.zig");
 const json_writer = @import("json_writer.zig");
 const apply_edit = @import("apply_edit.zig");
 
