@@ -189,22 +189,10 @@ fn writeTaggedLine(writer: anytype, label: []const u8, body: []const u8) !void {
     }
 }
 
-pub fn renderAll(writer: anytype, transcript: *const Transcript) !void {
+fn renderAll(writer: anytype, transcript: *const Transcript) !void {
     for (transcript.entries.items) |*entry| {
         try renderPlain(writer, entry);
     }
-}
-
-pub fn renderEntryToOwned(
-    allocator: std.mem.Allocator,
-    entry: *const OwnedEntry,
-) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try renderPlain(&aw.writer, entry);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
 }
 
 pub fn renderRich(writer: anytype, entry: *const OwnedEntry) !void {
