@@ -25,7 +25,7 @@ const zigts = @import("zigts");
 /// meta.json or events.jsonl shape changes in a breaking way.
 pub const schema_version: u32 = 1;
 
-pub const EventKind = enum {
+const EventKind = enum {
     user_text,
     model_text,
     tool_use,
@@ -61,14 +61,6 @@ pub const Meta = struct {
     session_id: []const u8,
     workspace_realpath: []const u8,
     created_at_unix_ms: i64,
-};
-
-pub const Error = error{
-    SchemaVersionTooNew,
-    SchemaVersionStale,
-    InvalidMetaJson,
-    WriteFailure,
-    FileOpenFailed,
 };
 
 // ===========================================================================

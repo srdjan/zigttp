@@ -40,7 +40,7 @@ pub const AppendOptions = struct {
 /// `appendEntry`, which emits exactly one event per `ToolCall` in the
 /// slice — matching the "every tool_use has a matching tool_result"
 /// invariant.
-pub fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
+fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
     return switch (entry.*) {
         .user_text => |body| .{ .user_text = body },
         .model_text => |body| .{ .model_text = body },
