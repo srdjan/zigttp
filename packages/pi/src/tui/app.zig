@@ -80,31 +80,7 @@ pub fn run(
                     const line_snapshot = editor.line();
                     writeAll("\r\n");
 
-                    if (std.mem.eql(u8, line_snapshot, "quit") or
-                        std.mem.eql(u8, line_snapshot, "exit") or
-                        std.mem.eql(u8, line_snapshot, ":q"))
-                    {
-                        return;
-                    }
-
-                    if (line_snapshot.len > 0 and !repl.shouldDispatchTool(registry, line_snapshot)) {
-                        const rendered = agent.runOneTurn(allocator, &session, registry, line_snapshot, approval_fn) catch |err| {
-                            var msg_buf: [256]u8 = undefined;
-                            const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
-                            writeAll(msg);
-                            editor.clear();
-                            redrawPrompt(editor.line());
-                            continue;
-                        };
-                        defer allocator.free(rendered);
-                        const stdout = StdoutAdapter{};
-                        try printBody(&stdout, rendered);
-                        editor.clear();
-                        redrawPrompt(editor.line());
-                        continue;
-                    }
-
-                    var outcome = repl.dispatchLine(allocator, registry, line_snapshot) catch |err| {
+                    var outcome = repl.processSubmit(allocator, &session, registry, line_snapshot, approval_fn) catch |err| {
                         var msg_buf: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
                         writeAll(msg);
@@ -113,12 +89,16 @@ pub fn run(
                         continue;
                     };
 
+                    const stdout = StdoutAdapter{};
                     switch (outcome) {
                         .noop => {},
                         .quit => return,
-                        .result => |*result| {
+                        .rendered => |rendered| {
+                            defer allocator.free(rendered);
+                            try printBody(&stdout, rendered);
+                        },
+                        .tool_result => |*result| {
                             defer result.deinit(allocator);
-                            const stdout = StdoutAdapter{};
                             try printBody(&stdout, result.body);
                         },
                         .session_resume => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, true),
@@ -308,4 +288,104 @@ test "selectApprovalFn: auto_reject resolves to loop.autoReject" {
 
 test "selectApprovalFn: ask resolves to the interactive approveEdit" {
     try testing.expect(selectApprovalFn(.ask) == approveEdit);
+}
+
+// ---------------------------------------------------------------------------
+// Slice 6 gate: replay-driven rendering
+//
+// Prove the TUI's rendering pipeline is pure w.r.t. its input stream —
+// feed a canned sequence of transcript entries (the same shape persisted
+// in `events.jsonl`) through renderRich + printBody and assert byte-for-
+// byte CRLF output. If this passes, the TUI could be driven by replaying
+// a persisted session without any live agent / model / stdin involvement.
+// ---------------------------------------------------------------------------
+
+const transcript_mod = @import("../transcript.zig");
+const turn = @import("../turn.zig");
+
+fn renderAndPrint(allocator: std.mem.Allocator, entries: []const transcript_mod.OwnedEntry, out: *std.Io.Writer) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    for (entries) |*entry| try transcript_mod.renderRich(&aw.writer, entry);
+
+    buf = aw.toArrayList();
+    try printBody(out, buf.items);
+}
+
+test "replay: canned entry stream renders deterministic CRLF output" {
+    const allocator = testing.allocator;
+
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(allocator);
+
+    try tr.append(allocator, .{ .user_text = "add a GET route" });
+    try tr.append(allocator, .{ .model_text = "Inspecting first." });
+    const calls = [_]turn.ToolCall{
+        .{ .id = "toolu_1", .name = "zigts_expert_meta", .args_json = "{}" },
+    };
+    try tr.append(allocator, .{ .assistant_tool_use = &calls });
+    try tr.append(allocator, .{ .tool_result = .{
+        .tool_use_id = "toolu_1",
+        .tool_name = "zigts_expert_meta",
+        .ok = true,
+        .body = "{\"ok\":true}",
+    } });
+    try tr.append(allocator, .{ .proof_card = "contract ok" });
+    try tr.append(allocator, .{ .diagnostic_box = "ZTS001 unsupported var" });
+
+    var out_buf: std.ArrayList(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out_buf);
+
+    try renderAndPrint(allocator, tr.entries.items, &aw.writer);
+
+    out_buf = aw.toArrayList();
+    const out = out_buf.items;
+
+    // No bare LF survives the TUI's OPOST-off translation.
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        if (out[i] == '\n') {
+            try testing.expect(i > 0 and out[i - 1] == '\r');
+        }
+    }
+
+    // Every entry's textual content made it through.
+    try testing.expect(std.mem.indexOf(u8, out, "add a GET route") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Inspecting first.") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "zigts_expert_meta") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "{\"ok\":true}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "contract ok") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ZTS001 unsupported var") != null);
+
+    // Proof and diagnostic boxes are rendered with their distinct frames.
+    try testing.expect(std.mem.indexOf(u8, out, "proof") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "veto") != null);
+}
+
+test "replay: rendering the same stream twice is byte-identical" {
+    const allocator = testing.allocator;
+
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(allocator);
+
+    try tr.append(allocator, .{ .user_text = "hello" });
+    try tr.append(allocator, .{ .model_text = "world\nwith multiple\nlines" });
+    try tr.append(allocator, .{ .proof_card = "ok" });
+
+    var buf_a: std.ArrayList(u8) = .empty;
+    defer buf_a.deinit(allocator);
+    var aw_a: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf_a);
+    try renderAndPrint(allocator, tr.entries.items, &aw_a.writer);
+    buf_a = aw_a.toArrayList();
+
+    var buf_b: std.ArrayList(u8) = .empty;
+    defer buf_b.deinit(allocator);
+    var aw_b: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf_b);
+    try renderAndPrint(allocator, tr.entries.items, &aw_b.writer);
+    buf_b = aw_b.toArrayList();
+
+    try testing.expectEqualSlices(u8, buf_a.items, buf_b.items);
 }

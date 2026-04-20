@@ -23,6 +23,49 @@ pub const DispatchOutcome = union(enum) {
     session_new,
 };
 
+/// Surface-agnostic result of processing one submitted line. Both the
+/// line-buffered REPL and the raw-mode TUI share this shape so the only
+/// per-surface code is how `rendered` / `tool_result` bytes are written.
+pub const SubmitOutcome = union(enum) {
+    noop,
+    quit,
+    /// Owned rendered text from `agent.runOneTurn`. Caller frees.
+    rendered: []u8,
+    /// Dispatched tool result. Caller calls `.deinit(allocator)`.
+    tool_result: ToolResult,
+    session_resume,
+    session_new,
+};
+
+/// Routes a single line through either the model (NL) or the dispatch
+/// table (slash/explicit/raw tool name). Returns a surface-agnostic
+/// outcome; the caller prints `rendered` / `tool_result.body` using its
+/// own writer conventions (bare stdout for REPL, CRLF-translated for TUI).
+pub fn processSubmit(
+    allocator: std.mem.Allocator,
+    session: *agent.AgentSession,
+    registry: *const Registry,
+    raw_line: []const u8,
+    approval_fn: ?loop.ApprovalFn,
+) !SubmitOutcome {
+    const trimmed = std.mem.trim(u8, raw_line, " \t\r\n");
+    if (trimmed.len == 0) return .noop;
+
+    if (!shouldDispatchTool(registry, trimmed)) {
+        const rendered = try agent.runOneTurn(allocator, session, registry, trimmed, approval_fn);
+        return .{ .rendered = rendered };
+    }
+
+    const outcome = try dispatchLine(allocator, registry, raw_line);
+    return switch (outcome) {
+        .noop => .noop,
+        .quit => .quit,
+        .result => |r| .{ .tool_result = r },
+        .session_resume => .session_resume,
+        .session_new => .session_new,
+    };
+}
+
 pub fn dispatchLine(
     allocator: std.mem.Allocator,
     registry: *const Registry,
@@ -165,20 +208,7 @@ pub fn run(
         const maybe_line = try readLine(&line_buf);
         const line = maybe_line orelse break;
 
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len > 0 and !shouldDispatchTool(registry, trimmed)) {
-            const rendered = agent.runOneTurn(allocator, &session, registry, trimmed, approval_fn) catch |err| {
-                var msg_buf: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
-                _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
-                continue;
-            };
-            defer allocator.free(rendered);
-            _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
-            continue;
-        }
-
-        var outcome = dispatchLine(allocator, registry, line) catch |err| {
+        var outcome = processSubmit(allocator, &session, registry, line, approval_fn) catch |err| {
             var msg_buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\n", .{@errorName(err)}) catch "error\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
@@ -188,7 +218,11 @@ pub fn run(
         switch (outcome) {
             .noop => {},
             .quit => break,
-            .result => |*result| {
+            .rendered => |rendered| {
+                defer allocator.free(rendered);
+                _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+            },
+            .tool_result => |*result| {
                 defer result.deinit(allocator);
                 if (result.body.len > 0) {
                     _ = std.c.write(std.c.STDOUT_FILENO, result.body.ptr, result.body.len);
