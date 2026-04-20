@@ -20,15 +20,27 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !void {
-    // Unknown long flags are reserved for future slices (--print, --mode, ...)
-    // and flow through to pi_app unchanged. Bare positional tokens remain
-    // unsupported: `zigts expert` does not take subcommands.
-    for (argv) |arg| {
+    // Unknown long flags flow through to pi_app unchanged. Known value-
+    // taking flags consume their next token so `zigts expert --print hello`
+    // does not get rejected as if `hello` were a subcommand.
+    const value_taking = [_][]const u8{ "--session-id", "--print", "--mode" };
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help")) {
             printExpertHelp();
             return;
         }
-        if (std.mem.startsWith(u8, arg, "--")) continue;
+        if (std.mem.startsWith(u8, arg, "--")) {
+            for (value_taking) |name| {
+                if (std.mem.eql(u8, arg, name)) {
+                    if (i + 1 < argv.len) i += 1;
+                    break;
+                }
+            }
+            continue;
+        }
         std.debug.print("zigts expert does not accept subcommands; use direct commands like `zigts meta` or `zigts verify-paths`.\n", .{});
         return error.InvalidArgument;
     }
@@ -44,6 +56,7 @@ fn printExpertHelp() void {
         \\Usage:
         \\  zigts expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
         \\               [--session-id <id> | --resume]
+        \\               [--print <prompt> [--mode json]]
         \\
         \\Flags:
         \\  --yes                      auto-approve every verified edit (non-interactive)
@@ -52,6 +65,9 @@ fn printExpertHelp() void {
         \\  --no-persist-tool-output   omit tool output bodies from persisted session
         \\  --session-id <id>          resume or create a session with this id
         \\  --resume                   resume the newest session for this cwd
+        \\  --print <prompt>           run a single non-interactive turn and exit
+        \\  --mode json                with --print, emit NDJSON transcript events
+        \\                             instead of rendered text
         \\
         \\Launches the interactive compiler-in-the-loop expert session.
         \\For machine-facing tooling, use direct commands such as:
