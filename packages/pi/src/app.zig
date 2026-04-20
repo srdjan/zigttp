@@ -66,7 +66,7 @@ pub fn setInvocationArgv(argv: []const []const u8) void {
 
 pub fn run(allocator: std.mem.Allocator) !void {
     const argv = captured_argv orelse &[_][]const u8{};
-    const policy = parseApprovalFlags(argv) catch |err| switch (err) {
+    const flags = parseExpertFlags(argv) catch |err| switch (err) {
         error.MutuallyExclusiveApprovalFlags => {
             const msg = "error: --yes and --no-edit are mutually exclusive\n";
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
@@ -79,27 +79,43 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        try tui_app.run(allocator, &registry, policy);
+        try tui_app.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output);
     } else {
-        try repl.run(allocator, &registry, policy);
+        try repl.run(allocator, &registry, flags.policy, flags.no_session, flags.no_persist_tool_output);
     }
 }
 
-/// Scan argv for `--yes` and `--no-edit` and fold into an `ApprovalPolicy`.
-/// Unknown flags are ignored so future slices can add their own without
-/// breaking this parser. Both flags present returns an error so the caller
-/// can report a clear diagnostic.
-pub fn parseApprovalFlags(argv: []const []const u8) !loop.ApprovalPolicy {
+/// Flags parsed from `zigts expert` argv. `policy` folds `--yes`/`--no-edit`
+/// into an `ApprovalPolicy`; `no_session` and `no_persist_tool_output` are
+/// plumbing for Batch 4's events.jsonl writer and are merely carried through
+/// `run` today.
+pub const ExpertFlags = struct {
+    policy: loop.ApprovalPolicy = .ask,
+    no_session: bool = false,
+    no_persist_tool_output: bool = false,
+};
+
+/// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
+/// future slices can add their own without breaking this parser. `--yes` and
+/// `--no-edit` together return an error so the caller can report a clear
+/// diagnostic. Order-independent; repetition is idempotent.
+pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
+    var out: ExpertFlags = .{};
     var saw_yes = false;
     var saw_no_edit = false;
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--yes")) saw_yes = true;
         if (std.mem.eql(u8, arg, "--no-edit")) saw_no_edit = true;
+        if (std.mem.eql(u8, arg, "--no-session")) out.no_session = true;
+        if (std.mem.eql(u8, arg, "--no-persist-tool-output")) out.no_persist_tool_output = true;
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
-    if (saw_yes) return .auto_approve;
-    if (saw_no_edit) return .auto_reject;
-    return .ask;
+    if (saw_yes) {
+        out.policy = .auto_approve;
+    } else if (saw_no_edit) {
+        out.policy = .auto_reject;
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,32 +168,69 @@ fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator
     }
 }
 
-test "parseApprovalFlags: empty argv yields ask" {
-    const policy = try parseApprovalFlags(&.{});
-    try testing.expectEqual(loop.ApprovalPolicy.ask, policy);
+test "parseExpertFlags: empty argv yields defaults" {
+    const flags = try parseExpertFlags(&.{});
+    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expectEqual(false, flags.no_session);
+    try testing.expectEqual(false, flags.no_persist_tool_output);
 }
 
-test "parseApprovalFlags: --yes yields auto_approve" {
+test "parseExpertFlags: --yes yields auto_approve" {
     const argv = [_][]const u8{ "zigts", "expert", "--yes" };
-    const policy = try parseApprovalFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, policy);
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy);
+    try testing.expectEqual(false, flags.no_session);
+    try testing.expectEqual(false, flags.no_persist_tool_output);
 }
 
-test "parseApprovalFlags: --no-edit yields auto_reject" {
+test "parseExpertFlags: --no-edit yields auto_reject" {
     const argv = [_][]const u8{ "zigts", "expert", "--no-edit" };
-    const policy = try parseApprovalFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_reject, policy);
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_reject, flags.policy);
 }
 
-test "parseApprovalFlags: both flags error" {
-    const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-edit" };
-    try testing.expectError(error.MutuallyExclusiveApprovalFlags, parseApprovalFlags(argv[0..]));
+test "parseExpertFlags: --no-session alone flips only that field" {
+    const argv = [_][]const u8{ "zigts", "expert", "--no-session" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expectEqual(true, flags.no_session);
+    try testing.expectEqual(false, flags.no_persist_tool_output);
 }
 
-test "parseApprovalFlags: unknown flag is ignored and --yes still wins" {
-    const argv = [_][]const u8{ "zigts", "expert", "--foo", "--yes" };
-    const policy = try parseApprovalFlags(argv[0..]);
-    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, policy);
+test "parseExpertFlags: --no-persist-tool-output alone flips only that field" {
+    const argv = [_][]const u8{ "zigts", "expert", "--no-persist-tool-output" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expectEqual(false, flags.no_session);
+    try testing.expectEqual(true, flags.no_persist_tool_output);
+}
+
+test "parseExpertFlags: --yes --no-session --no-persist-tool-output combine" {
+    const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-session", "--no-persist-tool-output" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.auto_approve, flags.policy);
+    try testing.expectEqual(true, flags.no_session);
+    try testing.expectEqual(true, flags.no_persist_tool_output);
+}
+
+test "parseExpertFlags: --yes + --no-edit still errors regardless of session flags" {
+    const argv = [_][]const u8{ "zigts", "expert", "--yes", "--no-session", "--no-edit" };
+    try testing.expectError(error.MutuallyExclusiveApprovalFlags, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: unknown --frobnicate is ignored, defaults preserved" {
+    const argv = [_][]const u8{ "zigts", "expert", "--frobnicate" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
+    try testing.expectEqual(false, flags.no_session);
+    try testing.expectEqual(false, flags.no_persist_tool_output);
+}
+
+test "parseExpertFlags: repeated --no-session is idempotent" {
+    const argv = [_][]const u8{ "zigts", "expert", "--no-session", "--no-session" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.no_session);
+    try testing.expectEqual(loop.ApprovalPolicy.ask, flags.policy);
 }
 
 test "buildRegistry + dispatchLine end-to-end against every tool" {
