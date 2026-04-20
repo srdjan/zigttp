@@ -109,9 +109,9 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const interactive_policy = flags.policy orelse .ask;
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
     if (is_tty) {
-        try tui_app.run(allocator, &registry, interactive_policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
+        try tui_app.run(allocator, &registry, flags, interactive_policy);
     } else {
-        try repl.run(allocator, &registry, interactive_policy, flags.no_session, flags.no_persist_tool_output, flags.session_id, flags.resume_latest);
+        try repl.run(allocator, &registry, flags, interactive_policy);
     }
 }
 
