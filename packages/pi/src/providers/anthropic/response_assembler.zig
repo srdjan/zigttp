@@ -4,7 +4,7 @@
 //! message. Blocks are keyed by their SSE `index` and assembled independently.
 
 const std = @import("std");
-const turn = @import("../turn.zig");
+const turn = @import("../../turn.zig");
 const events = @import("events.zig");
 
 pub const AssembleError = error{

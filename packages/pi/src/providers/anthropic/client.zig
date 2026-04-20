@@ -1,9 +1,9 @@
 //! HTTPS wire layer for the Anthropic Messages API.
 
 const std = @import("std");
-const loop = @import("../loop.zig");
-const turn = @import("../turn.zig");
-const transcript_mod = @import("../transcript.zig");
+const loop = @import("../../loop.zig");
+const turn = @import("../../turn.zig");
+const transcript_mod = @import("../../transcript.zig");
 const request_mod = @import("request.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");

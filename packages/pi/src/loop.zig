@@ -8,7 +8,7 @@ const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const zigts = @import("zigts");
 const file_io = zigts.file_io;
-const apply_edit = @import("anthropic/apply_edit.zig");
+const apply_edit = @import("providers/anthropic/apply_edit.zig");
 
 pub const ModelClient = struct {
     context: *anyopaque,

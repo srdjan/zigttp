@@ -16,8 +16,8 @@ const loop = @import("loop.zig");
 const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
-const anthropic_client = @import("anthropic/client.zig");
-const tools_schema = @import("anthropic/tools_schema.zig");
+const anthropic_client = @import("providers/anthropic/client.zig");
+const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const expert_persona = @import("expert_persona.zig");
 const context_loader = @import("context/loader.zig");
 const session_id_mod = @import("session/session_id.zig");
@@ -70,7 +70,7 @@ pub const StubClient = struct {
 
 pub const Backend = union(enum) {
     stub: StubClient,
-    live: anthropic_client.Client,
+    anthropic: anthropic_client.Client,
 };
 
 pub const AgentSession = struct {
@@ -116,7 +116,7 @@ pub const AgentSession = struct {
             null;
         errdefer if (tools_owned) |json| allocator.free(json);
         return .{
-            .backend = .{ .live = anthropic_client.Client.init(.{
+            .backend = .{ .anthropic = anthropic_client.Client.init(.{
                 .api_key = key_owned,
                 .system_prompt = prompt_owned,
                 .tools_json = tools_owned,
@@ -136,14 +136,14 @@ pub const AgentSession = struct {
         if (self.meta_path) |s| allocator.free(s);
         switch (self.backend) {
             .stub => {},
-            .live => |*c| allocator.free(c.config.api_key),
+            .anthropic => |*c| allocator.free(c.config.api_key),
         }
     }
 
     pub fn modelClient(self: *AgentSession) loop.ModelClient {
         return switch (self.backend) {
             .stub => (&self.backend.stub).asClient(),
-            .live => (&self.backend.live).asModelClient(),
+            .anthropic => (&self.backend.anthropic).asModelClient(),
         };
     }
 };
@@ -390,17 +390,17 @@ test "initLive dupes api_key and system_prompt, deinit releases both" {
     );
     defer session.deinit(testing.allocator);
 
-    try testing.expect(session.backend == .live);
-    try testing.expectEqualStrings("sk-ant-test", session.backend.live.config.api_key);
-    try testing.expectEqualStrings("you are a zigts expert", session.backend.live.config.system_prompt);
-    try testing.expect(session.backend.live.config.tools_json != null);
+    try testing.expect(session.backend == .anthropic);
+    try testing.expectEqualStrings("sk-ant-test", session.backend.anthropic.config.api_key);
+    try testing.expectEqualStrings("you are a zigts expert", session.backend.anthropic.config.system_prompt);
+    try testing.expect(session.backend.anthropic.config.tools_json != null);
     try testing.expect(session.system_prompt_owned != null);
 }
 
-test "modelClient returns a live client vtable when backend is live" {
+test "modelClient returns an anthropic client vtable when backend is anthropic" {
     var session = try AgentSession.initLive(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
 
     const mc = session.modelClient();
-    try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.live)));
+    try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
 }

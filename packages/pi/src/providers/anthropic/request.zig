@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const json_writer = @import("json_writer.zig");
-const transcript_mod = @import("../transcript.zig");
+const transcript_mod = @import("../../transcript.zig");
 
 pub const default_model = "claude-opus-4-6";
 pub const default_max_tokens: u32 = 8192;
@@ -190,7 +190,7 @@ test "writeRequestBody: tool-use and tool-result transcript entries serialize st
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
 
-    const calls = [_]@import("../turn.zig").ToolCall{
+    const calls = [_]@import("../../turn.zig").ToolCall{
         .{ .id = "toolu_meta", .name = "zigts_expert_meta", .args_json = "{}" },
         .{ .id = "toolu_search", .name = "workspace_search_text", .args_json = "{\"query\":\"handler\"}" },
     };

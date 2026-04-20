@@ -5,7 +5,7 @@
 //! in-process tool registry.
 
 const std = @import("std");
-const turn = @import("../turn.zig");
+const turn = @import("../../turn.zig");
 
 pub const tool_name = "apply_edit";
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
-const json_writer = @import("../anthropic/json_writer.zig");
+const json_writer = @import("../providers/anthropic/json_writer.zig");
 
 pub const default_output_limit: usize = 256 * 1024;
 

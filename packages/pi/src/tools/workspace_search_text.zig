@@ -1,7 +1,7 @@
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-const json_writer = @import("../anthropic/json_writer.zig");
+const json_writer = @import("../providers/anthropic/json_writer.zig");
 
 const name = "workspace_search_text";
 
