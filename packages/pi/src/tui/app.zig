@@ -290,15 +290,9 @@ test "selectApprovalFn: ask resolves to the interactive approveEdit" {
     try testing.expect(selectApprovalFn(.ask) == approveEdit);
 }
 
-// ---------------------------------------------------------------------------
-// Slice 6 gate: replay-driven rendering
-//
-// Prove the TUI's rendering pipeline is pure w.r.t. its input stream —
-// feed a canned sequence of transcript entries (the same shape persisted
-// in `events.jsonl`) through renderRich + printBody and assert byte-for-
-// byte CRLF output. If this passes, the TUI could be driven by replaying
-// a persisted session without any live agent / model / stdin involvement.
-// ---------------------------------------------------------------------------
+// Replay-driven rendering: the TUI must produce the same CRLF output for
+// a canned transcript as it does live, so persisted sessions can be
+// reconstructed through renderRich + printBody without any stdin.
 
 const transcript_mod = @import("../transcript.zig");
 const turn = @import("../turn.zig");
