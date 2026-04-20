@@ -40,13 +40,13 @@ pub const SessionConfig = struct {
     resume_latest: bool = false,
 };
 
-pub const stub_reply_text =
+const stub_reply_text =
     "expert offline: no live model backend configured; set ANTHROPIC_API_KEY to enable expert mode";
 
 /// Zero-state client used when no Anthropic credentials are present.
 /// Returns a fixed reply regardless of the prompt so the loop still
 /// exercises every path from keyboard to transcript.
-pub const StubClient = struct {
+const StubClient = struct {
     fn requestFn(
         ctx: *anyopaque,
         arena: std.mem.Allocator,
@@ -60,7 +60,7 @@ pub const StubClient = struct {
         return .{ .response = .{ .final_text = stub_reply_text } };
     }
 
-    pub fn asClient(self: *StubClient) loop.ModelClient {
+    fn asClient(self: *StubClient) loop.ModelClient {
         return .{
             .context = self,
             .request_fn = requestFn,
@@ -68,7 +68,7 @@ pub const StubClient = struct {
     }
 };
 
-pub const Backend = union(enum) {
+const Backend = union(enum) {
     stub: StubClient,
     anthropic: anthropic_client.Client,
 };
