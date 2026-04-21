@@ -85,11 +85,11 @@ pub fn isHelp(name: []const u8) bool {
 pub const session_commands = [_][]const u8{ "/resume", "/new" };
 
 pub fn isSessionResume(name: []const u8) bool {
-    return std.mem.eql(u8, name, "/resume");
+    return std.mem.eql(u8, name, session_commands[0]);
 }
 
 pub fn isSessionNew(name: []const u8) bool {
-    return std.mem.eql(u8, name, "/new");
+    return std.mem.eql(u8, name, session_commands[1]);
 }
 
 const testing = std.testing;
