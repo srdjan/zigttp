@@ -119,7 +119,21 @@ fn decodeRecord(
     if (type_value != .string) return ParseError.UnexpectedJsonShape;
     const type_str = type_value.string;
 
-    if (std.mem.eql(u8, type_str, "message_start")) return .message_start;
+    if (std.mem.eql(u8, type_str, "message_start")) {
+        const usage: events.MessageStartUsage = blk: {
+            const msg = root.get("message") orelse break :blk .{};
+            if (msg != .object) break :blk .{};
+            const u_val = msg.object.get("usage") orelse break :blk .{};
+            if (u_val != .object) break :blk .{};
+            const u = u_val.object;
+            break :blk .{
+                .input_tokens = readU64(u, "input_tokens"),
+                .cache_read_input_tokens = readU64(u, "cache_read_input_tokens"),
+                .cache_creation_input_tokens = readU64(u, "cache_creation_input_tokens"),
+            };
+        };
+        return .{ .message_start = usage };
+    }
     if (std.mem.eql(u8, type_str, "ping")) return .ping;
     if (std.mem.eql(u8, type_str, "message_stop")) return .message_stop;
 
@@ -203,6 +217,13 @@ fn decodeRecord(
     return ParseError.UnknownEventType;
 }
 
+fn readU64(obj: std.json.ObjectMap, key: []const u8) u64 {
+    const v = obj.get(key) orelse return 0;
+    if (v != .integer) return 0;
+    if (v.integer < 0) return 0;
+    return @intCast(v.integer);
+}
+
 fn readIndex(obj: std.json.ObjectMap) !u32 {
     const v = obj.get("index") orelse return ParseError.UnexpectedJsonShape;
     if (v != .integer) return ParseError.UnexpectedJsonShape;
@@ -237,11 +258,12 @@ test "text_simple cassette: full happy path produces expected event shape" {
     const list = try parseAll(arena.allocator(), cassette_text_simple);
 
     try testing.expectEqual(@as(usize, 7), list.len);
-    try testing.expectEqual(events.Event.message_start, list[0]);
+    try testing.expect(list[0] == .message_start);
+    try testing.expectEqual(@as(u64, 12), list[0].message_start.input_tokens);
     try testing.expect(list[1] == .content_block_start);
     try testing.expectEqual(@as(u32, 0), list[1].content_block_start.index);
     try testing.expect(list[1].content_block_start.kind == .text);
-    try testing.expectEqual(events.Event.ping, list[2]);
+    try testing.expect(list[2] == .ping);
     try testing.expect(list[3] == .content_block_delta);
     try testing.expect(list[3].content_block_delta.payload == .text);
     try testing.expectEqualStrings("Hello, world!", list[3].content_block_delta.payload.text);
@@ -250,7 +272,7 @@ test "text_simple cassette: full happy path produces expected event shape" {
     try testing.expect(list[5] == .message_delta);
     try testing.expectEqualStrings("end_turn", list[5].message_delta.stop_reason.?);
     try testing.expectEqual(@as(u64, 5), list[5].message_delta.output_tokens.?);
-    try testing.expectEqual(events.Event.message_stop, list[6]);
+    try testing.expect(list[6] == .message_stop);
 }
 
 test "text_multi_delta cassette: deltas concatenate into the full reply" {
@@ -319,7 +341,7 @@ test "RecordIterator: CRLF line endings are tolerated" {
     const input = "event: ping\r\ndata: {\"type\":\"ping\"}\r\n\r\n";
     const list = try parseAll(arena.allocator(), input);
     try testing.expectEqual(@as(usize, 1), list.len);
-    try testing.expectEqual(events.Event.ping, list[0]);
+    try testing.expect(list[0] == .ping);
 }
 
 test "RecordIterator: comment lines beginning with colon are ignored" {
@@ -332,7 +354,7 @@ test "RecordIterator: comment lines beginning with colon are ignored" {
         "\n";
     const list = try parseAll(arena.allocator(), input);
     try testing.expectEqual(@as(usize, 1), list.len);
-    try testing.expectEqual(events.Event.ping, list[0]);
+    try testing.expect(list[0] == .ping);
 }
 
 test "RecordIterator: missing colon field is ignored, not a parse error" {

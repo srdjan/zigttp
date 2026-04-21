@@ -10,6 +10,11 @@ const zigts = @import("zigts");
 const file_io = zigts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
 
+pub const ModelCallResult = struct {
+    reply: turn.AssistantReply,
+    usage: turn.Usage = .{},
+};
+
 pub const ModelClient = struct {
     context: *anyopaque,
     request_fn: *const fn (
@@ -17,14 +22,14 @@ pub const ModelClient = struct {
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply,
+    ) anyerror!ModelCallResult,
 
     pub fn request(
         self: ModelClient,
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) !turn.AssistantReply {
+    ) !ModelCallResult {
         return self.request_fn(self.context, arena, transcript, extra_user_text);
     }
 };
@@ -54,6 +59,7 @@ pub fn resolveApprovalFn(policy: ApprovalPolicy, ask_fn: ?ApprovalFn) ApprovalFn
 pub const TurnResult = struct {
     final_state: turn.TurnState,
     attempt: u8,
+    usage: turn.Usage = .{},
 };
 
 pub const RunOptions = struct {
@@ -77,12 +83,12 @@ fn callModel(
     client: ModelClient,
     transcript: *transcript_mod.Transcript,
     extra_prompt: ?[]const u8,
-) !turn.AssistantReply {
-    const reply = try client.request(arena, transcript, extra_prompt);
-    if (reply.preamble) |text| {
+) !ModelCallResult {
+    const result = try client.request(arena, transcript, extra_prompt);
+    if (result.reply.preamble) |text| {
         if (text.len > 0) try transcript.append(allocator, .{ .model_text = text });
     }
-    return reply;
+    return result;
 }
 
 pub fn runTurnWith(
@@ -103,6 +109,7 @@ pub fn runTurnWith(
     var next_event: turn.TurnEvent = .{ .user_submitted = user_text };
     var model_roundtrips: u8 = 0;
     var tool_calls_used: usize = 0;
+    var turn_usage: turn.Usage = .{};
 
     while (true) {
         const action = machine.transition(next_event);
@@ -113,7 +120,9 @@ pub fn runTurnWith(
                     continue;
                 }
                 model_roundtrips += 1;
-                next_event = .{ .model_replied = try callModel(allocator, ta, client, transcript, null) };
+                const result = try callModel(allocator, ta, client, transcript, null);
+                turn_usage.add(result.usage);
+                next_event = .{ .model_replied = result.reply };
             },
             .retry_draft => |payload| {
                 if (model_roundtrips >= options.max_model_roundtrips_per_turn) {
@@ -128,7 +137,9 @@ pub fn runTurnWith(
                         "emit a new edit.\n\n{s}",
                     .{ payload.attempt, payload.max_attempts, payload.diagnostic },
                 );
-                next_event = .{ .model_replied = try callModel(allocator, ta, client, transcript, prompt) };
+                const result = try callModel(allocator, ta, client, transcript, prompt);
+                turn_usage.add(result.usage);
+                next_event = .{ .model_replied = result.reply };
             },
             .run_veto => |edit| {
                 const prepared = try prepareEdit(ta, options.workspace_root, edit);
@@ -146,10 +157,11 @@ pub fn runTurnWith(
                                 .ok = false,
                                 .body = "edit verified but not applied by user approval policy",
                             } });
-                            return .{ .final_state = .done, .attempt = machine.attempt };
+                            return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage };
                         }
                     }
                     try applyPreparedEdit(ta, prepared);
+                    try postApplyCheck(allocator, ta, registry, transcript, prepared);
                 }
                 next_event = .{ .edit_verified = outcome };
             },
@@ -192,14 +204,14 @@ pub fn runTurnWith(
             },
             .render => |msg| {
                 try transcript.append(allocator, msg);
-                return .{ .final_state = machine.state, .attempt = machine.attempt };
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
             .prompt_user => |question| {
                 try transcript.append(allocator, .{ .diagnostic_box = question });
-                return .{ .final_state = machine.state, .attempt = machine.attempt };
+                return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
-            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt },
-            .none => return .{ .final_state = machine.state, .attempt = machine.attempt },
+            .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
+            .none => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
         }
     }
 }
@@ -279,6 +291,50 @@ fn applyPreparedEdit(
     try file_io.writeFile(allocator, prepared.resolved_path, prepared.edit.content);
 }
 
+fn postApplyCheck(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    registry: *const registry_mod.Registry,
+    transcript: *transcript_mod.Transcript,
+    prepared: PreparedEdit,
+) !void {
+    if (registry.findByName("zigts_expert_verify_paths") != null) {
+        const args_json = try std.fmt.allocPrint(
+            arena,
+            "{{\"paths\":[\"{s}\"]}}",
+            .{prepared.edit.file},
+        );
+        var vr = registry.invokeJson(arena, "zigts_expert_verify_paths", args_json) catch return;
+        defer vr.deinit(arena);
+        if (!vr.ok) {
+            const note = try std.fmt.allocPrint(
+                allocator,
+                "post-apply regression: verify_paths found violations\n{s}",
+                .{vr.body},
+            );
+            try transcript.append(allocator, .{ .diagnostic_box = note });
+        }
+    }
+
+    if (prepared.edit.before != null and registry.findByName("zigts_expert_review_patch") != null) {
+        const args_json = try std.fmt.allocPrint(
+            arena,
+            "{{\"file\":\"{s}\",\"diff_only\":true}}",
+            .{prepared.edit.file},
+        );
+        var rr = registry.invokeJson(arena, "zigts_expert_review_patch", args_json) catch return;
+        defer rr.deinit(arena);
+        if (!rr.ok) {
+            const note = try std.fmt.allocPrint(
+                allocator,
+                "post-apply diff review: new violations found\n{s}",
+                .{rr.body},
+            );
+            try transcript.append(allocator, .{ .diagnostic_box = note });
+        }
+    }
+}
+
 fn isPathInsideRoot(root: []const u8, candidate: []const u8) bool {
     if (!std.mem.startsWith(u8, candidate, root)) return false;
     if (candidate.len == root.len) return true;
@@ -296,12 +352,12 @@ const CannedClient = struct {
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply {
+    ) anyerror!ModelCallResult {
         const self: *CannedClient = @ptrCast(@alignCast(ctx));
         _ = arena;
         _ = transcript;
         _ = extra_user_text;
-        return self.reply;
+        return .{ .reply = self.reply };
     }
 
     pub fn asClient(self: *CannedClient) ModelClient {
@@ -318,7 +374,7 @@ const SequenceClient = struct {
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply {
+    ) anyerror!ModelCallResult {
         const self: *SequenceClient = @ptrCast(@alignCast(ctx));
         _ = arena;
         _ = transcript;
@@ -326,7 +382,7 @@ const SequenceClient = struct {
         if (self.index >= self.replies.len) return error.TestSequenceExhausted;
         const reply = self.replies[self.index];
         self.index += 1;
-        return reply;
+        return .{ .reply = reply };
     }
 
     pub fn asClient(self: *SequenceClient) ModelClient {

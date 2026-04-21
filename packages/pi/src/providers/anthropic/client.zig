@@ -43,7 +43,7 @@ pub const Client = struct {
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply {
+    ) anyerror!loop.ModelCallResult {
         const self: *Client = @ptrCast(@alignCast(ctx));
         return self.sendTurn(arena, transcript, extra_user_text);
     }
@@ -53,12 +53,13 @@ pub const Client = struct {
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) !turn.AssistantReply {
+    ) !loop.ModelCallResult {
         const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
         const response_body = try postAnthropic(arena, self.config, body);
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
-        return try apply_edit.maybeRemap(arena, outcome.reply);
+        const reply = try apply_edit.maybeRemap(arena, outcome.reply);
+        return .{ .reply = reply, .usage = outcome.usage };
     }
 };
 

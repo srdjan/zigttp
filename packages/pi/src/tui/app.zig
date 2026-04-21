@@ -43,6 +43,7 @@ pub fn run(
         .no_persist_tool_output = flags.no_persist_tool_output,
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
+        .fork_session_id = flags.fork_session_id,
     });
     defer session.deinit(allocator);
 
@@ -103,6 +104,16 @@ pub fn run(
                         },
                         .session_resume => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output, .resume_latest = true }),
                         .session_new => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output }),
+                        .session_compact => {
+                            const msg = try agent.compact(allocator, &session);
+                            defer allocator.free(msg);
+                            try printBody(&stdout, msg);
+                        },
+                        .session_fork => {
+                            const msg = try agent.fork(allocator, &session);
+                            defer allocator.free(msg);
+                            try printBody(&stdout, msg);
+                        },
                     }
 
                     editor.clear();

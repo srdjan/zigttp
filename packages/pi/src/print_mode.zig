@@ -31,6 +31,7 @@ pub fn run(
         .no_persist_tool_output = flags.no_persist_tool_output,
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
+        .fork_session_id = flags.fork_session_id,
     });
     defer session.deinit(allocator);
 
@@ -158,6 +159,7 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
             .ok = tr.ok,
             .body = tr.body,
         } }),
+        .system_note => {},
     }
 }
 
@@ -192,12 +194,12 @@ const CannedClient = struct {
         arena: std.mem.Allocator,
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply {
+    ) anyerror!loop.ModelCallResult {
         const self: *CannedClient = @ptrCast(@alignCast(ctx));
         _ = arena;
         _ = transcript;
         _ = extra_user_text;
-        return self.reply;
+        return .{ .reply = self.reply };
     }
 
     fn asModelClient(self: *CannedClient) loop.ModelClient {

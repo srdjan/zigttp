@@ -6,6 +6,21 @@
 
 const std = @import("std");
 
+/// Per-request token accounting returned by the model provider.
+pub const Usage = struct {
+    input_tokens: u64 = 0,
+    output_tokens: u64 = 0,
+    cache_read_input_tokens: u64 = 0,
+    cache_creation_input_tokens: u64 = 0,
+
+    pub fn add(self: *Usage, other: Usage) void {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_input_tokens += other.cache_read_input_tokens;
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+    }
+};
+
 pub const TurnState = enum {
     idle,
     awaiting_model,
@@ -71,6 +86,9 @@ pub const Message = union(enum) {
     proof_card: []const u8,
     diagnostic_box: []const u8,
     tool_result: ToolResultMessage,
+    /// Compacted history note injected by /compact. Replaces one or more older
+    /// entries so the model still sees the gist without the full token cost.
+    system_note: []const u8,
 };
 
 pub const RetryPayload = struct {

@@ -46,6 +46,7 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
         .model_text => |body| .{ .model_text = body },
         .proof_card => |body| .{ .proof_card = body },
         .diagnostic_box => |body| .{ .diagnostic_box = body },
+        .system_note => |body| .{ .system_note = body },
         .assistant_tool_use => |calls| .{ .tool_use = .{
             .id = calls[0].id,
             .name = calls[0].name,

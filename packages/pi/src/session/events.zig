@@ -32,6 +32,7 @@ const EventKind = enum {
     tool_result,
     proof_card,
     diagnostic_box,
+    system_note,
 };
 
 pub const ToolUse = struct {
@@ -54,6 +55,7 @@ pub const EventRecord = union(EventKind) {
     tool_result: ToolResult,
     proof_card: []const u8,
     diagnostic_box: []const u8,
+    system_note: []const u8,
 };
 
 pub const Meta = struct {
@@ -61,6 +63,7 @@ pub const Meta = struct {
     session_id: []const u8,
     workspace_realpath: []const u8,
     created_at_unix_ms: i64,
+    parent_id: ?[]const u8 = null,
 };
 
 // ===========================================================================
@@ -119,12 +122,13 @@ fn kindTag(record: EventRecord) []const u8 {
         .tool_result => "tool_result",
         .proof_card => "proof_card",
         .diagnostic_box => "diagnostic_box",
+        .system_note => "system_note",
     };
 }
 
 fn writePayload(stream: *std.json.Stringify, record: EventRecord) !void {
     switch (record) {
-        .user_text, .model_text, .proof_card, .diagnostic_box => |body| {
+        .user_text, .model_text, .proof_card, .diagnostic_box, .system_note => |body| {
             try stream.write(body);
         },
         .tool_use => |tu| {
@@ -192,11 +196,20 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
     const workspace_realpath = try allocator.dupe(u8, workspace_val.string);
     errdefer allocator.free(workspace_realpath);
 
+    var parent_id: ?[]u8 = null;
+    if (obj.get("parent_id")) |pid_val| {
+        if (pid_val == .string) {
+            parent_id = try allocator.dupe(u8, pid_val.string);
+        }
+    }
+    errdefer if (parent_id) |p| allocator.free(p);
+
     return .{
         .schema_version = version,
         .session_id = session_id,
         .workspace_realpath = workspace_realpath,
         .created_at_unix_ms = created_val.integer,
+        .parent_id = parent_id,
     };
 }
 
@@ -221,6 +234,10 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
     try stream.write(meta.workspace_realpath);
     try stream.objectField("created_at_unix_ms");
     try stream.write(meta.created_at_unix_ms);
+    if (meta.parent_id) |pid| {
+        try stream.objectField("parent_id");
+        try stream.write(pid);
+    }
     try stream.endObject();
     try aw.writer.writeByte('\n');
 
@@ -242,6 +259,7 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
 pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
     allocator.free(meta.session_id);
     allocator.free(meta.workspace_realpath);
+    if (meta.parent_id) |p| allocator.free(p);
     meta.* = .{
         .schema_version = schema_version,
         .session_id = &.{},

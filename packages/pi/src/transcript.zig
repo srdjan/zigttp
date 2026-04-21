@@ -82,6 +82,7 @@ pub const OwnedEntry = union(enum) {
     proof_card: []const u8,
     diagnostic_box: []const u8,
     tool_result: OwnedToolResult,
+    system_note: []const u8,
 
     pub fn deinit(self: *OwnedEntry, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -89,6 +90,7 @@ pub const OwnedEntry = union(enum) {
             .model_text => |body| allocator.free(body),
             .proof_card => |body| allocator.free(body),
             .diagnostic_box => |body| allocator.free(body),
+            .system_note => |body| allocator.free(body),
             .assistant_tool_use => |calls| {
                 for (calls) |*call| call.deinit(allocator);
                 allocator.free(calls);
@@ -151,6 +153,7 @@ fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
             .ok = result.ok,
             .body = try allocator.dupe(u8, result.body),
         } },
+        .system_note => |body| .{ .system_note = try allocator.dupe(u8, body) },
     };
 }
 
@@ -160,6 +163,7 @@ pub fn renderPlain(writer: anytype, entry: *const OwnedEntry) !void {
         .model_text => |body| try writeTaggedLine(writer, "model", body),
         .proof_card => |body| try writeTaggedLine(writer, "proof", body),
         .diagnostic_box => |body| try writeTaggedLine(writer, "error", body),
+        .system_note => |body| try writeTaggedLine(writer, "note", body),
         .assistant_tool_use => |calls| {
             try writer.writeAll("assistant: tool_use ");
             for (calls, 0..) |call, i| {

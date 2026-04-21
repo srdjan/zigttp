@@ -16,6 +16,8 @@ const zigts_cli = @import("zigts_cli");
 const expert_meta = zigts_cli.expert_meta;
 const json_diagnostics = zigts_cli.json_diagnostics;
 const skill = @import("zigts_expert_skill");
+const skills_catalog = @import("skills/catalog.zig");
+const prompts_catalog = @import("prompts/catalog.zig");
 
 // The tool list inside the prologue below must stay in sync with
 // `pi_app.buildRegistry`. Drift is a soft degradation, not a hard break:
@@ -170,6 +172,20 @@ pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
     try writeBanner(w, "POLICY METADATA");
     const info = expert_meta.compute();
     try expert_meta.writeText(w, &info);
+
+    try writeBanner(w, "AVAILABLE SKILLS");
+    try w.writeAll("The user may invoke skills via /skill:<name>. Each skill injects a focused\n");
+    try w.writeAll("prompt that you will receive as a user message. Available skills:\n\n");
+    inline for (skills_catalog.catalog) |s| {
+        try w.print("  /skill:{s}\n    {s}\n\n", .{ s.name, s.description });
+    }
+
+    try writeBanner(w, "AVAILABLE TEMPLATES");
+    try w.writeAll("The user may invoke templates via /template:<name> [args...]. Templates expand\n");
+    try w.writeAll("positional args ({{1}}, {{2}}, {{args}}) before being sent as your user message.\n\n");
+    inline for (prompts_catalog.catalog) |t| {
+        try w.print("  /template:{s}\n    {s}\n\n", .{ t.name, t.description });
+    }
 
     try w.writeAll(epilogue);
 

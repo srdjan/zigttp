@@ -15,7 +15,7 @@ pub const AssembleError = error{
 pub const Outcome = struct {
     reply: turn.AssistantReply,
     stop_reason: ?[]const u8 = null,
-    output_tokens: ?u64 = null,
+    usage: turn.Usage = .{},
 };
 
 const BlockState = union(enum) {
@@ -36,11 +36,16 @@ pub fn assemble(
 ) !Outcome {
     var blocks: std.ArrayListUnmanaged(BlockState) = .empty;
     var stop_reason: ?[]const u8 = null;
-    var output_tokens: ?u64 = null;
+    var usage: turn.Usage = .{};
 
     for (event_list) |ev| {
         switch (ev) {
             .api_error => return AssembleError.ApiError,
+            .message_start => |start_usage| {
+                usage.input_tokens = start_usage.input_tokens;
+                usage.cache_read_input_tokens = start_usage.cache_read_input_tokens;
+                usage.cache_creation_input_tokens = start_usage.cache_creation_input_tokens;
+            },
             .content_block_start => |start| {
                 try ensureBlockCapacity(arena, &blocks, start.index);
                 blocks.items[start.index] = switch (start.kind) {
@@ -68,7 +73,7 @@ pub fn assemble(
             },
             .message_delta => |delta| {
                 stop_reason = delta.stop_reason;
-                if (delta.output_tokens) |tokens| output_tokens = tokens;
+                if (delta.output_tokens) |tokens| usage.output_tokens = tokens;
             },
             else => {},
         }
@@ -107,7 +112,7 @@ pub fn assemble(
                 .response = .{ .tool_calls = try tool_calls.toOwnedSlice(arena) },
             },
             .stop_reason = stop_reason,
-            .output_tokens = output_tokens,
+            .usage = usage,
         };
     }
 
@@ -115,7 +120,7 @@ pub fn assemble(
         return .{
             .reply = .{ .response = .{ .final_text = text } },
             .stop_reason = stop_reason,
-            .output_tokens = output_tokens,
+            .usage = usage,
         };
     }
 
@@ -153,7 +158,8 @@ test "assemble: text_simple cassette yields final_text with stop_reason+tokens" 
         else => return error.TestFailed,
     }
     try testing.expectEqualStrings("end_turn", outcome.stop_reason.?);
-    try testing.expectEqual(@as(u64, 5), outcome.output_tokens.?);
+    try testing.expectEqual(@as(u64, 12), outcome.usage.input_tokens);
+    try testing.expectEqual(@as(u64, 5), outcome.usage.output_tokens);
 }
 
 test "assemble: text_multi_delta cassette concatenates every delta in order" {
@@ -229,6 +235,7 @@ test "assemble: text preamble plus tool batch preserves narration and every tool
             try testing.expectEqualStrings("{}", calls[0].args_json);
             try testing.expectEqualStrings("workspace_search_text", calls[1].name);
             try testing.expectEqualStrings("{\"query\":\"handler\"}", calls[1].args_json);
+            try testing.expectEqual(@as(u64, 13), outcome.usage.output_tokens);
         },
         else => return error.TestFailed,
     }
