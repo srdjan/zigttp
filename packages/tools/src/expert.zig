@@ -97,12 +97,15 @@ pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !v
             json_mode = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try paths.append(allocator, arg);
+        } else {
+            printVerifyHelp();
+            std.process.exit(1);
         }
     }
 
     if (paths.items.len == 0) {
         printVerifyHelp();
-        return error.MissingArgument;
+        std.process.exit(1);
     }
 
     var buf: std.ArrayList(u8) = .empty;

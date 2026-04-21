@@ -576,6 +576,12 @@ fn addExpertRun(
     const run = b.addRunArtifact(zigts_exe);
     run.addArgs(args);
     run.expectExitCode(expected_exit);
+    // Zig 0.16's run-step still fails non-zero commands that write to stderr
+    // unless a stderr check exists. Matching the empty string keeps the
+    // contract at "only the exit code matters" for exit-only checks.
+    if (golden_rel == null and expected_exit != 0) {
+        run.expectStdErrMatch("");
+    }
     if (golden_rel) |rel| {
         const expected = b.build_root.handle.readFileAlloc(b.graph.io, rel, b.allocator, .unlimited) catch |err| {
             std.debug.panic("missing expert golden fixture {s}: {s}", .{ rel, @errorName(err) });

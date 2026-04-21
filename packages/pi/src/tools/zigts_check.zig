@@ -7,7 +7,15 @@ const name = "zigts_check";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "zigts check",
-    .description = "Run `zigts check --json` for a handler path through the local CLI.",
+    .description =
+    \\Run `zigts check --json` for a handler path. On success the output
+    \\includes a "proof.properties" object with compiler-proven behavioral
+    \\flags: retry_safe, idempotent, injection_safe, deterministic,
+    \\read_only, state_isolated, fault_covered. Use this to inspect the
+    \\current on-disk proof state of a file before editing. `apply_edit`
+    \\drafts are validated before they are written to disk, so use the
+    \\compiler veto proof_card to validate post-edit properties instead.
+    ,
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
     .decode_json = decodeJson,
     .execute = execute,
@@ -36,4 +44,12 @@ fn execute(
     var outcome = try common.runCommand(allocator, root, &argv);
     defer outcome.deinit(allocator);
     return try common.commandOutcomeToToolResult(allocator, &argv, &outcome);
+}
+
+const testing = std.testing;
+
+test "tool description matches the current zigts check properties contract" {
+    try testing.expect(std.mem.indexOf(u8, tool.description, "pure") == null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "current on-disk proof state") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "proof_card") != null);
 }
