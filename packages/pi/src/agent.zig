@@ -295,23 +295,16 @@ pub fn runOneTurn(
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
-/// Tear down `session` and rebuild it in place from the same environment,
-/// carrying forward `no_session` / `no_persist_tool_output` and honoring
-/// `resume_latest`. Used by `/resume` (pass true) and `/new` (pass false).
+/// Tear down `session` and rebuild it in place from the same environment.
+/// Used by `/resume` and `/new`.
 pub fn rebuildSession(
     allocator: std.mem.Allocator,
     session: *AgentSession,
     registry: *const Registry,
-    no_session: bool,
-    no_persist_tool_output: bool,
-    resume_latest: bool,
+    config: SessionConfig,
 ) !void {
     session.deinit(allocator);
-    session.* = try initFromEnvWithSessionConfig(allocator, registry, .{
-        .no_session = no_session,
-        .no_persist_tool_output = no_persist_tool_output,
-        .resume_latest = resume_latest,
-    });
+    session.* = try initFromEnvWithSessionConfig(allocator, registry, config);
 }
 
 // ---------------------------------------------------------------------------

@@ -101,8 +101,8 @@ pub fn run(
                             defer result.deinit(allocator);
                             try printBody(&stdout, result.body);
                         },
-                        .session_resume => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, true),
-                        .session_new => try agent.rebuildSession(allocator, &session, registry, flags.no_session, flags.no_persist_tool_output, false),
+                        .session_resume => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output, .resume_latest = true }),
+                        .session_new => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output }),
                     }
 
                     editor.clear();
