@@ -381,6 +381,13 @@ fn renderTree(allocator: std.mem.Allocator) !ToolResult {
     return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
 }
 
+pub fn baseSessionConfig(flags: ExpertFlags, overrides: agent.SessionConfig) agent.SessionConfig {
+    var cfg = overrides;
+    cfg.no_session = flags.no_session;
+    cfg.no_persist_tool_output = flags.no_persist_tool_output;
+    return cfg;
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
@@ -451,8 +458,8 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output, .resume_latest = true }),
-            .session_new => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output }),
+            .session_resume => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })),
+            .session_new => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{})),
             .session_compact => {
                 const msg = try agent.compact(allocator, &session);
                 defer allocator.free(msg);
