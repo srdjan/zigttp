@@ -74,6 +74,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try zigts_cli.run(allocator, user_args);
         return;
     }
+    if (std.mem.eql(u8, command, "gen-tests")) {
+        try zigts_cli.run(allocator, user_args);
+        return;
+    }
     if (std.mem.eql(u8, command, "compile")) {
         try compileCommand(allocator, user_args[1..]);
         return;
