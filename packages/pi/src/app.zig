@@ -451,6 +451,64 @@ test "parseExpertFlags: --print + --yes combines policy with print" {
     try testing.expectEqualStrings("hello", flags.print.?);
 }
 
+test "parseExpertFlags: --continue sets resume_latest like --resume" {
+    const argv = [_][]const u8{ "zigts", "expert", "--continue" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(true, flags.resume_latest);
+    try testing.expect(flags.fork_session_id == null);
+}
+
+test "parseExpertFlags: --fork two-argv form captures id" {
+    const argv = [_][]const u8{ "zigts", "expert", "--fork", "abc123" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expect(flags.fork_session_id != null);
+    try testing.expectEqualStrings("abc123", flags.fork_session_id.?);
+    try testing.expectEqual(false, flags.resume_latest);
+}
+
+test "parseExpertFlags: --fork=id inline form captures id" {
+    const argv = [_][]const u8{ "zigts", "expert", "--fork=xyz" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqualStrings("xyz", flags.fork_session_id.?);
+}
+
+test "parseExpertFlags: --fork without value errors MissingForkSessionId" {
+    const argv = [_][]const u8{ "zigts", "expert", "--fork" };
+    try testing.expectError(error.MissingForkSessionId, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --fork + --resume errors MutuallyExclusiveForkFlags" {
+    const argv = [_][]const u8{ "zigts", "expert", "--fork", "x", "--resume" };
+    try testing.expectError(error.MutuallyExclusiveForkFlags, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --fork + --session-id errors MutuallyExclusiveForkFlags" {
+    const argv = [_][]const u8{ "zigts", "expert", "--fork", "x", "--session-id", "y" };
+    try testing.expectError(error.MutuallyExclusiveForkFlags, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --tools minimal sets preset" {
+    const argv = [_][]const u8{ "zigts", "expert", "--tools", "minimal" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(ToolsPreset.minimal, flags.tools_preset);
+}
+
+test "parseExpertFlags: --tools=full sets preset" {
+    const argv = [_][]const u8{ "zigts", "expert", "--tools=full" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(ToolsPreset.full, flags.tools_preset);
+}
+
+test "parseExpertFlags: --tools without value errors MissingToolsPreset" {
+    const argv = [_][]const u8{ "zigts", "expert", "--tools" };
+    try testing.expectError(error.MissingToolsPreset, parseExpertFlags(argv[0..]));
+}
+
+test "parseExpertFlags: --tools bad-value errors UnsupportedToolsPreset" {
+    const argv = [_][]const u8{ "zigts", "expert", "--tools", "quantum" };
+    try testing.expectError(error.UnsupportedToolsPreset, parseExpertFlags(argv[0..]));
+}
+
 test "buildRegistry + dispatchLine end-to-end against every tool" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
