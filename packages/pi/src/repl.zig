@@ -151,11 +151,26 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
 
     try w.writeAll("Natural language is sent to the expert backend by default.\n");
     try w.writeAll("Explicit local commands:\n");
-    try w.writeAll("  /meta  /features  /modules  /rule <code>  /search <term>\n");
-    try w.writeAll("  /verify <path...>  /check <path>  /build <step>  /test [step]\n");
-    try w.writeAll("  /resume  /new\n");
-    try w.writeAll("  zigts meta|features|modules|search|describe-rule|verify-paths|verify-modules|check ...\n");
-    try w.writeAll("  zig build <step>  zig build test[-...] \n\n");
+    for (commands.command_table) |row| {
+        if (row.slash) |slash| {
+            if (row.takes_trailing_args) {
+                try w.print("  {s} <args...>\n", .{slash});
+            } else {
+                try w.print("  {s}\n", .{slash});
+            }
+        }
+    }
+    for (commands.session_commands) |slash| {
+        try w.print("  {s}\n", .{slash});
+    }
+    try w.writeAll("  zigts");
+    for (commands.command_table) |row| {
+        if (row.explicit) |name| {
+            try w.print(" {s}", .{name});
+        }
+    }
+    try w.writeAll(" ...\n");
+    try w.writeAll("  zig build <step>  zig build test[-...]\n\n");
     try w.writeAll("Approval flags (pass on launch):\n");
     try w.writeAll("  --yes      auto-approve every verified edit\n");
     try w.writeAll("  --no-edit  auto-reject every verified edit\n");

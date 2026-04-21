@@ -51,6 +51,63 @@ zigts prove old-contract.json new-contract.json
 
 **Always use `--json` when running from an interactive expert client.** Parse the result. Never guess at errors from unstructured stderr.
 
+## REPL (`zigts expert`)
+
+The interactive agent. Natural language is sent to the model by default. Slash commands run locally without a model call.
+
+### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/meta` | Compiler version, policy hash |
+| `/features` | Allowed/blocked language features |
+| `/modules` | Virtual module exports |
+| `/rule <code>` | Explain a diagnostic code (e.g. ZTS303) |
+| `/search <keyword>` | Search all rules by keyword |
+| `/verify <path...>` | Check files for violations |
+| `/check <path>` | Full handler analysis |
+| `/build <step>` | Run a zig build step |
+| `/test [step]` | Run tests |
+| `/resume` | Resume the latest session for this cwd |
+| `/new` | Start a fresh session |
+| `help` or `:h` | Show command reference |
+| `quit`, `exit`, or `:q` | Exit the REPL |
+
+Explicit `zigts` subcommands (`zigts meta`, `zigts features`, etc.) also dispatch locally.
+
+### Launch Flags
+
+```bash
+# Approval
+zigts expert --yes           # auto-approve all verified edits
+zigts expert --no-edit       # auto-reject all verified edits
+
+# Session
+zigts expert --session-id <id>           # named session (resume or create)
+zigts expert --resume                    # resume newest session for this cwd
+zigts expert --no-session                # disable session persistence
+zigts expert --no-persist-tool-output    # omit tool output from session log
+
+# Non-interactive
+zigts expert --print "add a GET /health route"     # one-shot, plain text output
+zigts expert --print "..." --mode json             # one-shot, NDJSON events to stdout
+```
+
+### `--mode json` Event Format
+
+With `--print <prompt> --mode json`, the agent emits one NDJSON line per event then exits. This is the same shape as `events.jsonl` session files, so one parser handles both.
+
+```json
+{"v":1,"k":"user_text","d":"add a GET /health route"}
+{"v":1,"k":"tool_use","d":{"id":"tu_01","name":"zigts_check","args_json":"{\"path\":\"handler.ts\"}"}}
+{"v":1,"k":"tool_result","d":{"tool_use_id":"tu_01","tool_name":"zigts_check","ok":true,"body":"..."}}
+{"v":1,"k":"model_text","d":"Added the route. Proof: retry_safe=true, idempotent=true."}
+{"v":1,"k":"end"}
+```
+
+Event kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `end`.
+Field `v` is the schema version (currently `1`). The `end` event always appears last.
+
 ## Compiler-in-the-Loop Workflow
 
 When writing or fixing zigts code, follow this exact loop:
@@ -107,6 +164,8 @@ Error:
 ```
 
 **The `suggestion` field is authoritative.** Follow it. Don't invent an alternative.
+
+To record I/O for deterministic replay and test generation, see `references/testing-replay.md` (`--trace`, `--replay`, JSONL test format).
 
 ### Diagnostic Code Ranges
 
@@ -291,6 +350,8 @@ import { cacheGet, cacheSet, cacheIncr } from "zigttp:cache";
 import { parallel, race } from "zigttp:io";
 import { guard, pipe } from "zigttp:compose";
 import { logInfo, logError } from "zigttp:log";
+import { serviceCall } from "zigttp:service";
+import { send, close, getWebSockets, serializeAttachment, deserializeAttachment } from "zigttp:websocket";
 ```
 
 ### Pattern Matching
@@ -364,6 +425,37 @@ The BoolChecker enforces type-directed safety rules at compile time:
 ## When the Compiler Knows Best
 
 If `zigts check --json` returns an error with a suggestion, **use the suggestion**. The compiler understands the restricted grammar better than any language model. The skill gives you the patterns; the compiler enforces them.
+
+## JSX/SSR
+
+Use `.tsx` files for server-side HTML rendering. There is no client-side hydration. `renderToString` is the only rendering entry point.
+
+```tsx
+type Todo = { id: number; text: string; done: boolean };
+
+function TodoItem(props: { todo: Todo }): JSX.Element {
+    const cls = props.todo.done ? "done" : "pending";
+    return <li class={cls}>{props.todo.text}</li>;
+}
+
+function TodoList(props: { todos: Todo[] }): JSX.Element {
+    return (
+        <ul>
+            {props.todos.map((t) => <TodoItem todo={t} />)}
+        </ul>
+    );
+}
+
+function handler(req: Request): Response {
+    const todos: Todo[] = [
+        { id: 1, text: "ship it", done: false },
+    ];
+    const html = renderToString(<TodoList todos={todos} />);
+    return Response.html(html);
+}
+```
+
+See `references/jsx-patterns.md` for the full component API, attribute rules, and fragment syntax.
 
 ## Reference Files
 

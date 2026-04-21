@@ -82,6 +82,8 @@ pub fn isHelp(name: []const u8) bool {
     return std.mem.eql(u8, name, "help") or std.mem.eql(u8, name, ":h");
 }
 
+pub const session_commands = [_][]const u8{ "/resume", "/new" };
+
 pub fn isSessionResume(name: []const u8) bool {
     return std.mem.eql(u8, name, "/resume");
 }
