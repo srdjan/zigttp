@@ -26,6 +26,15 @@ const gen_tests_tool = @import("tools/gen_tests.zig");
 
 const Registry = registry_mod.Registry;
 
+pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {
+    var reg: Registry = .{};
+    errdefer reg.deinit(allocator);
+    try reg.register(allocator, workspace_read_file_tool.tool);
+    try reg.register(allocator, workspace_list_files_tool.tool);
+    try reg.register(allocator, workspace_search_text_tool.tool);
+    return reg;
+}
+
 pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
@@ -52,7 +61,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
 
 /// Long flags whose next token is a value. `zigts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
-pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode" };
+pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork" };
 
 var captured_argv: ?[]const []const u8 = null;
 
@@ -98,9 +107,32 @@ pub fn run(allocator: std.mem.Allocator) !void {
             _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
             std.process.exit(2);
         },
+        error.MissingToolsPreset => {
+            const msg = "error: --tools requires a value (full, minimal)\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.UnsupportedToolsPreset => {
+            const msg = "error: --tools only accepts 'full' or 'minimal'\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.MissingForkSessionId => {
+            const msg = "error: --fork requires a session id value\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
+        error.MutuallyExclusiveForkFlags => {
+            const msg = "error: --fork is mutually exclusive with --resume, --continue, and --session-id\n";
+            _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            std.process.exit(2);
+        },
     };
 
-    var registry = try buildRegistry(allocator);
+    var registry = switch (flags.tools_preset) {
+        .full => try buildRegistry(allocator),
+        .minimal => try buildMinimalRegistry(allocator),
+    };
     defer registry.deinit(allocator);
 
     if (flags.print != null) {
@@ -117,6 +149,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
     }
 }
 
+pub const ToolsPreset = enum { full, minimal };
+
+fn parseToolsPreset(val: []const u8) !ToolsPreset {
+    if (std.mem.eql(u8, val, "minimal")) return .minimal;
+    if (std.mem.eql(u8, val, "full")) return .full;
+    return error.UnsupportedToolsPreset;
+}
+
 /// Flags parsed from `zigts expert` argv. `policy == null` means the user
 /// did not pass `--yes` or `--no-edit`; callers pick an appropriate default
 /// (`.ask` for interactive, `.auto_reject` for `--print`).
@@ -126,8 +166,10 @@ pub const ExpertFlags = struct {
     no_persist_tool_output: bool = false,
     session_id: ?[]const u8 = null,
     resume_latest: bool = false,
+    fork_session_id: ?[]const u8 = null,
     print: ?[]const u8 = null,
     json_mode: bool = false,
+    tools_preset: ToolsPreset = .full,
 };
 
 /// Scan argv for the expert launch flags. Unknown `--*` tokens are ignored so
@@ -145,7 +187,25 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.eql(u8, arg, "--no-edit")) saw_no_edit = true;
         if (std.mem.eql(u8, arg, "--no-session")) out.no_session = true;
         if (std.mem.eql(u8, arg, "--no-persist-tool-output")) out.no_persist_tool_output = true;
-        if (std.mem.eql(u8, arg, "--resume")) out.resume_latest = true;
+        if (std.mem.eql(u8, arg, "--resume") or std.mem.eql(u8, arg, "--continue")) out.resume_latest = true;
+        if (std.mem.eql(u8, arg, "--fork")) {
+            if (i + 1 >= argv.len) return error.MissingForkSessionId;
+            i += 1;
+            out.fork_session_id = argv[i];
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--fork=")) {
+            out.fork_session_id = arg["--fork=".len..];
+        }
+        if (std.mem.eql(u8, arg, "--tools")) {
+            if (i + 1 >= argv.len) return error.MissingToolsPreset;
+            i += 1;
+            out.tools_preset = try parseToolsPreset(argv[i]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--tools=")) {
+            out.tools_preset = try parseToolsPreset(arg["--tools=".len..]);
+        }
         if (std.mem.eql(u8, arg, "--session-id")) {
             if (i + 1 >= argv.len) return error.MissingSessionId;
             i += 1;
@@ -181,6 +241,8 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
     if (out.resume_latest and out.session_id != null) return error.MutuallyExclusiveResumeFlags;
+    if (out.fork_session_id != null and out.resume_latest) return error.MutuallyExclusiveForkFlags;
+    if (out.fork_session_id != null and out.session_id != null) return error.MutuallyExclusiveForkFlags;
     if (out.json_mode and out.print == null) return error.JsonModeRequiresPrint;
     if (saw_yes) {
         out.policy = .auto_approve;

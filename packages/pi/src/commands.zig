@@ -82,14 +82,38 @@ pub fn isHelp(name: []const u8) bool {
     return std.mem.eql(u8, name, "help") or std.mem.eql(u8, name, ":h");
 }
 
-pub const session_commands = [_][]const u8{ "/resume", "/new" };
+pub const session_commands = [_][]const u8{ "/resume", "/continue", "/new", "/compact", "/fork", "/tree" };
 
 pub fn isSessionResume(name: []const u8) bool {
-    return std.mem.eql(u8, name, session_commands[0]);
+    return std.mem.eql(u8, name, "/resume") or std.mem.eql(u8, name, "/continue");
 }
 
 pub fn isSessionNew(name: []const u8) bool {
-    return std.mem.eql(u8, name, session_commands[1]);
+    return std.mem.eql(u8, name, "/new");
+}
+
+pub fn isCompact(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/compact");
+}
+
+pub fn isSettings(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/settings");
+}
+
+pub fn isHotkeys(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/hotkeys");
+}
+
+pub fn isChangelog(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/changelog");
+}
+
+pub fn isSessionFork(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/fork");
+}
+
+pub fn isSessionTree(name: []const u8) bool {
+    return std.mem.eql(u8, name, "/tree");
 }
 
 const testing = std.testing;

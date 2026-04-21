@@ -10,6 +10,9 @@ const agent = @import("agent.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
+const skills_catalog = @import("skills/catalog.zig");
+const prompts_catalog = @import("prompts/catalog.zig");
+const models_registry = @import("providers/models.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -21,6 +24,8 @@ pub const DispatchOutcome = union(enum) {
     result: ToolResult,
     session_resume,
     session_new,
+    session_compact,
+    session_fork,
 };
 
 /// Surface-agnostic result of processing one submitted line. Both the
@@ -35,6 +40,8 @@ pub const SubmitOutcome = union(enum) {
     tool_result: ToolResult,
     session_resume,
     session_new,
+    session_compact,
+    session_fork,
 };
 
 /// Routes a single line through either the model (NL) or the dispatch
@@ -51,6 +58,48 @@ pub fn processSubmit(
     const trimmed = std.mem.trim(u8, raw_line, " \t\r\n");
     if (trimmed.len == 0) return .noop;
 
+    if (std.mem.startsWith(u8, trimmed, "/skill:")) {
+        const skill_name = trimmed["/skill:".len..];
+        if (skills_catalog.findByName(skill_name)) |skill| {
+            const rendered = try agent.runOneTurn(allocator, session, registry, skill.body, approval_fn);
+            return .{ .rendered = rendered };
+        }
+        const msg = try std.fmt.allocPrint(allocator, "unknown skill: {s}\nAvailable: run /skills to list\n", .{skill_name});
+        return .{ .tool_result = .{ .ok = false, .body = msg } };
+    }
+
+    if (std.mem.eql(u8, trimmed, "/model")) {
+        return .{ .tool_result = try renderModel(allocator, session.currentModel()) };
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "/model ")) {
+        const model_id = std.mem.trim(u8, trimmed["/model ".len..], " \t");
+        if (models_registry.findById(model_id)) |model| {
+            session.setModel(model.id);
+            const msg = try std.fmt.allocPrint(allocator, "Model switched to: {s}\n", .{model.display_name});
+            return .{ .tool_result = .{ .ok = true, .body = msg } };
+        }
+        return .{ .tool_result = try renderModel(allocator, session.currentModel()) };
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "/template:")) {
+        const rest = trimmed["/template:".len..];
+        var it = std.mem.tokenizeAny(u8, rest, " \t");
+        const tmpl_name = it.next() orelse "";
+        var tmpl_args: std.ArrayList([]const u8) = .empty;
+        defer tmpl_args.deinit(allocator);
+        while (it.next()) |arg| try tmpl_args.append(allocator, arg);
+
+        if (prompts_catalog.findByName(tmpl_name)) |tmpl| {
+            const expanded = try prompts_catalog.expand(allocator, tmpl.body, tmpl_args.items);
+            defer allocator.free(expanded);
+            const rendered = try agent.runOneTurn(allocator, session, registry, expanded, approval_fn);
+            return .{ .rendered = rendered };
+        }
+        const msg = try std.fmt.allocPrint(allocator, "unknown template: {s}\nAvailable: run /templates to list\n", .{tmpl_name});
+        return .{ .tool_result = .{ .ok = false, .body = msg } };
+    }
+
     if (!shouldDispatchTool(registry, trimmed)) {
         const rendered = try agent.runOneTurn(allocator, session, registry, trimmed, approval_fn);
         return .{ .rendered = rendered };
@@ -63,6 +112,8 @@ pub fn processSubmit(
         .result => |r| .{ .tool_result = r },
         .session_resume => .session_resume,
         .session_new => .session_new,
+        .session_compact => .session_compact,
+        .session_fork => .session_fork,
     };
 }
 
@@ -83,6 +134,14 @@ pub fn dispatchLine(
     if (commands.isHelp(argv[0])) return .{ .result = try renderHelp(allocator, registry) };
     if (commands.isSessionResume(argv[0])) return .session_resume;
     if (commands.isSessionNew(argv[0])) return .session_new;
+    if (commands.isCompact(argv[0])) return .session_compact;
+    if (commands.isSessionFork(argv[0])) return .session_fork;
+    if (commands.isSessionTree(argv[0])) return .{ .result = try renderTree(allocator) };
+    if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
+    if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
+    if (commands.isChangelog(argv[0])) return .{ .result = try renderChangelog(allocator) };
+    if (std.mem.eql(u8, argv[0], "/skills")) return .{ .result = try renderSkills(allocator) };
+    if (std.mem.eql(u8, argv[0], "/templates")) return .{ .result = try renderTemplates(allocator) };
 
     if (commands.lookup(argv)) |cmd| {
         return .{ .result = try invokeTool(allocator, registry, cmd.tool_name, cmd.args) };
@@ -176,7 +235,8 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
     try w.writeAll("  --no-edit  auto-reject every verified edit\n");
     try w.writeAll("Session flags (pass on launch):\n");
     try w.writeAll("  --session-id <id>          resume or create a named session\n");
-    try w.writeAll("  --resume                   resume the newest session for this cwd\n");
+    try w.writeAll("  --resume / --continue      resume the newest session for this cwd\n");
+    try w.writeAll("  --fork <session-id>        branch from an existing session\n");
     try w.writeAll("  --no-session               disable session persistence for this run\n");
     try w.writeAll("  --no-persist-tool-output   omit tool output bodies from persisted session\n");
     try w.writeAll("Non-interactive flags (pass on launch):\n");
@@ -187,7 +247,135 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry) !ToolResu
         try w.print("  {s: <36}  {s}\n", .{ entry.name, entry.description });
     }
     try w.writeAll("\nMeta commands: help (:h), quit (:q)\n");
+    try w.writeAll("Info commands: /model  /settings  /hotkeys  /changelog\n");
+    try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
+    try w.writeAll("Skills:        /skills  /skill:<name>\n");
+    try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
+    buf = aw.toArrayList();
+    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+}
+
+const request_mod = @import("providers/anthropic/request.zig");
+const session_paths = @import("session/paths.zig");
+
+fn renderModel(allocator: std.mem.Allocator, active: ?[]const u8) !ToolResult {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    const current = active orelse request_mod.default_model;
+    try w.print("Active model: {s}\n\nAvailable models:\n", .{current});
+    for (models_registry.registry) |m| {
+        try w.print("  {s: <36}  {s}\n", .{ m.id, m.display_name });
+    }
+    try w.writeAll("\nSwitch with: /model <model-id>\n");
+    buf = aw.toArrayList();
+    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+}
+
+fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
+    const msg = try std.fmt.allocPrint(allocator,
+        "Settings (compile-time defaults):\n" ++
+        "  model:           {s}\n" ++
+        "  max_tokens:      {d}\n" ++
+        "  max_attempts:    3\n" ++
+        "  roundtrips/turn: 8\n" ++
+        "  tool_calls/turn: 16\n" ++
+        "  batch_size:      8\n",
+        .{ request_mod.default_model, request_mod.default_max_tokens },
+    );
+    return .{ .ok = true, .body = msg };
+}
+
+fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
+    const msg = try allocator.dupe(u8,
+        "Keyboard shortcuts (interactive REPL):\n" ++
+        "  Enter          submit current line\n" ++
+        "  Ctrl-C         interrupt / cancel\n" ++
+        "  Ctrl-D         quit (EOF)\n" ++
+        "  Up/Down        history navigation (TUI mode only)\n",
+    );
+    return .{ .ok = true, .body = msg };
+}
+
+fn renderSkills(allocator: std.mem.Allocator) !ToolResult {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    try w.writeAll("Available skills (invoke with /skill:<name>):\n");
+    for (skills_catalog.catalog) |skill| {
+        try w.print("  {s: <20}  {s}\n", .{ skill.name, skill.description });
+    }
+    buf = aw.toArrayList();
+    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+}
+
+fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    try w.writeAll("Available templates (invoke with /template:<name> [args...]):\n");
+    for (prompts_catalog.catalog) |tmpl| {
+        try w.print("  {s: <16}  {s}\n", .{ tmpl.name, tmpl.description });
+    }
+    buf = aw.toArrayList();
+    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+}
+
+fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
+    const msg = try allocator.dupe(u8,
+        "zigts expert - changelog\n" ++
+        "  Full token accounting (input, cache_read, cache_write, output)\n" ++
+        "  Post-apply auto-verify (verify_paths + diff review after each edit)\n" ++
+        "  Session compaction (/compact)\n" ++
+        "  Session branching: /fork, /tree, --fork, --continue\n" ++
+        "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
+        "  Skills catalog (/skill:<name>)\n" ++
+        "  Informational commands: /model, /settings, /hotkeys, /changelog\n",
+    );
+    return .{ .ok = true, .body = msg };
+}
+
+fn renderTree(allocator: std.mem.Allocator) !ToolResult {
+    const root = session_paths.sessionRoot(allocator) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "error reading session root: {s}\n", .{@errorName(err)});
+        return .{ .ok = false, .body = msg };
+    };
+    defer allocator.free(root);
+
+    const hash = session_paths.cwdHashFull(allocator) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "error computing cwd hash: {s}\n", .{@errorName(err)});
+        return .{ .ok = false, .body = msg };
+    };
+
+    const entries = session_paths.listSessions(allocator, root, hash[0..]) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "error listing sessions: {s}\n", .{@errorName(err)});
+        return .{ .ok = false, .body = msg };
+    };
+    defer {
+        for (entries) |*e| e.deinit(allocator);
+        allocator.free(entries);
+    }
+
+    if (entries.len == 0) {
+        return .{ .ok = true, .body = try allocator.dupe(u8, "No sessions found for this workspace.\n") };
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    try w.print("Sessions for this workspace ({d} total, newest first):\n", .{entries.len});
+    for (entries) |entry| {
+        const ms = entry.created_at_unix_ms;
+        const secs = @divTrunc(ms, 1000);
+        try w.print("  {s}  created={d}\n", .{ entry.session_id, secs });
+    }
+    try w.writeAll("\nUse /fork to branch the current session.\n");
+    try w.writeAll("Use /resume or /continue to reload the newest session.\n");
     buf = aw.toArrayList();
     return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
 }
@@ -210,6 +398,7 @@ pub fn run(
         .no_persist_tool_output = flags.no_persist_tool_output,
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
+        .fork_session_id = flags.fork_session_id,
     });
     defer session.deinit(allocator);
 
@@ -236,6 +425,21 @@ pub fn run(
             .rendered => |rendered| {
                 defer allocator.free(rendered);
                 _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+                if (is_tty) {
+                    const tok = session.token_totals;
+                    var token_buf: [128]u8 = undefined;
+                    const token_line = std.fmt.bufPrint(
+                        &token_buf,
+                        "[tokens: in={d} cache_r={d} cache_w={d} out={d}]\n",
+                        .{
+                            tok.input_tokens,
+                            tok.cache_read_input_tokens,
+                            tok.cache_creation_input_tokens,
+                            tok.output_tokens,
+                        },
+                    ) catch "";
+                    _ = std.c.write(std.c.STDOUT_FILENO, token_line.ptr, token_line.len);
+                }
             },
             .tool_result => |*result| {
                 defer result.deinit(allocator);
@@ -248,6 +452,16 @@ pub fn run(
             },
             .session_resume => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output, .resume_latest = true }),
             .session_new => try agent.rebuildSession(allocator, &session, registry, .{ .no_session = flags.no_session, .no_persist_tool_output = flags.no_persist_tool_output }),
+            .session_compact => {
+                const msg = try agent.compact(allocator, &session);
+                defer allocator.free(msg);
+                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            },
+            .session_fork => {
+                const msg = try agent.fork(allocator, &session);
+                defer allocator.free(msg);
+                _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
+            },
         }
     }
 }

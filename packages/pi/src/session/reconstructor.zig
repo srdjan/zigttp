@@ -102,12 +102,14 @@ fn appendFromLine(
         try appendToolUse(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "tool_result")) {
         try appendToolResult(allocator, tr, payload);
+    } else if (std.mem.eql(u8, kind, "system_note")) {
+        try appendText(allocator, tr, payload, .system_note);
     } else {
         return error.CorruptEventsLog;
     }
 }
 
-const TextKind = enum { user_text, model_text, proof_card, diagnostic_box };
+const TextKind = enum { user_text, model_text, proof_card, diagnostic_box, system_note };
 
 fn appendText(
     allocator: std.mem.Allocator,
@@ -124,6 +126,7 @@ fn appendText(
         .model_text => .{ .model_text = body },
         .proof_card => .{ .proof_card = body },
         .diagnostic_box => .{ .diagnostic_box = body },
+        .system_note => .{ .system_note = body },
     };
     try tr.entries.append(allocator, entry);
 }

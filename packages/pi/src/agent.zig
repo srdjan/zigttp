@@ -37,6 +37,10 @@ pub const SessionConfig = struct {
     /// Load the newest session for this cwd. Mutually exclusive with
     /// `session_id`.
     resume_latest: bool = false,
+    /// Fork from the given session id: copy its transcript into a new session
+    /// with `parent_id` pointing to the source. Mutually exclusive with
+    /// `resume_latest` and `session_id`.
+    fork_session_id: ?[]const u8 = null,
 };
 
 const stub_reply_text =
@@ -51,12 +55,12 @@ const StubClient = struct {
         arena: std.mem.Allocator,
         transcript: *const Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply {
+    ) anyerror!loop.ModelCallResult {
         _ = ctx;
         _ = arena;
         _ = transcript;
         _ = extra_user_text;
-        return .{ .response = .{ .final_text = stub_reply_text } };
+        return .{ .reply = .{ .response = .{ .final_text = stub_reply_text } } };
     }
 
     fn asClient(self: *StubClient) loop.ModelClient {
@@ -91,6 +95,8 @@ pub const AgentSession = struct {
     /// Cursor into `transcript.entries`. Entries from this index forward
     /// are the ones that need to be persisted next.
     last_persisted_len: usize = 0,
+    /// Running total of tokens consumed by all turns in this session.
+    token_totals: turn.Usage = .{},
 
     pub fn initStub() AgentSession {
         return .{};
@@ -145,6 +151,24 @@ pub const AgentSession = struct {
             .anthropic => (&self.backend.anthropic).asModelClient(),
         };
     }
+
+    /// Returns the model id currently in use, or null for the stub backend.
+    pub fn currentModel(self: *const AgentSession) ?[]const u8 {
+        return switch (self.backend) {
+            .stub => null,
+            .anthropic => |c| c.config.model,
+        };
+    }
+
+    /// Switches the Anthropic backend's model. `model_id` must outlive the
+    /// session (use a compile-time const or an allocator-owned dupe). No-op
+    /// for the stub backend.
+    pub fn setModel(self: *AgentSession, model_id: []const u8) void {
+        switch (self.backend) {
+            .anthropic => |*c| c.config.model = model_id,
+            .stub => {},
+        }
+    }
 };
 
 /// Build a session from the environment (`ANTHROPIC_API_KEY` -> anthropic,
@@ -161,6 +185,8 @@ pub fn initFromEnvWithSessionConfig(
     config: SessionConfig,
 ) !AgentSession {
     std.debug.assert(!(config.resume_latest and config.session_id != null));
+    std.debug.assert(!(config.fork_session_id != null and config.resume_latest));
+    std.debug.assert(!(config.fork_session_id != null and config.session_id != null));
 
     var session = blk: {
         const api_key = envVar("ANTHROPIC_API_KEY") orelse break :blk AgentSession.initStub();
@@ -219,6 +245,25 @@ pub fn initFromEnvWithSessionConfig(
         session.transcript = tr;
         session.last_persisted_len = tr.len();
         session.replay_next_turn = true;
+    } else if (config.fork_session_id) |fork_id| {
+        const src_dir = try session_paths.sessionDir(allocator, fork_id);
+        defer allocator.free(src_dir);
+        const src_events = try std.fs.path.join(allocator, &.{ src_dir, "events.jsonl" });
+        defer allocator.free(src_events);
+        const tr = try reconstructor.reconstructTranscript(allocator, src_events, null);
+        session.transcript.deinit(allocator);
+        session.transcript = tr;
+        // Re-persist forked transcript to the new session's events.jsonl.
+        for (session.transcript.entries.items) |*entry| {
+            try persister.appendEntry(allocator, session.events_path.?, entry, session.persist_opts);
+        }
+        session.last_persisted_len = session.transcript.len();
+        try session_events.writeMeta(allocator, session.meta_path.?, .{
+            .session_id = sid,
+            .workspace_realpath = realpath,
+            .created_at_unix_ms = nowUnixMs(),
+            .parent_id = fork_id,
+        });
     } else {
         try session_events.writeMeta(allocator, session.meta_path.?, .{
             .session_id = sid,
@@ -266,7 +311,7 @@ pub fn runOneTurn(
     const replay = session.replay_next_turn;
     session.replay_next_turn = false;
 
-    _ = try loop.runTurnWith(
+    const turn_result = try loop.runTurnWith(
         allocator,
         session.modelClient(),
         registry,
@@ -274,6 +319,7 @@ pub fn runOneTurn(
         user_text,
         .{ .approval_fn = approval_fn, .replay_mode = replay },
     );
+    session.token_totals.add(turn_result.usage);
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
 
@@ -290,6 +336,101 @@ pub fn runOneTurn(
     }
 
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
+}
+
+/// Compact the session transcript: render all existing entries to plain text,
+/// replace them with a single `system_note` carrying that rendered history,
+/// and reset the persistence cursor so the note is persisted next time.
+/// The model will see the compacted history as a user-role context block.
+pub fn compact(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+) ![]u8 {
+    const tr = &session.transcript;
+    if (tr.len() == 0) {
+        return allocator.dupe(u8, "Nothing to compact.\n");
+    }
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try aw.writer.writeAll("[COMPACTED CONVERSATION HISTORY]\n");
+    for (tr.entries.items) |*entry| {
+        try transcript_mod.renderPlain(&aw.writer, entry);
+    }
+    buf = aw.toArrayList();
+    const note = try buf.toOwnedSlice(allocator);
+    errdefer allocator.free(note);
+
+    const entry_count = tr.len();
+    for (tr.entries.items) |*entry| entry.deinit(allocator);
+    tr.entries.clearAndFree(allocator);
+    try tr.entries.append(allocator, .{ .system_note = note });
+    session.last_persisted_len = 0;
+
+    return std.fmt.allocPrint(
+        allocator,
+        "Compacted {d} entries into a single context note.\n",
+        .{entry_count},
+    );
+}
+
+/// Branch the current session: create a new session directory, copy the
+/// current transcript's persisted events to it, write a meta.json with
+/// `parent_id` pointing at the current session, then update the session's
+/// on-disk handles to the new location. The in-memory transcript is unchanged.
+/// Returns an owned summary message; caller frees.
+pub fn fork(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+) ![]u8 {
+    const old_sid = session.session_id orelse {
+        return allocator.dupe(u8, "Session is ephemeral (--no-session); nothing to fork.\n");
+    };
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const realpath = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
+    defer allocator.free(realpath);
+
+    const new_sid = try session_id_mod.generate(allocator);
+    const new_dir = try session_paths.sessionDir(allocator, new_sid);
+    errdefer allocator.free(new_dir);
+    try session_paths.writeWorkspacePointer(allocator, new_dir, realpath);
+
+    const new_events_path = try std.fs.path.join(allocator, &.{ new_dir, "events.jsonl" });
+    errdefer allocator.free(new_events_path);
+    const new_meta_path = try std.fs.path.join(allocator, &.{ new_dir, "meta.json" });
+    errdefer allocator.free(new_meta_path);
+
+    for (session.transcript.entries.items) |*entry| {
+        try persister.appendEntry(allocator, new_events_path, entry, session.persist_opts);
+    }
+
+    try session_events.writeMeta(allocator, new_meta_path, .{
+        .session_id = new_sid,
+        .workspace_realpath = realpath,
+        .created_at_unix_ms = nowUnixMs(),
+        .parent_id = old_sid,
+    });
+
+    if (session.session_id) |s| allocator.free(s);
+    if (session.session_dir) |s| allocator.free(s);
+    if (session.events_path) |s| allocator.free(s);
+    if (session.meta_path) |s| allocator.free(s);
+
+    session.session_id = new_sid;
+    session.session_dir = new_dir;
+    session.events_path = new_events_path;
+    session.meta_path = new_meta_path;
+    session.last_persisted_len = session.transcript.len();
+
+    return std.fmt.allocPrint(
+        allocator,
+        "Forked to new session: {s}\nParent: {s}\n",
+        .{ new_sid, old_sid },
+    );
 }
 
 /// Tear down `session` and rebuild it in place from the same environment.
@@ -477,8 +618,8 @@ test "StubClient ignores user_text and always returns the stub reply" {
     const client = stub.asClient();
     var transcript: Transcript = .{};
     defer transcript.deinit(testing.allocator);
-    const reply = try client.request(testing.allocator, &transcript, "whatever the user typed");
-    switch (reply.response) {
+    const result = try client.request(testing.allocator, &transcript, "whatever the user typed");
+    switch (result.reply.response) {
         .final_text => |t| try testing.expectEqualStrings(stub_reply_text, t),
         else => return error.TestFailed,
     }

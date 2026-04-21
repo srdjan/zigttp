@@ -140,17 +140,17 @@ const EditClient = struct {
         arena: std.mem.Allocator,
         transcript: *const @import("../transcript.zig").Transcript,
         extra_user_text: ?[]const u8,
-    ) anyerror!turn.AssistantReply {
+    ) anyerror!loop.ModelCallResult {
         _ = arena;
         _ = transcript;
         _ = extra_user_text;
         const self: *EditClient = @ptrCast(@alignCast(ctx));
         self.call_count += 1;
-        return .{ .response = .{ .edit = .{
+        return .{ .reply = .{ .response = .{ .edit = .{
             .file = "handler.ts",
             .content = clean_handler,
             .before = null,
-        } } };
+        } } } };
     }
 
     fn asModelClient(self: *EditClient) loop.ModelClient {

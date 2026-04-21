@@ -5,8 +5,14 @@
 
 const std = @import("std");
 
+pub const MessageStartUsage = struct {
+    input_tokens: u64 = 0,
+    cache_read_input_tokens: u64 = 0,
+    cache_creation_input_tokens: u64 = 0,
+};
+
 pub const Event = union(enum) {
-    message_start,
+    message_start: MessageStartUsage,
     content_block_start: ContentBlockStart,
     content_block_delta: ContentBlockDelta,
     content_block_stop: ContentBlockStop,
