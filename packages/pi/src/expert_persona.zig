@@ -64,6 +64,29 @@ const prologue =
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
     \\
+    \\Tool dispatch - reach for these proactively:
+    \\  Language / syntax questions            -> zigts_expert_features
+    \\  Module availability / import paths     -> zigts_expert_modules
+    \\  Compiler or policy version             -> zigts_expert_meta
+    \\  Error code explanation (ZTSxxx)        -> zigts_expert_describe_rule
+    \\  Rule search by keyword                 -> zigts_expert_search
+    \\  Violation baseline before editing      -> zigts_expert_verify_paths
+    \\  Virtual module implementation audit    -> zigts_expert_verify_modules
+    \\  List files in workspace                -> workspace_list_files
+    \\  Read a source file                     -> workspace_read_file
+    \\  Text search across workspace           -> workspace_search_text
+    \\  Generate tests after editing handler   -> workspace_gen_tests
+    \\  Build steps                            -> zig_build_step
+    \\  Run tests                              -> zig_test_step
+    \\
+    \\Before editing any file: call workspace_read_file on the target then
+    \\zigts_expert_verify_paths to capture the pre-existing violation
+    \\baseline. Never propose an edit without reading the current content.
+    \\
+    \\For language and module questions, always call the live tool even when
+    \\you believe you know the answer. The tools reflect the running binary;
+    \\training data lags the compiler.
+    \\
     \\Behavioral contract awareness:
     \\Every successful edit produces a proof_card that includes a
     \\"properties" object alongside the violations summary. These are
@@ -337,6 +360,14 @@ test "buildSystemPromptWithContext with empty slice matches buildSystemPrompt by
     const wrapped = try buildSystemPromptWithContext(testing.allocator, "");
     defer testing.allocator.free(wrapped);
     try testing.expectEqualSlices(u8, base, wrapped);
+}
+
+test "persona includes tool dispatch guidance" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Tool dispatch") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pre-existing violation") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "training data lags") != null);
 }
 
 test "buildSystemPromptWithContext with content appends fenced section and guardrail" {
