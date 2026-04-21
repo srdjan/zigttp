@@ -11,11 +11,11 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 ### What makes it different
 
-**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops, no `switch` - just functions, `let`/`const`, arrow functions, destructuring, `for...of`, `match` expressions, and `assert` statements. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace. Wait for it, there is a payoff for this :) 
+**Opinionated language subset.** TypeScript with the footguns removed. No classes, no `this`, no `var`, no `while` loops, no `switch` - just functions, `let`/`const`, arrow functions, destructuring, `for...of`, `match` expressions, and `assert` statements. Unsupported features fail at parse time with a suggested alternative, not at runtime with a cryptic stack trace. The payoff: each restriction enables a compiler guarantee that would be impossible with general JavaScript.
 
 **JSX as a first-class primitive.** The parser handles JSX directly - no Babel, no build step. Write TSX handlers that return server-rendered HTML.
 
-**Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. This works because zigttp's JS subset has no back-edges and no exceptions - the IR tree IS the control flow graph. `break` and `continue` within `for-of` are forward jumps only and don't compromise this property. See [verification docs](docs/verification.md).
+**Compile-time verification.** `-Dverify` proves your handler correct at build time: every code path returns a Response, Result values are checked before access, no unreachable code. The IR tree is the control flow graph: no back-edges, no exceptions. `break` and `continue` within `for-of` are forward jumps only and don't compromise this property. See [verification docs](docs/verification.md).
 
 **Sound mode.** The compiler uses type inference to catch bugs across all operators at compile time, not just in boolean contexts. Arithmetic on non-numeric types is rejected (`"hello" - 1`, `true * 5`, `env("X") / 2`). Mixed-type `+` is an error - use template literals. Tautological comparisons (`typeof x === "number"` when x is provably number) emit warnings. In boolean contexts, types with unambiguous falsy states are accepted (`if (count)`, `if (name)`), while objects and functions are rejected (always truthy). Values the static checker cannot prove are caught by runtime VM assertions. When types are statically proven, the compiler emits specialized opcodes (`add_num`, `lt_num`, etc.) that skip runtime type dispatch. See [sound mode docs](docs/sound-mode.md).
 
@@ -31,7 +31,7 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 
 **One-command deploy.** `zigttp deploy` cross-compiles the handler to a Linux musl binary, packages it as an OCI image with proven-fact labels (proof level, env vars, egress hosts, cache namespaces, routes, handler properties), pushes it through the zigttp control plane, and provisions the service. No flags, no config files, no registry to set up. First run prompts for a Zigttp access token in the terminal; browser-based device login remains available as fallback. Drift detection blocks accidental replaces; `--confirm` acknowledges and proceeds. See [docs/deploy-tutorial.md](docs/deploy-tutorial.md).
 
-**Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state - handlers become deterministic pure functions of (Request, VirtualModuleResponses).
+**Deterministic replay.** Record every I/O boundary during handler execution with `--trace`, then replay against a new handler version with `--replay` or `-Dreplay` at build time. Because virtual modules are the only I/O boundary, recording their inputs and outputs captures all external state. Handlers become deterministic pure functions of (Request, VirtualModuleResponses).
 
 **Durable execution.** `--durable <dir>` enables crash recovery and long-running workflows via write-ahead oplog. Wrap work in `run(key, fn)` from `zigttp:durable` with an idempotency key; each I/O call is persisted before returning to the handler. On crash recovery, recorded results are replayed without touching the network. Completed runs are deduplicated by key. Durable runs can suspend with `sleep(ms)`, `sleepUntil(unixMs)`, or `waitSignal(name)` and resume when the timer fires or a signal arrives via `signal(key, name, payload)`. A background scheduler polls for ready timers and signals using the same replay-safe recovery path.
 
@@ -44,6 +44,8 @@ Validated release target: Zig `0.16.0`. The build produces three binaries: `zigt
 **Proven live reload.** `--watch --prove` watches handler files and hot-swaps them in-process on every save. The server recompiles the handler, extracts its behavioral contract, diffs it against the running version, and applies the change only when the upgrade verdict is `safe` or `safe_with_additions`. Breaking changes (removed routes, lost critical properties) block the swap and print the diff. `--force-swap` overrides the block. Without `--prove`, `--watch` hot-reloads without contract proof. Compilation errors keep the old handler running. Durable handlers refuse live swap because replay state depends on handler identity.
 
 **Contract-driven mock server.** `zigts mock tests.jsonl --port 3001` serves mock HTTP responses from PathGenerator test cases. Frontend teams get a mock API provably consistent with the handler contract.
+
+**Generated tests.** `zigts gen-tests handler.ts -o handler.test.jsonl` writes a JSONL test file from the same behavioral path enumeration the compiler uses internally. Each proven execution path becomes one runnable test case: synthesized request, ordered I/O stubs, expected status. The output runs immediately via `--test` or `zigts mock`. The `zigts expert` agent calls this automatically after edits so the test suite stays in sync with the proof.
 
 **Native modules over JS polyfills.** Common FaaS needs (JWT auth, JSON Schema validation, caching, crypto) are implemented in Zig and exposed as `zigttp:*` virtual modules with zero interpretation overhead. Each module binding declares what runtime capabilities its implementation uses (clock, crypto, stderr, etc.); checked helpers enforce the declarations at call time, so implementation drift panics instead of silently misbehaving.
 
@@ -451,6 +453,7 @@ zigts link <system.json>              # Cross-handler contract linking
 zigts features [--json]               # List allowed/blocked language features
 zigts modules [--json]                # List virtual modules and exports
 zigts meta [--json]                   # Policy metadata (version, hash, rule count)
+zigts gen-tests [handler.ts] [-o output.jsonl]  # Generate tests from proven paths
 zigts verify-paths <f>... [--json]    # Full analysis on files
 zigts verify-modules --builtins --strict --json  # Governance audit
 ```
@@ -654,7 +657,7 @@ The verifier statically proves seven properties of your handler at compile time:
 6. **Optional values are checked before use.** Values from `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` must be narrowed via `if (val)`, `val !== undefined`, `val ?? default`, or reassignment before use in expressions.
 7. **No cross-request state leakage.** Module-scope variables must not be mutated inside the handler body. This prevents one request from affecting another through shared mutable state.
 
-This works because zigttp's JS subset eliminates most non-trivial control flow - no `while`, no `switch`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
+zigttp's JS subset eliminates back-edges: no `while`, no `switch`, no `try/catch`, no exceptions. `break` and `continue` are allowed within `for-of` (forward jumps only). The IR tree is the control flow graph. Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 ```
 $ zig build -Dhandler=handler.ts -Dverify
@@ -986,13 +989,13 @@ The parser desugars the pipe chain into a single flat function with sequential i
 
 Five optional build flags accept external JSON files for cross-referencing against compiler-proven contracts. These work with any code generator or hand-written files - no specific tooling required.
 
-- **`-Dmanifest=<path>`** - Cross-references a declared manifest (routes, SQL tables, env vars) against the handler contract. Errors on declared items missing from code, warns on undeclared items found in code. Emits `manifest-alignment.json`.
-- **`-Dexpect-properties=<path>`** - Verifies handler-derived properties (state_isolated, injection_safe, read_only, etc.) match external expectations. Build fails on mismatches.
-- **`-Ddata-labels=<path>`** - Merges externally declared data sensitivity labels (secret, credential, etc.) with the flow checker's heuristic labels. Violations of declared labels become build errors.
-- **`-Dfault-severity=<path>`** - Overrides fault severity classification at the route level. A route declared "critical" elevates all failable calls within it to critical severity for fault coverage diagnostics.
-- **`-Dreport=json`** - Emits a structured JSON build report aggregating verification, properties, fault coverage, flow analysis, manifest alignment, and property expectations into `report.json`.
+- `-Dmanifest=<path>`: Cross-references a declared manifest (routes, SQL tables, env vars) against the handler contract. Errors on declared items missing from code, warns on undeclared items found in code. Emits `manifest-alignment.json`.
+- `-Dexpect-properties=<path>`: Verifies handler-derived properties (state_isolated, injection_safe, read_only, etc.) match external expectations. Build fails on mismatches.
+- `-Ddata-labels=<path>`: Merges externally declared data sensitivity labels (secret, credential, etc.) with the flow checker's heuristic labels. Violations of declared labels become build errors.
+- `-Dfault-severity=<path>`: Overrides fault severity classification at the route level. A route declared "critical" elevates all failable calls within it to critical severity for fault coverage diagnostics.
+- `-Dreport=json`: Emits a structured JSON build report aggregating verification, properties, fault coverage, flow analysis, manifest alignment, and property expectations into `report.json`.
 
-All flags are optional and additive. Without them, zigttp works identically to before.
+All flags are optional and additive. Without them, nothing changes.
 
 ### Precompiled Bytecode
 
@@ -1000,14 +1003,14 @@ All flags are optional and additive. Without them, zigttp works identically to b
 
 | Platform | Cold Start | Runtime Init | Status |
 |----------|------------|--------------|--------|
-| **macOS** (development) | ~103ms | 3ms | ✅ Current |
-| **Linux** (production) | ~18-33ms (planned) | 3ms | 🚧 Future |
+| **macOS** (development) | ~103ms | 3ms | Current |
+| **Linux** (production) | ~18-33ms (planned) | 3ms | Planned |
 
 **macOS Performance** (development environment):
 - Total cold start: ~103ms (2-3x faster than Deno)
-- Runtime initialization: 3ms (highly optimized)
+- Runtime initialization: 3ms
 - dyld overhead: 80-90ms (unavoidable on macOS, affects all binaries)
-- Competitive for development, acceptable for local testing
+- Acceptable for development; not suitable for latency-sensitive production
 
 **Linux Target** (future production optimization):
 - Static linking with musl libc
@@ -1020,11 +1023,7 @@ All flags are optional and additive. Without them, zigttp works identically to b
 zig build -Doptimize=ReleaseFast -Dhandler=path/to/handler.js
 ```
 
-Benefits:
-- Eliminates runtime parsing and compilation
-- Smaller container images (single binary)
-- Reduced memory footprint
-- Zero trade-offs
+Eliminates runtime parsing and compilation. Single binary, smaller container image, lower memory baseline.
 
 **Platform Strategy**:
 - **macOS**: Development only (~100ms is acceptable)
