@@ -542,9 +542,7 @@ fn cwdPathAlloc(allocator: std.mem.Allocator) ![]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
-    const p = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
-    defer allocator.free(p);
-    return try allocator.dupe(u8, p);
+    return std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
 }
 
 fn writeTestFile(
