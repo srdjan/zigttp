@@ -12,6 +12,7 @@ const json_diag = precompile.json_diag;
 const rule_error = zigts.rule_error;
 const file_io = zigts.file_io;
 const writeJsonString = zigts.handler_contract.writeJsonString;
+const HandlerProperties = zigts.handler_contract.HandlerProperties;
 
 pub const EditSimulateInput = struct {
     file: []const u8,
@@ -34,6 +35,9 @@ pub const SimulateResult = struct {
     total: u32 = 0,
     new_count: u32 = 0,
     preexisting_count: u32 = 0,
+    /// Behavioral properties from contract extraction. Present only when the
+    /// analysis pipeline reached the contract phase (no parse or type errors).
+    properties: ?HandlerProperties = null,
 
     pub fn deinit(self: *SimulateResult, allocator: std.mem.Allocator) void {
         self.violations.deinit(allocator);
@@ -73,7 +77,9 @@ pub fn simulate(
         }
     }
 
-    var result = SimulateResult{};
+    var result = SimulateResult{
+        .properties = new_check.properties,
+    };
     errdefer result.deinit(allocator);
 
     for (new_check.json_diagnostics.items) |diag| {
@@ -163,7 +169,20 @@ pub fn writeResultJson(writer: anytype, result: *const SimulateResult) !void {
     try writer.print("{d}", .{result.new_count});
     try writer.writeAll(",\"preexisting\":");
     try writer.print("{d}", .{result.preexisting_count});
-    try writer.writeAll("}}\n");
+    try writer.writeAll("}");
+    if (result.properties) |p| {
+        try writer.print(",\"properties\":{{\"pure\":{},\"read_only\":{},\"deterministic\":{},\"retry_safe\":{},\"idempotent\":{},\"state_isolated\":{},\"injection_safe\":{},\"fault_covered\":{}}}", .{
+            p.pure,
+            p.read_only,
+            p.deterministic,
+            p.retry_safe,
+            p.idempotent,
+            p.state_isolated,
+            p.injection_safe,
+            p.fault_covered,
+        });
+    }
+    try writer.writeAll("}\n");
 }
 
 /// CLI entry point for `zigts edit-simulate`.
@@ -326,6 +345,35 @@ test "writeResultJson empty result" {
     buf = aw.toArrayList();
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"total\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"violations\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"properties\"") == null);
+}
+
+test "writeResultJson includes properties when present" {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+
+    const result = SimulateResult{
+        .properties = .{
+            .pure = false,
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+            .injection_safe = true,
+            .state_isolated = true,
+            .fault_covered = false,
+        },
+    };
+    try writeResultJson(&aw.writer, &result);
+
+    buf = aw.toArrayList();
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"properties\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"deterministic\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"injection_safe\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"state_isolated\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"fault_covered\":false") != null);
 }
 
 test "violationKey excludes line numbers" {
