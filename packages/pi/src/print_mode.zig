@@ -3,8 +3,9 @@
 //! Runs exactly one turn through the agent, emits either the rendered text
 //! or an NDJSON event stream, and returns. Bypasses the REPL and TUI.
 //!
-//! JSON mode emits the same event shape as `session/events.zig` so consumers
-//! can reuse one parser across live stdout and persisted `events.jsonl`.
+//! JSON mode reuses the `{"v","k","d"}` envelope from `session/events.zig`
+//! for transcript events. Live stdout also appends a success-only `end`
+//! sentinel that is not written to persisted `events.jsonl`.
 
 const std = @import("std");
 

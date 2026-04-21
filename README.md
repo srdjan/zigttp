@@ -438,11 +438,22 @@ provenance survives in the registry.
 
 Standalone analysis and compilation without starting a server.
 
-For the interactive compiler-backed authoring workflow, run:
+`zigts expert` calls the Anthropic API directly (`ANTHROPIC_API_KEY`). The shipped persona and bundled references are compiled into the binary, and startup appends a live compiler snapshot plus read-only workspace context from ancestor `AGENTS.md` and `CLAUDE.md` files. Editing those workspace files can change model behavior without recompiling.
 
 ```bash
+# Interactive REPL
 zigts expert
+zigts expert --resume                    # resume newest session for this cwd
+zigts expert --session-id <id>           # named session
+zigts expert --yes                       # auto-approve all verified edits
+zigts expert --no-edit                   # auto-reject all verified edits
+
+# Non-interactive (one turn and exit)
+zigts expert --print "add a GET /health route"
+zigts expert --print "..." --mode json   # NDJSON event stream to stdout
 ```
+
+In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
 
 ```bash
 zigts check [handler.ts] [options]    # Verify handler, show proof card

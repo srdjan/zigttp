@@ -378,6 +378,31 @@ Two tripwires guard this contract and run under `zig build test`: the in-tree te
 - Anything reading from files other than `--stdin-json` on `edit-simulate` and `review-patch`.
 - Authentication, rate limiting, tracing, and the managed-task surface for `zigttp serve/dev/deploy`. All runtime and deploy commands are outside v1.
 
+## `zigts expert --print --mode json` event stream
+
+`zigts expert` calls the Anthropic API directly using `ANTHROPIC_API_KEY`. The shipped persona and bundled references are embedded in the binary at compile time via `@embedFile`, and startup appends a live compiler snapshot plus read-only project context from ancestor `AGENTS.md` and `CLAUDE.md` files. Editing those workspace files can change model behavior without recompiling. It does not require Claude Code or separately installed skill files.
+
+`--print <prompt>` runs one turn and exits. `--mode json` switches output to an NDJSON event stream, one event per line. This surface falls outside the v1 tool contract above but appears here because CI scripts commonly use both together.
+
+**Event schema:** `{"v":1,"k":"<kind>","d":<payload>}`
+
+```json
+{"v":1,"k":"user_text","d":"add a GET /health route"}
+{"v":1,"k":"tool_use","d":{"id":"tu_01","name":"zigts_check","args_json":"{\"path\":\"handler.ts\"}"}}
+{"v":1,"k":"tool_result","d":{"tool_use_id":"tu_01","tool_name":"zigts_check","ok":true,"body":"..."}}
+{"v":1,"k":"model_text","d":"Added the route. Proof: retry_safe=true, idempotent=true."}
+{"v":1,"k":"end"}
+```
+
+Fields:
+- `v` (integer) - schema version, currently `1`.
+- `k` (string) - event kind. Defined kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `end`.
+- `d` (any) - payload. String for `user_text`, `model_text`, `proof_card`, `diagnostic_box`. Object for `tool_use` and `tool_result`. Absent for `end`.
+
+The live stream and `events.jsonl` share the same `{"v","k","d"}` envelope for transcript events, so one parser can handle both if it treats `end` as a live-only sentinel. `end` appears last only on successful one-turn runs; errored runs may terminate without it, and session files neither write nor reconstruct it. Ignore unknown kinds; treat their `d` as a string or object.
+
+This surface is outside the v1 stability guarantee. New kinds may appear in future releases; clients should ignore unknown `k` values.
+
 ## Relationship to the TUI port
 
-`zigts expert` now uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
+`zigts expert` uses these commands from in-process function calls. The in-process API must remain a faithful representation of this contract so the non-interactive binary and the expert UI never diverge. The wire shapes above are the reference; the in-process Zig structs are an optimization that must round-trip through them without loss.
