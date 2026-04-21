@@ -19,7 +19,6 @@ const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("providers/anthropic/client.zig");
 const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const expert_persona = @import("expert_persona.zig");
-const context_loader = @import("context/loader.zig");
 const session_id_mod = @import("session/session_id.zig");
 const session_paths = @import("session/paths.zig");
 const session_events = @import("session/events.zig");
@@ -165,9 +164,7 @@ pub fn initFromEnvWithSessionConfig(
 
     var session = blk: {
         const api_key = envVar("ANTHROPIC_API_KEY") orelse break :blk AgentSession.initStub();
-        const ctx = try context_loader.loadProjectContext(allocator);
-        defer if (ctx) |b| allocator.free(b);
-        const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, ctx);
+        const system_prompt = try expert_persona.buildSystemPrompt(allocator);
         defer allocator.free(system_prompt);
         const tools_json = if (registry) |reg|
             try buildToolsJson(allocator, reg)
@@ -313,6 +310,119 @@ pub fn rebuildSession(
 
 const testing = std.testing;
 
+var isolated_tmp_counter = std.atomic.Value(u64).init(0);
+
+const IsolatedTmp = struct {
+    abs_path: []u8,
+    name: []u8,
+
+    fn init(allocator: std.mem.Allocator) !IsolatedTmp {
+        var ts: std.posix.timespec = undefined;
+        _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+        const counter = isolated_tmp_counter.fetchAdd(1, .seq_cst);
+        const name = try std.fmt.allocPrint(
+            allocator,
+            "zigttp-agent-test-{d}-{d}-{d}",
+            .{ @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter },
+        );
+        errdefer allocator.free(name);
+
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        const io = io_backend.io();
+
+        var tmp_root = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
+        defer tmp_root.close(io);
+        tmp_root.deleteTree(io, name) catch {};
+        try std.Io.Dir.createDirPath(tmp_root, io, name);
+
+        const abs_path = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
+        errdefer allocator.free(abs_path);
+
+        return .{ .abs_path = abs_path, .name = name };
+    }
+
+    fn cleanup(self: *IsolatedTmp, allocator: std.mem.Allocator) void {
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        const io = io_backend.io();
+        var tmp_root = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch {
+            allocator.free(self.abs_path);
+            allocator.free(self.name);
+            return;
+        };
+        defer tmp_root.close(io);
+        tmp_root.deleteTree(io, self.name) catch {};
+        allocator.free(self.abs_path);
+        allocator.free(self.name);
+    }
+};
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+const EnvOverride = struct {
+    name_z: [:0]const u8,
+    previous: ?[]u8,
+
+    fn set(allocator: std.mem.Allocator, name_z: [:0]const u8, value: []const u8) !EnvOverride {
+        const prev_opt = std.c.getenv(name_z.ptr);
+        const previous: ?[]u8 = if (prev_opt) |p| blk: {
+            const slice = std.mem.sliceTo(p, 0);
+            break :blk try allocator.dupe(u8, slice);
+        } else null;
+        errdefer if (previous) |p| allocator.free(p);
+
+        const value_z = try allocator.dupeZ(u8, value);
+        defer allocator.free(value_z);
+        _ = setenv(name_z.ptr, value_z.ptr, 1);
+
+        return .{ .name_z = name_z, .previous = previous };
+    }
+
+    fn restore(self: *EnvOverride, allocator: std.mem.Allocator) void {
+        if (self.previous) |prev| {
+            const prev_z = allocator.dupeZ(u8, prev) catch {
+                allocator.free(prev);
+                self.previous = null;
+                return;
+            };
+            defer allocator.free(prev_z);
+            _ = setenv(self.name_z.ptr, prev_z.ptr, 1);
+            allocator.free(prev);
+            self.previous = null;
+        } else {
+            _ = unsetenv(self.name_z.ptr);
+        }
+    }
+};
+
+fn cwdPathAlloc(allocator: std.mem.Allocator) ![]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const p = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
+    defer allocator.free(p);
+    return try allocator.dupe(u8, p);
+}
+
+fn writeTestFile(
+    allocator: std.mem.Allocator,
+    root_abs: []const u8,
+    sub_path: []const u8,
+    data: []const u8,
+) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var root = try std.Io.Dir.openDirAbsolute(io, root_abs, .{});
+    defer root.close(io);
+    if (std.fs.path.dirname(sub_path)) |parent| {
+        try std.Io.Dir.createDirPath(root, io, parent);
+    }
+    try root.writeFile(io, .{ .sub_path = sub_path, .data = data });
+}
+
 test "runOneTurn: fresh stub session grows transcript by 2 and renders model reply" {
     var session = AgentSession.initStub();
     defer session.deinit(testing.allocator);
@@ -396,4 +506,34 @@ test "modelClient returns an anthropic client vtable when backend is anthropic" 
 
     const mc = session.modelClient();
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
+}
+
+test "initFromEnvWithSessionConfig ignores AGENTS and CLAUDE files when building the Anthropic prompt" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator);
+    defer tmp.cleanup(allocator);
+
+    try writeTestFile(allocator, tmp.abs_path, "AGENTS.md", "IGNORE_AGENTS_MARKER");
+    try writeTestFile(allocator, tmp.abs_path, "CLAUDE.md", "IGNORE_CLAUDE_MARKER");
+
+    const expected = try expert_persona.buildSystemPrompt(allocator);
+    defer allocator.free(expected);
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "sk-ant-test");
+    defer api_override.restore(allocator);
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{ .no_session = true });
+    defer session.deinit(allocator);
+
+    try testing.expect(session.backend == .anthropic);
+    const actual = session.system_prompt_owned orelse return error.TestUnexpectedResult;
+    try testing.expectEqualSlices(u8, expected, actual);
+    try testing.expect(std.mem.indexOf(u8, actual, "IGNORE_AGENTS_MARKER") == null);
+    try testing.expect(std.mem.indexOf(u8, actual, "IGNORE_CLAUDE_MARKER") == null);
+    try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") == null);
 }

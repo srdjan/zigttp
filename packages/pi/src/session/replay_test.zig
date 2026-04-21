@@ -224,8 +224,8 @@ test "replay-safety: resumed session over mutated workspace does not rewrite fil
     var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
     defer api_override.restore(allocator);
 
-    // Workspace lives beside the sessions dir so chdir'ing into it doesn't
-    // pick up ancestor AGENTS.md / CLAUDE.md.
+    // Workspace lives beside the sessions dir so the test stays inside the
+    // isolated scratch tree after chdir.
     const ws_dir_raw = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
     defer allocator.free(ws_dir_raw);
     {
