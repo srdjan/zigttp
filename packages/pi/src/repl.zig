@@ -318,7 +318,16 @@ test "help renders local command guidance" {
     defer reg.deinit(testing.allocator);
 
     var outcome = try dispatchLine(testing.allocator, &reg, "help");
-    try expectResult(&outcome, testing.allocator, "/verify", true);
+    switch (outcome) {
+        .result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.body, "/verify") != null);
+            try testing.expect(std.mem.indexOf(u8, r.body, commands.session_commands[0]) != null);
+            try testing.expect(std.mem.indexOf(u8, r.body, commands.session_commands[1]) != null);
+        },
+        else => return error.TestFailed,
+    }
 }
 
 test "slash command routes locally" {
