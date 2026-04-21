@@ -79,7 +79,8 @@ pub fn processSubmit(
             const msg = try std.fmt.allocPrint(allocator, "Model switched to: {s}\n", .{model.display_name});
             return .{ .tool_result = .{ .ok = true, .body = msg } };
         }
-        return .{ .tool_result = try renderModel(allocator, session.currentModel()) };
+        const msg = try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id});
+        return .{ .tool_result = .{ .ok = false, .body = msg } };
     }
 
     if (std.mem.startsWith(u8, trimmed, "/template:")) {
