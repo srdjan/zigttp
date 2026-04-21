@@ -438,7 +438,7 @@ provenance survives in the registry.
 
 Standalone analysis and compilation without starting a server.
 
-`zigts expert` calls the Anthropic API directly (`ANTHROPIC_API_KEY`). The shipped persona and bundled references are compiled into the binary, and startup appends a live compiler snapshot plus read-only workspace context from ancestor `AGENTS.md` and `CLAUDE.md` files. Editing those workspace files can change model behavior without recompiling.
+`zigts expert` calls the Anthropic API directly (`ANTHROPIC_API_KEY`). Its system prompt comes entirely from the binary: embedded persona text, embedded reference material, and compiler metadata rendered from in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
 
 ```bash
 # Interactive REPL

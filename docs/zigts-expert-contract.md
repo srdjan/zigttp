@@ -380,7 +380,7 @@ Two tripwires guard this contract and run under `zig build test`: the in-tree te
 
 ## `zigts expert --print --mode json` event stream
 
-`zigts expert` calls the Anthropic API directly using `ANTHROPIC_API_KEY`. The shipped persona and bundled references are embedded in the binary at compile time via `@embedFile`, and startup appends a live compiler snapshot plus read-only project context from ancestor `AGENTS.md` and `CLAUDE.md` files. Editing those workspace files can change model behavior without recompiling. It does not require Claude Code or separately installed skill files.
+`zigts expert` calls the Anthropic API directly using `ANTHROPIC_API_KEY`. Its system prompt comes entirely from the binary: the shipped persona and bundled references are embedded at compile time via `@embedFile`, and compiler metadata is rendered from the running binary's in-process registries. Startup does not read `AGENTS.md`, `CLAUDE.md`, external skill files, or any other workspace prompt files.
 
 `--print <prompt>` runs one turn and exits. `--mode json` switches output to an NDJSON event stream, one event per line. This surface falls outside the v1 tool contract above but appears here because CI scripts commonly use both together.
 
