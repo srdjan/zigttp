@@ -71,6 +71,20 @@ const PreparedEdit = struct {
     resolved_path: []const u8,
 };
 
+fn callModel(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    client: ModelClient,
+    transcript: *transcript_mod.Transcript,
+    extra_prompt: ?[]const u8,
+) !turn.AssistantReply {
+    const reply = try client.request(arena, transcript, extra_prompt);
+    if (reply.preamble) |text| {
+        if (text.len > 0) try transcript.append(allocator, .{ .model_text = text });
+    }
+    return reply;
+}
+
 pub fn runTurnWith(
     allocator: std.mem.Allocator,
     client: ModelClient,
@@ -99,11 +113,7 @@ pub fn runTurnWith(
                     continue;
                 }
                 model_roundtrips += 1;
-                const reply = try client.request(ta, transcript, null);
-                if (reply.preamble) |text| {
-                    if (text.len > 0) try transcript.append(allocator, .{ .model_text = text });
-                }
-                next_event = .{ .model_replied = reply };
+                next_event = .{ .model_replied = try callModel(allocator, ta, client, transcript, null) };
             },
             .retry_draft => |payload| {
                 if (model_roundtrips >= options.max_model_roundtrips_per_turn) {
@@ -118,11 +128,7 @@ pub fn runTurnWith(
                         "emit a new edit.\n\n{s}",
                     .{ payload.attempt, payload.max_attempts, payload.diagnostic },
                 );
-                const reply = try client.request(ta, transcript, prompt);
-                if (reply.preamble) |text| {
-                    if (text.len > 0) try transcript.append(allocator, .{ .model_text = text });
-                }
-                next_event = .{ .model_replied = reply };
+                next_event = .{ .model_replied = try callModel(allocator, ta, client, transcript, prompt) };
             },
             .run_veto => |edit| {
                 const prepared = try prepareEdit(ta, options.workspace_root, edit);
