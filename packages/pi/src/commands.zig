@@ -172,7 +172,26 @@ test "isQuit and isHelp recognize aliases" {
 
 test "isSessionResume and isSessionNew recognize slash commands" {
     try testing.expect(isSessionResume("/resume"));
+    try testing.expect(isSessionResume("/continue"));
     try testing.expect(!isSessionResume("/new"));
     try testing.expect(isSessionNew("/new"));
     try testing.expect(!isSessionNew("/resume"));
+}
+
+test "isCompact isSessionFork isSessionTree recognize their slash commands" {
+    try testing.expect(isCompact("/compact"));
+    try testing.expect(!isCompact("/fork"));
+    try testing.expect(isSessionFork("/fork"));
+    try testing.expect(!isSessionFork("/compact"));
+    try testing.expect(isSessionTree("/tree"));
+    try testing.expect(!isSessionTree("/fork"));
+}
+
+test "isSettings isHotkeys isChangelog recognize their slash commands" {
+    try testing.expect(isSettings("/settings"));
+    try testing.expect(!isSettings("/hotkeys"));
+    try testing.expect(isHotkeys("/hotkeys"));
+    try testing.expect(!isHotkeys("/changelog"));
+    try testing.expect(isChangelog("/changelog"));
+    try testing.expect(!isChangelog("/settings"));
 }
