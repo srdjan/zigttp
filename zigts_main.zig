@@ -27,21 +27,36 @@ fn runExpertCommand(argv: []const []const u8, allocator: std.mem.Allocator) !voi
             printExpertHelp();
             return;
         }
+        if (isExpertBareFlag(arg)) continue;
         if (std.mem.startsWith(u8, arg, "--")) {
-            for (pi_app.value_taking_flags) |name| {
-                if (std.mem.eql(u8, arg, name)) {
-                    if (i + 1 < argv.len) i += 1;
-                    break;
-                }
+            if (isExpertValueTakingFlag(arg)) {
+                if (i + 1 < argv.len) i += 1;
+                continue;
             }
-            continue;
+            std.debug.print("zigts expert does not accept flag '{s}'. See `zigts expert --help`.\n", .{arg});
+            std.process.exit(1);
         }
         std.debug.print("zigts expert does not accept subcommands; use direct commands like `zigts meta` or `zigts verify-paths`.\n", .{});
-        return error.InvalidArgument;
+        std.process.exit(1);
     }
 
     pi_app.setInvocationArgv(argv);
     try pi_app.run(allocator);
+}
+
+fn isExpertBareFlag(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "--yes") or
+        std.mem.eql(u8, arg, "--no-edit") or
+        std.mem.eql(u8, arg, "--no-session") or
+        std.mem.eql(u8, arg, "--no-persist-tool-output") or
+        std.mem.eql(u8, arg, "--resume");
+}
+
+fn isExpertValueTakingFlag(arg: []const u8) bool {
+    for (pi_app.value_taking_flags) |name| {
+        if (std.mem.eql(u8, arg, name)) return true;
+    }
+    return false;
 }
 
 fn printExpertHelp() void {

@@ -1121,6 +1121,14 @@ pub const CheckResult = struct {
     }
 };
 
+fn syncCheckResultProperties(result: *CheckResult) void {
+    if (result.contract) |*contract| {
+        result.properties = contract.properties;
+    } else {
+        result.properties = null;
+    }
+}
+
 /// Run the full analysis pipeline without generating bytecode.
 /// Returns a CheckResult with all verification, contract, and coverage data.
 pub fn runCheckOnly(
@@ -1409,8 +1417,8 @@ pub fn runCheckOnlyFromSource(
             props.result_safe = result.results_safe;
             props.optional_safe = result.optionals_safe;
         }
-        result.properties = c.properties;
     }
+    syncCheckResultProperties(&result);
 
     // Stage 9: Path generation + Stage 10: Fault coverage
     {
@@ -1462,6 +1470,10 @@ pub fn runCheckOnlyFromSource(
             }
         }
     }
+
+    // Later analysis stages mutate contract.properties, so keep the flat
+    // CheckResult mirror aligned with the finalized contract before returning.
+    syncCheckResultProperties(&result);
 
     return result;
 }
@@ -4201,6 +4213,34 @@ test "buildTestContractForSource extracts scope metadata and clears retry safety
     try std.testing.expect(!contract.properties.?.retry_safe);
     try std.testing.expect(handler_contract.containsString(contract.scope.names.items, "outer"));
     try std.testing.expect(handler_contract.containsString(contract.scope.names.items, "inner"));
+}
+
+test "runCheckOnly keeps mirrored properties aligned with finalized fault coverage" {
+    const source =
+        \\import { jwtVerify } from "zigttp:auth";
+        \\
+        \\function handler(req) {
+        \\  _ = req;
+        \\  const auth = jwtVerify("token", "secret");
+        \\  if (!auth.ok) {
+        \\    return Response.text("unauthorized", { status: 401 });
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.js", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(result.fault_total > 0);
+
+    const mirrored = result.properties orelse return error.MissingProperties;
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const finalized = contract.properties orelse return error.MissingProperties;
+
+    try std.testing.expect(finalized.fault_covered);
+    try std.testing.expectEqual(finalized.fault_covered, mirrored.fault_covered);
 }
 
 test "buildTestContractForSource rejects scope and durable together" {

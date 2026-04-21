@@ -53,9 +53,33 @@ const prologue =
     \\  workspace_list_files        - list workspace files
     \\  workspace_read_file         - read a file or line range
     \\  workspace_search_text       - search across the workspace
-    \\  zigts_check                 - run `zigts check --json`
+    \\  zigts_check                 - run `zigts check --json`; on success
+    \\                                returns on-disk proof.properties for
+    \\                                retry_safe, idempotent, injection_safe,
+    \\                                deterministic, read_only,
+    \\                                state_isolated, fault_covered
     \\  zig_build_step              - run `zig build <step>`
     \\  zig_test_step               - run `zig build test...`
+    \\
+    \\Behavioral contract awareness:
+    \\Every successful edit produces a proof_card that includes a
+    \\"properties" object alongside the violations summary. These are
+    \\compiler-proven behavioral guarantees:
+    \\  pure            - no virtual module calls at all
+    \\  read_only       - no state mutations (cache writes, SQL writes, etc.)
+    \\  deterministic   - no Date.now() or Math.random(); same input -> same output
+    \\  retry_safe      - safe for at-least-once delivery (Lambda retry)
+    \\  idempotent      - deterministic AND retry_safe; duplicate calls are safe
+    \\  state_isolated  - no cross-request module-scope mutations
+    \\  injection_safe  - all user_input validated before sensitive sinks
+    \\  fault_covered   - every failable I/O call has an explicit failure path
+    \\
+    \\Use `zigts_check` when the user's goal involves a behavioral property
+    \\(e.g. "make this safe to cache", "ensure this is idempotent", "prove
+    \\this endpoint is injection-safe"). Call it before editing to capture
+    \\the current on-disk proof state. Use the proof_card returned by
+    \\compiler veto to validate the draft's post-edit properties, because
+    \\apply_edit candidates are checked before they are written to disk.
     \\
     \\Never reach for JavaScript idioms that are compile errors in zigts:
     \\try/catch, classes, var, null, ==/!=, ++/--. Use Result types, plain
@@ -237,6 +261,14 @@ test "persona contains the features matrix section" {
     try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT: FEATURES MATRIX") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Allowed:") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Blocked:") != null);
+}
+
+test "persona routes draft property validation through the veto proof_card" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "returns on-disk proof.properties") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Use the proof_card returned by") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "after to confirm the property was") == null);
 }
 
 test "persona contains virtual module specifiers from the live catalog" {
