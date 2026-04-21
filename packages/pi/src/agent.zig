@@ -647,6 +647,51 @@ test "modelClient returns an anthropic client vtable when backend is anthropic" 
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
 }
 
+test "compact: empty transcript returns early message" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    const msg = try compact(testing.allocator, &session);
+    defer testing.allocator.free(msg);
+    try testing.expectEqualStrings("Nothing to compact.\n", msg);
+    try testing.expectEqual(@as(usize, 0), session.transcript.len());
+}
+
+test "compact: collapses entries into one system_note" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runOneTurn(testing.allocator, &session, &registry, "first turn", null);
+    _ = try runOneTurn(testing.allocator, &session, &registry, "second turn", null);
+    const before_len = session.transcript.len();
+    try testing.expect(before_len >= 2);
+
+    const msg = try compact(testing.allocator, &session);
+    defer testing.allocator.free(msg);
+
+    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+    switch (session.transcript.at(0).*) {
+        .system_note => |body| {
+            try testing.expect(std.mem.indexOf(u8, body, "first turn") != null);
+            try testing.expect(std.mem.indexOf(u8, body, "[COMPACTED CONVERSATION HISTORY]") != null);
+        },
+        else => return error.TestFailed,
+    }
+    try testing.expect(std.mem.indexOf(u8, msg, "Compacted") != null);
+    try testing.expectEqual(@as(usize, 0), session.last_persisted_len);
+}
+
+test "fork: ephemeral session returns error message" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    const msg = try fork(testing.allocator, &session);
+    defer testing.allocator.free(msg);
+    try testing.expect(std.mem.indexOf(u8, msg, "ephemeral") != null);
+}
+
 test "initFromEnvWithSessionConfig ignores AGENTS and CLAUDE files when building the Anthropic prompt" {
     const allocator = testing.allocator;
     var tmp = try IsolatedTmp.init(allocator);
