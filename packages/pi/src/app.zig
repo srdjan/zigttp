@@ -22,6 +22,7 @@ const workspace_search_text_tool = @import("tools/workspace_search_text.zig");
 const zigts_check_tool = @import("tools/zigts_check.zig");
 const zig_build_step_tool = @import("tools/zig_build_step.zig");
 const zig_test_step_tool = @import("tools/zig_test_step.zig");
+const gen_tests_tool = @import("tools/gen_tests.zig");
 
 const Registry = registry_mod.Registry;
 
@@ -44,6 +45,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     try reg.register(allocator, zigts_check_tool.tool);
     try reg.register(allocator, zig_build_step_tool.tool);
     try reg.register(allocator, zig_test_step_tool.tool);
+    try reg.register(allocator, gen_tests_tool.tool);
 
     return reg;
 }
@@ -216,6 +218,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zigts_check",
         "zig_build_step",
         "zig_test_step",
+        "workspace_gen_tests",
     };
 
     for (expected_names) |expected| {

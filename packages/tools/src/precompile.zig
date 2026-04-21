@@ -1478,6 +1478,71 @@ pub fn runCheckOnlyFromSource(
     return result;
 }
 
+/// Parse handler source and write one JSONL test case per proven behavioral path.
+/// Returns the number of test cases written. Returns 0 when no handler function
+/// is found. Callers should check for parse errors via stderr.
+pub fn runGenTests(
+    allocator: std.mem.Allocator,
+    handler_path: []const u8,
+    writer: anytype,
+) !u32 {
+    const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
+        std.debug.print("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+        return err;
+    };
+    defer allocator.free(source);
+
+    var source_to_parse: []const u8 = source;
+    var strip_result: ?zigts.StripResult = null;
+    defer if (strip_result) |*sr| sr.deinit();
+
+    const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
+    const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
+    if (is_ts or is_tsx) {
+        strip_result = zigts.strip(allocator, source, .{
+            .tsx_mode = is_tsx,
+            .enable_comptime = true,
+            .comptime_env = .{},
+        }) catch |err| {
+            std.debug.print("TypeScript strip error: {}\n", .{err});
+            return err;
+        };
+        source_to_parse = strip_result.?.code;
+    }
+
+    var atoms = zigts.context.AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var js_parser = zigts.parser.JsParser.init(allocator, source_to_parse);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
+        js_parser.tokenizer.enableJsx();
+    }
+
+    const root = js_parser.parse() catch {
+        const errors = js_parser.errors.getErrors();
+        for (errors) |parse_error| {
+            std.debug.print("{s}:{}:{}: {s}\n", .{
+                handler_path,
+                parse_error.location.line,
+                parse_error.location.column,
+                parse_error.message,
+            });
+        }
+        return error.ParseError;
+    };
+
+    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const handler_fn = findHandlerFunction(ir_view, root) orelse return 0;
+
+    var gen = zigts.PathGenerator.init(allocator, ir_view, &atoms);
+    defer gen.deinit();
+    try gen.generate(handler_fn);
+    try gen.writeJsonl(writer);
+    return @intCast(gen.getTests().len);
+}
+
 /// Format a structured proof card showing what the compiler proved.
 pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const u8) void {
     writer.print("\nzts check: {s}\n\n", .{filename}) catch return;

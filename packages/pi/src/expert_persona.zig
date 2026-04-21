@@ -53,6 +53,9 @@ const prologue =
     \\  workspace_list_files        - list workspace files
     \\  workspace_read_file         - read a file or line range
     \\  workspace_search_text       - search across the workspace
+    \\  workspace_gen_tests         - generate JSONL tests from proven behavioral
+    \\                                paths; call after editing a handler to keep
+    \\                                the test suite in sync with the proof
     \\  zigts_check                 - run `zigts check --json`; on success
     \\                                returns on-disk proof.properties for
     \\                                retry_safe, idempotent, injection_safe,

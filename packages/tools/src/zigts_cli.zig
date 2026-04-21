@@ -101,6 +101,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         try review_patch.runWithArgs(allocator, argv[1..]);
         return;
     }
+    if (std.mem.eql(u8, command, "gen-tests")) {
+        try runGenTestsCommand(allocator, argv[1..]);
+        return;
+    }
     printHelp();
     return error.UnknownCommand;
 }
@@ -343,6 +347,7 @@ fn printHelp() void {
         \\  zigts describe-rule [rule-name|code] [--json] [--hash]
         \\  zigts search <keyword> [--json]
         \\  zigts review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
+        \\  zigts gen-tests [handler.ts] [-o output.jsonl]
         \\  zigts expert                          (interactive coding agent)
         \\
     ;
@@ -361,6 +366,77 @@ fn printCheckHelp() void {
         \\  --types          Emit zigttp.d.ts type definitions for IDE autocomplete
         \\  --sql-schema P   SQLite schema file for query validation
         \\  --system P       system.json for internal serviceCall typing
+        \\
+        \\If no handler is specified, uses the entry from zigttp.json.
+        \\
+    ;
+    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var handler_path: ?[]const u8 = null;
+    var output_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            i += 1;
+            if (i >= argv.len) return error.MissingArgument;
+            output_path = argv[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--help")) {
+            printGenTestsHelp();
+            return;
+        }
+        if (!std.mem.startsWith(u8, arg, "-") and handler_path == null) {
+            handler_path = arg;
+            continue;
+        }
+        return error.InvalidArgument;
+    }
+
+    const target = if (handler_path) |path|
+        path
+    else
+        try defaultProjectEntry(allocator);
+    defer if (handler_path == null) allocator.free(target);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const count = try precompile.runGenTests(allocator, target, &aw.writer);
+    buf = aw.toArrayList();
+
+    if (output_path) |out_path| {
+        try zigts_file_io.writeFile(allocator, out_path, buf.items);
+        const msg = try std.fmt.allocPrint(allocator, "Wrote {d} test{s} to {s}\n", .{
+            count,
+            if (count == 1) @as([]const u8, "") else "s",
+            out_path,
+        });
+        defer allocator.free(msg);
+        _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+    } else {
+        if (buf.items.len > 0) {
+            _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        }
+    }
+}
+
+fn printGenTestsHelp() void {
+    const help =
+        \\zigts gen-tests - generate JSONL tests from proven behavioral paths
+        \\
+        \\Usage: zigts gen-tests [handler.ts] [-o output.jsonl]
+        \\
+        \\Options:
+        \\  -o, --output <file>  Write tests to file instead of stdout
+        \\
+        \\Enumerates all execution paths through the handler and emits a
+        \\declarative JSONL test case for each path. Output is immediately
+        \\runnable via `--test` or `zigttp mock`.
         \\
         \\If no handler is specified, uses the entry from zigttp.json.
         \\
