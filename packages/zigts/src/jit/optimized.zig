@@ -258,7 +258,7 @@ pub const OptimizedCompiler = struct {
             pc += 1;
 
             switch (op) {
-                .loop, .goto => {
+                .loop, .goto, .drop_goto => {
                     // Loop/goto opcode: check if backward jump (loop back-edge)
                     if (pc + 2 <= code.len) {
                         const offset: i16 = @bitCast(readU16(code, pc));
@@ -482,7 +482,7 @@ pub const OptimizedCompiler = struct {
                     pc += 4;
                 },
                 // Skip other opcodes
-                .loop, .goto, .if_true, .if_false => pc += 2,
+                .loop, .goto, .if_true, .if_false, .drop_goto => pc += 2,
                 .if_false_goto, .for_of_next => pc += 2,
                 .for_of_next_put_loc => pc += 3,
                 .push_const => pc += 2,
@@ -567,7 +567,7 @@ pub const OptimizedCompiler = struct {
             pc += 1;
 
             switch (op) {
-                .goto, .loop, .if_true, .if_false, .if_false_goto => {
+                .goto, .loop, .if_true, .if_false, .if_false_goto, .drop_goto => {
                     if (pc + 2 <= code.len) {
                         const offset: i16 = @bitCast(readU16(code, pc));
                         const target: u32 = @intCast(@as(i32, @intCast(pc + 2)) + offset);
@@ -986,6 +986,13 @@ pub const OptimizedCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                try self.emitJump(target);
+            },
+            .drop_goto => {
+                const offset: i16 = @bitCast(readU16(code, new_pc));
+                new_pc += 2;
+                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                try self.emitDrop();
                 try self.emitJump(target);
             },
             .if_true => {

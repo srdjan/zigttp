@@ -27,6 +27,8 @@ pub const OptStats = struct {
     get_field_call_count: u32 = 0,
     /// Number of if_false + goto fusions
     if_false_goto_count: u32 = 0,
+    /// Number of drop + goto fusions
+    drop_goto_count: u32 = 0,
     /// Total bytes saved
     bytes_saved: u32 = 0,
     /// Total dispatches saved
@@ -37,18 +39,20 @@ pub const OptStats = struct {
             self.get_loc_get_loc_add_count +
             self.push_const_call_count +
             self.get_field_call_count +
-            self.if_false_goto_count;
+            self.if_false_goto_count +
+            self.drop_goto_count;
     }
 
     pub fn writeJson(self: OptStats, writer: anytype) !void {
         try writer.print(
-            "{{\"get_loc_add_count\":{d},\"get_loc_get_loc_add_count\":{d},\"push_const_call_count\":{d},\"get_field_call_count\":{d},\"if_false_goto_count\":{d},\"bytes_saved\":{d},\"dispatches_saved\":{d},\"total_fusions\":{d}}}",
+            "{{\"get_loc_add_count\":{d},\"get_loc_get_loc_add_count\":{d},\"push_const_call_count\":{d},\"get_field_call_count\":{d},\"if_false_goto_count\":{d},\"drop_goto_count\":{d},\"bytes_saved\":{d},\"dispatches_saved\":{d},\"total_fusions\":{d}}}",
             .{
                 self.get_loc_add_count,
                 self.get_loc_get_loc_add_count,
                 self.push_const_call_count,
                 self.get_field_call_count,
                 self.if_false_goto_count,
+                self.drop_goto_count,
                 self.bytes_saved,
                 self.dispatches_saved,
                 self.totalFusions(),
@@ -190,6 +194,25 @@ pub const BytecodeOptimizer = struct {
 
         // Don't fuse if next instruction is a jump target (for other patterns)
         if (self.isJumpTarget(next_pos)) return 0;
+
+        // Pattern: drop + goto -> drop_goto
+        // Original: drop(1) + goto(3) = 4 bytes
+        // Fused: drop_goto(3) = 3 bytes, NOP 1 byte
+        if (op1 == .drop and op2 == .goto) {
+            const goto_offset = self.readI16(code, next_pos + 1);
+            const goto_target: i32 = @as(i32, @intCast(next_pos)) + info2.size + goto_offset;
+            const fused_size: i32 = bytecode.getOpcodeInfo(.drop_goto).size;
+            const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
+
+            code[pos] = @intFromEnum(Opcode.drop_goto);
+            self.writeU16(code, pos + 1, @bitCast(combined_offset));
+            // NOP out the old goto's trailing byte (position 3)
+            code[pos + 3] = @intFromEnum(Opcode.nop);
+            stats.drop_goto_count += 1;
+            stats.dispatches_saved += 1;
+            stats.bytes_saved += 1;
+            return 3; // Size of drop_goto
+        }
 
         // Pattern: get_loc N + add -> get_loc_add N
         // Original: get_loc(2) + add(1) = 3 bytes
@@ -694,6 +717,81 @@ test "BytecodeOptimizer: if_false + goto fusion" {
     try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
     try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[5]);
     try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[6]);
+}
+
+test "BytecodeOptimizer: drop + goto fusion" {
+    const allocator = std.testing.allocator;
+
+    // Layout:
+    // 0: push_1 (value to drop)
+    // 1: drop (1 byte)
+    // 2-4: goto +3 (jump to pos 2+3+3 = 8)
+    // 5: push_2 (unreachable)
+    // 6: ret
+    // 7: nop (padding)
+    // 8: push_0 (jump target)
+    var code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.drop),
+        @intFromEnum(Opcode.goto), 0x03, 0x00,
+        @intFromEnum(Opcode.push_2),
+        @intFromEnum(Opcode.ret),
+        @intFromEnum(Opcode.nop),
+        @intFromEnum(Opcode.push_0),
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const stats = try optimizer.optimize(&code);
+
+    try std.testing.expectEqual(@as(u32, 1), stats.drop_goto_count);
+    try std.testing.expectEqual(@as(u32, 1), stats.dispatches_saved);
+    try std.testing.expectEqual(@as(u32, 1), stats.bytes_saved);
+
+    // drop becomes drop_goto; operand is offset from end of fused instruction.
+    // Original goto at pos 2 jumps to 2 + 3 + 3 = 8.
+    // Fused drop_goto at pos 1, size 3, must also target 8: offset = 8 - 1 - 3 = 4.
+    try std.testing.expectEqual(@intFromEnum(Opcode.drop_goto), code[1]);
+    const fused_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
+    try std.testing.expectEqual(@as(i16, 4), fused_offset);
+    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
+}
+
+test "BytecodeOptimizer: drop + goto no fusion across jump target" {
+    const allocator = std.testing.allocator;
+
+    // The goto is itself a jump target, so the drop+goto pair must not be fused:
+    // fusing would make a backward jump skip the drop entirely.
+    //
+    // Layout:
+    // 0: push_1
+    // 1: drop
+    // 2-4: goto -3 (backward jump to pos 2+3-3 = 2, i.e. to itself - infinite loop;
+    //              simulates a loop-back target that lands on the goto)
+    //
+    // Another jump targets position 2 (the goto) so it cannot be fused away.
+    var code = [_]u8{
+        @intFromEnum(Opcode.push_true),
+        @intFromEnum(Opcode.if_false), 0x00, 0x00, // 1-3: if_false +0 -> pos 4 (the drop)
+        @intFromEnum(Opcode.drop), // 4
+        @intFromEnum(Opcode.goto), 0xFE, 0xFF, // 5-7: goto -2 -> pos 5+3-2 = 6 (not goto itself but test target-on-goto)
+        @intFromEnum(Opcode.ret),
+    };
+    // Actually set up pos 5 (goto) as a jump target so drop+goto cannot fuse.
+    // Replace if_false offset so it lands on the goto at pos 5.
+    // pos 1 + size 3 = 4; target = 4 + offset. Want target = 5 -> offset = 1.
+    code[2] = 0x01;
+    code[3] = 0x00;
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const stats = try optimizer.optimize(&code);
+
+    try std.testing.expectEqual(@as(u32, 0), stats.drop_goto_count);
+    try std.testing.expectEqual(@intFromEnum(Opcode.drop), code[4]);
+    try std.testing.expectEqual(@intFromEnum(Opcode.goto), code[5]);
 }
 
 test "BytecodeOptimizer: if_false + goto no fusion when targets differ" {

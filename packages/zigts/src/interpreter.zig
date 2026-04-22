@@ -875,7 +875,7 @@ pub const Interpreter = struct {
 
             // 2-byte operand (u16 or i16)
             .push_i16, .push_const, .loop => 2,
-            .goto, .if_true, .if_false => 2,
+            .goto, .if_true, .if_false, .drop_goto => 2,
             .get_field, .put_field, .put_field_keep => 2,
             .new_array, .get_global, .put_global, .define_global, .make_function => 2,
             .import_module, .import_name, .export_name => 2,
@@ -2938,6 +2938,14 @@ pub const Interpreter = struct {
                 if (!cond_bool) {
                     self.offsetPc(offset);
                 }
+                continue :sw @enumFromInt(self.pc[0]);
+            },
+            .drop_goto => {
+                self.advanceOp();
+                _ = self.ctx.pop();
+                const offset = readI16(self.pc);
+                self.pc += 2;
+                self.offsetPc(offset);
                 continue :sw @enumFromInt(self.pc[0]);
             },
 

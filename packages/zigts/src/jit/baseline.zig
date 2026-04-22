@@ -510,7 +510,7 @@ pub const BaselineCompiler = struct {
                 .mod_const_i8, .add_const_i8, .sub_const_i8, .mul_const_i8, .lt_const_i8, .le_const_i8 => pc += 1,
                 .get_upvalue, .put_upvalue, .close_upvalue => pc += 1,
                 .get_field_call => pc += 3,
-                .goto, .if_true, .if_false, .if_false_goto => pc += 2,
+                .goto, .if_true, .if_false, .if_false_goto, .drop_goto => pc += 2,
                 else => {},
             }
         }
@@ -1072,7 +1072,7 @@ pub const BaselineCompiler = struct {
 
             // Check for jump instructions and record their targets
             switch (op) {
-                .goto, .loop, .if_true, .if_false, .if_false_goto => {
+                .goto, .loop, .if_true, .if_false, .if_false_goto, .drop_goto => {
                     // These have i16 offset immediately after opcode
                     if (pc + 2 <= code.len) {
                         const offset: i16 = @bitCast(readU16(code, pc));
@@ -1763,6 +1763,14 @@ pub const BaselineCompiler = struct {
                 const offset: i16 = @bitCast(readU16(code, new_pc));
                 new_pc += 2;
                 const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                try self.emitJump(target);
+            },
+
+            .drop_goto => {
+                const offset: i16 = @bitCast(readU16(code, new_pc));
+                new_pc += 2;
+                const target: u32 = @intCast(@as(i32, @intCast(new_pc)) + offset);
+                try self.emitDrop();
                 try self.emitJump(target);
             },
 

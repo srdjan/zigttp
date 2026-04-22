@@ -1,19 +1,708 @@
 {
-  "schema_version":1,
-  "benchmarks":[
-    {"name":"intArithmetic","iterations":50000,"success":true,"time_ms":23.324,"ops_per_sec":2143714,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":0,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"stringConcat","iterations":50000,"success":true,"time_ms":16.761,"ops_per_sec":2983115,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":0,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"stringOps","iterations":50000,"success":true,"time_ms":64.531,"ops_per_sec":774821,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":0,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"objectCreate","iterations":50000,"success":true,"time_ms":53.289,"ops_per_sec":938279,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":100001,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"propertyAccess","iterations":50000,"success":true,"time_ms":28.237,"ops_per_sec":1770726,"error":null,"perf":{"backedge_count":0,"pic_hits":249995,"pic_misses":5,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"arrayOps","iterations":50000,"success":true,"time_ms":52.765,"ops_per_sec":947597,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":100000,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"functionCalls","iterations":50000,"success":true,"time_ms":84.112,"ops_per_sec":594445,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":0,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":2,"baseline":2,"optimized_candidate":2,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":1,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"recursion","iterations":25,"success":true,"time_ms":178.324,"ops_per_sec":140,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":0,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":1,"baseline":1,"optimized_candidate":1,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":0,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":0,"dispatches_saved":0,"total_fusions":0},"feedback_summary":{"value":{"sites":2,"monomorphic":2,"polymorphic":0,"megamorphic":0,"total_hits":92},"calls":{"sites":2,"monomorphic":2,"polymorphic":0,"megamorphic":0,"total_hits":67}}},
-    {"name":"jsonOps","iterations":5000,"success":true,"time_ms":19.247,"ops_per_sec":259780,"error":null,"perf":{"backedge_count":0,"pic_hits":14997,"pic_misses":5003,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"gcPressure","iterations":50000,"success":true,"time_ms":88.613,"ops_per_sec":564251,"error":null,"perf":{"backedge_count":0,"pic_hits":49999,"pic_misses":1,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"httpHandler","iterations":5000,"success":true,"time_ms":9.415,"ops_per_sec":531067,"error":null,"perf":{"backedge_count":0,"pic_hits":9998,"pic_misses":2,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"httpHandlerHeavy","iterations":2000,"success":true,"time_ms":23.124,"ops_per_sec":86490,"error":null,"perf":{"backedge_count":0,"pic_hits":7996,"pic_misses":5,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}},
-    {"name":"forOfLoop","iterations":50000,"success":true,"time_ms":7.583,"ops_per_sec":6593696,"error":null,"perf":{"backedge_count":0,"pic_hits":0,"pic_misses":100,"deopt_count":0,"opcode_histogram_enabled":false,"opcode_histogram_nonzero":0,"tier_promotions":{"interpreted":0,"baseline_candidate":0,"baseline":0,"optimized_candidate":0,"optimized":0}},"opt_stats":{"get_loc_add_count":0,"get_loc_get_loc_add_count":0,"push_const_call_count":1,"get_field_call_count":0,"if_false_goto_count":0,"bytes_saved":1,"dispatches_saved":1,"total_fusions":1},"feedback_summary":{"value":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0},"calls":{"sites":0,"monomorphic":0,"polymorphic":0,"megamorphic":0,"total_hits":0}}}
+  "schema_version": 1,
+  "benchmarks": [
+    {
+      "name": "intArithmetic",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 3.436,
+      "ops_per_sec": 19447685,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 0,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "stringConcat",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 1.93,
+      "ops_per_sec": 26315789,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 0,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 0,
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "stringOps",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 2.788,
+      "ops_per_sec": 17934002,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 0,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "objectCreate",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 3.547,
+      "ops_per_sec": 14480162,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 100001,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 0,
+        "bytes_saved": 1,
+        "dispatches_saved": 1,
+        "total_fusions": 1
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "propertyAccess",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 2.914,
+      "ops_per_sec": 17289073,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 249995,
+        "pic_misses": 5,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "arrayOps",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 3.131,
+      "ops_per_sec": 16061676,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 100000,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "functionCalls",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 4.492,
+      "ops_per_sec": 11418131,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 0,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 4,
+        "promotion_succeeded": 4,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 2,
+          "baseline": 2,
+          "optimized_candidate": 2,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 1,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "recursion",
+      "iterations": 25,
+      "success": true,
+      "time_ms": 7.427,
+      "ops_per_sec": 3380,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 0,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 2,
+        "promotion_succeeded": 2,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 1,
+          "baseline": 1,
+          "optimized_candidate": 1,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 0,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 0,
+        "bytes_saved": 0,
+        "dispatches_saved": 0,
+        "total_fusions": 0
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 2,
+          "monomorphic": 2,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 92
+        },
+        "calls": {
+          "sites": 2,
+          "monomorphic": 2,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 67
+        }
+      }
+    },
+    {
+      "name": "jsonOps",
+      "iterations": 5000,
+      "success": true,
+      "time_ms": 1.382,
+      "ops_per_sec": 3993610,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 14997,
+        "pic_misses": 5003,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "gcPressure",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 6.003,
+      "ops_per_sec": 8461668,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 49999,
+        "pic_misses": 1,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "httpHandler",
+      "iterations": 5000,
+      "success": true,
+      "time_ms": 0.721,
+      "ops_per_sec": 6963788,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 9998,
+        "pic_misses": 2,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "httpHandlerHeavy",
+      "iterations": 2000,
+      "success": true,
+      "time_ms": 1.677,
+      "ops_per_sec": 1229256,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 7996,
+        "pic_misses": 5,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 1,
+        "bytes_saved": 2,
+        "dispatches_saved": 2,
+        "total_fusions": 2
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    },
+    {
+      "name": "forOfLoop",
+      "iterations": 50000,
+      "success": true,
+      "time_ms": 0.467,
+      "ops_per_sec": 2000000000,
+      "error": null,
+      "perf": {
+        "backedge_count": 0,
+        "pic_hits": 0,
+        "pic_misses": 100,
+        "deopt_count": 0,
+        "mega_recoveries": 0,
+        "promotion_attempted": 0,
+        "promotion_succeeded": 0,
+        "promotion_rejected_deopt_storm": 0,
+        "opcode_histogram_enabled": false,
+        "opcode_histogram_nonzero": 0,
+        "tier_promotions": {
+          "interpreted": 0,
+          "baseline_candidate": 0,
+          "baseline": 0,
+          "optimized_candidate": 0,
+          "optimized": 0
+        }
+      },
+      "opt_stats": {
+        "get_loc_add_count": 0,
+        "get_loc_get_loc_add_count": 0,
+        "push_const_call_count": 1,
+        "get_field_call_count": 0,
+        "if_false_goto_count": 0,
+        "drop_goto_count": 3,
+        "bytes_saved": 4,
+        "dispatches_saved": 4,
+        "total_fusions": 4
+      },
+      "feedback_summary": {
+        "value": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        },
+        "calls": {
+          "sites": 0,
+          "monomorphic": 0,
+          "polymorphic": 0,
+          "megamorphic": 0,
+          "total_hits": 0
+        }
+      }
+    }
   ],
-  "total_ms":649.325
+  "total_ms": 39.915
 }
