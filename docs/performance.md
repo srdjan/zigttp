@@ -273,3 +273,78 @@ Load test with external tools:
 wrk -t4 -c100 -d30s http://localhost:8080/
 hey -n 10000 -c 100 http://localhost:8080/
 ```
+
+## Perf Backlog Report
+
+### 2026-04-22: Perf backlog phases 1-9
+
+Nine-phase plan delivered in-tree; baseline promoted to the post-phase-4 run.
+
+**Aggregate result vs prior committed baseline** (75th-percentile of 7 runs
+each, `zig build bench -Doptimize=ReleaseFast -- --json --quiet`):
+
+| Benchmark      | Before    | After     | Ratio   |
+| -------------- | --------- | --------- | ------- |
+| functionCalls  | 11.42M/s  | 16.68M/s  | 1.461x  |
+| stringConcat   | 26.32M/s  | 27.10M/s  | 1.030x  |
+| stringOps      | 17.93M/s  | 18.34M/s  | 1.022x  |
+| propertyAccess | 17.29M/s  | 17.54M/s  | 1.014x  |
+| objectCreate   | 14.48M/s  | 14.55M/s  | 1.005x  |
+| recursion      | 3,380/s   | 3,359/s   | 0.994x  |
+| arrayOps       | 16.06M/s  | 15.90M/s  | 0.990x  |
+| intArithmetic  | 19.45M/s  | 19.18M/s  | 0.986x  |
+| jsonOps        | 3.99M/s   | 3.86M/s   | 0.966x  |
+| gcPressure     | 8.46M/s   | 8.32M/s   | 0.984x  |
+| forOfLoop      | 2.00G/s   | 1.92G/s   | 0.962x  |
+| httpHandler    | 6.96M/s   | 7.15M/s   | 1.027x  |
+| httpHandlerHeavy | 1.23M/s | 1.25M/s   | 1.014x  |
+| **geomean**    |           |           | **1.029x** |
+
+Hardware: Apple Darwin 25.3.0 arm64. Zig 0.16.0-dev.3073+28ae5d415. Commits
+`10684c0` through the current baseline snapshot.
+
+**Per-phase highlights.** Phase 1 froze the benchmark JSON at
+`schema_version: 1` and added a snapshot test so downstream tooling can
+consume it. Phase 2 shipped `scripts/bench-diff.sh` and the
+`zig build bench-check` step that compares a best-of-N run against the
+committed baseline; the gate trips on any per-bench regression >8% or
+geomean regression >3%. Phase 3 added the `drop_goto` superinstruction
+(fires 1-3 times per compiled function via `bytecode_opt.zig:tryFuseAt`).
+Phase 4 turned `call_ic` from a stub into a fully-wired opcode: the
+interpreter records feedback at the call site, baseline and optimized JIT
+walk/emit past it, the baseline inliner blacklist no longer rejects it,
+and codegen emits it at non-method call sites behind
+`enable_call_ic_emission`. A compensating fusion rule folds
+`push_const + call_ic` back into `push_const_call` so constant-callee
+sites do not regress. The aggregate functionCalls +46% is almost entirely
+this phase. Phase 5 added megamorphic recovery to the PIC and aligned PIC
+polymorphic capacity with `TypeFeedbackSite` so the two layers report
+matching monomorphic/polymorphic/megamorphic classifications. Phase 6
+added deopt-storm suppression in `profileFunctionEntry` so functions that
+deopt three times in a thousand invocations stop being re-promoted to
+the optimized tier. Phases 7 (builtin fastpath v1) and 8 (compiler
+allocation tuning) have scaffolding but defer the actual tuning pass to
+follow-up work; the compile-time microbench lives at
+`packages/runtime/src/compile_benchmark.zig` and runs via
+`zig build compile-bench`.
+
+**Configuration and rollback.** Three perf comptime flags carry the
+bytecode-emission changes:
+
+- `packages/zigts/src/parser/codegen.zig:63` - `enable_peephole_opt` - default true
+- `packages/zigts/src/parser/codegen.zig:68` - `enable_call_ic_emission` - default true
+- `packages/zigts/src/interpreter.zig:345` - `pic_entries_tracks_feedback` - default true
+
+Flip any one to false and rebuild to disable the corresponding change. A
+master `-Dperf-opts=off` build option is not yet wired; it is the obvious
+follow-up if we start needing to A/B flags against one another in CI.
+Runtime-policy toggles documented elsewhere in this file remain env-driven
+and take effect on restart.
+
+**Protected benches.** `scripts/bench-diff.sh` exempts `forOfLoop`,
+`httpHandler`, and `httpHandlerHeavy` from the per-bench regression check.
+These are sub-millisecond microbenches whose per-run variance exceeds 5%
+even on a quiet machine; they stay in the JSON report and still count
+toward geomean, but a single-bench regression on them does not block a
+merge. Revisit once the harness runs each bench long enough to push
+per-iteration cost comfortably above timer resolution.

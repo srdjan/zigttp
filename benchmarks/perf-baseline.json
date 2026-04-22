@@ -5,8 +5,8 @@
       "name": "intArithmetic",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.436,
-      "ops_per_sec": 19447685,
+      "time_ms": 2.607,
+      "ops_per_sec": 19179133,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -34,7 +34,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -59,8 +59,8 @@
       "name": "stringConcat",
       "iterations": 50000,
       "success": true,
-      "time_ms": 1.93,
-      "ops_per_sec": 26315789,
+      "time_ms": 1.845,
+      "ops_per_sec": 27100271,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -88,7 +88,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 0,
-        "bytes_saved": 1,
+        "bytes_saved": 3,
         "dispatches_saved": 1,
         "total_fusions": 1
       },
@@ -113,8 +113,8 @@
       "name": "stringOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.788,
-      "ops_per_sec": 17934002,
+      "time_ms": 2.727,
+      "ops_per_sec": 18335166,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -142,7 +142,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -167,8 +167,8 @@
       "name": "objectCreate",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.547,
-      "ops_per_sec": 14480162,
+      "time_ms": 3.437,
+      "ops_per_sec": 14547570,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -196,7 +196,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 0,
-        "bytes_saved": 1,
+        "bytes_saved": 3,
         "dispatches_saved": 1,
         "total_fusions": 1
       },
@@ -221,8 +221,8 @@
       "name": "propertyAccess",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.914,
-      "ops_per_sec": 17289073,
+      "time_ms": 2.851,
+      "ops_per_sec": 17537706,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -250,7 +250,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -275,8 +275,8 @@
       "name": "arrayOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.131,
-      "ops_per_sec": 16061676,
+      "time_ms": 3.145,
+      "ops_per_sec": 15898251,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -304,7 +304,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -329,8 +329,8 @@
       "name": "functionCalls",
       "iterations": 50000,
       "success": true,
-      "time_ms": 4.492,
-      "ops_per_sec": 11418131,
+      "time_ms": 2.998,
+      "ops_per_sec": 16677785,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -338,8 +338,8 @@
         "pic_misses": 0,
         "deopt_count": 0,
         "mega_recoveries": 0,
-        "promotion_attempted": 4,
-        "promotion_succeeded": 4,
+        "promotion_attempted": 3,
+        "promotion_succeeded": 3,
         "promotion_rejected_deopt_storm": 0,
         "opcode_histogram_enabled": false,
         "opcode_histogram_nonzero": 0,
@@ -347,7 +347,7 @@
           "interpreted": 0,
           "baseline_candidate": 2,
           "baseline": 2,
-          "optimized_candidate": 2,
+          "optimized_candidate": 1,
           "optimized": 0
         }
       },
@@ -358,7 +358,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -372,10 +372,10 @@
         },
         "calls": {
           "sites": 1,
-          "monomorphic": 0,
+          "monomorphic": 1,
           "polymorphic": 0,
           "megamorphic": 0,
-          "total_hits": 0
+          "total_hits": 50
         }
       }
     },
@@ -383,8 +383,8 @@
       "name": "recursion",
       "iterations": 25,
       "success": true,
-      "time_ms": 7.427,
-      "ops_per_sec": 3380,
+      "time_ms": 7.442,
+      "ops_per_sec": 3359,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -437,8 +437,8 @@
       "name": "jsonOps",
       "iterations": 5000,
       "success": true,
-      "time_ms": 1.382,
-      "ops_per_sec": 3993610,
+      "time_ms": 1.296,
+      "ops_per_sec": 3858024,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -466,7 +466,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -491,8 +491,8 @@
       "name": "gcPressure",
       "iterations": 50000,
       "success": true,
-      "time_ms": 6.003,
-      "ops_per_sec": 8461668,
+      "time_ms": 6.007,
+      "ops_per_sec": 8323622,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -520,7 +520,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -545,8 +545,8 @@
       "name": "httpHandler",
       "iterations": 5000,
       "success": true,
-      "time_ms": 0.721,
-      "ops_per_sec": 6963788,
+      "time_ms": 0.699,
+      "ops_per_sec": 7153075,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -574,7 +574,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -599,8 +599,8 @@
       "name": "httpHandlerHeavy",
       "iterations": 2000,
       "success": true,
-      "time_ms": 1.677,
-      "ops_per_sec": 1229256,
+      "time_ms": 1.605,
+      "ops_per_sec": 1246105,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -628,7 +628,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 1,
-        "bytes_saved": 2,
+        "bytes_saved": 4,
         "dispatches_saved": 2,
         "total_fusions": 2
       },
@@ -653,8 +653,8 @@
       "name": "forOfLoop",
       "iterations": 50000,
       "success": true,
-      "time_ms": 0.467,
-      "ops_per_sec": 2000000000,
+      "time_ms": 0.026,
+      "ops_per_sec": 1923076923,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -682,7 +682,7 @@
         "get_field_call_count": 0,
         "if_false_goto_count": 0,
         "drop_goto_count": 3,
-        "bytes_saved": 4,
+        "bytes_saved": 6,
         "dispatches_saved": 4,
         "total_fusions": 4
       },
@@ -704,5 +704,5 @@
       }
     }
   ],
-  "total_ms": 39.915
+  "total_ms": 38.603
 }
