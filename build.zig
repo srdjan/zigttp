@@ -548,6 +548,43 @@ pub fn build(b: *std.Build) void {
     const bench_check_step = b.step("bench-check", "Compare benchmark output against the checked-in perf baseline");
     bench_check_step.dependOn(&bench_check_cmd.step);
 
+    // Compile-time microbench: parse + codegen ns/bytes/IR-nodes per compile
+    // across a small synthesized corpus. Scaffolding for Phase 8 tuning of
+    // reserveCapacity and intern_pool capacity hints.
+    const compile_bench_exe = b.addExecutable(.{
+        .name = "zigttp-compile-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = runtime_dep.path("src/compile_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    compile_bench_exe.root_module.addImport("zigts", zigts_mod);
+
+    const compile_bench_cmd = b.addRunArtifact(compile_bench_exe);
+    // Bench runs are measurements, not cacheable build products.
+    compile_bench_cmd.has_side_effects = true;
+    if (b.args) |args| {
+        compile_bench_cmd.addArgs(args);
+    }
+    const compile_bench_step = b.step("compile-bench", "Run compile-time microbenchmarks");
+    compile_bench_step.dependOn(&compile_bench_cmd.step);
+
+    const compile_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = runtime_dep.path("src/compile_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    compile_bench_tests.root_module.addImport("zigts", zigts_mod);
+    const run_compile_bench_tests = b.addRunArtifact(compile_bench_tests);
+    const compile_bench_test_step = b.step("test-compile-bench", "Run compile-time microbench harness tests");
+    compile_bench_test_step.dependOn(&run_compile_bench_tests.step);
+    test_step.dependOn(&run_compile_bench_tests.step);
+
     // System linking step (cross-handler contract verification)
     if (system_path) |sys_path| {
         const run_system = b.addRunArtifact(zigts_exe);
