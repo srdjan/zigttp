@@ -269,6 +269,26 @@ pub const BytecodeOptimizer = struct {
             return 4; // Size of push_const_call
         }
 
+        // Pattern: push_const X + call_ic N I -> push_const_call X N
+        // Original: push_const(3) + call_ic(4) = 7 bytes
+        // Fused: push_const_call(4) = 4 bytes, NOP 3 bytes
+        // The cache_idx operand on call_ic is discarded; feedback for the
+        // resulting push_const_call site is allocated by the interpreter scan.
+        if (op1 == .push_const and op2 == .call_ic) {
+            const const_idx = self.readU16(code, pos + 1);
+            const argc = code[next_pos + 1];
+            code[pos] = @intFromEnum(Opcode.push_const_call);
+            self.writeU16(code, pos + 1, const_idx);
+            code[pos + 3] = argc;
+            code[pos + 4] = @intFromEnum(Opcode.nop);
+            code[pos + 5] = @intFromEnum(Opcode.nop);
+            code[pos + 6] = @intFromEnum(Opcode.nop);
+            stats.push_const_call_count += 1;
+            stats.dispatches_saved += 1;
+            stats.bytes_saved += 3;
+            return 4;
+        }
+
         // Pattern: get_field X + call_method N -> get_field_call X N
         // Original: get_field(3) + call_method(2) = 5 bytes
         // Fused: get_field_call(4) = 4 bytes, NOP 1 byte
@@ -535,6 +555,33 @@ test "BytecodeOptimizer: push_const + call fusion" {
     try std.testing.expectEqual(@as(u8, 0x02), code[1]); // Low byte of const idx
     try std.testing.expectEqual(@as(u8, 0x01), code[2]); // High byte of const idx
     try std.testing.expectEqual(@as(u8, 3), code[3]); // argc
+}
+
+test "BytecodeOptimizer: push_const + call_ic fusion" {
+    const allocator = std.testing.allocator;
+
+    // push_const 0x0102, call_ic 3 cache=0 -> push_const_call 0x0102 3, NOP NOP NOP
+    var code = [_]u8{
+        @intFromEnum(Opcode.push_const), 0x02, 0x01,
+        @intFromEnum(Opcode.call_ic),    3,    0x00, 0x00,
+        @intFromEnum(Opcode.ret),
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    const stats = try optimizer.optimize(&code);
+
+    try std.testing.expectEqual(@as(u32, 1), stats.push_const_call_count);
+    try std.testing.expectEqual(@as(u32, 3), stats.bytes_saved);
+
+    try std.testing.expectEqual(@intFromEnum(Opcode.push_const_call), code[0]);
+    try std.testing.expectEqual(@as(u8, 0x02), code[1]);
+    try std.testing.expectEqual(@as(u8, 0x01), code[2]);
+    try std.testing.expectEqual(@as(u8, 3), code[3]);
+    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
+    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[5]);
+    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[6]);
 }
 
 test "BytecodeOptimizer: no fusion across jump target" {
