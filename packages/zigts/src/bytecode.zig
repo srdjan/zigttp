@@ -477,6 +477,13 @@ pub const FunctionBytecode = struct {
     tier: CompilationTier = .interpreted,
     compiled_code: ?*anyopaque = null, // Pointer to CompiledCode when JIT'd
 
+    // Tiering deopt-storm suppression (Phase 6)
+    // Saturating count of deopts this function has incurred; paired with the
+    // exec_count at which the most recent deopt landed. Used by
+    // type_feedback.InliningPolicy.shouldSuppressOnDeoptStorm().
+    deopt_count: u16 = 0,
+    last_deopt_exec_count: u32 = 0,
+
     // Unique identifier for JIT guard fast path
     // Enables single 64-bit comparison instead of multiple field checks
     guard_id: u64 = 0,

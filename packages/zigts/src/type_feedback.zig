@@ -10,6 +10,12 @@ const bytecode = @import("bytecode.zig");
 
 const debug_log = false; // Set to true for type feedback diagnostics
 
+/// Maximum distinct shapes/types a feedback site or PIC may cache before
+/// transitioning to megamorphic. Shared between TypeFeedbackSite and the
+/// PolymorphicInlineCache in interpreter.zig so both systems agree on what
+/// counts as "too polymorphic to specialize".
+pub const MAX_POLYMORPHIC_SHAPES: u8 = 4;
+
 /// Observed runtime type classification for type feedback
 pub const ObservedType = enum(u8) {
     none = 0,
@@ -25,17 +31,17 @@ pub const ObservedType = enum(u8) {
 };
 
 /// Type feedback site for binary operations and property access
-/// Records up to 4 observed types before transitioning to megamorphic
+/// Records up to MAX_POLYMORPHIC_SHAPES observed types before transitioning to megamorphic
 pub const TypeFeedbackSite = struct {
-    /// Observed types at this site (up to 4 for polymorphic)
-    observed: [4]ObservedType = .{.none} ** 4,
+    /// Observed types at this site (up to MAX_POLYMORPHIC_SHAPES for polymorphic)
+    observed: [MAX_POLYMORPHIC_SHAPES]ObservedType = .{.none} ** MAX_POLYMORPHIC_SHAPES,
     /// Hidden class indices for object types (enables shape specialization)
-    hidden_classes: [4]object.HiddenClassIndex = .{.none} ** 4,
+    hidden_classes: [MAX_POLYMORPHIC_SHAPES]object.HiddenClassIndex = .{.none} ** MAX_POLYMORPHIC_SHAPES,
     /// Number of distinct types observed
     count: u8 = 0,
     /// Total hits at this site
     total_hits: u32 = 0,
-    /// True when more than 4 types observed
+    /// True when more than MAX_POLYMORPHIC_SHAPES types observed
     megamorphic: bool = false,
 
     /// Record a value's type at this feedback site
@@ -53,7 +59,7 @@ pub const TypeFeedbackSite = struct {
         }
 
         // Add new type if space available
-        if (self.count < 4) {
+        if (self.count < MAX_POLYMORPHIC_SHAPES) {
             self.observed[self.count] = observed_type;
             // Record hidden class for objects
             if (observed_type == .object or observed_type == .array or observed_type == .function) {
@@ -73,9 +79,9 @@ pub const TypeFeedbackSite = struct {
         return self.count == 1 and !self.megamorphic;
     }
 
-    /// Check if this site is polymorphic (2-4 types)
+    /// Check if this site is polymorphic (2 to MAX_POLYMORPHIC_SHAPES types)
     pub fn isPolymorphic(self: *const TypeFeedbackSite) bool {
-        return self.count > 1 and self.count <= 4 and !self.megamorphic;
+        return self.count > 1 and self.count <= MAX_POLYMORPHIC_SHAPES and !self.megamorphic;
     }
 
     /// Get the dominant (first observed) type, or null if no feedback
@@ -94,8 +100,8 @@ pub const TypeFeedbackSite = struct {
 
     /// Reset feedback (used after deoptimization)
     pub fn reset(self: *TypeFeedbackSite) void {
-        self.observed = .{.none} ** 4;
-        self.hidden_classes = .{.none} ** 4;
+        self.observed = .{.none} ** MAX_POLYMORPHIC_SHAPES;
+        self.hidden_classes = .{.none} ** MAX_POLYMORPHIC_SHAPES;
         self.count = 0;
         self.total_hits = 0;
         self.megamorphic = false;
@@ -105,11 +111,11 @@ pub const TypeFeedbackSite = struct {
 /// Call site feedback for function inlining decisions
 /// Tracks which functions are called at each call site
 pub const CallSiteFeedback = struct {
-    /// Observed callees at this site (up to 4)
-    callees: [4]?*const bytecode.FunctionBytecode = .{null} ** 4,
+    /// Observed callees at this site (up to MAX_POLYMORPHIC_SHAPES)
+    callees: [MAX_POLYMORPHIC_SHAPES]?*const bytecode.FunctionBytecode = .{null} ** MAX_POLYMORPHIC_SHAPES,
     /// Number of distinct callees observed
     count: u8 = 0,
-    /// True when more than 4 callees observed
+    /// True when more than MAX_POLYMORPHIC_SHAPES callees observed
     megamorphic: bool = false,
     /// Total calls at this site
     total_calls: u32 = 0,
@@ -129,7 +135,7 @@ pub const CallSiteFeedback = struct {
         }
 
         // Add new callee if space available
-        if (self.count < 4) {
+        if (self.count < MAX_POLYMORPHIC_SHAPES) {
             self.callees[self.count] = func_bc;
             self.count += 1;
         } else {
@@ -150,7 +156,7 @@ pub const CallSiteFeedback = struct {
 
     /// Reset feedback
     pub fn reset(self: *CallSiteFeedback) void {
-        self.callees = .{null} ** 4;
+        self.callees = .{null} ** MAX_POLYMORPHIC_SHAPES;
         self.count = 0;
         self.megamorphic = false;
         self.total_calls = 0;
@@ -228,6 +234,82 @@ pub const TypeFeedback = struct {
         }
         return total;
     }
+
+    /// Summarize feedback vector shape and hit distribution for reporting.
+    pub fn summary(self: *const TypeFeedback) FeedbackSummary {
+        var result = FeedbackSummary{
+            .value_sites = @intCast(self.sites.len),
+            .call_sites = @intCast(self.call_sites.len),
+        };
+
+        for (self.sites) |site| {
+            result.value_total_hits +|= site.total_hits;
+            if (site.megamorphic) {
+                result.value_megamorphic_sites +|= 1;
+            } else if (site.count > 1) {
+                result.value_polymorphic_sites +|= 1;
+            } else if (site.count == 1) {
+                result.value_monomorphic_sites +|= 1;
+            }
+        }
+
+        for (self.call_sites) |site| {
+            result.call_total_hits +|= site.total_calls;
+            if (site.megamorphic) {
+                result.call_megamorphic_sites +|= 1;
+            } else if (site.count > 1) {
+                result.call_polymorphic_sites +|= 1;
+            } else if (site.count == 1) {
+                result.call_monomorphic_sites +|= 1;
+            }
+        }
+
+        return result;
+    }
+};
+
+pub const FeedbackSummary = struct {
+    value_sites: u32 = 0,
+    value_monomorphic_sites: u32 = 0,
+    value_polymorphic_sites: u32 = 0,
+    value_megamorphic_sites: u32 = 0,
+    value_total_hits: u32 = 0,
+    call_sites: u32 = 0,
+    call_monomorphic_sites: u32 = 0,
+    call_polymorphic_sites: u32 = 0,
+    call_megamorphic_sites: u32 = 0,
+    call_total_hits: u32 = 0,
+
+    pub fn merge(self: *FeedbackSummary, other: FeedbackSummary) void {
+        self.value_sites +|= other.value_sites;
+        self.value_monomorphic_sites +|= other.value_monomorphic_sites;
+        self.value_polymorphic_sites +|= other.value_polymorphic_sites;
+        self.value_megamorphic_sites +|= other.value_megamorphic_sites;
+        self.value_total_hits +|= other.value_total_hits;
+        self.call_sites +|= other.call_sites;
+        self.call_monomorphic_sites +|= other.call_monomorphic_sites;
+        self.call_polymorphic_sites +|= other.call_polymorphic_sites;
+        self.call_megamorphic_sites +|= other.call_megamorphic_sites;
+        self.call_total_hits +|= other.call_total_hits;
+    }
+
+    pub fn writeJson(self: FeedbackSummary, writer: anytype) !void {
+        try writer.print(
+            "{{\"value\":{{\"sites\":{d},\"monomorphic\":{d},\"polymorphic\":{d},\"megamorphic\":{d},\"total_hits\":{d}}},\"calls\":{{\"sites\":{d},\"monomorphic\":{d},\"polymorphic\":{d},\"megamorphic\":{d},\"total_hits\":{d}}}}}",
+            .{
+                self.value_sites,
+                self.value_monomorphic_sites,
+                self.value_polymorphic_sites,
+                self.value_megamorphic_sites,
+                self.value_total_hits,
+                self.call_sites,
+                self.call_monomorphic_sites,
+                self.call_polymorphic_sites,
+                self.call_megamorphic_sites,
+                self.call_total_hits,
+            },
+        );
+    }
 };
 
 /// Inlining policy for function inlining decisions
@@ -244,6 +326,24 @@ pub const InliningPolicy = struct {
     pub const HOT_CALLEE_THRESHOLD: u32 = 1000;
     /// Maximum total inlined bytecode budget per function
     pub const MAX_INLINED_SIZE: u32 = 500;
+
+    /// Tiering deopt-storm suppression: refuse to re-promote to optimized_candidate
+    /// if the function has taken DEOPT_SUPPRESS_COUNT or more deopts AND the last
+    /// one was within DEOPT_SUPPRESS_COOLDOWN invocations of now.
+    pub const DEOPT_SUPPRESS_COUNT: u16 = 3;
+    pub const DEOPT_SUPPRESS_COOLDOWN: u32 = 1000;
+
+    /// Whether deopt-storm suppression should engage for this promotion attempt.
+    /// `exec_count` is the current invocation count, `deopt_count` is the function's
+    /// saturating deopt counter, `last_deopt_exec_count` is when the last deopt fired.
+    pub inline fn shouldSuppressOnDeoptStorm(
+        deopt_count: u16,
+        exec_count: u32,
+        last_deopt_exec_count: u32,
+    ) bool {
+        if (deopt_count < DEOPT_SUPPRESS_COUNT) return false;
+        return (exec_count -% last_deopt_exec_count) < DEOPT_SUPPRESS_COOLDOWN;
+    }
 
     /// Decision result for inlining
     pub const InlineDecision = enum {
@@ -578,6 +678,39 @@ test "TypeFeedback init and deinit" {
 
     try std.testing.expectEqual(@as(usize, 10), tf.sites.len);
     try std.testing.expectEqual(@as(usize, 5), tf.call_sites.len);
+}
+
+test "TypeFeedback summary groups value and call sites" {
+    const allocator = std.testing.allocator;
+
+    const tf = try TypeFeedback.init(allocator, 3, 2);
+    defer tf.deinit();
+
+    tf.sites[0].record(value.JSValue.fromInt(1));
+    tf.sites[1].record(value.JSValue.fromInt(1));
+    tf.sites[1].record(value.JSValue.true_val);
+    tf.sites[2].count = 4;
+    tf.sites[2].megamorphic = true;
+    tf.sites[2].total_hits = 9;
+
+    var dummy_bc1: bytecode.FunctionBytecode = undefined;
+    var dummy_bc2: bytecode.FunctionBytecode = undefined;
+    tf.call_sites[0].recordCallee(&dummy_bc1);
+    tf.call_sites[0].recordCallee(&dummy_bc1);
+    tf.call_sites[1].recordCallee(&dummy_bc1);
+    tf.call_sites[1].recordCallee(&dummy_bc2);
+
+    const summary = tf.summary();
+    try std.testing.expectEqual(@as(u32, 3), summary.value_sites);
+    try std.testing.expectEqual(@as(u32, 1), summary.value_monomorphic_sites);
+    try std.testing.expectEqual(@as(u32, 1), summary.value_polymorphic_sites);
+    try std.testing.expectEqual(@as(u32, 1), summary.value_megamorphic_sites);
+    try std.testing.expectEqual(@as(u32, 12), summary.value_total_hits);
+    try std.testing.expectEqual(@as(u32, 2), summary.call_sites);
+    try std.testing.expectEqual(@as(u32, 1), summary.call_monomorphic_sites);
+    try std.testing.expectEqual(@as(u32, 1), summary.call_polymorphic_sites);
+    try std.testing.expectEqual(@as(u32, 0), summary.call_megamorphic_sites);
+    try std.testing.expectEqual(@as(u32, 4), summary.call_total_hits);
 }
 
 test "classifyValue" {

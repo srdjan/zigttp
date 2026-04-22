@@ -3,20 +3,24 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const zigts_dep = b.dependency("zigts", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
     const zigts_mod = zigts_dep.module("zigts");
     const zigts_host_dep = b.dependency("zigts", .{
         .target = b.graph.host,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
     const zigts_host_mod = zigts_host_dep.module("zigts");
 
     const tools_dep = b.dependency("zigttp_tools", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
     const zigts_cli_mod = tools_dep.module("zigts_cli");
     const project_config_mod = tools_dep.module("project_config");
@@ -29,6 +33,7 @@ pub fn build(b: *std.Build) void {
     const pi_dep = b.dependency("zigttp_pi", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
     const pi_app_mod = pi_dep.module("pi_app");
 
@@ -76,6 +81,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const zigts_build_options = b.addOptions();
+    zigts_build_options.addOption(bool, "perf_histogram", perf_histogram_enabled);
+    zigts_tests_root.addOptions("build_options", zigts_build_options);
     zigts_tests_root.addImport("zigttp-sdk", zigttp_sdk_dep.module("zigttp-sdk"));
     zigts_tests_root.addImport("zigttp-modules", zigttp_modules_dep.module("zigttp-modules"));
     zigts_tests_root.addImport("zigttp-ext-demo", ext_demo_dep.module("zigttp-ext-demo"));
@@ -150,6 +158,7 @@ pub fn build(b: *std.Build) void {
     const pi_host_tools_dep = b.dependency("zigttp_tools", .{
         .target = b.graph.host,
         .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
     });
     const pi_zigts_cli_host_mod = pi_host_tools_dep.module("zigts_cli");
     const pi_zigts_expert_skill_host_mod = pi_host_tools_dep.module("zigts_expert_skill");
@@ -522,11 +531,22 @@ pub fn build(b: *std.Build) void {
         bench_cmd.addArgs(args);
     }
 
+    const bench_check_run = b.addRunArtifact(bench_exe);
+    bench_check_run.addArg("--json");
+    bench_check_run.addArg("--quiet");
+    bench_check_run.has_side_effects = true;
+    const bench_check_json = bench_check_run.captureStdOut(.{ .basename = "bench-check-current.json" });
+    const bench_check_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/bench-diff.sh" });
+    bench_check_cmd.addFileArg(bench_check_json);
+    bench_check_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
+
     // Release build step (with handler precompilation if provided)
     const release_step = b.step("release", "Build optimized release binaries (zigttp, zigttp-runtime, zigts)");
     release_step.dependOn(b.getInstallStep());
     const bench_step = b.step("bench", "Run performance benchmarks");
     bench_step.dependOn(&bench_cmd.step);
+    const bench_check_step = b.step("bench-check", "Compare benchmark output against the checked-in perf baseline");
+    bench_check_step.dependOn(&bench_check_cmd.step);
 
     // System linking step (cross-handler contract verification)
     if (system_path) |sys_path| {

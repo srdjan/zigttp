@@ -10,6 +10,9 @@ const zruntime = @import("zruntime.zig");
 const zq = @import("zigts");
 const Runtime = zruntime.Runtime;
 const RuntimeConfig = zruntime.RuntimeConfig;
+const PerfStats = zq.interpreter.PerfStats;
+const FeedbackSummary = zq.type_feedback.FeedbackSummary;
+const OptStats = zq.OptStats;
 
 pub const std_options: std.Options = .{
     .log_level = .err,
@@ -18,10 +21,13 @@ pub const std_options: std.Options = .{
 const BenchmarkResult = struct {
     name: []const u8,
     iterations: u32,
-    time_ms: f64,
-    ops_per_sec: u64,
-    pic_hits: u64 = 0,
-    pic_misses: u64 = 0,
+    time_ms: f64 = 0,
+    ops_per_sec: u64 = 0,
+    success: bool = true,
+    error_name: ?[]const u8 = null,
+    perf: PerfStats = .{},
+    opt_stats: OptStats = .{},
+    feedback_summary: FeedbackSummary = .{},
 };
 
 const Options = struct {
@@ -127,6 +133,81 @@ fn printFmt(comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     println(msg);
+}
+
+fn tierName(index: usize) []const u8 {
+    return switch (@as(zq.bytecode.CompilationTier, @enumFromInt(index))) {
+        .interpreted => "interpreted",
+        .baseline_candidate => "baseline_candidate",
+        .baseline => "baseline",
+        .optimized_candidate => "optimized_candidate",
+        .optimized => "optimized",
+    };
+}
+
+fn writeTierPromotionsJson(writer: anytype, counts: []const u32) !void {
+    try writer.writeAll("{");
+    for (counts, 0..) |count, idx| {
+        if (idx > 0) try writer.writeAll(",");
+        try writer.print("\"{s}\":{d}", .{ tierName(idx), count });
+    }
+    try writer.writeAll("}");
+}
+
+fn writePerfStatsJson(writer: anytype, perf: PerfStats) !void {
+    try writer.print(
+        "{{\"backedge_count\":{d},\"pic_hits\":{d},\"pic_misses\":{d},\"deopt_count\":{d},\"mega_recoveries\":{d},\"promotion_attempted\":{d},\"promotion_succeeded\":{d},\"promotion_rejected_deopt_storm\":{d},\"opcode_histogram_enabled\":{s},\"opcode_histogram_nonzero\":{d},\"tier_promotions\":",
+        .{
+            perf.backedge_count,
+            perf.pic_hits,
+            perf.pic_misses,
+            perf.deopt_count,
+            perf.mega_recoveries,
+            perf.promotion_attempted,
+            perf.promotion_succeeded,
+            perf.promotion_rejected_deopt_storm,
+            if (perf.opcode_histogram_enabled) "true" else "false",
+            perf.opcode_histogram_nonzero,
+        },
+    );
+    try writeTierPromotionsJson(writer, perf.tier_promotions[0..]);
+    if (perf.opcode_histogram_enabled) {
+        try writer.writeAll(",\"opcode_histogram\":[");
+        var first = true;
+        for (perf.opcode_histogram, 0..) |count, opcode_idx| {
+            if (count == 0) continue;
+            if (!first) try writer.writeAll(",");
+            first = false;
+            try writer.print("[{d},{d}]", .{ opcode_idx, count });
+        }
+        try writer.writeAll("]");
+    }
+    try writer.writeAll("}");
+}
+
+fn writeBenchmarkResultJson(writer: anytype, result: BenchmarkResult) !void {
+    try writer.print(
+        "{{\"name\":\"{s}\",\"iterations\":{d},\"success\":{s},\"time_ms\":{d:.3},\"ops_per_sec\":{d},\"error\":",
+        .{
+            result.name,
+            result.iterations,
+            if (result.success) "true" else "false",
+            result.time_ms,
+            result.ops_per_sec,
+        },
+    );
+    if (result.error_name) |error_name| {
+        try writer.print("\"{s}\"", .{error_name});
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"perf\":");
+    try writePerfStatsJson(writer, result.perf);
+    try writer.writeAll(",\"opt_stats\":");
+    try result.opt_stats.writeJson(writer);
+    try writer.writeAll(",\"feedback_summary\":");
+    try result.feedback_summary.writeJson(writer);
+    try writer.writeAll("}");
 }
 
 const ITERATIONS: u32 = 50000;
@@ -328,7 +409,7 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         \\        let query = (i % 2 === 0) ? '?limit=10&offset=5' : '?limit=25&offset=0';
         \\        let limit = (query.indexOf('limit=25') !== -1) ? 25 : 10;
         \\        let offset = (query.indexOf('offset=5') !== -1) ? 5 : 0;
-        \\        let bodyObj = null;
+        \\        let bodyObj = undefined;
         \\        if (reqPath.indexOf('/api/users') === 0) {
         \\            bodyObj = JSON.parse(payload);
         \\            bodyObj.limit = limit;
@@ -401,12 +482,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
         // All memory is released when the process exits
 
-        runtime.loadCode(code, script_path) catch |err| {
+        runtime.loadCodeNoHandler(code, script_path) catch |err| {
             std.log.err("Failed to execute script {s}: {}", .{ script_path, err });
             return;
         };
 
         if (options.bench) {
+            runtime.interpreter.resetProfilingCounters();
             const max_i32 = std.math.maxInt(i32);
             if (options.bench_iterations > max_i32 or options.warmup_iterations > max_i32) {
                 std.log.err("Iterations exceed i32 range", .{});
@@ -455,13 +537,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 elapsed_ms,
                 ops_per_sec,
             });
-            const pic_total = @as(u64, runtime.interpreter.pic_hits) + @as(u64, runtime.interpreter.pic_misses);
+            const perf = runtime.interpreter.snapshotPerfStats();
+            const pic_total = @as(u64, perf.pic_hits) + @as(u64, perf.pic_misses);
             if (pic_total > 0) {
-                const hit_rate = @as(f64, @floatFromInt(runtime.interpreter.pic_hits)) * 100.0 /
+                const hit_rate = @as(f64, @floatFromInt(perf.pic_hits)) * 100.0 /
                     @as(f64, @floatFromInt(pic_total));
                 printFmt("  IC: {} hits / {} total ({d:.1}%)", .{
-                    runtime.interpreter.pic_hits, pic_total, hit_rate,
+                    perf.pic_hits, pic_total, hit_rate,
                 });
+            }
+            if (perf.deopt_count > 0) {
+                printFmt("  deopts: {}", .{perf.deopt_count});
             }
             return;
         }
@@ -475,6 +561,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     var results: [benchmarks.len]BenchmarkResult = undefined;
+    for (benchmarks, 0..) |bench, i| {
+        results[i] = .{
+            .name = bench.name,
+            .iterations = bench.iterations,
+        };
+    }
     var total_time_ns: u64 = 0;
 
     for (benchmarks, 0..) |bench, i| {
@@ -487,63 +579,63 @@ pub fn main(init: std.process.Init.Minimal) !void {
             return;
         };
 
-        runtime.loadCode(bench.code, bench.name) catch |err| {
-            printFmt("{s}: ERROR - {}", .{ bench.name, err });
+        runtime.loadCodeNoHandler(bench.code, bench.name) catch |err| {
+            results[i].success = false;
+            results[i].error_name = @errorName(err);
+            if (!options.quiet and !options.json) {
+                printFmt("{s}: ERROR - {}", .{ bench.name, err });
+            }
             continue;
         };
 
         const end = compat.Instant.now() catch continue;
         const elapsed_ns = end.since(start);
         total_time_ns += elapsed_ns;
+        const perf = runtime.interpreter.snapshotPerfStats();
 
-        const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
-        const ops_per_sec: u64 = if (elapsed_ns > 0)
+        results[i].time_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+        results[i].ops_per_sec = if (elapsed_ns > 0)
             @intFromFloat(@as(f64, @floatFromInt(bench.iterations)) * 1_000_000_000.0 / @as(f64, @floatFromInt(elapsed_ns)))
         else
             0;
-
-        results[i] = .{
-            .name = bench.name,
-            .iterations = bench.iterations,
-            .time_ms = elapsed_ms,
-            .ops_per_sec = ops_per_sec,
-            .pic_hits = runtime.interpreter.pic_hits,
-            .pic_misses = runtime.interpreter.pic_misses,
-        };
+        results[i].perf = perf;
+        results[i].opt_stats = runtime.last_opt_stats;
+        results[i].feedback_summary = runtime.last_feedback_summary;
 
         if (!options.quiet and !options.json) {
-            printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, elapsed_ms, ops_per_sec });
-            const pic_total = results[i].pic_hits + results[i].pic_misses;
+            printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, results[i].time_ms, results[i].ops_per_sec });
+            const pic_total = @as(u64, results[i].perf.pic_hits) + @as(u64, results[i].perf.pic_misses);
             if (pic_total > 0) {
-                const hit_rate = @as(f64, @floatFromInt(results[i].pic_hits)) * 100.0 /
+                const hit_rate = @as(f64, @floatFromInt(results[i].perf.pic_hits)) * 100.0 /
                     @as(f64, @floatFromInt(pic_total));
                 printFmt("  IC: {} hits / {} total ({d:.1}%)", .{
-                    results[i].pic_hits, pic_total, hit_rate,
+                    results[i].perf.pic_hits, pic_total, hit_rate,
                 });
+            }
+            if (results[i].perf.deopt_count > 0) {
+                printFmt("  deopts: {}", .{results[i].perf.deopt_count});
             }
         }
     }
 
     if (options.json) {
-        writeStdout("{\n  \"benchmarks\": [\n");
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+        try aw.writer.writeAll("{\n  \"schema_version\":1,\n  \"benchmarks\":[\n");
         for (results, 0..) |result, i| {
-            var line_buf: [512]u8 = undefined;
-            const line = std.fmt.bufPrint(
-                &line_buf,
-                "    {{\"name\":\"{s}\",\"iterations\":{},\"time_ms\":{d:.3},\"ops_per_sec\":{},\"pic_hits\":{},\"pic_misses\":{}}}",
-                .{ result.name, result.iterations, result.time_ms, result.ops_per_sec, result.pic_hits, result.pic_misses },
-            ) catch continue;
-            writeStdout(line);
+            try aw.writer.writeAll("    ");
+            try writeBenchmarkResultJson(&aw.writer, result);
             if (i + 1 < results.len) {
-                writeStdout(",\n");
+                try aw.writer.writeAll(",\n");
             } else {
-                writeStdout("\n");
+                try aw.writer.writeAll("\n");
             }
         }
         const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
-        var tail_buf: [128]u8 = undefined;
-        const tail = std.fmt.bufPrint(&tail_buf, "  ],\n  \"total_ms\":{d:.3}\n}}\n", .{total_ms}) catch return;
-        writeStdout(tail);
+        try aw.writer.print("  ],\n  \"total_ms\":{d:.3}\n}}\n", .{total_ms});
+        output = aw.toArrayList();
+        writeStdout(output.items);
         return;
     }
 
@@ -585,6 +677,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (!options.quiet and options.compare) {
         for (results) |result| {
+            if (!result.success) continue;
             const base_ops = getBaseline(result.name) orelse continue;
             const ratio = if (base_ops > 0)
                 @as(f64, @floatFromInt(result.ops_per_sec)) / @as(f64, @floatFromInt(base_ops))

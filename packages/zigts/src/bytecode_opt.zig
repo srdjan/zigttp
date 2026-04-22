@@ -39,6 +39,22 @@ pub const OptStats = struct {
             self.get_field_call_count +
             self.if_false_goto_count;
     }
+
+    pub fn writeJson(self: OptStats, writer: anytype) !void {
+        try writer.print(
+            "{{\"get_loc_add_count\":{d},\"get_loc_get_loc_add_count\":{d},\"push_const_call_count\":{d},\"get_field_call_count\":{d},\"if_false_goto_count\":{d},\"bytes_saved\":{d},\"dispatches_saved\":{d},\"total_fusions\":{d}}}",
+            .{
+                self.get_loc_add_count,
+                self.get_loc_get_loc_add_count,
+                self.push_const_call_count,
+                self.get_field_call_count,
+                self.if_false_goto_count,
+                self.bytes_saved,
+                self.dispatches_saved,
+                self.totalFusions(),
+            },
+        );
+    }
 };
 
 /// Peephole optimizer for bytecode
@@ -398,6 +414,26 @@ pub fn optimizeBytecode(allocator: std.mem.Allocator, code: []u8) !struct { len:
     return .{ .len = new_len, .stats = stats };
 }
 
+test "OptStats JSON writer includes stable fields" {
+    const stats = OptStats{
+        .get_loc_add_count = 1,
+        .push_const_call_count = 2,
+        .bytes_saved = 3,
+        .dispatches_saved = 4,
+    };
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &output);
+    try stats.writeJson(&aw.writer);
+    output = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"get_loc_add_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"push_const_call_count\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"dispatches_saved\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"total_fusions\":3") != null);
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -529,10 +565,8 @@ test "BytecodeOptimizer: compact updates jump offsets" {
     // After compaction: if_false +1 (skip push_1 to ret)
     var code = [_]u8{
         @intFromEnum(Opcode.push_true),
-        @intFromEnum(Opcode.if_false), 0x03, 0x00, // if_false, offset +3
-        @intFromEnum(Opcode.nop),
-        @intFromEnum(Opcode.nop),
-        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.if_false), 0x03,                     0x00, // if_false, offset +3
+        @intFromEnum(Opcode.nop),      @intFromEnum(Opcode.nop), @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.ret),
     };
 
@@ -559,8 +593,7 @@ test "BytecodeOptimizer: full optimize and compact" {
     var code = [_]u8{
         @intFromEnum(Opcode.get_loc), 1,
         @intFromEnum(Opcode.get_loc), 2,
-        @intFromEnum(Opcode.add),
-        @intFromEnum(Opcode.ret),
+        @intFromEnum(Opcode.add),     @intFromEnum(Opcode.ret),
     };
 
     const result = try optimizeBytecode(allocator, &code);
