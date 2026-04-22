@@ -3214,12 +3214,12 @@ pub const Interpreter = struct {
             .call_ic => {
                 self.advanceOp();
                 const argc: u8 = self.pc[0];
-                self.pc += 1;
-                _ = readU16(self.pc); // cache_idx: reserved for future direct-index fast path; feedback flows through feedback_site_map today
-                self.pc += 2;
+                // cache_idx (u16) is reserved for a future direct-index fast path;
+                // feedback currently flows through feedback_site_map keyed on bc offset.
+                self.pc += 3;
                 self.call_opcode_offset = 4;
-                defer self.call_opcode_offset = 2;
                 try self.doCall(argc, false);
+                self.call_opcode_offset = 2;
                 continue :sw @enumFromInt(self.pc[0]);
             },
 
