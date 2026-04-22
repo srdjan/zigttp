@@ -65,7 +65,7 @@ pub const enable_peephole_opt = true;
 /// Compile-time flag to emit `.call_ic` at regular non-method call sites.
 /// Default off until the interpreter monomorphic fast path and JIT lowering
 /// have been benchmarked against the current `.call` path.
-pub const enable_call_ic_emission = false;
+pub const enable_call_ic_emission = true;
 
 /// Code generator state
 pub const CodeGen = struct {
