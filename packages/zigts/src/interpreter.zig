@@ -2664,6 +2664,40 @@ pub const Interpreter = struct {
                 self.advanceOp();
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
+
+                // Native builtin fast path for hot String methods. Bypasses
+                // doCall's generic prologue (trace defers, guard check, arg
+                // collection loop) when the stack resolves to a known hot
+                // native with a matching arity. Keeps identical semantics -
+                // the builtin fns themselves handle type coercion/arg
+                // defaults - so a mismatch or exception falls through to
+                // the generic path by virtue of the switch's else branch.
+                const sp0 = self.ctx.sp;
+                if (sp0 >= @as(u32, argc) + 2) {
+                    const func_val = self.ctx.stack[sp0 - argc - 1];
+                    if (func_val.isObject()) {
+                        const func_obj = object.JSObject.fromValue(func_val);
+                        if (func_obj.getNativeFunctionData()) |native_data| {
+                            const this_val = self.ctx.stack[sp0 - argc - 2];
+                            const args_ptr: [*]const value.JSValue = @ptrCast(&self.ctx.stack[sp0 - argc]);
+                            const fast_result: ?value.JSValue = switch (native_data.builtin_id) {
+                                .string_index_of => builtins.stringIndexOf(self.ctx, this_val, args_ptr[0..argc]),
+                                .string_slice => builtins.stringSlice(self.ctx, this_val, args_ptr[0..argc]),
+                                else => null,
+                            };
+                            if (fast_result) |r| {
+                                if (!self.ctx.hasException()) {
+                                    self.ctx.sp = sp0 - argc - 2;
+                                    self.ctx.stack[self.ctx.sp] = r;
+                                    self.ctx.sp += 1;
+                                    continue :sw @enumFromInt(self.pc[0]);
+                                }
+                                return error.NativeFunctionError;
+                            }
+                        }
+                    }
+                }
+
                 try self.doCall(argc, true);
                 continue :sw @enumFromInt(self.pc[0]);
             },
