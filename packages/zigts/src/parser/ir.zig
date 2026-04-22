@@ -1856,10 +1856,13 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                // Property: a = key, b[0:24] = value, b[24] = is_computed, b[25] = is_shorthand
+                // Property: a = key, b[0:24] = value, b[24] = is_computed, b[25] = is_shorthand.
+                // Mask the value field: @truncate to NodeIndex (u32) would leave the flag
+                // bits in place, so a shorthand property (bit 25) would read back with
+                // 0x02000000 OR'd into the node index and resolve to garbage.
                 break :blk .{
                     .key = d.a,
-                    .value = @truncate(d.b),
+                    .value = @as(NodeIndex, @as(u24, @truncate(d.b))),
                     .is_computed = (d.b >> 24) & 1 != 0,
                     .is_shorthand = (d.b >> 25) & 1 != 0,
                 };

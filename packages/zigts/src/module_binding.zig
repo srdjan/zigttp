@@ -618,8 +618,7 @@ const SdkStateEnvelope = struct {
 
 pub export fn zigttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque {
     const ctx = handleToContext(handle);
-    const env = ctx.getModuleState(SdkStateEnvelope, slot) orelse return null;
-    return env.user_ptr;
+    return getSdkModuleStatePtr(ctx, slot);
 }
 
 pub export fn zigttpSdkSetModuleState(
@@ -629,10 +628,33 @@ pub export fn zigttpSdkSetModuleState(
     sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
 ) bool {
     const ctx = handleToContext(handle);
-    const env = ctx.allocator.create(SdkStateEnvelope) catch return false;
+    installSdkModuleState(ctx, slot, user_ptr, sdk_deinit) catch return false;
+    return true;
+}
+
+/// Read an SDK-installed module state pointer from a slot. Returns the
+/// user pointer stashed inside the envelope, or null if the slot is empty.
+/// Use this from zigts-internal bootstrap code (e.g. `installStore`) that
+/// needs to reach modules living in peer packages through the SDK boundary.
+pub fn getSdkModuleStatePtr(ctx: *context.Context, slot: usize) ?*anyopaque {
+    const env = ctx.getModuleState(SdkStateEnvelope, slot) orelse return null;
+    return env.user_ptr;
+}
+
+/// Install an SDK-layout module state envelope from the zigts side of the
+/// peer-package boundary. Required whenever the runtime pre-installs state
+/// for a module that reads via the SDK's `getModuleState` (which unwraps an
+/// `SdkStateEnvelope`); writing a bare pointer would leave the module
+/// reading the envelope bytes as user state.
+pub fn installSdkModuleState(
+    ctx: *context.Context,
+    slot: usize,
+    user_ptr: *anyopaque,
+    sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
+) !void {
+    const env = try ctx.allocator.create(SdkStateEnvelope);
     env.* = .{ .user_ptr = user_ptr, .sdk_deinit = sdk_deinit, .allocator = ctx.allocator };
     ctx.setModuleState(slot, env, SdkStateEnvelope.envelopeDeinit);
-    return true;
 }
 
 pub export fn zigttpSdkIsCallable(val: value.JSValue) bool {
