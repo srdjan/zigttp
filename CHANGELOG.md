@@ -8,6 +8,16 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Added
 
+- `zigts expert`: full token accounting per session - input, cache-read, cache-write, and output tokens tracked cumulatively and displayed after each model turn as `[tokens: in=N cache_r=N cache_w=N out=N]`.
+- `zigts expert`: session compaction via `/compact` - collapses the current transcript into a single system note; the session continues from the summary.
+- `zigts expert`: session branching via `/fork` and `--fork <session-id>` - opens a new session that continues from the end of an existing session's transcript.
+- `zigts expert`: `/tree` command lists all sessions for the current workspace with creation timestamps.
+- `zigts expert`: `--continue` flag as an alias for `--resume`.
+- `zigts expert`: `--tools minimal|full` flag selects the tool preset at launch. `minimal` loads only workspace read/list/search; `full` loads the complete compiler tool set (default).
+- `zigts expert`: `/model` shows the active model and lists available IDs; `/model <id>` switches mid-session. Unknown IDs print an error.
+- `zigts expert`: skills catalog with `/skills` and `/skill:<name>` - lists baked-in skill shortcuts and sends the selected skill body as a model prompt.
+- `zigts expert`: prompt template catalog with `/templates` and `/template:<name> [args...]` - lists baked-in templates and expands positional args (`{{1}}`, `{{2}}`, `{{args}}`) before sending.
+- `zigts expert`: `/settings`, `/hotkeys`, and `/changelog` informational commands.
 - Root-level `LICENSE` (MIT), `SECURITY.md`, `CONTRIBUTING.md`, and `CODEOWNERS`.
 - This `CHANGELOG.md`.
 - `docs/capabilities.md` - complete capability enforcement map: every `ModuleCapability` variant, which virtual modules declare it, and the enforcement helpers (`pushActiveModuleContext`, `requireCapability`, `wrapNativeFnWithCapabilities`) that gate it. Explains the thread-local context model that makes capability enforcement compose with `HandlerPool`.

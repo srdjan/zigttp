@@ -444,9 +444,13 @@ Standalone analysis and compilation without starting a server.
 # Interactive REPL
 zigts expert
 zigts expert --resume                    # resume newest session for this cwd
-zigts expert --session-id <id>           # named session
+zigts expert --continue                  # alias for --resume
+zigts expert --session-id <id>           # named or resumed session
+zigts expert --fork <session-id>         # branch from an existing session
 zigts expert --yes                       # auto-approve all verified edits
 zigts expert --no-edit                   # auto-reject all verified edits
+zigts expert --tools minimal             # workspace-read-only tool preset
+zigts expert --tools full                # full compiler tool preset (default)
 
 # Non-interactive (one turn and exit)
 zigts expert --print "add a GET /health route"
@@ -454,6 +458,27 @@ zigts expert --print "..." --mode json   # NDJSON event stream to stdout
 ```
 
 In `--mode json`, each event is `{"v":1,"k":"<kind>","d":<payload>}`. Kinds: `user_text`, `model_text`, `tool_use`, `tool_result`, `proof_card`, `diagnostic_box`, `end`. Persisted `events.jsonl` lines use the same envelope for transcript events, but `end` is a live-stream-only sentinel emitted last on success. Errored runs may terminate without `end`, and session files do not persist it.
+
+The interactive REPL accepts slash commands alongside natural language:
+
+```
+/compact                       collapse the session transcript into a summary
+/fork                          branch the current session into a new directory
+/tree                          list all sessions for this workspace
+/resume  /continue             reload the newest session for this cwd
+/new                           start a fresh session
+/model                         show the active model and available IDs
+/model <id>                    switch to a different model mid-session
+/skills                        list available skill shortcuts
+/skill:<name>                  send the named skill body as a prompt
+/templates                     list available prompt templates
+/template:<name> [args...]     expand a template and send it as a prompt
+/settings                      show compile-time defaults (model, token limits)
+/hotkeys                       list keyboard shortcuts
+/changelog                     recent expert subsystem additions
+```
+
+After each model turn the REPL prints cumulative token use for the session: `[tokens: in=N cache_r=N cache_w=N out=N]`. The totals reset when you start a new session or reload with `/new` or `/resume`.
 
 ```bash
 zigts check [handler.ts] [options]    # Verify handler, show proof card
