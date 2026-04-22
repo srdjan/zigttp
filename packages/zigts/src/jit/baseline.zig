@@ -506,6 +506,7 @@ pub const BaselineCompiler = struct {
                 .new_array, .get_field, .put_field, .put_field_keep, .get_global, .put_global => pc += 2,
                 .get_field_ic, .put_field_ic => pc += 4,
                 .call, .call_method, .tail_call => pc += 1,
+                .call_ic => pc += 3,
                 .add_mod, .sub_mod, .mul_mod, .mod_const => pc += 2,
                 .mod_const_i8, .add_const_i8, .sub_const_i8, .mul_const_i8, .lt_const_i8, .le_const_i8 => pc += 1,
                 .get_upvalue, .put_upvalue, .close_upvalue => pc += 1,
@@ -1106,6 +1107,7 @@ pub const BaselineCompiler = struct {
                 .new_array, .get_field, .put_field, .put_field_keep, .get_global, .put_global => pc += 2,
                 .get_field_ic, .put_field_ic => pc += 4,
                 .call, .call_method, .tail_call => pc += 1,
+                .call_ic => pc += 3,
                 .get_loc_add, .get_loc_get_loc_add => pc += if (op == .get_loc_add) 1 else 2,
                 .add_mod, .sub_mod, .mul_mod, .mod_const => pc += 2,
                 .mod_const_i8, .add_const_i8, .sub_const_i8, .mul_const_i8, .lt_const_i8, .le_const_i8 => pc += 1,
@@ -1742,6 +1744,15 @@ pub const BaselineCompiler = struct {
             .call => {
                 const argc = code[new_pc];
                 new_pc += 1;
+                const opcode_offset = pc - 1;
+                try self.emitCallWithFeedback(argc, false, opcode_offset, true);
+            },
+
+            .call_ic => {
+                const argc = code[new_pc];
+                new_pc += 1;
+                _ = readU16(code, new_pc); // cache_idx reserved for future direct-index fast path
+                new_pc += 2;
                 const opcode_offset = pc - 1;
                 try self.emitCallWithFeedback(argc, false, opcode_offset, true);
             },
@@ -3399,7 +3410,6 @@ pub const BaselineCompiler = struct {
             .put_upvalue,
             .close_upvalue,
             .make_closure,
-            .call_ic,
             => false,
             else => true,
         };

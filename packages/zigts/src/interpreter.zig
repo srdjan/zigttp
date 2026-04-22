@@ -755,6 +755,10 @@ pub const Interpreter = struct {
                     call_site_count += 1;
                     pc += 1; // Skip argc
                 },
+                .call_ic => {
+                    call_site_count += 1;
+                    pc += 3; // Skip argc + u16 cache_idx
+                },
                 // Fused call opcodes also need call site feedback
                 .push_const_call => {
                     call_site_count += 1;
@@ -812,6 +816,11 @@ pub const Interpreter = struct {
                     site_map[op_offset] = call_idx | 0x8000;
                     call_idx += 1;
                     pc += 1;
+                },
+                .call_ic => {
+                    site_map[op_offset] = call_idx | 0x8000;
+                    call_idx += 1;
+                    pc += 3;
                 },
                 // Fused call opcodes also get call site entries
                 .push_const_call => {
@@ -3204,13 +3213,12 @@ pub const Interpreter = struct {
             // ========================================
             .call_ic => {
                 self.advanceOp();
-                // call_ic: +u8 argc +u16 cache_idx
                 const argc: u8 = self.pc[0];
                 self.pc += 1;
-                const _cache_idx = readU16(self.pc);
-                _ = _cache_idx;
+                _ = readU16(self.pc); // cache_idx: reserved for future direct-index fast path; feedback flows through feedback_site_map today
                 self.pc += 2;
-                // Fall back to normal call (IC not yet implemented for calls)
+                self.call_opcode_offset = 4;
+                defer self.call_opcode_offset = 2;
                 try self.doCall(argc, false);
                 continue :sw @enumFromInt(self.pc[0]);
             },
@@ -5556,6 +5564,89 @@ test "JIT: inlined call deopts on callee change" {
 
     const stats = jit.deopt.getDeoptStats();
     try std.testing.expectEqual(@as(u64, 1), stats.callee_changed_count);
+}
+
+test "call_ic: operational parity with .call and feedback is recorded" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("gc.zig");
+
+    const prev_policy = getJitPolicy();
+    const prev_threshold = getJitThreshold();
+    const prev_warmup = getJitFeedbackWarmup();
+    defer {
+        setJitPolicy(prev_policy);
+        setJitThreshold(prev_threshold);
+        setJitFeedbackWarmup(prev_warmup);
+    }
+
+    // Keep the test on the interpreter path so call_ic feedback is observable
+    // via the feedback_site_map without racing against JIT promotion.
+    setJitPolicy(.disabled);
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+
+    // Callee: return 42;
+    const callee_code = try allocator.alloc(u8, 4);
+    callee_code[0] = @intFromEnum(bytecode.Opcode.push_i8);
+    callee_code[1] = 42;
+    callee_code[2] = @intFromEnum(bytecode.Opcode.ret);
+    callee_code[3] = @intFromEnum(bytecode.Opcode.nop);
+
+    const callee_func = try allocator.create(bytecode.FunctionBytecode);
+    callee_func.* = .{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 4,
+        .flags = .{},
+        .code = callee_code,
+        .constants = &.{},
+        .source_map = null,
+    };
+    const callee_obj_ptr = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
+    defer callee_obj_ptr.destroyFull(allocator);
+
+    const callee_const = [_]value.JSValue{callee_obj_ptr.toValue()};
+
+    // Caller: push_const callee; call_ic argc=0 cache_idx=0; ret
+    const caller_code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_const), 0, 0,
+        @intFromEnum(bytecode.Opcode.call_ic),    0, 0, 0,
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+
+    var caller_func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &caller_code,
+        .constants = &callee_const,
+        .source_map = null,
+    };
+    defer cleanupTypeFeedback(allocator, &caller_func);
+    defer cleanupCompiledCode(allocator, &caller_func);
+
+    // Force feedback allocation so call_ic recording has a slot to write.
+    try interp.allocateTypeFeedback(&caller_func);
+
+    const res = try interp.run(&caller_func);
+    try std.testing.expectEqual(@as(i32, 42), res.getInt());
+
+    const tf = caller_func.type_feedback_ptr orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(usize, 1), tf.call_sites.len);
+    try std.testing.expect(tf.call_sites[0].isMonomorphic());
+    try std.testing.expect(tf.call_sites[0].getMonomorphicCallee() == callee_func);
+    try std.testing.expectEqual(@as(u32, 1), tf.call_sites[0].total_calls);
 }
 
 test "JIT: deopt on type mismatch in specialized add" {

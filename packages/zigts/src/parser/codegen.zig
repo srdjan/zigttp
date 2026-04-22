@@ -62,6 +62,11 @@ const LoopContext = struct {
 /// Reduces dispatch overhead by fusing common instruction sequences
 pub const enable_peephole_opt = true;
 
+/// Compile-time flag to emit `.call_ic` at regular non-method call sites.
+/// Default off until the interpreter monomorphic fast path and JIT lowering
+/// have been benchmarked against the current `.call` path.
+pub const enable_call_ic_emission = false;
+
 /// Code generator state
 pub const CodeGen = struct {
     allocator: std.mem.Allocator,
@@ -1110,8 +1115,16 @@ pub const CodeGen = struct {
             // Emit arguments
             try self.emitCallArgs(call);
 
-            try self.emit(.call);
-            try self.emitByte(call.args_count);
+            if (comptime enable_call_ic_emission) {
+                try self.emit(.call_ic);
+                try self.emitByte(call.args_count);
+                // cache_idx: reserved for future direct-index fast path; feedback
+                // flows through feedback_site_map keyed on bytecode offset today.
+                try self.emitU16(0);
+            } else {
+                try self.emit(.call);
+                try self.emitByte(call.args_count);
+            }
 
             // Pop callee + args, push result
             self.popStack(call.args_count);
