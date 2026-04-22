@@ -24,7 +24,7 @@ run_tests() {
     name=$(echo "$handler" | sed 's|examples/||')
 
     local output
-    output=$("$ZIGTTP" "$handler" --test "$tests" 2>&1) || true
+    output=$("$ZIGTTP" serve "$handler" --test "$tests" 2>&1) || true
 
     local results
     results=$(echo "$output" | grep "^Results:" || echo "Results: ? passed, ? failed, ? total")
