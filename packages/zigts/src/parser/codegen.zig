@@ -243,19 +243,20 @@ pub const CodeGen = struct {
         }
     }
 
-    /// Pre-reserve capacity based on IR size to reduce reallocations
+    /// Pre-reserve capacity based on IR size to reduce reallocations.
+    ///
+    /// Heuristics calibrated against the Phase 8 compile-bench fixtures
+    /// (see packages/runtime/src/compile_benchmark.zig). Measured top-level
+    /// bytecode length is 0.3-0.5 bytes per IR node; an inflated node_count*4
+    /// reserve was over-allocating 10-25x and costing an extra up-front alloc.
     fn reserveCapacity(self: *CodeGen) !void {
         const node_count = self.ir.nodeCount();
         if (node_count == 0) return;
 
-        // Heuristics based on typical JS code patterns:
-        // - ~4 bytes of bytecode per IR node
-        // - ~1 constant per 10 nodes
-        // - ~1 label per 20 nodes (for jumps)
-        try self.code.ensureTotalCapacity(self.allocator, node_count * 4);
-        try self.constants.ensureTotalCapacity(self.allocator, @max(16, node_count / 10));
-        try self.labels.ensureTotalCapacity(self.allocator, @max(8, node_count / 20));
-        try self.pending_jumps.ensureTotalCapacity(self.allocator, @max(8, node_count / 20));
+        try self.code.ensureTotalCapacity(self.allocator, @max(32, node_count));
+        try self.constants.ensureTotalCapacity(self.allocator, @max(8, node_count / 16));
+        try self.labels.ensureTotalCapacity(self.allocator, @max(4, node_count / 24));
+        try self.pending_jumps.ensureTotalCapacity(self.allocator, @max(4, node_count / 24));
     }
 
     /// Generate bytecode for the entire program
@@ -1498,17 +1499,20 @@ pub const CodeGen = struct {
             });
         }
 
-        // Create FunctionBytecode on heap with errdefer cleanup for error paths
+        // Create FunctionBytecode on heap with errdefer cleanup for error paths.
+        // Transfer ownership of the ArrayList buffers directly (toOwnedSlice)
+        // rather than dupe; same heap ownership, skips the allocation + copy
+        // on each nested function body.
         const func_bc = try self.allocator.create(FunctionBytecode);
         errdefer self.allocator.destroy(func_bc);
 
-        const code_copy = try self.allocator.dupe(u8, self.code.items);
+        const code_copy = try self.code.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(code_copy);
 
-        const consts_copy = try self.allocator.dupe(JSValue, self.constants.items);
+        const consts_copy = try self.constants.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(consts_copy);
 
-        const upvalue_copy = try self.allocator.dupe(UpvalueInfo, upvalue_info_list.items);
+        const upvalue_copy = try upvalue_info_list.toOwnedSlice(self.allocator);
 
         func_bc.* = .{
             .header = .{},
