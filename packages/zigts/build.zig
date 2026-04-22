@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const sdk_dep = b.dependency("zigttp_sdk", .{
         .target = target,
         .optimize = optimize,
@@ -22,6 +23,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "perf_histogram", perf_histogram);
+    mod.addOptions("build_options", build_options);
     mod.addCSourceFile(.{
         .file = b.path("deps/sqlite/sqlite3.c"),
         .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },

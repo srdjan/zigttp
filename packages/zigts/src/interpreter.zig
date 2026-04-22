@@ -14,8 +14,35 @@ const string = @import("string.zig");
 const jit = @import("jit/root.zig");
 const type_feedback = @import("type_feedback.zig");
 const builtins = @import("builtins/root.zig");
+const build_options = @import("build_options");
 
 const empty_code: [0]u8 = .{};
+const tier_count = std.meta.fields(bytecode.CompilationTier).len;
+
+pub const enable_opcode_histogram = build_options.perf_histogram;
+
+pub const PerfStats = struct {
+    backedge_count: u32 = 0,
+    pic_hits: u32 = 0,
+    pic_misses: u32 = 0,
+    deopt_count: u32 = 0,
+    mega_recoveries: u32 = 0,
+    tier_promotions: [tier_count]u32 = [_]u32{0} ** tier_count,
+    promotion_attempted: u32 = 0,
+    promotion_succeeded: u32 = 0,
+    promotion_rejected_deopt_storm: u32 = 0,
+    opcode_histogram_enabled: bool = enable_opcode_histogram,
+    opcode_histogram_nonzero: u32 = 0,
+    opcode_histogram: [256]u32 = [_]u32{0} ** 256,
+};
+
+fn countNonZeroHistogramEntries(histogram: []const u32) u32 {
+    var count: u32 = 0;
+    for (histogram) |entry| {
+        if (entry > 0) count +|= 1;
+    }
+    return count;
+}
 
 pub threadlocal var current_interpreter: ?*Interpreter = null;
 
@@ -124,6 +151,55 @@ pub fn setJitFeedbackWarmup(warmup: u32) void {
 pub fn disableJitForTests() void {
     jit_disabled_cache = true;
     jit_policy_cache = .disabled;
+}
+
+// ============================================================================
+// PIC megamorphic recovery tunables
+// ============================================================================
+
+var pic_mega_recovery_window_cache: ?u16 = null;
+var pic_recovery_disabled_cache: ?bool = null;
+var tiering_deopt_suppress_cache: ?bool = null;
+
+/// Number of consecutive monomorphic observations after a PIC goes megamorphic
+/// before it is allowed to reset and re-specialize on the dominant shape.
+/// Overridable via ZTS_PIC_MEGA_RECOVERY_WINDOW.
+pub fn getPicMegaRecoveryWindow() u16 {
+    if (pic_mega_recovery_window_cache) |cached| return cached;
+    const default_window: u16 = 32;
+    if (std.c.getenv("ZTS_PIC_MEGA_RECOVERY_WINDOW")) |raw_ptr| {
+        const raw = std.mem.sliceTo(raw_ptr, 0);
+        const parsed = std.fmt.parseUnsigned(u16, raw, 10) catch default_window;
+        pic_mega_recovery_window_cache = if (parsed == 0) default_window else parsed;
+    } else {
+        pic_mega_recovery_window_cache = default_window;
+    }
+    return pic_mega_recovery_window_cache.?;
+}
+
+/// When ZTS_PIC_DISABLE_RECOVERY is set, PICs stay megamorphic permanently
+/// (legacy behavior) instead of attempting recovery after a stable shape window.
+pub fn isPicRecoveryDisabled() bool {
+    if (pic_recovery_disabled_cache) |cached| return cached;
+    const disabled = std.c.getenv("ZTS_PIC_DISABLE_RECOVERY") != null;
+    pic_recovery_disabled_cache = disabled;
+    return disabled;
+}
+
+/// When ZTS_TIERING_DEOPT_SUPPRESS is set, functions that recently deopted
+/// repeatedly are denied promotion to optimized_candidate for a cooldown
+/// window. Defaults to off until field data confirms the heuristic.
+pub fn isTieringDeoptSuppressEnabled() bool {
+    if (tiering_deopt_suppress_cache) |cached| return cached;
+    const enabled = std.c.getenv("ZTS_TIERING_DEOPT_SUPPRESS") != null;
+    tiering_deopt_suppress_cache = enabled;
+    return enabled;
+}
+
+/// Reset the cached tiering suppression env read; tests use this to toggle
+/// behavior without restarting the process.
+pub fn resetTieringDeoptSuppressCache() void {
+    tiering_deopt_suppress_cache = null;
 }
 
 fn jitDisabled() bool {
@@ -261,21 +337,41 @@ pub const PICEntry = struct {
 /// while keeping memory overhead reasonable per IC site
 pub const PIC_ENTRIES = 8;
 
+/// When true, cap the number of distinct shapes the PIC caches at
+/// `type_feedback.MAX_POLYMORPHIC_SHAPES` so that PIC and the upstream
+/// type-feedback layer agree on what counts as megamorphic. The underlying
+/// `entries` array stays at PIC_ENTRIES to preserve memory layout and the
+/// JIT's inline PIC_CHECK_COUNT assumptions. Flip to false for reversion.
+pub const pic_entries_tracks_feedback = true;
+
+/// Effective cap on distinct shapes the PIC will cache before going megamorphic.
+pub const effective_pic_cap: u8 = if (pic_entries_tracks_feedback)
+    type_feedback.MAX_POLYMORPHIC_SHAPES
+else
+    PIC_ENTRIES;
+
 /// Polymorphic Inline Cache for property access optimization
-/// Caches up to 8 (hidden_class, slot_offset) pairs per access site
-/// Falls back to megamorphic mode when more than 8 shapes are observed
+/// Caches up to `effective_pic_cap` (hidden_class, slot_offset) pairs per access site
+/// Falls back to megamorphic mode when more shapes are observed
 pub const PolymorphicInlineCache = struct {
     /// Cached entries (only first `count` are valid)
     /// Initialize all entries with invalid hidden class to prevent JIT false matches
     /// on uninitialized memory (JIT checks first PIC_CHECK_COUNT entries inline)
     entries: [PIC_ENTRIES]PICEntry = [_]PICEntry{.{ .hidden_class_idx = .none, .slot_offset = 0 }} ** PIC_ENTRIES,
-    /// Number of valid entries (0-8)
+    /// Number of valid entries (0..effective_pic_cap)
     count: u8 = 0,
     /// Index of most recently hit entry
     last_hit: u8 = 0,
-    /// Megamorphic flag: true when > PIC_ENTRIES shapes observed
-    /// When megamorphic, skip caching entirely (too polymorphic to benefit)
+    /// Megamorphic flag: true when > effective_pic_cap shapes observed
+    /// When megamorphic, skip caching unless a recovery window elapses with a single shape
     megamorphic: bool = false,
+    /// Shape being watched for megamorphic recovery
+    recovery_candidate: object.HiddenClassIndex = .none,
+    /// Consecutive observations of `recovery_candidate` while megamorphic
+    consec_same_shape: u16 = 0,
+    /// Latched when update() performed a megamorphic->monomorphic recovery
+    /// Callers read and reset it to increment PerfStats.mega_recoveries.
+    just_recovered: bool = false,
 
     /// Lookup hidden class in cache, return slot offset if found
     pub inline fn lookup(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex) ?u16 {
@@ -297,9 +393,29 @@ pub const PolymorphicInlineCache = struct {
     }
 
     /// Update cache with new (hidden_class_idx, slot_offset) pair
-    /// Returns true if entry was added, false if megamorphic
+    /// Returns true if the shape is now cached, false if still rejected as megamorphic.
+    /// If recovery triggers, `just_recovered` is set so callers can observe it.
     pub inline fn update(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, slot_offset: u16) bool {
-        if (self.megamorphic) return false;
+        if (self.megamorphic) {
+            if (isPicRecoveryDisabled()) return false;
+            if (self.recovery_candidate == hidden_class_idx and hidden_class_idx != .none) {
+                self.consec_same_shape +|= 1;
+                if (self.consec_same_shape >= getPicMegaRecoveryWindow()) {
+                    self.entries[0] = .{ .hidden_class_idx = hidden_class_idx, .slot_offset = slot_offset };
+                    self.count = 1;
+                    self.last_hit = 0;
+                    self.megamorphic = false;
+                    self.consec_same_shape = 0;
+                    self.recovery_candidate = .none;
+                    self.just_recovered = true;
+                    return true;
+                }
+            } else {
+                self.recovery_candidate = hidden_class_idx;
+                self.consec_same_shape = 1;
+            }
+            return false;
+        }
 
         // Check if already cached (update existing entry)
         for (self.entries[0..self.count], 0..) |*entry, idx| {
@@ -310,8 +426,8 @@ pub const PolymorphicInlineCache = struct {
             }
         }
 
-        // Add new entry if space available
-        if (self.count < PIC_ENTRIES) {
+        // Add new entry if space available (capped at effective_pic_cap, not PIC_ENTRIES)
+        if (self.count < effective_pic_cap) {
             self.entries[self.count] = .{
                 .hidden_class_idx = hidden_class_idx,
                 .slot_offset = slot_offset,
@@ -323,6 +439,8 @@ pub const PolymorphicInlineCache = struct {
 
         // Cache full with new shape: transition to megamorphic
         self.megamorphic = true;
+        self.recovery_candidate = .none;
+        self.consec_same_shape = 0;
         return false;
     }
 
@@ -331,6 +449,9 @@ pub const PolymorphicInlineCache = struct {
         self.count = 0;
         self.last_hit = 0;
         self.megamorphic = false;
+        self.recovery_candidate = .none;
+        self.consec_same_shape = 0;
+        self.just_recovered = false;
     }
 };
 
@@ -379,6 +500,13 @@ pub const Interpreter = struct {
     backedge_count: u32 = 0, // Back-edge counter for hot loop detection
     pic_hits: u32 = 0, // PIC cache hits (type feedback)
     pic_misses: u32 = 0, // PIC cache misses (type feedback)
+    deopt_count: u32 = 0, // JIT deoptimizations observed through this interpreter
+    mega_recoveries: u32 = 0, // PIC sites that recovered from megamorphic to monomorphic
+    tier_promotions: [tier_count]u32 = [_]u32{0} ** tier_count,
+    promotion_attempted: u32 = 0, // Phase 6: every profileFunctionEntry tier transition attempt
+    promotion_succeeded: u32 = 0, // Phase 6: attempts that resulted in a tier bump
+    promotion_rejected_deopt_storm: u32 = 0, // Phase 6: optimized_candidate promotions blocked by deopt storm
+    opcode_histogram: [256]u32 = [_]u32{0} ** 256,
     last_op: bytecode.Opcode = .nop,
 
     pub fn init(ctx: *context.Context) Interpreter {
@@ -396,23 +524,44 @@ pub const Interpreter = struct {
             .backedge_count = 0,
             .pic_hits = 0,
             .pic_misses = 0,
+            .deopt_count = 0,
+            .mega_recoveries = 0,
+            .tier_promotions = [_]u32{0} ** tier_count,
+            .promotion_attempted = 0,
+            .promotion_succeeded = 0,
+            .promotion_rejected_deopt_storm = 0,
+            .opcode_histogram = [_]u32{0} ** 256,
             .last_op = .nop,
         };
     }
 
     /// Profile function entry: increment execution count, check for JIT threshold
     /// Returns true if function should be promoted to JIT candidate
-    inline fn profileFunctionEntry(func: *bytecode.FunctionBytecode) bool {
+    inline fn profileFunctionEntry(self: *Interpreter, func: *bytecode.FunctionBytecode) bool {
         // Use non-atomic increment for single-threaded interpreter
         func.execution_count +%= 1;
         if (jitDisabled()) return false;
         if (func.execution_count == getJitThreshold() and func.tier == .interpreted) {
-            func.tier = .baseline_candidate;
+            self.promotion_attempted +%= 1;
+            self.setTier(func, .baseline_candidate);
+            self.promotion_succeeded +%= 1;
             return true;
         }
         // Promote baseline to optimized_candidate after OPTIMIZED_THRESHOLD calls
         if (func.execution_count == bytecode.OPTIMIZED_THRESHOLD and func.tier == .baseline) {
-            func.tier = .optimized_candidate;
+            self.promotion_attempted +%= 1;
+            if (isTieringDeoptSuppressEnabled() and
+                type_feedback.InliningPolicy.shouldSuppressOnDeoptStorm(
+                    func.deopt_count,
+                    func.execution_count,
+                    func.last_deopt_exec_count,
+                ))
+            {
+                self.promotion_rejected_deopt_storm +%= 1;
+                return false;
+            }
+            self.setTier(func, .optimized_candidate);
+            self.promotion_succeeded +%= 1;
             return true;
         }
         return false;
@@ -429,6 +578,61 @@ pub const Interpreter = struct {
         self.backedge_count = 0;
         self.pic_hits = 0;
         self.pic_misses = 0;
+        self.deopt_count = 0;
+        self.mega_recoveries = 0;
+        self.tier_promotions = [_]u32{0} ** tier_count;
+        self.promotion_attempted = 0;
+        self.promotion_succeeded = 0;
+        self.promotion_rejected_deopt_storm = 0;
+        self.opcode_histogram = [_]u32{0} ** 256;
+    }
+
+    /// Update a PIC and observe whether it performed a megamorphic recovery,
+    /// bumping PerfStats.mega_recoveries when it does.
+    pub inline fn updatePic(
+        self: *Interpreter,
+        pic: *PolymorphicInlineCache,
+        hidden_class_idx: object.HiddenClassIndex,
+        slot_offset: u16,
+    ) void {
+        _ = pic.update(hidden_class_idx, slot_offset);
+        if (pic.just_recovered) {
+            pic.just_recovered = false;
+            self.mega_recoveries +%= 1;
+        }
+    }
+
+    pub fn snapshotPerfStats(self: *const Interpreter) PerfStats {
+        return .{
+            .backedge_count = self.backedge_count,
+            .pic_hits = self.pic_hits,
+            .pic_misses = self.pic_misses,
+            .deopt_count = self.deopt_count,
+            .mega_recoveries = self.mega_recoveries,
+            .tier_promotions = self.tier_promotions,
+            .promotion_attempted = self.promotion_attempted,
+            .promotion_succeeded = self.promotion_succeeded,
+            .promotion_rejected_deopt_storm = self.promotion_rejected_deopt_storm,
+            .opcode_histogram_enabled = enable_opcode_histogram,
+            .opcode_histogram_nonzero = if (enable_opcode_histogram)
+                countNonZeroHistogramEntries(self.opcode_histogram[0..])
+            else
+                0,
+            .opcode_histogram = self.opcode_histogram,
+        };
+    }
+
+    pub fn recordDeopt(self: *Interpreter) void {
+        self.deopt_count +%= 1;
+    }
+
+    pub fn setTier(self: *Interpreter, func: *bytecode.FunctionBytecode, new_tier: bytecode.CompilationTier) void {
+        const old_tier = func.tier;
+        if (old_tier == new_tier) return;
+        func.tier = new_tier;
+        if (@intFromEnum(new_tier) > @intFromEnum(old_tier)) {
+            self.tier_promotions[@intFromEnum(new_tier)] +%= 1;
+        }
     }
 
     /// Try to compile a function using the baseline JIT compiler.
@@ -449,7 +653,7 @@ pub const Interpreter = struct {
             switch (err) {
                 jit.CompileError.UnsupportedOpcode => {
                     // Function uses opcodes we can't compile yet - stay interpreted
-                    func.tier = .interpreted;
+                    self.setTier(func, .interpreted);
                     self.ctx.recordJitFailure();
                     return;
                 },
@@ -465,7 +669,7 @@ pub const Interpreter = struct {
         const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
         compiled_ptr.* = compiled;
         func.compiled_code = compiled_ptr;
-        func.tier = .baseline;
+        self.setTier(func, .baseline);
     }
 
     /// Try to compile a function using the optimized JIT tier.
@@ -485,7 +689,7 @@ pub const Interpreter = struct {
             switch (err) {
                 jit.CompileError.UnsupportedOpcode => {
                     // No optimizable loops found - stay at baseline
-                    func.tier = .baseline;
+                    self.setTier(func, .baseline);
                     return;
                 },
                 else => return err,
@@ -506,7 +710,7 @@ pub const Interpreter = struct {
         const compiled_ptr = try self.ctx.allocator.create(jit.CompiledCode);
         compiled_ptr.* = compiled;
         func.compiled_code = compiled_ptr;
-        func.tier = .optimized;
+        self.setTier(func, .optimized);
     }
 
     /// Allocate type feedback vector for a function
@@ -768,7 +972,7 @@ pub const Interpreter = struct {
         const func_mut = @constCast(func);
 
         // Profile function entry and potentially trigger JIT compilation
-        const is_candidate = profileFunctionEntry(func_mut);
+        const is_candidate = self.profileFunctionEntry(func_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
             self.allocateTypeFeedback(func_mut) catch {};
@@ -812,7 +1016,7 @@ pub const Interpreter = struct {
         if (!jitDisabled() and func_mut.tier == .optimized_candidate) {
             self.tryCompileOptimized(func_mut) catch {
                 // Compilation failed - stay at baseline
-                func_mut.tier = .baseline;
+                self.setTier(func_mut, .baseline);
             };
         }
 
@@ -991,7 +1195,7 @@ pub const Interpreter = struct {
         const func_bc_mut = @constCast(func_bc);
 
         // Profile function entry and potentially trigger JIT compilation
-        const is_candidate = profileFunctionEntry(func_bc_mut);
+        const is_candidate = self.profileFunctionEntry(func_bc_mut);
         if (is_candidate) {
             // Allocate type feedback for future optimization
             self.allocateTypeFeedback(func_bc_mut) catch {};
@@ -1032,7 +1236,7 @@ pub const Interpreter = struct {
         if (!jitDisabled() and func_bc_mut.tier == .optimized_candidate) {
             self.tryCompileOptimized(func_bc_mut) catch {
                 // Compilation failed - stay at baseline
-                func_bc_mut.tier = .baseline;
+                self.setTier(func_bc_mut, .baseline);
             };
         }
 
@@ -2067,7 +2271,7 @@ pub const Interpreter = struct {
                         continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                        _ = pic.update(obj.hidden_class_idx, slot_offset);
+                        self.updatePic(pic, obj.hidden_class_idx, slot_offset);
                         try self.ctx.push(obj.getSlot(slot_offset));
                     } else if (obj.getProperty(pool, atom)) |prop_val| {
                         try self.ctx.push(prop_val);
@@ -2124,7 +2328,7 @@ pub const Interpreter = struct {
                         continue :sw @enumFromInt(self.pc[0]);
                     };
                     if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-                        _ = pic.update(obj.hidden_class_idx, slot_offset);
+                        self.updatePic(pic, obj.hidden_class_idx, slot_offset);
                         obj.setSlot(slot_offset, val);
                     } else {
                         try self.ctx.setPropertyChecked(obj, atom, val);
@@ -3169,6 +3373,9 @@ pub const Interpreter = struct {
     /// Advance program counter past opcode byte and track last opcode for diagnostics.
     inline fn advanceOp(self: *Interpreter) void {
         self.last_op = @enumFromInt(self.pc[0]);
+        if (comptime enable_opcode_histogram) {
+            self.opcode_histogram[@intFromEnum(self.last_op)] +%= 1;
+        }
         self.pc += 1;
     }
 
@@ -3863,7 +4070,6 @@ pub const Interpreter = struct {
         // Unknown function type
         try self.ctx.push(value.JSValue.undefined_val);
     }
-
 };
 
 /// JIT helper: perform a call/call_method from compiled code.
@@ -4055,7 +4261,7 @@ pub export fn jitGetFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
         interp.pic_misses +%= 1;
         const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
         if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-            _ = pic.update(obj.hidden_class_idx, slot_offset);
+            interp.updatePic(pic, obj.hidden_class_idx, slot_offset);
             return obj.getSlot(slot_offset);
         }
         if (obj.getProperty(pool, atom)) |prop_val| {
@@ -4109,7 +4315,7 @@ pub export fn jitPutFieldIC(ctx: *context.Context, obj_val: value.JSValue, atom_
         };
 
         if (pool.findProperty(obj.hidden_class_idx, atom)) |slot_offset| {
-            _ = pic.update(obj.hidden_class_idx, slot_offset);
+            interp.updatePic(pic, obj.hidden_class_idx, slot_offset);
             obj.setSlot(slot_offset, val);
             return val;
         }
@@ -6826,10 +7032,6 @@ test "PolymorphicInlineCache unit tests" {
     const class3: object.HiddenClassIndex = @enumFromInt(3);
     const class4: object.HiddenClassIndex = @enumFromInt(4);
     const class5: object.HiddenClassIndex = @enumFromInt(5);
-    const class6: object.HiddenClassIndex = @enumFromInt(6);
-    const class7: object.HiddenClassIndex = @enumFromInt(7);
-    const class8: object.HiddenClassIndex = @enumFromInt(8);
-    const class9: object.HiddenClassIndex = @enumFromInt(9);
 
     // Initially empty
     try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
@@ -6849,18 +7051,10 @@ test "PolymorphicInlineCache unit tests" {
     // First entry still works
     try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
 
-    // Add third and fourth entries
+    // Fill cache up to effective cap (MAX_POLYMORPHIC_SHAPES)
     try std.testing.expect(pic.update(class3, 30));
     try std.testing.expect(pic.update(class4, 40));
-    try std.testing.expectEqual(@as(u8, 4), pic.count);
-    try std.testing.expect(!pic.megamorphic);
-
-    // Add fifth through eighth entries
-    try std.testing.expect(pic.update(class5, 50));
-    try std.testing.expect(pic.update(class6, 60));
-    try std.testing.expect(pic.update(class7, 70));
-    try std.testing.expect(pic.update(class8, 80));
-    try std.testing.expectEqual(@as(u8, PIC_ENTRIES), pic.count);
+    try std.testing.expectEqual(@as(u8, effective_pic_cap), pic.count);
     try std.testing.expect(!pic.megamorphic);
 
     // All entries work
@@ -6869,15 +7063,16 @@ test "PolymorphicInlineCache unit tests" {
     try std.testing.expectEqual(@as(?u16, 30), pic.lookup(class3));
     try std.testing.expectEqual(@as(?u16, 40), pic.lookup(class4));
 
-    // Ninth entry triggers megamorphic
-    try std.testing.expect(!pic.update(class9, 90));
+    // One-past-cap entry triggers megamorphic
+    try std.testing.expect(!pic.update(class5, 50));
     try std.testing.expect(pic.megamorphic);
-    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class9));
+    try std.testing.expectEqual(@as(?u16, null), pic.lookup(class5));
 
     // Existing entries still work (megamorphic doesn't clear cache)
     try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1));
 
-    // Update existing entry in megamorphic state - no change
+    // Update existing entry in megamorphic state - returns false because we
+    // don't mutate the cache while megamorphic; the original slot remains valid.
     try std.testing.expect(!pic.update(class1, 100));
     try std.testing.expectEqual(@as(?u16, 10), pic.lookup(class1)); // unchanged
 
@@ -6886,6 +7081,53 @@ test "PolymorphicInlineCache unit tests" {
     try std.testing.expectEqual(@as(u8, 0), pic.count);
     try std.testing.expect(!pic.megamorphic);
     try std.testing.expectEqual(@as(?u16, null), pic.lookup(class1));
+}
+
+test "PolymorphicInlineCache: megamorphic recovery after stable shape window" {
+    var pic = PolymorphicInlineCache{};
+    const window = getPicMegaRecoveryWindow();
+
+    // Saturate beyond cap to force megamorphic.
+    var class_idx: u16 = 1;
+    while (class_idx <= effective_pic_cap + 1) : (class_idx += 1) {
+        const cls: object.HiddenClassIndex = @enumFromInt(class_idx);
+        _ = pic.update(cls, class_idx * 10);
+    }
+    try std.testing.expect(pic.megamorphic);
+
+    const dominant: object.HiddenClassIndex = @enumFromInt(42);
+    var observations: u16 = 0;
+    while (observations < window - 1) : (observations += 1) {
+        try std.testing.expect(!pic.update(dominant, 777));
+    }
+    try std.testing.expect(pic.megamorphic);
+    try std.testing.expect(!pic.just_recovered);
+
+    // One more observation crosses the threshold and performs recovery.
+    try std.testing.expect(pic.update(dominant, 777));
+    try std.testing.expect(!pic.megamorphic);
+    try std.testing.expect(pic.just_recovered);
+    try std.testing.expectEqual(@as(u8, 1), pic.count);
+    try std.testing.expectEqual(@as(?u16, 777), pic.lookup(dominant));
+
+    // A second shape interrupting recovery counting should not recover.
+    pic.reset();
+    class_idx = 1;
+    while (class_idx <= effective_pic_cap + 1) : (class_idx += 1) {
+        const cls: object.HiddenClassIndex = @enumFromInt(class_idx);
+        _ = pic.update(cls, class_idx * 10);
+    }
+    try std.testing.expect(pic.megamorphic);
+
+    const shape_a: object.HiddenClassIndex = @enumFromInt(100);
+    const shape_b: object.HiddenClassIndex = @enumFromInt(101);
+    var i: u16 = 0;
+    while (i < window * 2) : (i += 1) {
+        const cls = if (i % 2 == 0) shape_a else shape_b;
+        try std.testing.expect(!pic.update(cls, 1));
+    }
+    try std.testing.expect(pic.megamorphic);
+    try std.testing.expect(!pic.just_recovered);
 }
 
 test "End-to-end: polymorphic property access" {
@@ -6961,6 +7203,15 @@ test "End-to-end: polymorphic property access" {
 }
 
 test "JIT profiling: execution counting" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
     // Test that function execution counting works correctly
     var func = bytecode.FunctionBytecode{
         .header = .{},
@@ -6978,25 +7229,140 @@ test "JIT profiling: execution counting" {
     try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
     try std.testing.expectEqual(@as(u32, 0), func.execution_count);
 
+    var interp = Interpreter.init(ctx);
+
     // Simulate function calls up to threshold - 1
     var i: u32 = 0;
     while (i < bytecode.JIT_THRESHOLD - 1) : (i += 1) {
-        const promoted = Interpreter.profileFunctionEntry(&func);
+        const promoted = interp.profileFunctionEntry(&func);
         try std.testing.expect(!promoted);
         try std.testing.expectEqual(bytecode.CompilationTier.interpreted, func.tier);
     }
     try std.testing.expectEqual(bytecode.JIT_THRESHOLD - 1, func.execution_count);
 
     // One more call should hit threshold and promote to baseline_candidate
-    const promoted = Interpreter.profileFunctionEntry(&func);
+    const promoted = interp.profileFunctionEntry(&func);
     try std.testing.expect(promoted);
     try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
     try std.testing.expectEqual(bytecode.JIT_THRESHOLD, func.execution_count);
+    try std.testing.expectEqual(@as(u32, 1), interp.tier_promotions[@intFromEnum(bytecode.CompilationTier.baseline_candidate)]);
 
     // Subsequent calls don't re-promote
-    const promoted2 = Interpreter.profileFunctionEntry(&func);
+    const promoted2 = interp.profileFunctionEntry(&func);
     try std.testing.expect(!promoted2);
     try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
+}
+
+test "tiering: deopt storm suppresses optimized promotion when enabled" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Force the feature on for this test. Restore default after.
+    tiering_deopt_suppress_cache = true;
+    defer tiering_deopt_suppress_cache = null;
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &.{},
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    // Simulate a function that already reached .baseline and has just deopted
+    // DEOPT_SUPPRESS_COUNT times, with the most recent deopt at the current
+    // exec count.
+    func.tier = bytecode.CompilationTier.baseline;
+    func.execution_count = bytecode.OPTIMIZED_THRESHOLD - 1;
+    func.deopt_count = type_feedback.InliningPolicy.DEOPT_SUPPRESS_COUNT;
+    func.last_deopt_exec_count = func.execution_count;
+
+    var interp = Interpreter.init(ctx);
+
+    // Next profile bumps exec_count to OPTIMIZED_THRESHOLD and should reject
+    // promotion because of the recent deopt storm.
+    const promoted = interp.profileFunctionEntry(&func);
+    try std.testing.expect(!promoted);
+    try std.testing.expectEqual(bytecode.CompilationTier.baseline, func.tier);
+    try std.testing.expectEqual(@as(u32, 1), interp.promotion_attempted);
+    try std.testing.expectEqual(@as(u32, 0), interp.promotion_succeeded);
+    try std.testing.expectEqual(@as(u32, 1), interp.promotion_rejected_deopt_storm);
+}
+
+test "tiering: deopt storm does not suppress when feature is disabled" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    // Feature explicitly off.
+    tiering_deopt_suppress_cache = false;
+    defer tiering_deopt_suppress_cache = null;
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 1,
+        .flags = .{},
+        .code = &.{},
+        .constants = &.{},
+        .source_map = null,
+    };
+
+    func.tier = bytecode.CompilationTier.baseline;
+    func.execution_count = bytecode.OPTIMIZED_THRESHOLD - 1;
+    func.deopt_count = type_feedback.InliningPolicy.DEOPT_SUPPRESS_COUNT + 5;
+    func.last_deopt_exec_count = func.execution_count;
+
+    var interp = Interpreter.init(ctx);
+
+    const promoted = interp.profileFunctionEntry(&func);
+    try std.testing.expect(promoted);
+    try std.testing.expectEqual(bytecode.CompilationTier.optimized_candidate, func.tier);
+    try std.testing.expectEqual(@as(u32, 1), interp.promotion_attempted);
+    try std.testing.expectEqual(@as(u32, 1), interp.promotion_succeeded);
+    try std.testing.expectEqual(@as(u32, 0), interp.promotion_rejected_deopt_storm);
+}
+
+test "tiering: shouldSuppressOnDeoptStorm boundary conditions" {
+    const Policy = type_feedback.InliningPolicy;
+
+    // Below threshold: never suppress.
+    try std.testing.expect(!Policy.shouldSuppressOnDeoptStorm(
+        Policy.DEOPT_SUPPRESS_COUNT - 1,
+        5_000,
+        5_000,
+    ));
+
+    // At threshold and recent: suppress.
+    try std.testing.expect(Policy.shouldSuppressOnDeoptStorm(
+        Policy.DEOPT_SUPPRESS_COUNT,
+        1_500,
+        1_500,
+    ));
+
+    // At threshold but the last deopt is outside the cooldown: do not suppress.
+    try std.testing.expect(!Policy.shouldSuppressOnDeoptStorm(
+        Policy.DEOPT_SUPPRESS_COUNT + 5,
+        Policy.DEOPT_SUPPRESS_COOLDOWN + 10,
+        0,
+    ));
 }
 
 test "JIT profiling: back-edge counting" {
@@ -7062,6 +7428,29 @@ test "JIT profiling: PIC hit/miss counting" {
     try std.testing.expectEqual(@as(u32, 0), interp.pic_misses);
 }
 
+test "perf snapshot: empty program yields zeroed counters" {
+    const allocator = std.testing.allocator;
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+    const snapshot = interp.snapshotPerfStats();
+
+    try std.testing.expectEqual(@as(u32, 0), snapshot.backedge_count);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.pic_hits);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.pic_misses);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.deopt_count);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.opcode_histogram_nonzero);
+    for (snapshot.tier_promotions) |count| {
+        try std.testing.expectEqual(@as(u32, 0), count);
+    }
+}
+
 test "JIT integration: tryCompileBaseline triggers on threshold" {
     const allocator = std.testing.allocator;
     const gc = @import("gc.zig");
@@ -7104,7 +7493,7 @@ test "JIT integration: tryCompileBaseline triggers on threshold" {
     func.execution_count = bytecode.JIT_THRESHOLD - 1;
 
     // Next call should trigger JIT compilation
-    const is_candidate = Interpreter.profileFunctionEntry(&func);
+    const is_candidate = interp.profileFunctionEntry(&func);
     try std.testing.expect(is_candidate);
     try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
 

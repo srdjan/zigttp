@@ -87,6 +87,7 @@ pub export fn jitDeoptimize(ctx: *context.Context, bytecode_offset: u32, reason:
         return value.JSValue.undefined_val.raw;
     };
     const interp: *interpreter_mod.Interpreter = @ptrCast(@alignCast(interp_ptr));
+    interp.recordDeopt();
 
     // Get current function
     const func = interp.current_func orelse {
@@ -97,13 +98,16 @@ pub export fn jitDeoptimize(ctx: *context.Context, bytecode_offset: u32, reason:
     // Mark function for recompilation with updated type feedback
     // The next time this function is called, it will be re-JITted with
     // the new feedback which may produce different (more generic) code
+    const mut_func = @constCast(func);
+    mut_func.deopt_count +|= 1;
+    mut_func.last_deopt_exec_count = mut_func.execution_count;
     if (func.tier == .optimized) {
         // Demote optimized to baseline - the type feedback was wrong
         // Don't try to re-optimize immediately, let it run in baseline
-        @constCast(func).tier = .baseline;
+        mut_func.tier = .baseline;
     } else if (func.tier == .baseline) {
         // Demote to candidate so it gets recompiled on next hot call
-        @constCast(func).tier = .baseline_candidate;
+        mut_func.tier = .baseline_candidate;
     }
 
     // Restore interpreter state and continue from the deopt point

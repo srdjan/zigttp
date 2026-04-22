@@ -195,6 +195,8 @@ pub const Runtime = struct {
     gc_state: *zq.GC,
     heap: *zq.heap.Heap,
     interpreter: zq.Interpreter,
+    last_opt_stats: zq.OptStats,
+    last_feedback_summary: zq.type_feedback.FeedbackSummary,
     strings: *zq.StringTable,
     owned_strings: ?zq.StringTable,
     handler_atom: ?zq.Atom,
@@ -339,6 +341,8 @@ pub const Runtime = struct {
             .gc_state = gc_state,
             .heap = heap_state,
             .interpreter = interp,
+            .last_opt_stats = .{},
+            .last_feedback_summary = .{},
             .strings = undefined,
             .owned_strings = zq.StringTable.init(allocator),
             .handler_atom = null,
@@ -402,6 +406,8 @@ pub const Runtime = struct {
             .gc_state = pool_rt.gc_state,
             .heap = pool_rt.heap_state,
             .interpreter = interp,
+            .last_opt_stats = .{},
+            .last_feedback_summary = .{},
             .strings = &pool_rt.strings,
             .owned_strings = null,
             .handler_atom = null,
@@ -927,14 +933,48 @@ pub const Runtime = struct {
         });
     }
 
+    fn summarizeFeedbackRecursive(summary: *zq.type_feedback.FeedbackSummary, func: *const zq.FunctionBytecode) void {
+        if (func.getTypeFeedback()) |tf| {
+            summary.merge(tf.summary());
+        }
+        for (func.constants) |constant| {
+            if (constant.isExternPtr()) {
+                summarizeFeedbackRecursive(summary, constant.toExternPtr(zq.FunctionBytecode));
+            }
+        }
+    }
+
+    fn captureCompilationStats(self: *Self, parser: *const zq.Parser, func: *const zq.FunctionBytecode) void {
+        self.last_opt_stats = if (parser.code_gen) |cg| cg.getOptStats() else .{};
+        self.last_feedback_summary = .{};
+        summarizeFeedbackRecursive(&self.last_feedback_summary, func);
+    }
+
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
-        _ = try self.loadCodeWithCaching(code, filename, null);
+        _ = try self.loadCodeWithCachingInternal(code, filename, null, true);
+    }
+
+    /// Load and compile JavaScript code without requiring a `handler` export.
+    /// Used by benchmark and script-style tooling that call other globals directly.
+    pub fn loadCodeNoHandler(self: *Self, code: []const u8, filename: []const u8) !void {
+        _ = try self.loadCodeWithCachingInternal(code, filename, null, false);
     }
 
     /// Load and compile JavaScript code, optionally returning serialized bytecode for caching
     /// If cache_buffer is provided, serializes the bytecode and returns the serialized slice
     pub fn loadCodeWithCaching(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8) !?[]const u8 {
+        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, true);
+    }
+
+    pub fn loadCodeWithCachingNoHandler(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8) !?[]const u8 {
+        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, false);
+    }
+
+    fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool) !?[]const u8 {
+        self.last_opt_stats = .{};
+        self.last_feedback_summary = .{};
+        self.interpreter.resetProfilingCounters();
         var source_to_parse: []const u8 = code;
         var strip_result: ?zq.StripResult = null;
         defer if (strip_result) |*sr| sr.deinit();
@@ -1047,6 +1087,9 @@ pub const Runtime = struct {
         // If file imports are present, build module graph and compile dependencies
         if (has_file_imports) {
             try self.compileAndRunFileImports(code, filename);
+            if (refresh_handler) {
+                try self.refreshHandlerCache();
+            }
             return null; // Disable caching for multi-module handlers
         }
 
@@ -1099,7 +1142,10 @@ pub const Runtime = struct {
 
         // Execute the compiled code to define functions
         _ = try self.interpreter.run(&func);
-        try self.refreshHandlerCache();
+        self.captureCompilationStats(&p, &func);
+        if (refresh_handler) {
+            try self.refreshHandlerCache();
+        }
 
         return serialized;
     }
@@ -1148,6 +1194,9 @@ pub const Runtime = struct {
     }
 
     fn loadFromCachedBytecodeImpl(self: *Self, cached_data: []const u8, refresh_handler: bool) !void {
+        self.last_opt_stats = .{};
+        self.last_feedback_summary = .{};
+        self.interpreter.resetProfilingCounters();
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
         // Deserialize bytecode with atoms and shapes - skips parsing entirely
@@ -1176,6 +1225,7 @@ pub const Runtime = struct {
 
         // Execute the deserialized bytecode
         _ = try self.interpreter.run(result.func);
+        summarizeFeedbackRecursive(&self.last_feedback_summary, result.func);
         if (refresh_handler) {
             try self.refreshHandlerCache();
         }
@@ -7724,6 +7774,26 @@ test "JIT object literal overflow slots remain valid" {
         try std.testing.expect(result.isInt());
         try std.testing.expectEqual(@as(i32, 9), result.getInt());
     }
+}
+
+test "loadCodeNoHandler supports benchmark-style scripts" {
+    const allocator = std.heap.c_allocator;
+
+    const script =
+        \\function run(iterations) {
+        \\  return iterations + 1;
+        \\}
+    ;
+
+    var rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadCodeNoHandler(script, "<bench>");
+
+    const args = [_]zq.JSValue{zq.JSValue.fromInt(10)};
+    const result = try rt.callGlobalFunction("run", &args);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 11), result.getInt());
+    try std.testing.expectEqual(@as(u32, 0), rt.interpreter.snapshotPerfStats().deopt_count);
 }
 
 test "HandlerPool high contention stress" {

@@ -34,6 +34,7 @@ pub const object = @import("object.zig");
 pub const context = @import("context.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
+pub const type_feedback = @import("type_feedback.zig");
 pub const builtins = @import("builtins/root.zig");
 // New two-pass parser with proper function compilation
 pub const parser = @import("parser/root.zig");
@@ -116,6 +117,7 @@ pub const BytecodeCache = bytecode_cache.BytecodeCache;
 pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
 pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
 pub const OptStats = bytecode_opt.OptStats;
+pub const FeedbackSummary = type_feedback.FeedbackSummary;
 pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
 pub const HandlerVerifier = handler_verifier.HandlerVerifier;
 pub const BoolChecker = bool_checker.BoolChecker;

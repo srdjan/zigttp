@@ -3,16 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
 
     const zigts_dep = b.dependency("zigts", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram,
     });
     const zigts_mod = zigts_dep.module("zigts");
 
     const tools_dep = b.dependency("zigttp_tools", .{
         .target = target,
         .optimize = optimize,
+        .perf_histogram = perf_histogram,
     });
     const zigts_cli_mod = tools_dep.module("zigts_cli");
     const zigts_expert_skill_mod = tools_dep.module("zigts_expert_skill");
