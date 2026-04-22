@@ -773,7 +773,7 @@ pub const Runtime = struct {
     /// Build a module graph from file imports, compile all dependencies,
     /// and run them in topological order so their exports are available
     /// as globals when the entry file executes.
-    fn compileAndRunFileImports(self: *Self, entry_source: []const u8, filename: []const u8) !void {
+    fn compileAndRunFileImports(self: *Self, entry_source: []const u8, filename: []const u8, refresh_handler: bool) !void {
         // Build module graph
         var graph = zq.modules.ModuleGraph.init(self.allocator);
         defer graph.deinit();
@@ -792,6 +792,9 @@ pub const Runtime = struct {
             // No actual file dependencies found; run entry normally
             // This shouldn't happen since resolveModuleImports said there were file imports,
             // but handle gracefully.
+            if (refresh_handler) {
+                try self.refreshHandlerCache();
+            }
             return;
         }
 
@@ -818,8 +821,9 @@ pub const Runtime = struct {
             _ = try self.interpreter.run(&compiled_mod.func);
         }
 
-        // The last module is the entry file; refresh handler cache
-        try self.refreshHandlerCache();
+        if (refresh_handler) {
+            try self.refreshHandlerCache();
+        }
     }
 
     /// Register all virtual module native functions on the context.
@@ -1086,10 +1090,7 @@ pub const Runtime = struct {
 
         // If file imports are present, build module graph and compile dependencies
         if (has_file_imports) {
-            try self.compileAndRunFileImports(code, filename);
-            if (refresh_handler) {
-                try self.refreshHandlerCache();
-            }
+            try self.compileAndRunFileImports(code, filename, refresh_handler);
             return null; // Disable caching for multi-module handlers
         }
 
@@ -7794,6 +7795,47 @@ test "loadCodeNoHandler supports benchmark-style scripts" {
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 11), result.getInt());
     try std.testing.expectEqual(@as(u32, 0), rt.interpreter.snapshotPerfStats().deopt_count);
+}
+
+test "loadCodeNoHandler supports imported benchmark-style scripts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const dep_source =
+        \\export function addOne(value) {
+        \\  return value + 1;
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(std.testing.io, .{
+        .sub_path = "dep.js",
+        .data = dep_source,
+    });
+
+    const main_source =
+        \\import { addOne } from "./dep.js";
+        \\function run(iterations) {
+        \\  return addOne(iterations) + 1;
+        \\}
+    ;
+    try tmp_dir.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.js",
+        .data = main_source,
+    });
+
+    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp_dir.sub_path[0..], "main.js" });
+
+    var rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadCodeNoHandler(main_source, entry_path);
+
+    const args = [_]zq.JSValue{zq.JSValue.fromInt(10)};
+    const result = try rt.callGlobalFunction("run", &args);
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 12), result.getInt());
 }
 
 test "HandlerPool high contention stress" {

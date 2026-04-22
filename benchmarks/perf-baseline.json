@@ -5,8 +5,8 @@
       "name": "intArithmetic",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.567,
-      "ops_per_sec": 19477989,
+      "time_ms": 2.424,
+      "ops_per_sec": 20627062,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -59,8 +59,8 @@
       "name": "stringConcat",
       "iterations": 50000,
       "success": true,
-      "time_ms": 1.833,
-      "ops_per_sec": 27277686,
+      "time_ms": 1.735,
+      "ops_per_sec": 28818443,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -113,8 +113,8 @@
       "name": "stringOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.556,
-      "ops_per_sec": 19561815,
+      "time_ms": 2.572,
+      "ops_per_sec": 19440124,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -167,8 +167,8 @@
       "name": "objectCreate",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.576,
-      "ops_per_sec": 13982102,
+      "time_ms": 3.465,
+      "ops_per_sec": 14430014,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -221,8 +221,8 @@
       "name": "propertyAccess",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.873,
-      "ops_per_sec": 17403411,
+      "time_ms": 2.731,
+      "ops_per_sec": 18308311,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -275,8 +275,8 @@
       "name": "arrayOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.098,
-      "ops_per_sec": 16139444,
+      "time_ms": 2.954,
+      "ops_per_sec": 16926201,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -329,8 +329,8 @@
       "name": "functionCalls",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.981,
-      "ops_per_sec": 16772895,
+      "time_ms": 2.905,
+      "ops_per_sec": 17211703,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -383,8 +383,8 @@
       "name": "recursion",
       "iterations": 25,
       "success": true,
-      "time_ms": 7.428,
-      "ops_per_sec": 3365,
+      "time_ms": 7.335,
+      "ops_per_sec": 3408,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -437,8 +437,8 @@
       "name": "jsonOps",
       "iterations": 5000,
       "success": true,
-      "time_ms": 1.327,
-      "ops_per_sec": 3767897,
+      "time_ms": 1.265,
+      "ops_per_sec": 3952569,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -491,8 +491,8 @@
       "name": "gcPressure",
       "iterations": 50000,
       "success": true,
-      "time_ms": 6.077,
-      "ops_per_sec": 8227743,
+      "time_ms": 5.755,
+      "ops_per_sec": 8688097,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -545,8 +545,8 @@
       "name": "httpHandler",
       "iterations": 5000,
       "success": true,
-      "time_ms": 0.732,
-      "ops_per_sec": 6830601,
+      "time_ms": 0.706,
+      "ops_per_sec": 7082152,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -599,8 +599,8 @@
       "name": "httpHandlerHeavy",
       "iterations": 2000,
       "success": true,
-      "time_ms": 1.638,
-      "ops_per_sec": 1221001,
+      "time_ms": 1.617,
+      "ops_per_sec": 1236858,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -653,8 +653,8 @@
       "name": "forOfLoop",
       "iterations": 50000,
       "success": true,
-      "time_ms": 0.025,
-      "ops_per_sec": 2000000000,
+      "time_ms": 0.791,
+      "ops_per_sec": 63211125,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -704,5 +704,5 @@
       }
     }
   ],
-  "total_ms": 38.167
+  "total_ms": 39.604
 }
