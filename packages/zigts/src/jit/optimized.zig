@@ -1147,9 +1147,8 @@ pub const OptimizedCompiler = struct {
             },
             .call_ic => {
                 const argc = code[new_pc];
-                new_pc += 1;
-                _ = readU16(code, new_pc); // cache_idx reserved for future direct-index fast path
-                new_pc += 2;
+                // Skip argc + u16 cache_idx (cache_idx currently unused; see interpreter handler).
+                new_pc += 3;
                 try self.emitCall(argc);
             },
             // Fallback for unsupported opcodes

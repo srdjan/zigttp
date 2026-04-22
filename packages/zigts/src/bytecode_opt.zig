@@ -280,9 +280,7 @@ pub const BytecodeOptimizer = struct {
             code[pos] = @intFromEnum(Opcode.push_const_call);
             self.writeU16(code, pos + 1, const_idx);
             code[pos + 3] = argc;
-            code[pos + 4] = @intFromEnum(Opcode.nop);
-            code[pos + 5] = @intFromEnum(Opcode.nop);
-            code[pos + 6] = @intFromEnum(Opcode.nop);
+            @memset(code[pos + 4 .. pos + 7], @intFromEnum(Opcode.nop));
             stats.push_const_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;

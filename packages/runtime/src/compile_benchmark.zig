@@ -290,62 +290,41 @@ const Result = struct {
 };
 
 fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result {
+    const fail = struct {
+        fn mk(fixture: Fixture, iters: u32, bytes: u64, ir_nodes: u64, bc_len: u64, err_name: []const u8) Result {
+            return .{
+                .name = fixture.name,
+                .iterations = iters,
+                .ns_per_iter = 0,
+                .bytes_alloc = bytes,
+                .ir_nodes = ir_nodes,
+                .bytecode_len = bc_len,
+                .success = false,
+                .error_name = err_name,
+            };
+        }
+    }.mk;
+
     // One warm compile to surface parse errors before timing.
     const warm = compileOnce(allocator, fx.source) catch |err| {
-        return .{
-            .name = fx.name,
-            .iterations = iterations,
-            .ns_per_iter = 0,
-            .bytes_alloc = 0,
-            .ir_nodes = 0,
-            .bytecode_len = 0,
-            .success = false,
-            .error_name = @errorName(err),
-        };
+        return fail(fx, iterations, 0, 0, 0, @errorName(err));
     };
 
     const start = compat.Instant.now() catch {
-        return .{
-            .name = fx.name,
-            .iterations = iterations,
-            .ns_per_iter = 0,
-            .bytes_alloc = warm.bytes,
-            .ir_nodes = warm.ir_nodes,
-            .bytecode_len = warm.bytecode_len,
-            .success = false,
-            .error_name = "TimerUnavailable",
-        };
+        return fail(fx, iterations, warm.bytes, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
     };
 
     var total_bytes: u64 = 0;
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
         const s = compileOnce(allocator, fx.source) catch |err| {
-            return .{
-                .name = fx.name,
-                .iterations = iterations,
-                .ns_per_iter = 0,
-                .bytes_alloc = total_bytes,
-                .ir_nodes = warm.ir_nodes,
-                .bytecode_len = warm.bytecode_len,
-                .success = false,
-                .error_name = @errorName(err),
-            };
+            return fail(fx, iterations, total_bytes, warm.ir_nodes, warm.bytecode_len, @errorName(err));
         };
         total_bytes += s.bytes;
     }
 
     const end = compat.Instant.now() catch {
-        return .{
-            .name = fx.name,
-            .iterations = iterations,
-            .ns_per_iter = 0,
-            .bytes_alloc = total_bytes / iterations,
-            .ir_nodes = warm.ir_nodes,
-            .bytecode_len = warm.bytecode_len,
-            .success = false,
-            .error_name = "TimerUnavailable",
-        };
+        return fail(fx, iterations, total_bytes / iterations, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
     };
     const elapsed_ns = end.since(start);
     const ns_per_iter = elapsed_ns / iterations;

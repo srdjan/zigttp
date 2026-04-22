@@ -1750,9 +1750,9 @@ pub const BaselineCompiler = struct {
 
             .call_ic => {
                 const argc = code[new_pc];
-                new_pc += 1;
-                _ = readU16(code, new_pc); // cache_idx reserved for future direct-index fast path
-                new_pc += 2;
+                // Skip argc + u16 cache_idx; cache_idx is reserved for a future
+                // direct-index fast path, feedback flows through feedback_site_map today.
+                new_pc += 3;
                 const opcode_offset = pc - 1;
                 try self.emitCallWithFeedback(argc, false, opcode_offset, true);
             },
