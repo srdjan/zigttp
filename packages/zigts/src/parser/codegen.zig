@@ -356,6 +356,8 @@ pub const CodeGen = struct {
         self.opt_stats.get_loc_get_loc_add_count += stats.get_loc_get_loc_add_count;
         self.opt_stats.push_const_call_count += stats.push_const_call_count;
         self.opt_stats.get_field_call_count += stats.get_field_call_count;
+        self.opt_stats.if_false_goto_count += stats.if_false_goto_count;
+        self.opt_stats.drop_goto_count += stats.drop_goto_count;
         self.opt_stats.bytes_saved += stats.bytes_saved;
         self.opt_stats.dispatches_saved += stats.dispatches_saved;
     }

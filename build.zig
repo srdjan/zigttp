@@ -531,14 +531,14 @@ pub fn build(b: *std.Build) void {
         bench_cmd.addArgs(args);
     }
 
-    const bench_check_run = b.addRunArtifact(bench_exe);
-    bench_check_run.addArg("--json");
-    bench_check_run.addArg("--quiet");
-    bench_check_run.has_side_effects = true;
-    const bench_check_json = bench_check_run.captureStdOut(.{ .basename = "bench-check-current.json" });
+    // Run the benchmark binary multiple times through bench-diff.sh directly
+    // (best-of-N handling lives in the script to tame microbench variance).
     const bench_check_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/bench-diff.sh" });
-    bench_check_cmd.addFileArg(bench_check_json);
+    bench_check_cmd.addArg("--baseline");
     bench_check_cmd.addFileArg(b.path("benchmarks/perf-baseline.json"));
+    bench_check_cmd.addArg("--bench");
+    bench_check_cmd.addFileArg(bench_exe.getEmittedBin());
+    bench_check_cmd.has_side_effects = true;
 
     // Release build step (with handler precompilation if provided)
     const release_step = b.step("release", "Build optimized release binaries (zigttp, zigttp-runtime, zigts)");
