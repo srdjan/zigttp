@@ -542,7 +542,11 @@ fn cwdPathAlloc(allocator: std.mem.Allocator) ![]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
-    return std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
+    // realPathFileAlloc returns [:0]u8 (sentinel-terminated, len+1 allocation).
+    // dupe strips the sentinel so the caller can free a plain []u8 symmetrically.
+    const p = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
+    defer allocator.free(p);
+    return allocator.dupe(u8, p);
 }
 
 fn writeTestFile(
@@ -663,8 +667,10 @@ test "compact: collapses entries into one system_note" {
     var registry: Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    _ = try runOneTurn(testing.allocator, &session, &registry, "first turn", null);
-    _ = try runOneTurn(testing.allocator, &session, &registry, "second turn", null);
+    const r1 = try runOneTurn(testing.allocator, &session, &registry, "first turn", null);
+    defer testing.allocator.free(r1);
+    const r2 = try runOneTurn(testing.allocator, &session, &registry, "second turn", null);
+    defer testing.allocator.free(r2);
     const before_len = session.transcript.len();
     try testing.expect(before_len >= 2);
 
