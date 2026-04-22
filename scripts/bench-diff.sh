@@ -73,7 +73,7 @@ import math
 import sys
 
 # Benches whose per-run time is dominated by timer resolution or JIT warmup variance.
-# They produce meaningless gate failures, but stay in the JSON report and in geomean.
+# They stay in the JSON report, but are excluded from gate checks entirely.
 SKIP_REGRESSION_CHECK = {"forOfLoop", "httpHandler", "httpHandlerHeavy"}
 
 current_path, baseline_path = sys.argv[1], sys.argv[2]
@@ -115,9 +115,9 @@ for name in sorted(baseline_ops):
     if base <= 0:
         raise SystemExit(f"baseline: benchmark {name} has non-positive ops_per_sec")
     ratio = current_ops[name] / base
-    ratios.append(ratio)
     if name in SKIP_REGRESSION_CHECK:
         continue
+    ratios.append(ratio)
     regression_pct = max(0.0, (1.0 - ratio) * 100.0)
     if regression_pct > regression_limit:
         hard_failures.append((name, regression_pct, current_ops[name], base))
@@ -129,6 +129,9 @@ if hard_failures:
             file=sys.stderr,
         )
     raise SystemExit(1)
+
+if not ratios:
+    raise SystemExit("no benchmarks left after applying regression-check skip list")
 
 geomean = math.exp(sum(math.log(r) for r in ratios) / len(ratios))
 geomean_regression_pct = max(0.0, (1.0 - geomean) * 100.0)

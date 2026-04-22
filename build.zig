@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const zigts_dep = b.dependency("zigts", .{
         .target = target,
@@ -511,7 +512,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = runtime_dep.path("src/benchmark.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = bench_optimize,
             .link_libc = true,
         }),
     });

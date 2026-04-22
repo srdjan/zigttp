@@ -394,7 +394,7 @@ pub const BytecodeOptimizer = struct {
             const info = bytecode.getOpcodeInfo(op);
 
             switch (op) {
-                .goto, .if_true, .if_false, .if_false_goto, .loop, .for_of_next => {
+                .goto, .if_true, .if_false, .if_false_goto, .loop, .for_of_next, .drop_goto => {
                     const old_offset = self.readI16(code, read_pos + 1);
                     const old_target: i32 = @as(i32, @intCast(read_pos)) + info.size + old_offset;
 
@@ -560,9 +560,9 @@ test "BytecodeOptimizer: push_const + call_ic fusion" {
 
     // push_const 0x0102, call_ic 3 cache=0 -> push_const_call 0x0102 3, NOP NOP NOP
     var code = [_]u8{
-        @intFromEnum(Opcode.push_const), 0x02, 0x01,
-        @intFromEnum(Opcode.call_ic),    3,    0x00, 0x00,
-        @intFromEnum(Opcode.ret),
+        @intFromEnum(Opcode.push_const), 0x02,                     0x01,
+        @intFromEnum(Opcode.call_ic),    3,                        0x00,
+        0x00,                            @intFromEnum(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -781,7 +781,9 @@ test "BytecodeOptimizer: drop + goto fusion" {
     var code = [_]u8{
         @intFromEnum(Opcode.push_1),
         @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.goto), 0x03, 0x00,
+        @intFromEnum(Opcode.goto),
+        0x03,
+        0x00,
         @intFromEnum(Opcode.push_2),
         @intFromEnum(Opcode.ret),
         @intFromEnum(Opcode.nop),
@@ -806,6 +808,46 @@ test "BytecodeOptimizer: drop + goto fusion" {
     try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
 }
 
+test "BytecodeOptimizer: compact updates drop_goto offsets" {
+    const allocator = std.testing.allocator;
+
+    // Layout:
+    // 0: push_1
+    // 1: drop
+    // 2-4: goto +4 -> lands at pos 9
+    // 5: push_2
+    // 6: ret
+    // 7-8: nop, nop (both compacted away)
+    // 9: push_0 (jump target)
+    var code = [_]u8{
+        @intFromEnum(Opcode.push_1),
+        @intFromEnum(Opcode.drop),
+        @intFromEnum(Opcode.goto),
+        0x04,
+        0x00,
+        @intFromEnum(Opcode.push_2),
+        @intFromEnum(Opcode.ret),
+        @intFromEnum(Opcode.nop),
+        @intFromEnum(Opcode.nop),
+        @intFromEnum(Opcode.push_0),
+    };
+
+    var optimizer = BytecodeOptimizer.init(allocator);
+    defer optimizer.deinit();
+
+    _ = try optimizer.optimize(&code);
+    const new_len = try optimizer.compact(&code);
+
+    try std.testing.expectEqual(@as(usize, 7), new_len);
+    try std.testing.expectEqual(@intFromEnum(Opcode.drop_goto), code[1]);
+
+    // After compaction, the old target at pos 9 moves to pos 6.
+    // New offset = 6 - 1 - 3 = 2.
+    const compacted_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
+    try std.testing.expectEqual(@as(i16, 2), compacted_offset);
+    try std.testing.expectEqual(@intFromEnum(Opcode.push_0), code[6]);
+}
+
 test "BytecodeOptimizer: drop + goto no fusion across jump target" {
     const allocator = std.testing.allocator;
 
@@ -820,9 +862,13 @@ test "BytecodeOptimizer: drop + goto no fusion across jump target" {
     // 8: ret
     var code = [_]u8{
         @intFromEnum(Opcode.push_true),
-        @intFromEnum(Opcode.if_false), 0x01, 0x00,
+        @intFromEnum(Opcode.if_false),
+        0x01,
+        0x00,
         @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.goto), 0xFE, 0xFF,
+        @intFromEnum(Opcode.goto),
+        0xFE,
+        0xFF,
         @intFromEnum(Opcode.ret),
     };
 
