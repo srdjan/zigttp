@@ -2,69 +2,59 @@
 set -euo pipefail
 
 # Usage:
-#   bench-diff.sh <current.json> <baseline.json>           (legacy single-file mode)
-#   bench-diff.sh --baseline <baseline.json> --bench <bench-exe>
+#   bench-diff.sh --baseline <baseline.json> --bench <bench-exe> [--runs N]
 #
-# In --bench mode the script invokes the given benchmark binary $BENCH_RUNS times
-# (default 3) and compares the per-benchmark best-of-N ops_per_sec against the
-# baseline. Microbench variance frequently exceeds 3% on a single run, so
-# single-run mode is too flaky for CI gating.
+# Runs the benchmark binary $BENCH_RUNS times (default 5) and compares the
+# per-benchmark best-of-N ops_per_sec against the baseline. Microbench variance
+# frequently exceeds 3% on a single run, so single-run mode is too flaky for
+# CI gating.
 
 BENCH_RUNS="${BENCH_RUNS:-5}"
 REGRESSION_PCT="${BENCH_REGRESSION_PCT:-8.0}"
 GEOMEAN_PCT="${BENCH_GEOMEAN_PCT:-3.0}"
 
 usage() {
-  echo "usage: $0 <current.json> <baseline.json>" >&2
-  echo "   or: $0 --baseline <baseline.json> --bench <bench-exe> [--runs N]" >&2
+  echo "usage: $0 --baseline <baseline.json> --bench <bench-exe> [--runs N]" >&2
   exit 2
 }
 
 baseline_json=""
 bench_exe=""
-current_json=""
 
-if [[ $# -eq 2 && "$1" != --* && "$2" != --* ]]; then
-  current_json="$1"
-  baseline_json="$2"
-else
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --baseline) baseline_json="$2"; shift 2 ;;
-      --bench)    bench_exe="$2";     shift 2 ;;
-      --runs)     BENCH_RUNS="$2";    shift 2 ;;
-      *)          usage ;;
-    esac
-  done
-fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --baseline) baseline_json="$2"; shift 2 ;;
+    --bench)    bench_exe="$2";     shift 2 ;;
+    --runs)     BENCH_RUNS="$2";    shift 2 ;;
+    *)          usage ;;
+  esac
+done
 
 if [[ -z "$baseline_json" || ! -f "$baseline_json" ]]; then
   echo "baseline benchmark file not found: $baseline_json" >&2
   exit 1
 fi
+if [[ -z "$bench_exe" || ! -x "$bench_exe" ]]; then
+  echo "bench binary not executable: $bench_exe" >&2
+  exit 1
+fi
 
-tmpdir=""
-cleanup() { [[ -n "$tmpdir" && -d "$tmpdir" ]] && rm -rf "$tmpdir"; }
-trap cleanup EXIT
+tmpdir="$(mktemp -d)"
+cleanup() { [[ -d "$tmpdir" ]] && rm -rf "$tmpdir"; }
+trap cleanup EXIT INT TERM
 
-if [[ -n "$bench_exe" ]]; then
-  if [[ ! -x "$bench_exe" ]]; then
-    echo "bench binary not executable: $bench_exe" >&2
-    exit 1
-  fi
-  tmpdir="$(mktemp -d)"
-  for i in $(seq 1 "$BENCH_RUNS"); do
-    "$bench_exe" --json --quiet > "$tmpdir/run-$i.json"
-  done
-  current_json="$tmpdir/current.json"
-  python3 - "$current_json" "$tmpdir" "$BENCH_RUNS" <<'PY'
+for i in $(seq 1 "$BENCH_RUNS"); do
+  "$bench_exe" --json --quiet > "$tmpdir/run-$i.json"
+done
+current_json="$tmpdir/current.json"
+python3 - "$current_json" "$tmpdir" "$BENCH_RUNS" <<'PY'
 import json, sys, os
 out_path, tmpdir, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
 runs = []
 for i in range(1, n + 1):
     with open(os.path.join(tmpdir, f"run-{i}.json")) as fh:
         runs.append(json.load(fh))
-# Take per-bench best (max ops_per_sec) across runs; take min time_ms for clarity.
+# Take per-bench best (max ops_per_sec) across runs.
 best = {b["name"]: dict(b) for b in runs[0]["benchmarks"]}
 for run in runs[1:]:
     for b in run["benchmarks"]:
@@ -76,12 +66,6 @@ merged["benchmarks"] = [best[name] for name in best]
 with open(out_path, "w") as fh:
     json.dump(merged, fh)
 PY
-fi
-
-if [[ -z "$current_json" || ! -f "$current_json" ]]; then
-  echo "current benchmark file not found: $current_json" >&2
-  exit 1
-fi
 
 python3 - "$current_json" "$baseline_json" "$REGRESSION_PCT" "$GEOMEAN_PCT" <<'PY'
 import json
