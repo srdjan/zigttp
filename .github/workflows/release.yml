@@ -48,7 +48,7 @@ jobs:
 
       - name: Verify expert subsystem
         run: |
-          META=$(./zig-out/bin/zigts expert meta --json)
+          META=$(./zig-out/bin/zigts meta --json)
           echo "$META" | jq -e '.rule_count >= 25'
           echo "$META" | jq -e '.policy_hash | length == 64'
 
