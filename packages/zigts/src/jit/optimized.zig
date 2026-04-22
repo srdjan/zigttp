@@ -307,6 +307,7 @@ pub const OptimizedCompiler = struct {
                 .new_array, .get_field, .put_field, .put_field_keep, .get_global, .put_global => pc += 2,
                 .get_field_ic, .put_field_ic => pc += 4,
                 .call, .call_method, .tail_call => pc += 1,
+                .call_ic => pc += 3,
                 .get_loc_add => pc += 1,
                 .get_loc_get_loc_add => pc += 2,
                 .add_mod, .sub_mod, .mul_mod, .mod_const => pc += 2,
@@ -464,6 +465,10 @@ pub const OptimizedCompiler = struct {
                     loop_info.has_side_effects = true;
                     pc += 1;
                 },
+                .call_ic => {
+                    loop_info.has_side_effects = true;
+                    pc += 3;
+                },
                 .get_field, .put_field, .put_field_ic => {
                     loop_info.has_side_effects = true;
                     pc += switch (op) {
@@ -597,6 +602,7 @@ pub const OptimizedCompiler = struct {
                 .new_array, .get_field, .put_field, .put_field_keep, .get_global, .put_global => pc += 2,
                 .get_field_ic, .put_field_ic => pc += 4,
                 .call, .call_method, .tail_call => pc += 1,
+                .call_ic => pc += 3,
                 .get_loc_add => pc += 1,
                 .get_loc_get_loc_add => pc += 2,
                 .add_mod, .sub_mod, .mul_mod, .mod_const => pc += 2,
@@ -1137,6 +1143,13 @@ pub const OptimizedCompiler = struct {
             .call => {
                 const argc = code[new_pc];
                 new_pc += 1;
+                try self.emitCall(argc);
+            },
+            .call_ic => {
+                const argc = code[new_pc];
+                new_pc += 1;
+                _ = readU16(code, new_pc); // cache_idx reserved for future direct-index fast path
+                new_pc += 2;
                 try self.emitCall(argc);
             },
             // Fallback for unsupported opcodes
