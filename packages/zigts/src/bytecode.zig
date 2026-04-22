@@ -214,7 +214,7 @@ pub const Opcode = enum(u8) {
     lte_num = 0xCB, // pop 2 numbers, push boolean (less-or-equal)
     gte_num = 0xCC, // pop 2 numbers, push boolean (greater-or-equal)
     concat_2 = 0xCD, // pop 2 strings, push concatenation
-    drop_goto = 0xCE, // +i16 offset: pop 1 from stack, unconditional jump (fused drop + goto)
+    drop_goto = 0xCE, // +i16 offset (fused drop + goto)
 
     // Reserved for future
     _,

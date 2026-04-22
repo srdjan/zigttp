@@ -195,25 +195,6 @@ pub const BytecodeOptimizer = struct {
         // Don't fuse if next instruction is a jump target (for other patterns)
         if (self.isJumpTarget(next_pos)) return 0;
 
-        // Pattern: drop + goto -> drop_goto
-        // Original: drop(1) + goto(3) = 4 bytes
-        // Fused: drop_goto(3) = 3 bytes, NOP 1 byte
-        if (op1 == .drop and op2 == .goto) {
-            const goto_offset = self.readI16(code, next_pos + 1);
-            const goto_target: i32 = @as(i32, @intCast(next_pos)) + info2.size + goto_offset;
-            const fused_size: i32 = bytecode.getOpcodeInfo(.drop_goto).size;
-            const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
-
-            code[pos] = @intFromEnum(Opcode.drop_goto);
-            self.writeU16(code, pos + 1, @bitCast(combined_offset));
-            // NOP out the old goto's trailing byte (position 3)
-            code[pos + 3] = @intFromEnum(Opcode.nop);
-            stats.drop_goto_count += 1;
-            stats.dispatches_saved += 1;
-            stats.bytes_saved += 1;
-            return 3; // Size of drop_goto
-        }
-
         // Pattern: get_loc N + add -> get_loc_add N
         // Original: get_loc(2) + add(1) = 3 bytes
         // Fused: get_loc_add(2) = 2 bytes, NOP 1 byte
@@ -323,6 +304,28 @@ pub const BytecodeOptimizer = struct {
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;
             return 4;
+        }
+
+        // Pattern: drop + goto -> drop_goto
+        // Original: drop(1) + goto(3) = 4 bytes
+        // Fused: drop_goto(3) = 3 bytes, NOP 1 byte
+        //
+        // Fires 1-3 times per compiled function in the benchmark suite, far less
+        // than the get_loc+add patterns above, so it is checked last to keep the
+        // common-case fall-through cheap.
+        if (op1 == .drop and op2 == .goto) {
+            const goto_offset = self.readI16(code, next_pos + 1);
+            const goto_target: i32 = @as(i32, @intCast(next_pos)) + info2.size + goto_offset;
+            const fused_size: i32 = bytecode.getOpcodeInfo(.drop_goto).size;
+            const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
+
+            code[pos] = @intFromEnum(Opcode.drop_goto);
+            self.writeU16(code, pos + 1, @bitCast(combined_offset));
+            code[pos + 3] = @intFromEnum(Opcode.nop);
+            stats.drop_goto_count += 1;
+            stats.dispatches_saved += 1;
+            stats.bytes_saved += 1;
+            return 3;
         }
 
         return 0;
@@ -761,28 +764,22 @@ test "BytecodeOptimizer: drop + goto fusion" {
 test "BytecodeOptimizer: drop + goto no fusion across jump target" {
     const allocator = std.testing.allocator;
 
-    // The goto is itself a jump target, so the drop+goto pair must not be fused:
-    // fusing would make a backward jump skip the drop entirely.
+    // The goto is itself a jump target (pos 5), so drop+goto must not fuse:
+    // fusing would let any jump-to-goto skip the drop entirely.
     //
     // Layout:
-    // 0: push_1
-    // 1: drop
-    // 2-4: goto -3 (backward jump to pos 2+3-3 = 2, i.e. to itself - infinite loop;
-    //              simulates a loop-back target that lands on the goto)
-    //
-    // Another jump targets position 2 (the goto) so it cannot be fused away.
+    // 0: push_true
+    // 1-3: if_false +1 -> lands at pos 5 (the goto)
+    // 4: drop
+    // 5-7: goto -2 (unimportant; only the fact that pos 5 is a jump target matters)
+    // 8: ret
     var code = [_]u8{
         @intFromEnum(Opcode.push_true),
-        @intFromEnum(Opcode.if_false), 0x00, 0x00, // 1-3: if_false +0 -> pos 4 (the drop)
-        @intFromEnum(Opcode.drop), // 4
-        @intFromEnum(Opcode.goto), 0xFE, 0xFF, // 5-7: goto -2 -> pos 5+3-2 = 6 (not goto itself but test target-on-goto)
+        @intFromEnum(Opcode.if_false), 0x01, 0x00,
+        @intFromEnum(Opcode.drop),
+        @intFromEnum(Opcode.goto), 0xFE, 0xFF,
         @intFromEnum(Opcode.ret),
     };
-    // Actually set up pos 5 (goto) as a jump target so drop+goto cannot fuse.
-    // Replace if_false offset so it lands on the goto at pos 5.
-    // pos 1 + size 3 = 4; target = 4 + offset. Want target = 5 -> offset = 1.
-    code[2] = 0x01;
-    code[3] = 0x00;
 
     var optimizer = BytecodeOptimizer.init(allocator);
     defer optimizer.deinit();
