@@ -198,28 +198,37 @@ const CountingAlloc = struct {
 // sizing (`reserveCapacity`) and IR-node -> bytecode ratio.
 
 const CompileStats = struct {
+    /// Total bytes across tokenizer/parser/IR/codegen. Matches the prior
+    /// single-counter number so baselines remain comparable.
     bytes: u64,
+    /// Subset of `bytes` attributable to CodeGen (reserveCapacity growth,
+    /// constants pool, labels, pending_jumps, bytecode array). This is the
+    /// number the Phase 8 tuning pass uses to calibrate `reserveCapacity`.
+    codegen_bytes: u64,
     ir_nodes: u64,
     bytecode_len: u64,
 };
 
 fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
-    var counting = CountingAlloc{ .backing = backing };
-    const alloc = counting.allocator();
+    var parser_counting = CountingAlloc{ .backing = backing };
+    var codegen_counting = CountingAlloc{ .backing = backing };
+    const parser_alloc = parser_counting.allocator();
+    const codegen_alloc = codegen_counting.allocator();
 
-    var strings = zq.string.StringTable.init(alloc);
+    var strings = zq.string.StringTable.init(parser_alloc);
     defer strings.deinit();
-    var atoms = zq.context.AtomTable.init(alloc);
+    var atoms = zq.context.AtomTable.init(parser_alloc);
     defer atoms.deinit();
 
-    var p = zq.Parser.init(alloc, source, &strings, &atoms);
+    var p = zq.Parser.init(parser_alloc, source, &strings, &atoms);
     defer p.deinit();
 
-    const bytecode_data = try p.parse();
+    const bytecode_data = try p.parseWithCodegenAllocator(codegen_alloc);
     const ir_node_count: u64 = @intCast(p.js_parser.nodes.tags.items.len);
 
     return .{
-        .bytes = counting.total_bytes,
+        .bytes = parser_counting.total_bytes + codegen_counting.total_bytes,
+        .codegen_bytes = codegen_counting.total_bytes,
         .ir_nodes = ir_node_count,
         .bytecode_len = @intCast(bytecode_data.len),
     };
@@ -283,6 +292,7 @@ const Result = struct {
     iterations: u32,
     ns_per_iter: u64,
     bytes_alloc: u64,
+    codegen_bytes: u64,
     ir_nodes: u64,
     bytecode_len: u64,
     success: bool,
@@ -291,12 +301,13 @@ const Result = struct {
 
 fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result {
     const fail = struct {
-        fn mk(fixture: Fixture, iters: u32, bytes: u64, ir_nodes: u64, bc_len: u64, err_name: []const u8) Result {
+        fn mk(fixture: Fixture, iters: u32, bytes: u64, cg_bytes: u64, ir_nodes: u64, bc_len: u64, err_name: []const u8) Result {
             return .{
                 .name = fixture.name,
                 .iterations = iters,
                 .ns_per_iter = 0,
                 .bytes_alloc = bytes,
+                .codegen_bytes = cg_bytes,
                 .ir_nodes = ir_nodes,
                 .bytecode_len = bc_len,
                 .success = false,
@@ -307,34 +318,35 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result
 
     // One warm compile to surface parse errors before timing.
     const warm = compileOnce(allocator, fx.source) catch |err| {
-        return fail(fx, iterations, 0, 0, 0, @errorName(err));
+        return fail(fx, iterations, 0, 0, 0, 0, @errorName(err));
     };
 
     const start = compat.Instant.now() catch {
-        return fail(fx, iterations, warm.bytes, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
+        return fail(fx, iterations, warm.bytes, warm.codegen_bytes, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
     };
 
     var total_bytes: u64 = 0;
+    var total_cg_bytes: u64 = 0;
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
         const s = compileOnce(allocator, fx.source) catch |err| {
-            return fail(fx, iterations, total_bytes, warm.ir_nodes, warm.bytecode_len, @errorName(err));
+            return fail(fx, iterations, total_bytes, total_cg_bytes, warm.ir_nodes, warm.bytecode_len, @errorName(err));
         };
         total_bytes += s.bytes;
+        total_cg_bytes += s.codegen_bytes;
     }
 
     const end = compat.Instant.now() catch {
-        return fail(fx, iterations, total_bytes / iterations, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
+        return fail(fx, iterations, total_bytes / iterations, total_cg_bytes / iterations, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
     };
     const elapsed_ns = end.since(start);
-    const ns_per_iter = elapsed_ns / iterations;
-    const bytes_per_iter = total_bytes / iterations;
 
     return .{
         .name = fx.name,
         .iterations = iterations,
-        .ns_per_iter = ns_per_iter,
-        .bytes_alloc = bytes_per_iter,
+        .ns_per_iter = elapsed_ns / iterations,
+        .bytes_alloc = total_bytes / iterations,
+        .codegen_bytes = total_cg_bytes / iterations,
         .ir_nodes = warm.ir_nodes,
         .bytecode_len = warm.bytecode_len,
         .success = true,
@@ -344,18 +356,18 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result
 fn emitJson(results: []const Result) void {
     writeStdout("{\n  \"schema_version\": 1,\n  \"benchmarks\": [\n");
     for (results, 0..) |r, i| {
-        var line: [512]u8 = undefined;
+        var line: [640]u8 = undefined;
         const written = if (r.success)
             std.fmt.bufPrint(
                 &line,
-                "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"ir_nodes\":{},\"bytecode_len\":{},\"success\":true}}",
-                .{ r.name, r.iterations, r.ns_per_iter, r.bytes_alloc, r.ir_nodes, r.bytecode_len },
+                "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"codegen_bytes\":{},\"ir_nodes\":{},\"bytecode_len\":{},\"success\":true}}",
+                .{ r.name, r.iterations, r.ns_per_iter, r.bytes_alloc, r.codegen_bytes, r.ir_nodes, r.bytecode_len },
             ) catch continue
         else
             std.fmt.bufPrint(
                 &line,
-                "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"ir_nodes\":{},\"bytecode_len\":{},\"success\":false,\"error_name\":\"{s}\"}}",
-                .{ r.name, r.iterations, r.ns_per_iter, r.bytes_alloc, r.ir_nodes, r.bytecode_len, r.error_name orelse "unknown" },
+                "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"codegen_bytes\":{},\"ir_nodes\":{},\"bytecode_len\":{},\"success\":false,\"error_name\":\"{s}\"}}",
+                .{ r.name, r.iterations, r.ns_per_iter, r.bytes_alloc, r.codegen_bytes, r.ir_nodes, r.bytecode_len, r.error_name orelse "unknown" },
             ) catch continue;
         writeStdout(written);
         writeStdout(if (i + 1 < results.len) ",\n" else "\n");
@@ -365,12 +377,12 @@ fn emitJson(results: []const Result) void {
 
 fn emitHuman(results: []const Result) void {
     writeStdout("\n=== zigts compile-time microbench ===\n\n");
-    printFmt("{s:<24} {s:>12} {s:>14} {s:>10} {s:>12}", .{ "fixture", "ns/compile", "bytes/compile", "ir_nodes", "bc_len" });
-    writeStdout("--------------------------------------------------------------------------\n");
+    printFmt("{s:<24} {s:>12} {s:>14} {s:>12} {s:>10} {s:>8}", .{ "fixture", "ns/compile", "bytes/compile", "cg_bytes", "ir_nodes", "bc_len" });
+    writeStdout("------------------------------------------------------------------------------------\n");
     for (results) |r| {
         if (r.success) {
-            printFmt("{s:<24} {d:>12} {d:>14} {d:>10} {d:>12}", .{
-                r.name, r.ns_per_iter, r.bytes_alloc, r.ir_nodes, r.bytecode_len,
+            printFmt("{s:<24} {d:>12} {d:>14} {d:>12} {d:>10} {d:>8}", .{
+                r.name, r.ns_per_iter, r.bytes_alloc, r.codegen_bytes, r.ir_nodes, r.bytecode_len,
             });
         } else {
             printFmt("{s:<24} FAILED: {s}", .{ r.name, r.error_name orelse "unknown" });

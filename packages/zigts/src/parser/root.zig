@@ -197,12 +197,18 @@ pub const Parser = struct {
 
     /// Parse and generate bytecode, returns bytecode slice
     pub fn parse(self: *Parser) ![]const u8 {
-        // Parse to IR
+        return self.parseWithCodegenAllocator(self.allocator);
+    }
+
+    /// Parse and generate bytecode, using `codegen_alloc` for the CodeGen pass.
+    /// The tokenizer/parser/IR still use `self.allocator`. Used by the
+    /// compile-time microbench to isolate codegen allocation from parser/IR
+    /// allocation; production paths call `parse()` with both identical.
+    pub fn parseWithCodegenAllocator(self: *Parser, codegen_alloc: std.mem.Allocator) ![]const u8 {
         const root = try self.js_parser.parse();
         self.root_node = root;
 
-        // Optimize IR (cold-start-friendly single pass)
-        // Non-fatal: optimization failures are silently ignored
+        // Non-fatal: optimization failures are silently ignored.
         _ = ir_opt.optimizeIR(
             self.allocator,
             &self.js_parser.nodes,
@@ -210,9 +216,8 @@ pub const Parser = struct {
             root,
         ) catch {};
 
-        // Generate bytecode with string table and atoms for proper string/property handling
         self.code_gen = CodeGen.initWithIRStore(
-            self.allocator,
+            codegen_alloc,
             &self.js_parser.nodes,
             &self.js_parser.constants,
             &self.js_parser.scopes,
@@ -222,7 +227,6 @@ pub const Parser = struct {
 
         const func_bc = try self.code_gen.?.generate(root);
 
-        // Update compatibility fields
         self.max_local_count = @intCast(func_bc.local_count);
         self.constants = .{ .items = func_bc.constants };
 
