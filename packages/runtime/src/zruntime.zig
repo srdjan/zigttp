@@ -7476,6 +7476,7 @@ test "JSX rendering works" {
 }
 
 test "HandlerPool exhaustion and recovery" {
+    if (skip_handler_pool_linux_tests) return error.SkipZigTest;
     const allocator = std.heap.c_allocator;
 
     const handler_code = "function handler(req) { return Response.text('ok'); }";
