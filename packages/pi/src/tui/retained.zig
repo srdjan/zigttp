@@ -71,7 +71,7 @@ fn writeInputLine(
     prompt_label: []const u8,
     input: []const u8,
 ) !void {
-    try w.writeAll("\r\x1b[2K");
+    try w.writeAll(ansi.erase_line);
     try ansi.styled(w, palette.prompt_label, prompt_label);
     if (input.len > 0) try ansi.styled(w, palette.input_text, input);
 }
