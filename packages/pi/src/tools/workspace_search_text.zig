@@ -109,3 +109,44 @@ fn execute(
     buf = aw.toArrayList();
     return .{ .ok = semantic_ok, .body = try buf.toOwnedSlice(allocator) };
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "workspace_search_text: missing query arg returns structured error" {
+    var result = try execute(testing.allocator, &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "missing query") != null);
+}
+
+test "workspace_search_text: JSON args without query returns structured error" {
+    var result = try execute(testing.allocator, &.{"{\"path\":\".\"}"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "missing query") != null);
+}
+
+test "workspace_search_text: non-string query returns structured error" {
+    var result = try execute(testing.allocator, &.{"{\"query\":42}"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "query must be a string") != null);
+}
+
+test "workspace_search_text: malformed JSON returns structured error" {
+    var result = try execute(testing.allocator, &.{"{not"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "invalid JSON input") != null);
+}
+
+test "workspace_search_text: ../ escape is rejected by resolveInsideWorkspace" {
+    try testing.expectError(
+        error.PathOutsideWorkspace,
+        execute(testing.allocator, &.{ "needle", "../../etc" }),
+    );
+}
