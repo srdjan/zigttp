@@ -138,7 +138,7 @@ fn retainedState(session: *const agent.AgentSession, input: []const u8, cursor: 
         .status = .{
             .session_id = if (session.session_id) |s| s else null,
             .model = session.currentModel(),
-            .auth = session.authLabel(),
+            .auth = session.backendDescriptor().auth_label,
             .tokens = session.token_totals,
         },
         .input = input,

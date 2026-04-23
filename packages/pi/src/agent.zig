@@ -37,6 +37,11 @@ pub const AuthKind = enum {
     anthropic_api_key,
 };
 
+pub const BackendDescriptor = struct {
+    auth_label: []const u8,
+    provider_label: []const u8,
+};
+
 pub const SessionConfig = struct {
     no_session: bool = false,
     no_persist_tool_output: bool = false,
@@ -183,17 +188,13 @@ pub const AgentSession = struct {
         };
     }
 
-    pub fn authLabel(self: *const AgentSession) []const u8 {
-        return switch (self.authKind()) {
-            .stub => "stub",
-            .anthropic_api_key => "api-key",
-        };
-    }
-
-    pub fn providerLabel(self: *const AgentSession) []const u8 {
+    /// Single source of truth for the backend's display labels. One switch
+    /// on `self.backend` replaces what used to be three: authKind, then
+    /// authLabel (re-dispatching on authKind), then providerLabel.
+    pub fn backendDescriptor(self: *const AgentSession) BackendDescriptor {
         return switch (self.backend) {
-            .stub => "stub",
-            .anthropic => "anthropic",
+            .stub => .{ .auth_label = "stub", .provider_label = "stub" },
+            .anthropic => .{ .auth_label = "api-key", .provider_label = "anthropic" },
         };
     }
 

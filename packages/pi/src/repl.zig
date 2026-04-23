@@ -320,6 +320,7 @@ fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession
     const session_id = if (session.session_id) |sid| sid else "ephemeral";
     const model = session.currentModel() orelse "stub";
     const tok = session.token_totals;
+    const descriptor = session.backendDescriptor();
     const msg = try std.fmt.allocPrint(
         allocator,
         "Expert status:\n" ++
@@ -333,8 +334,8 @@ fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession
             "  tokens.cache_w:{d}\n" ++
             "  tokens.out:    {d}\n",
         .{
-            session.providerLabel(),
-            session.authLabel(),
+            descriptor.provider_label,
+            descriptor.auth_label,
             model,
             session_id,
             if (session.session_dir != null) "enabled" else "disabled",
