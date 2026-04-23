@@ -13,6 +13,7 @@ const app = @import("app.zig");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
+const theme_mod = @import("tui/theme.zig");
 
 pub const Registry = registry_mod.Registry;
 const ToolResult = registry_mod.ToolResult;
@@ -80,6 +81,21 @@ pub fn processSubmit(
             return .{ .tool_result = .{ .ok = true, .body = msg } };
         }
         const msg = try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id});
+        return .{ .tool_result = .{ .ok = false, .body = msg } };
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "/settings theme")) {
+        const rest_raw = trimmed["/settings theme".len..];
+        const rest = std.mem.trim(u8, rest_raw, " \t");
+        if (rest.len == 0) {
+            return .{ .tool_result = try renderThemes(allocator, session.theme) };
+        }
+        if (theme_mod.findByName(rest)) |t| {
+            session.theme = t;
+            const msg = try std.fmt.allocPrint(allocator, "Theme switched to: {s}\n", .{t.display_name});
+            return .{ .tool_result = .{ .ok = true, .body = msg } };
+        }
+        const msg = try std.fmt.allocPrint(allocator, "Unknown theme: {s}\nAvailable: run /settings theme to list\n", .{rest});
         return .{ .tool_result = .{ .ok = false, .body = msg } };
     }
 
@@ -283,10 +299,25 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
         "  max_attempts:    3\n" ++
         "  roundtrips/turn: 8\n" ++
         "  tool_calls/turn: 16\n" ++
-        "  batch_size:      8\n",
+        "  batch_size:      8\n" ++
+        "Theme: run /settings theme to list or switch.\n",
         .{ request_mod.default_model, request_mod.default_max_tokens },
     );
     return .{ .ok = true, .body = msg };
+}
+
+fn renderThemes(allocator: std.mem.Allocator, current: *const theme_mod.Theme) !ToolResult {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    const w = &aw.writer;
+    try w.writeAll("Available themes (invoke with /settings theme <name>):\n");
+    for (theme_mod.registry) |t| {
+        const marker = if (t == current) "*" else " ";
+        try w.print("  {s} {s: <16}  {s}\n", .{ marker, t.name, t.display_name });
+    }
+    buf = aw.toArrayList();
+    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
 }
 
 fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
@@ -597,4 +628,63 @@ test "selectApprovalFn: auto_reject resolves to loop.autoReject" {
 
 test "selectApprovalFn: ask resolves to the interactive approveEdit" {
     try testing.expect(selectApprovalFn(.ask) == approveEdit);
+}
+
+test "processSubmit: /settings theme lists themes and marks the current one" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings theme", null);
+    switch (outcome) {
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.body, "default") != null);
+            try testing.expect(std.mem.indexOf(u8, r.body, "solarized-dark") != null);
+            // The current theme gets a '*' marker.
+            try testing.expect(std.mem.indexOf(u8, r.body, "* default") != null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "processSubmit: /settings theme <name> swaps the session theme" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    try testing.expect(session.theme == &theme_mod.default);
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings theme solarized-dark", null);
+    switch (outcome) {
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.body, "Solarized Dark") != null);
+        },
+        else => return error.TestFailed,
+    }
+    try testing.expect(session.theme == &theme_mod.solarized_dark);
+}
+
+test "processSubmit: /settings theme <unknown> returns an error result" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var outcome = try processSubmit(testing.allocator, &session, &reg, "/settings theme neon-pink", null);
+    switch (outcome) {
+        .tool_result => |*r| {
+            defer r.deinit(testing.allocator);
+            try testing.expect(!r.ok);
+            try testing.expect(std.mem.indexOf(u8, r.body, "Unknown theme") != null);
+        },
+        else => return error.TestFailed,
+    }
+    // Theme should not have changed.
+    try testing.expect(session.theme == &theme_mod.default);
 }
