@@ -265,8 +265,8 @@ Add a tool:
 `packages/pi/src/providers/openai/` mirroring the `anthropic/` file
 layout. The `loop.ModelClient` vtable already accepts a new provider
 without loop changes. The blocker is one live call to record a CI
-cassette; the replay harness itself builds cold. See commit history
-for the full nine-phase plan.
+cassette; the replay harness itself builds cold. Full spec in
+[../../docs/pi-cassettes.md](../../docs/pi-cassettes.md).
 
 **Phase 5 (structured `ToolResult` split).** Deliberately skipped. The
 current `ToolResult.body` is JSON that Claude reads natively; splitting
