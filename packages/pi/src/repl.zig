@@ -910,3 +910,175 @@ test "renderTree builds nested payload nodes from parent ids" {
     try testing.expectEqualStrings("orphan", nodes[2].session_id);
     try testing.expect(nodes[2].is_orphan_root);
 }
+
+test "buildSessionTreeNodes: empty entries returns empty" {
+    const nodes = try buildSessionTreeNodes(testing.allocator, &.{}, null);
+    defer freeSessionTreeNodes(testing.allocator, nodes);
+    try testing.expectEqual(@as(usize, 0), nodes.len);
+}
+
+test "buildSessionTreeNodes: multiple roots emit both" {
+    const allocator = testing.allocator;
+    var entries = [_]session_paths.SessionEntry{
+        .{
+            .session_id = try allocator.dupe(u8, "a"),
+            .dir_path = try allocator.dupe(u8, "/tmp/a"),
+            .created_at_unix_ms = 100,
+            .parent_id = null,
+        },
+        .{
+            .session_id = try allocator.dupe(u8, "b"),
+            .dir_path = try allocator.dupe(u8, "/tmp/b"),
+            .created_at_unix_ms = 200,
+            .parent_id = null,
+        },
+    };
+    defer for (&entries) |*e| e.deinit(allocator);
+
+    const nodes = try buildSessionTreeNodes(allocator, &entries, null);
+    defer freeSessionTreeNodes(allocator, nodes);
+
+    try testing.expectEqual(@as(usize, 2), nodes.len);
+    try testing.expectEqual(@as(usize, 0), nodes[0].depth);
+    try testing.expectEqual(@as(usize, 0), nodes[1].depth);
+    try testing.expect(!nodes[0].is_current);
+    try testing.expect(!nodes[1].is_current);
+    try testing.expect(!nodes[0].is_orphan_root);
+}
+
+test "buildSessionTreeNodes: grandchild gets depth 2" {
+    const allocator = testing.allocator;
+    var entries = [_]session_paths.SessionEntry{
+        .{
+            .session_id = try allocator.dupe(u8, "root"),
+            .dir_path = try allocator.dupe(u8, "/tmp/root"),
+            .created_at_unix_ms = 100,
+            .parent_id = null,
+        },
+        .{
+            .session_id = try allocator.dupe(u8, "child"),
+            .dir_path = try allocator.dupe(u8, "/tmp/child"),
+            .created_at_unix_ms = 200,
+            .parent_id = try allocator.dupe(u8, "root"),
+        },
+        .{
+            .session_id = try allocator.dupe(u8, "grand"),
+            .dir_path = try allocator.dupe(u8, "/tmp/grand"),
+            .created_at_unix_ms = 300,
+            .parent_id = try allocator.dupe(u8, "child"),
+        },
+    };
+    defer for (&entries) |*e| e.deinit(allocator);
+
+    const nodes = try buildSessionTreeNodes(allocator, &entries, null);
+    defer freeSessionTreeNodes(allocator, nodes);
+
+    try testing.expectEqual(@as(usize, 3), nodes.len);
+    try testing.expectEqualStrings("root", nodes[0].session_id);
+    try testing.expectEqual(@as(usize, 0), nodes[0].depth);
+    try testing.expectEqualStrings("child", nodes[1].session_id);
+    try testing.expectEqual(@as(usize, 1), nodes[1].depth);
+    try testing.expectEqualStrings("grand", nodes[2].session_id);
+    try testing.expectEqual(@as(usize, 2), nodes[2].depth);
+}
+
+test "writeSessionTree: indents per depth, marks current with '*'" {
+    const allocator = testing.allocator;
+    const nodes = [_]SessionTreeNode{
+        .{
+            .session_id = try allocator.dupe(u8, "root"),
+            .parent_id = null,
+            .created_at_unix_ms = 1_000,
+            .depth = 0,
+            .is_current = false,
+            .is_orphan_root = false,
+        },
+        .{
+            .session_id = try allocator.dupe(u8, "child"),
+            .parent_id = try allocator.dupe(u8, "root"),
+            .created_at_unix_ms = 2_000,
+            .depth = 1,
+            .is_current = true,
+            .is_orphan_root = false,
+        },
+    };
+    defer {
+        var mutable = nodes;
+        for (&mutable) |*n| n.deinit(allocator);
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeSessionTree(&aw.writer, &nodes);
+
+    const out = aw.writer.buffered();
+    // Root: no indent, dash marker, id.
+    try testing.expect(std.mem.startsWith(u8, out, "- root"));
+    // Current child: indented two spaces, star marker, id.
+    try testing.expect(std.mem.indexOf(u8, out, "\n  * child") != null);
+}
+
+test "writeSessionTree: orphan root gets orphaned-from annotation" {
+    const allocator = testing.allocator;
+    const nodes = [_]SessionTreeNode{
+        .{
+            .session_id = try allocator.dupe(u8, "stray"),
+            .parent_id = try allocator.dupe(u8, "missing"),
+            .created_at_unix_ms = 1_000,
+            .depth = 0,
+            .is_current = false,
+            .is_orphan_root = true,
+        },
+    };
+    defer {
+        var mutable = nodes;
+        for (&mutable) |*n| n.deinit(allocator);
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try writeSessionTree(&aw.writer, &nodes);
+
+    const out = aw.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, out, "orphaned-from=missing") != null);
+}
+
+test "writeSessionTree: empty nodes writes nothing" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeSessionTree(&aw.writer, &.{});
+    try testing.expectEqual(@as(usize, 0), aw.writer.end);
+}
+
+test "renderStatus: stub session shows 'stub' provider + 'ephemeral' session" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var result = try renderStatus(testing.allocator, &session);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.body, "provider:      stub") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "auth:          stub") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "session:       ephemeral") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "persistence:   disabled") != null);
+}
+
+test "renderStatus: enumerates every token total" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    session.token_totals = .{
+        .input_tokens = 11,
+        .output_tokens = 22,
+        .cache_read_input_tokens = 33,
+        .cache_creation_input_tokens = 44,
+    };
+
+    var result = try renderStatus(testing.allocator, &session);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.in:     11") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.out:    22") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.cache_r:33") != null);
+    try testing.expect(std.mem.indexOf(u8, result.body, "tokens.cache_w:44") != null);
+}
