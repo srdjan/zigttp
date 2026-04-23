@@ -40,3 +40,6 @@ codedb.snapshot
 # .zig-cache/tmp/<sub_path>, but keep this glob in case another callsite
 # regresses. No legit top-level dir in this repo is 16 chars long.
 /????????????????/
+docs/pi-tui-demo.gif
+docs/pi-tui-demo.tape
+docs/pi-tui-demo.tape
