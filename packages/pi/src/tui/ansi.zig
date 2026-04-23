@@ -22,11 +22,6 @@ pub fn eraseLineUp(w: *std.Io.Writer, rows: usize) !void {
 pub const sync_begin = "\x1b[?2026h";
 pub const sync_end = "\x1b[?2026l";
 
-/// Move cursor to absolute column on the current row.
-pub fn cursorColumn(w: *std.Io.Writer, col: usize) !void {
-    try w.print("\r\x1b[{d}C", .{col});
-}
-
 /// SGR segment: emit "\x1b[<params>m". Empty params emit a reset.
 pub fn sgr(w: *std.Io.Writer, params: []const u8) !void {
     if (params.len == 0) {
@@ -150,12 +145,3 @@ test "eraseLineUp: clears current + N rows above" {
     try testing.expectEqualStrings("\r\x1b[2K\x1b[2A\x1b[2K", out);
 }
 
-test "cursorColumn: absolute positioning via \\r + CUF" {
-    const out = try collect(struct {
-        fn call(w: *std.Io.Writer) !void {
-            try cursorColumn(w, 10);
-        }
-    }.call);
-    defer testing.allocator.free(out);
-    try testing.expectEqualStrings("\r\x1b[10C", out);
-}
