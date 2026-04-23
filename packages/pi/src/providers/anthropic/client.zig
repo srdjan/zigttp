@@ -93,12 +93,22 @@ fn postAnthropic(
 
     var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
     defer io_backend.deinit();
+    const io = io_backend.io();
 
     var client = std.http.Client{
         .allocator = arena,
-        .io = io_backend.io(),
+        .io = io,
     };
     defer client.deinit();
+
+    // std.http.Client's `request()` auto-populates `now` + `ca_bundle`
+    // together when `now == null`, but we pre-connect below via
+    // `connectTcpOptions` which performs the TLS handshake before
+    // `request()` runs. Do both ourselves: scan the system trust store
+    // and stamp `now` so the TLS handshake has what it needs.
+    const now = std.Io.Clock.real.now(io);
+    client.ca_bundle.rescan(arena, io, now) catch return error.CertificateBundleLoadFailure;
+    client.now = now;
 
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedProtocol;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
