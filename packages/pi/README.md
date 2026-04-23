@@ -64,7 +64,9 @@ packages/pi/
       ansi.zig            # escape vocabulary (CSI ?2026h/l synchronized output)
       theme.zig           # Theme struct + registry
       themes/             # default + solarized-dark palettes
-      widgets/            # status_line, box, line_editor
+      term.zig            # RawMode.enter / exit
+      line_editor.zig     # pure key-event → buffer state machine
+      widgets/            # status_line, box
     test_support/
       tmp.zig             # shared IsolatedTmp for filesystem tests
       env.zig             # EnvOverride for setenv/unsetenv
@@ -191,6 +193,20 @@ to pi:
 --mode rpc               long-lived JSON-RPC 2.0 over stdio
 ```
 
+Flag interactions the parser enforces:
+
+- `--resume` / `--continue` / `--session-id` / `--fork` are mutually
+  exclusive; each picks a different session-selection strategy.
+- `--yes` and `--no-edit` are mutually exclusive; they resolve the
+  edit-approval policy to `auto_approve` and `auto_reject` respectively.
+- `--mode rpc` and `--print` are mutually exclusive; RPC is long-lived,
+  `--print` is one-shot.
+- `--mode json` requires `--print`; the JSON event stream only makes
+  sense in one-shot mode.
+
+The parser returns a distinct error variant for each collision so the
+stderr message points at the exact bad combination.
+
 Slash commands in the interactive REPL:
 
 ```
@@ -257,3 +273,12 @@ current `ToolResult.body` is JSON that Claude reads natively; splitting
 into `{llm_text, ui_payload}` would lose structure the model already
 uses. Reopen if a full-screen TUI widget (diff viewer, diagnostics
 list) lands and needs a typed payload for rendering.
+
+## See also
+
+- [../../README.md](../../README.md) — repository overview; pi is
+  linked from the zigts CLI section.
+- [../../docs/architecture.md](../../docs/architecture.md) — how
+  `pi_app` fits alongside `zigts`, `zigttp`, and `zigttp-runtime`.
+- [../../docs/zigts-expert-contract.md](../../docs/zigts-expert-contract.md)
+  — the v1 JSON contract for the `zigts` tool commands pi invokes.
