@@ -104,6 +104,9 @@ pub const AgentSession = struct {
     last_persisted_len: usize = 0,
     /// Running total of tokens consumed by all turns in this session.
     token_totals: turn.Usage = .{},
+    /// TUI theme in use for this session. Defaults to the built-in "default"
+    /// palette; `/settings theme <name>` swaps the pointer.
+    theme: *const @import("tui/theme.zig").Theme = &@import("tui/theme.zig").default,
 
     pub fn initStub() AgentSession {
         return .{};

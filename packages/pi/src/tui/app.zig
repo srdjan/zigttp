@@ -2,14 +2,17 @@
 //! backend by default; direct tool invocations still route through the
 //! same `repl.dispatchLine` path as the line-buffered REPL.
 //!
-//! The loop reads bytes from stdin, classifies each into a `KeyEvent`, feeds
-//! it to the `LineEditor`, and on submit hands the collected line to the
-//! registry. Tool output is routed through `printBody` which translates `\n`
-//! to `\r\n` because raw mode disables OPOST.
+//! The screen is split into normal scrollback above and a bottom-anchored
+//! retained region (status line + input line) managed by `retained.zig`.
+//! All scrollback writes are bracketed by `retained.beforeScrollback` /
+//! `retained.afterScrollback` so the sticky rows survive every turn.
 
 const std = @import("std");
 const term = @import("term.zig");
 const line_editor = @import("line_editor.zig");
+const retained = @import("retained.zig");
+const status_widget = @import("widgets/status_line.zig");
+const theme_mod = @import("theme.zig");
 const repl = @import("../repl.zig");
 const agent = @import("../agent.zig");
 const loop = @import("../loop.zig");
@@ -20,9 +23,7 @@ const KeyEvent = line_editor.KeyEvent;
 const Registry = repl.Registry;
 const ExpertFlags = app.ExpertFlags;
 
-// The redraw prefix is built at comptime so one syscall covers both the
-// clear-line escape and the label instead of two per keystroke.
-const prompt_prefix = "\r\x1b[2K" ++ "expert> ";
+const prompt_label = "expert> ";
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -48,9 +49,8 @@ pub fn run(
     });
     defer session.deinit(allocator);
 
-    const banner = "zigts expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
-    writeAll(banner);
-    redrawPrompt(editor.line());
+    try writeBanner(&session);
+    try redrawRetained(&session, editor.line());
 
     var input_buf: [256]u8 = undefined;
 
@@ -65,8 +65,8 @@ pub fn run(
         while (i < n) {
             const byte = input_buf[i];
             if (byte == 0x1b) {
-                // Escape sequence - consume up to 2 more bytes if present
-                // (typical arrow/function key shape is ESC [ X) and ignore.
+                // Escape sequence: consume up to 2 more bytes (arrow / function
+                // keys are typically ESC [ X) and ignore.
                 i = @min(n, i + 3);
                 continue;
             }
@@ -77,56 +77,133 @@ pub fn run(
             const action = try editor.handle(allocator, event);
             switch (action) {
                 .none => {},
-                .redraw => redrawPrompt(editor.line()),
+                .redraw => try redrawRetained(&session, editor.line()),
                 .submit => {
                     const line_snapshot = editor.line();
-                    writeAll("\r\n");
+
+                    // Scrollback area: the submitted line becomes history.
+                    // Erase retained, echo the submitted line, redraw.
+                    try emitScrollback(&session, "\r\n");
 
                     var outcome = repl.processSubmit(allocator, &session, registry, line_snapshot, approval_fn) catch |err| {
                         var msg_buf: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&msg_buf, "error: {s}\r\n", .{@errorName(err)}) catch "error\r\n";
-                        writeAll(msg);
+                        try emitScrollback(&session, msg);
                         editor.clear();
-                        redrawPrompt(editor.line());
+                        try redrawRetained(&session, editor.line());
                         continue;
                     };
 
-                    const stdout = StdoutAdapter{};
                     switch (outcome) {
                         .noop => {},
                         .quit => return,
                         .rendered => |rendered| {
                             defer allocator.free(rendered);
-                            try printBody(&stdout, rendered);
+                            try emitScrollbackBody(&session, rendered);
                         },
                         .tool_result => |*result| {
                             defer result.deinit(allocator);
-                            try printBody(&stdout, result.body);
+                            try emitScrollbackBody(&session, result.body);
                         },
                         .session_resume => try agent.rebuildSession(allocator, &session, registry, repl.baseSessionConfig(flags, .{ .resume_latest = true })),
                         .session_new => try agent.rebuildSession(allocator, &session, registry, repl.baseSessionConfig(flags, .{})),
                         .session_compact => {
                             const msg = try agent.compact(allocator, &session);
                             defer allocator.free(msg);
-                            try printBody(&stdout, msg);
+                            try emitScrollbackBody(&session, msg);
                         },
                         .session_fork => {
                             const msg = try agent.fork(allocator, &session);
                             defer allocator.free(msg);
-                            try printBody(&stdout, msg);
+                            try emitScrollbackBody(&session, msg);
                         },
                     }
 
                     editor.clear();
-                    redrawPrompt(editor.line());
+                    try redrawRetained(&session, editor.line());
                 },
                 .cancel => {
-                    writeAll("\r\n");
+                    try emitScrollback(&session, "\r\n");
                     return;
                 },
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Retained region + scrollback plumbing
+// ---------------------------------------------------------------------------
+
+/// Single-threaded scratch buffer for the retained writer. The TUI loop
+/// never recurses into itself so reusing the same buffer per frame is safe
+/// and avoids a per-frame allocation.
+var frame_buf: [4096]u8 = undefined;
+
+fn retainedState(session: *const agent.AgentSession, input: []const u8) retained.State {
+    return .{
+        .status = .{
+            .session_id = if (session.session_id) |s| s else null,
+            .model = session.currentModel(),
+            .tokens = session.token_totals,
+        },
+        .input = input,
+        .prompt_label = prompt_label,
+    };
+}
+
+fn redrawRetained(session: *const agent.AgentSession, input: []const u8) !void {
+    var fw = std.Io.Writer.fixed(&frame_buf);
+    // retained.redraw's max emission fits in 4 KiB for any realistic
+    // terminal width; a larger input buffer would be truncated by the
+    // writer-fixed wrap, which is still correct since the line will be
+    // redrawn on the next keystroke.
+    retained.redraw(&fw, session.theme, retainedState(session, input)) catch {};
+    writeAll(fw.buffered());
+}
+
+/// Erase the retained region, print `body` as scrollback (CRLF-translated),
+/// then re-anchor the retained region below the new scrollback bytes. All
+/// three phases share `frame_buf`: the before and after writes compose
+/// short ANSI escape sequences that always fit.
+fn emitScrollbackBody(session: *agent.AgentSession, body: []const u8) !void {
+    try flushRetainedCommand(retainedEraser);
+
+    const stdout = StdoutAdapter{};
+    try printBody(&stdout, body);
+
+    try flushRetainedReanchor(session);
+}
+
+/// Short-circuit path: a fixed CRLF or short literal string that should
+/// land above the retained region without extra CRLF translation.
+fn emitScrollback(session: *agent.AgentSession, body: []const u8) !void {
+    try flushRetainedCommand(retainedEraser);
+    writeAll(body);
+    try flushRetainedReanchor(session);
+}
+
+fn retainedEraser(w: *std.Io.Writer) !void {
+    try retained.beforeScrollback(w);
+}
+
+/// Runs `emit` against a fixed writer over `frame_buf`, then flushes the
+/// buffered bytes to stdout. Keeps the ceremony out of callers.
+fn flushRetainedCommand(emit: *const fn (*std.Io.Writer) anyerror!void) !void {
+    var fw = std.Io.Writer.fixed(&frame_buf);
+    try emit(&fw);
+    writeAll(fw.buffered());
+}
+
+fn flushRetainedReanchor(session: *const agent.AgentSession) !void {
+    var fw = std.Io.Writer.fixed(&frame_buf);
+    try retained.afterScrollback(&fw, session.theme, retainedState(session, ""));
+    writeAll(fw.buffered());
+}
+
+fn writeBanner(_: *const agent.AgentSession) !void {
+    const banner = "zigts expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
+    writeAll(banner);
 }
 
 fn classifyByte(b: u8) KeyEvent {
@@ -141,12 +218,8 @@ fn classifyByte(b: u8) KeyEvent {
 }
 
 fn writeAll(s: []const u8) void {
+    if (s.len == 0) return;
     _ = std.c.write(std.c.STDOUT_FILENO, s.ptr, s.len);
-}
-
-fn redrawPrompt(current: []const u8) void {
-    writeAll(prompt_prefix);
-    if (current.len > 0) writeAll(current);
 }
 
 fn approveEdit(file: []const u8) !bool {
@@ -178,19 +251,12 @@ fn approveEdit(file: []const u8) !bool {
     }
 }
 
-/// Writer adapter that forwards straight to stdout via std.c.write. Used by
-/// the `run()` loop to keep `printBody` non-allocating in production while
-/// letting tests pass a buffered writer instead.
 const StdoutAdapter = struct {
     fn writeAll(_: *const StdoutAdapter, bytes: []const u8) error{}!void {
         _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
     }
 };
 
-/// Translate LF to CRLF because raw mode has OPOST off, and always terminate
-/// with CRLF so the next prompt draws on a fresh line even when the body
-/// itself ended mid-line. Takes a writer so tests can pin the exact output;
-/// the `run()` loop passes a `StdoutAdapter`.
 fn printBody(writer: anytype, body: []const u8) !void {
     var start: usize = 0;
     var i: usize = 0;
@@ -211,9 +277,9 @@ fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
     return loop.resolveApprovalFn(policy, approveEdit);
 }
 
-
 // ---------------------------------------------------------------------------
-// Tests (byte classification only; the event loop itself is I/O-driven)
+// Tests (byte classification + rendering only; the event loop itself is
+// I/O-driven and exercised by integration runs).
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -302,10 +368,6 @@ test "selectApprovalFn: ask resolves to the interactive approveEdit" {
     try testing.expect(selectApprovalFn(.ask) == approveEdit);
 }
 
-// Replay-driven rendering: the TUI must produce the same CRLF output for
-// a canned transcript as it does live, so persisted sessions can be
-// reconstructed through renderRich + printBody without any stdin.
-
 const transcript_mod = @import("../transcript.zig");
 const turn = @import("../turn.zig");
 
@@ -350,7 +412,6 @@ test "replay: canned entry stream renders deterministic CRLF output" {
     out_buf = aw.toArrayList();
     const out = out_buf.items;
 
-    // No bare LF survives the TUI's OPOST-off translation.
     var i: usize = 0;
     while (i < out.len) : (i += 1) {
         if (out[i] == '\n') {
@@ -358,7 +419,6 @@ test "replay: canned entry stream renders deterministic CRLF output" {
         }
     }
 
-    // Every entry's textual content made it through.
     try testing.expect(std.mem.indexOf(u8, out, "add a GET route") != null);
     try testing.expect(std.mem.indexOf(u8, out, "Inspecting first.") != null);
     try testing.expect(std.mem.indexOf(u8, out, "zigts_expert_meta") != null);
@@ -366,7 +426,6 @@ test "replay: canned entry stream renders deterministic CRLF output" {
     try testing.expect(std.mem.indexOf(u8, out, "contract ok") != null);
     try testing.expect(std.mem.indexOf(u8, out, "ZTS001 unsupported var") != null);
 
-    // Proof and diagnostic boxes are rendered with their distinct frames.
     try testing.expect(std.mem.indexOf(u8, out, "proof") != null);
     try testing.expect(std.mem.indexOf(u8, out, "veto") != null);
 }
@@ -394,4 +453,15 @@ test "replay: rendering the same stream twice is byte-identical" {
     buf_b = aw_b.toArrayList();
 
     try testing.expectEqualSlices(u8, buf_a.items, buf_b.items);
+}
+
+test "retainedState: mirrors session fields" {
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    const state = retainedState(&session, "typed");
+    try testing.expect(state.status.model == null);
+    try testing.expectEqualStrings("typed", state.input);
+    try testing.expectEqualStrings("expert> ", state.prompt_label);
+    try testing.expect(state.status.session_id == null);
 }
