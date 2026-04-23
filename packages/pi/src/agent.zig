@@ -27,6 +27,7 @@ const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const project_context = @import("context/project_context.zig");
+const theme_mod = @import("tui/theme.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
@@ -106,7 +107,7 @@ pub const AgentSession = struct {
     token_totals: turn.Usage = .{},
     /// TUI theme in use for this session. Defaults to the built-in "default"
     /// palette; `/settings theme <name>` swaps the pointer.
-    theme: *const @import("tui/theme.zig").Theme = &@import("tui/theme.zig").default,
+    theme: *const theme_mod.Theme = &theme_mod.default,
 
     pub fn initStub() AgentSession {
         return .{};

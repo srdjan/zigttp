@@ -11,6 +11,7 @@
 //! this is accurate; richer content will need a proper width helper.
 
 const std = @import("std");
+const ansi = @import("../ansi.zig");
 
 pub const Color = enum {
     none,
@@ -30,7 +31,7 @@ pub const Color = enum {
     }
 };
 
-pub const reset = "\x1b[0m";
+pub const reset = ansi.reset;
 
 /// Unicode box-drawing characters. Kept as constants so any future
 /// switch to ASCII-only rendering is a single-file edit.

@@ -49,7 +49,7 @@ pub fn run(
     });
     defer session.deinit(allocator);
 
-    try writeBanner(&session);
+    try writeBanner();
     try redrawRetained(&session, editor.line());
 
     var input_buf: [256]u8 = undefined;
@@ -137,8 +137,9 @@ pub fn run(
 
 /// Single-threaded scratch buffer for the retained writer. The TUI loop
 /// never recurses into itself so reusing the same buffer per frame is safe
-/// and avoids a per-frame allocation.
-var frame_buf: [4096]u8 = undefined;
+/// and avoids a per-frame allocation. 8 KiB covers every realistic terminal
+/// width + input length combination without truncation.
+var frame_buf: [8192]u8 = undefined;
 
 fn retainedState(session: *const agent.AgentSession, input: []const u8) retained.State {
     return .{
@@ -154,54 +155,40 @@ fn retainedState(session: *const agent.AgentSession, input: []const u8) retained
 
 fn redrawRetained(session: *const agent.AgentSession, input: []const u8) !void {
     var fw = std.Io.Writer.fixed(&frame_buf);
-    // retained.redraw's max emission fits in 4 KiB for any realistic
-    // terminal width; a larger input buffer would be truncated by the
-    // writer-fixed wrap, which is still correct since the line will be
-    // redrawn on the next keystroke.
-    retained.redraw(&fw, session.theme, retainedState(session, input)) catch {};
+    try retained.redraw(&fw, session.theme, retainedState(session, input));
     writeAll(fw.buffered());
 }
 
 /// Erase the retained region, print `body` as scrollback (CRLF-translated),
-/// then re-anchor the retained region below the new scrollback bytes. All
-/// three phases share `frame_buf`: the before and after writes compose
-/// short ANSI escape sequences that always fit.
+/// then re-anchor the retained region below the new scrollback bytes.
 fn emitScrollbackBody(session: *agent.AgentSession, body: []const u8) !void {
-    try flushRetainedCommand(retainedEraser);
-
+    try flushEraseRetained();
     const stdout = StdoutAdapter{};
     try printBody(&stdout, body);
-
-    try flushRetainedReanchor(session);
+    try flushReanchor(session);
 }
 
-/// Short-circuit path: a fixed CRLF or short literal string that should
-/// land above the retained region without extra CRLF translation.
+/// Short-circuit path: a literal string that should land above the retained
+/// region without extra CRLF translation.
 fn emitScrollback(session: *agent.AgentSession, body: []const u8) !void {
-    try flushRetainedCommand(retainedEraser);
+    try flushEraseRetained();
     writeAll(body);
-    try flushRetainedReanchor(session);
+    try flushReanchor(session);
 }
 
-fn retainedEraser(w: *std.Io.Writer) !void {
-    try retained.beforeScrollback(w);
-}
-
-/// Runs `emit` against a fixed writer over `frame_buf`, then flushes the
-/// buffered bytes to stdout. Keeps the ceremony out of callers.
-fn flushRetainedCommand(emit: *const fn (*std.Io.Writer) anyerror!void) !void {
+fn flushEraseRetained() !void {
     var fw = std.Io.Writer.fixed(&frame_buf);
-    try emit(&fw);
+    try retained.beforeScrollback(&fw);
     writeAll(fw.buffered());
 }
 
-fn flushRetainedReanchor(session: *const agent.AgentSession) !void {
+fn flushReanchor(session: *const agent.AgentSession) !void {
     var fw = std.Io.Writer.fixed(&frame_buf);
     try retained.afterScrollback(&fw, session.theme, retainedState(session, ""));
     writeAll(fw.buffered());
 }
 
-fn writeBanner(_: *const agent.AgentSession) !void {
+fn writeBanner() !void {
     const banner = "zigts expert - type a request, 'help' for tools, press Enter to submit, Ctrl-C or 'quit' to exit\r\n";
     writeAll(banner);
 }

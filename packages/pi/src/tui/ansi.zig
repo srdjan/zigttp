@@ -48,6 +48,24 @@ pub fn styled(w: *std.Io.Writer, params: []const u8, text: []const u8) !void {
     try w.writeAll(reset);
 }
 
+/// Same as `styled` but the inner content is produced via `std.fmt`-style
+/// formatting. Lets callers render integers (or any non-string value)
+/// through the SGR wrapper without hand-rolling a `\x1b[{s}m` print.
+pub fn styledFmt(
+    w: *std.Io.Writer,
+    params: []const u8,
+    comptime fmt: []const u8,
+    args: anytype,
+) !void {
+    if (params.len == 0) {
+        try w.print(fmt, args);
+        return;
+    }
+    try sgr(w, params);
+    try w.print(fmt, args);
+    try w.writeAll(reset);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -90,6 +108,26 @@ test "styled: wraps the text with SGR and resets at the end" {
     }.call);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("\x1b[32mok\x1b[0m", out);
+}
+
+test "styledFmt: formats through SGR with params" {
+    const out = try collect(struct {
+        fn call(w: *std.Io.Writer) !void {
+            try styledFmt(w, "36", "{d}", .{42});
+        }
+    }.call);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("\x1b[36m42\x1b[0m", out);
+}
+
+test "styledFmt: empty params drops the SGR wrap" {
+    const out = try collect(struct {
+        fn call(w: *std.Io.Writer) !void {
+            try styledFmt(w, "", "{d}", .{7});
+        }
+    }.call);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("7", out);
 }
 
 test "styled: empty SGR emits only the text" {

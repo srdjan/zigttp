@@ -12,6 +12,10 @@ const ansi = @import("../ansi.zig");
 const theme_mod = @import("../theme.zig");
 const turn = @import("../../turn.zig");
 
+/// UTF-8 encoding of U+00B7 "middle dot" used as the visual separator
+/// between status line sections.
+const middle_dot = " \xc2\xb7 ";
+
 pub const State = struct {
     session_id: ?[]const u8,
     model: ?[]const u8,
@@ -29,15 +33,15 @@ pub fn render(
     try ansi.styled(writer, palette.status_key, "sess ");
     try ansi.styled(writer, palette.status_value, formatSessionShort(state.session_id));
 
-    try ansi.styled(writer, palette.dim, " \xc2\xb7 "); // middle dot U+00B7
+    try ansi.styled(writer, palette.dim, middle_dot);
     try ansi.styled(writer, palette.status_key, "model ");
     try ansi.styled(writer, palette.status_value, state.model orelse "stub");
 
-    try ansi.styled(writer, palette.dim, " \xc2\xb7 ");
+    try ansi.styled(writer, palette.dim, middle_dot);
     try ansi.styled(writer, palette.status_key, "tokens in:");
-    try writer.print("\x1b[{s}m{d}\x1b[0m", .{ palette.status_value, state.tokens.input_tokens });
+    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.input_tokens});
     try ansi.styled(writer, palette.status_key, " out:");
-    try writer.print("\x1b[{s}m{d}\x1b[0m", .{ palette.status_value, state.tokens.output_tokens });
+    try ansi.styledFmt(writer, palette.status_value, "{d}", .{state.tokens.output_tokens});
 }
 
 /// Truncates a session id to a short display form. Session ids are 26-char
