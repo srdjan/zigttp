@@ -52,4 +52,5 @@ comptime {
     _ = @import("frontmatter.zig");
     _ = @import("skills/catalog.zig");
     _ = @import("prompts/catalog.zig");
+    _ = @import("test_support/lockdown.zig");
 }
