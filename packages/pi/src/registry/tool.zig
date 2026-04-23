@@ -64,9 +64,14 @@ pub const ToolResult = struct {
         ok: bool,
         llm_text: []const u8,
     ) !ToolResult {
-        return withUiPayload(allocator, ok, llm_text, .{
-            .plain_text = @constCast(llm_text),
-        });
+        const owned_text = try allocator.dupe(u8, llm_text);
+        errdefer allocator.free(owned_text);
+        const payload_copy = try allocator.dupe(u8, llm_text);
+        return .{
+            .ok = ok,
+            .llm_text = owned_text,
+            .ui_payload = .{ .plain_text = payload_copy },
+        };
     }
 
     pub fn withSessionTree(
@@ -75,9 +80,25 @@ pub const ToolResult = struct {
         llm_text: []const u8,
         nodes: []const SessionTreeNode,
     ) !ToolResult {
-        return withUiPayload(allocator, ok, llm_text, .{
-            .session_tree = .{ .nodes = @constCast(nodes) },
-        });
+        const owned_text = try allocator.dupe(u8, llm_text);
+        errdefer allocator.free(owned_text);
+        const owned_nodes = try allocator.alloc(SessionTreeNode, nodes.len);
+        var initialized: usize = 0;
+        errdefer {
+            while (initialized > 0) {
+                initialized -= 1;
+                owned_nodes[initialized].deinit(allocator);
+            }
+            allocator.free(owned_nodes);
+        }
+        while (initialized < nodes.len) : (initialized += 1) {
+            owned_nodes[initialized] = try nodes[initialized].clone(allocator);
+        }
+        return .{
+            .ok = ok,
+            .llm_text = owned_text,
+            .ui_payload = .{ .session_tree = .{ .nodes = owned_nodes } },
+        };
     }
 };
 
