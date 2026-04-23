@@ -4,6 +4,7 @@
 const std = @import("std");
 const verify_paths_core = @import("zigts_cli").verify_paths_core;
 const registry_mod = @import("../registry/registry.zig");
+const ui_payload = @import("../ui_payload.zig");
 
 const name = "zigts_expert_verify_paths";
 
@@ -38,10 +39,72 @@ fn execute(
     const outcome = try verify_paths_core.writeJsonEnvelope(allocator, &aw.writer, args);
 
     buf = aw.toArrayList();
+    const llm_text = try buf.toOwnedSlice(allocator);
+    errdefer allocator.free(llm_text);
+
     return .{
         .ok = outcome.ok,
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = llm_text,
+        .ui_payload = buildDiagnosticsPayload(allocator, llm_text) catch null,
     };
+}
+
+fn buildDiagnosticsPayload(
+    allocator: std.mem.Allocator,
+    llm_text: []const u8,
+) !ui_payload.UiPayload {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, llm_text, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidDiagnosticsEnvelope;
+    const obj = parsed.value.object;
+    const checked_files = obj.get("checked_files") orelse return error.InvalidDiagnosticsEnvelope;
+    const violations = obj.get("violations") orelse return error.InvalidDiagnosticsEnvelope;
+    if (checked_files != .array or violations != .array) return error.InvalidDiagnosticsEnvelope;
+
+    const items = try allocator.alloc(ui_payload.DiagnosticItem, violations.array.items.len);
+    errdefer allocator.free(items);
+    for (items) |*item| item.* = undefined;
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            items[i].deinit(allocator);
+        }
+        allocator.free(items);
+    }
+    while (i < violations.array.items.len) : (i += 1) {
+        const diag = violations.array.items[i];
+        if (diag != .object) return error.InvalidDiagnosticsEnvelope;
+        const diag_obj = diag.object;
+        const code = diag_obj.get("code") orelse return error.InvalidDiagnosticsEnvelope;
+        const severity = diag_obj.get("severity") orelse return error.InvalidDiagnosticsEnvelope;
+        const message = diag_obj.get("message") orelse return error.InvalidDiagnosticsEnvelope;
+        const file = diag_obj.get("file") orelse return error.InvalidDiagnosticsEnvelope;
+        const line = diag_obj.get("line") orelse return error.InvalidDiagnosticsEnvelope;
+        const column = diag_obj.get("column") orelse return error.InvalidDiagnosticsEnvelope;
+        if (code != .string or severity != .string or message != .string or file != .string or line != .integer or column != .integer) {
+            return error.InvalidDiagnosticsEnvelope;
+        }
+        items[i] = try ui_payload.DiagnosticItem.init(
+            allocator,
+            code.string,
+            severity.string,
+            file.string,
+            @intCast(line.integer),
+            @intCast(column.integer),
+            message.string,
+            null,
+        );
+    }
+
+    return .{ .diagnostics = .{
+        .summary = try std.fmt.allocPrint(
+            allocator,
+            "{d} checked file(s), {d} diagnostic(s)",
+            .{ checked_files.array.items.len, items.len },
+        ),
+        .items = items,
+    } };
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +118,7 @@ test "missing args returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "requires at least one path") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires at least one path") != null);
 }
 
 test "execute on a file that does not exist emits ZTS000 envelope" {
@@ -63,7 +126,8 @@ test "execute on a file that does not exist emits ZTS000 envelope" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"ok\":false") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"ZTS000\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"policy_version\":\"2026.04.2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ZTS000\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_version\":\"2026.04.2\"") != null);
+    try testing.expect(result.ui_payload != null);
 }

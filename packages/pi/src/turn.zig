@@ -5,6 +5,7 @@
 //! transcript mutation. The machine only decides what happens next.
 
 const std = @import("std");
+const ui_payload = @import("ui_payload.zig");
 
 /// Per-request token accounting returned by the model provider.
 pub const Usage = struct {
@@ -42,6 +43,17 @@ pub const Edit = struct {
     before: ?[]const u8,
 };
 
+pub const DisplayMessage = struct {
+    llm_text: []const u8,
+    ui_payload: ?ui_payload.UiPayload = null,
+
+    pub fn deinit(self: *DisplayMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.llm_text);
+        if (self.ui_payload) |*payload| payload.deinit(allocator);
+        self.* = .{ .llm_text = &.{}, .ui_payload = null };
+    }
+};
+
 pub const AssistantReply = struct {
     preamble: ?[]const u8 = null,
     response: Response,
@@ -55,11 +67,13 @@ pub const AssistantReply = struct {
 
 pub const EditOutcome = struct {
     ok: bool,
-    body: []const u8,
+    llm_text: []const u8,
+    ui_payload: ?ui_payload.UiPayload = null,
 
     pub fn deinit(self: *EditOutcome, allocator: std.mem.Allocator) void {
-        allocator.free(self.body);
-        self.body = &.{};
+        allocator.free(self.llm_text);
+        if (self.ui_payload) |*payload| payload.deinit(allocator);
+        self.* = .{ .ok = false, .llm_text = &.{}, .ui_payload = null };
     }
 };
 
@@ -67,7 +81,8 @@ pub const ToolResultMessage = struct {
     tool_use_id: []const u8,
     tool_name: []const u8,
     ok: bool,
-    body: []const u8,
+    llm_text: []const u8,
+    ui_payload: ?ui_payload.UiPayload = null,
 };
 
 pub const TurnEvent = union(enum) {
@@ -83,8 +98,8 @@ pub const Message = union(enum) {
     user_text: []const u8,
     model_text: []const u8,
     assistant_tool_use: []const ToolCall,
-    proof_card: []const u8,
-    diagnostic_box: []const u8,
+    proof_card: DisplayMessage,
+    diagnostic_box: DisplayMessage,
     tool_result: ToolResultMessage,
     /// Compacted history note injected by /compact. Replaces one or more older
     /// entries so the model still sees the gist without the full token cost.
@@ -167,16 +182,22 @@ pub const TurnMachine = struct {
             .edit_verified => |outcome| {
                 if (outcome.ok) {
                     self.state = .done;
-                    return .{ .render = .{ .proof_card = outcome.body } };
+                    return .{ .render = .{ .proof_card = .{
+                        .llm_text = outcome.llm_text,
+                        .ui_payload = outcome.ui_payload,
+                    } } };
                 }
                 if (self.attempt >= self.max_attempts) {
                     self.state = .done;
-                    return .{ .render = .{ .diagnostic_box = outcome.body } };
+                    return .{ .render = .{ .diagnostic_box = .{
+                        .llm_text = outcome.llm_text,
+                        .ui_payload = outcome.ui_payload,
+                    } } };
                 }
                 self.attempt += 1;
                 self.state = .awaiting_model;
                 return .{ .retry_draft = .{
-                    .diagnostic = outcome.body,
+                    .diagnostic = outcome.llm_text,
                     .attempt = self.attempt,
                     .max_attempts = self.max_attempts,
                 } };
@@ -283,12 +304,15 @@ test "awaiting_model + edit -> verifying_edit with run_veto" {
 
 test "verifying_edit + edit_verified(ok) -> done with proof_card" {
     var m: TurnMachine = .{ .state = .verifying_edit };
-    const action = m.transition(.{ .edit_verified = .{ .ok = true, .body = "proof-body" } });
+    const action = m.transition(.{ .edit_verified = .{
+        .ok = true,
+        .llm_text = "proof-body",
+    } });
 
     try testing.expectEqual(TurnState.done, m.state);
     switch (action) {
         .render => |msg| switch (msg) {
-            .proof_card => |body| try testing.expectEqualStrings("proof-body", body),
+            .proof_card => |card| try testing.expectEqualStrings("proof-body", card.llm_text),
             else => return error.TestFailed,
         },
         else => return error.TestFailed,
@@ -297,7 +321,10 @@ test "verifying_edit + edit_verified(ok) -> done with proof_card" {
 
 test "verifying_edit + edit_verified(fail) with budget remaining -> retry_draft" {
     var m: TurnMachine = .{ .state = .verifying_edit, .max_attempts = 3 };
-    const action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "ZTS001 diag" } });
+    const action = m.transition(.{ .edit_verified = .{
+        .ok = false,
+        .llm_text = "ZTS001 diag",
+    } });
 
     try testing.expectEqual(TurnState.awaiting_model, m.state);
     try testing.expectEqual(@as(u8, 2), m.attempt);
@@ -313,12 +340,15 @@ test "verifying_edit + edit_verified(fail) with budget remaining -> retry_draft"
 
 test "verifying_edit + edit_verified(fail) at max_attempts -> done with diagnostic_box" {
     var m: TurnMachine = .{ .state = .verifying_edit, .attempt = 3, .max_attempts = 3 };
-    const action = m.transition(.{ .edit_verified = .{ .ok = false, .body = "final diag" } });
+    const action = m.transition(.{ .edit_verified = .{
+        .ok = false,
+        .llm_text = "final diag",
+    } });
 
     try testing.expectEqual(TurnState.done, m.state);
     switch (action) {
         .render => |msg| switch (msg) {
-            .diagnostic_box => |body| try testing.expectEqualStrings("final diag", body),
+            .diagnostic_box => |box| try testing.expectEqualStrings("final diag", box.llm_text),
             else => return error.TestFailed,
         },
         else => return error.TestFailed,

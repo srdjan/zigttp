@@ -91,7 +91,7 @@ fn execute(
     try w.writeAll("}\n");
 
     buf = aw.toArrayList();
-    return .{ .ok = true, .body = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,28 +104,28 @@ test "workspace_read_file: missing path arg returns structured error" {
     var result = try execute(testing.allocator, &.{});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "missing path") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing path") != null);
 }
 
 test "workspace_read_file: malformed JSON args returns structured error" {
     var result = try execute(testing.allocator, &.{"{not json"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "invalid JSON input") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
 }
 
 test "workspace_read_file: JSON args without path returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"start_line\":1}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "missing path") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "missing path") != null);
 }
 
 test "workspace_read_file: negative start_line returns structured error" {
     var result = try execute(testing.allocator, &.{"{\"path\":\"x\",\"start_line\":-1}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "start_line must be a positive integer") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "start_line must be a positive integer") != null);
 }
 
 test "workspace_read_file: ../ escape is rejected by resolveInsideWorkspace" {

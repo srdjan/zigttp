@@ -143,8 +143,14 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
     switch (entry.*) {
         .user_text => |body| try emitRecord(allocator, out, .{ .user_text = body }),
         .model_text => |body| try emitRecord(allocator, out, .{ .model_text = body }),
-        .proof_card => |body| try emitRecord(allocator, out, .{ .proof_card = body }),
-        .diagnostic_box => |body| try emitRecord(allocator, out, .{ .diagnostic_box = body }),
+        .proof_card => |body| try emitRecord(allocator, out, .{ .proof_card = .{
+            .llm_text = body.llm_text,
+            .ui_payload = body.ui_payload,
+        } }),
+        .diagnostic_box => |body| try emitRecord(allocator, out, .{ .diagnostic_box = .{
+            .llm_text = body.llm_text,
+            .ui_payload = body.ui_payload,
+        } }),
         .assistant_tool_use => |calls| {
             for (calls) |call| {
                 try emitRecord(allocator, out, .{ .tool_use = .{
@@ -158,7 +164,8 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
             .tool_use_id = tr.tool_use_id,
             .tool_name = tr.tool_name,
             .ok = tr.ok,
-            .body = tr.body,
+            .llm_text = tr.llm_text,
+            .ui_payload = tr.ui_payload,
         } }),
         .system_note => {},
     }
@@ -264,7 +271,7 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
     try testing.expect(model_line < end_line);
     try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "hello") != null);
     try testing.expect(std.mem.indexOf(u8, lines.items[model_line], "hi") != null);
-    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":2") != null);
 }
 
 test "runWithClient: non-json mode writes rendered text" {

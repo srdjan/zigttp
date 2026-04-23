@@ -34,7 +34,31 @@ pub const ModelClient = struct {
     }
 };
 
-pub const ApprovalFn = *const fn (file: []const u8) anyerror!bool;
+pub const ApprovalFn = union(enum) {
+    bare: *const fn (file: []const u8) anyerror!bool,
+    contextual: struct {
+        context: *anyopaque,
+        func: *const fn (context: *anyopaque, file: []const u8) anyerror!bool,
+    },
+
+    pub fn fromFn(func: *const fn (file: []const u8) anyerror!bool) ApprovalFn {
+        return .{ .bare = func };
+    }
+
+    pub fn withContext(
+        context: *anyopaque,
+        func: *const fn (context: *anyopaque, file: []const u8) anyerror!bool,
+    ) ApprovalFn {
+        return .{ .contextual = .{ .context = context, .func = func } };
+    }
+
+    pub fn call(self: ApprovalFn, file: []const u8) anyerror!bool {
+        return switch (self) {
+            .bare => |func| func(file),
+            .contextual => |wrapped| wrapped.func(wrapped.context, file),
+        };
+    }
+};
 
 pub const ApprovalPolicy = enum { ask, auto_approve, auto_reject };
 
@@ -50,9 +74,9 @@ pub fn autoReject(file: []const u8) anyerror!bool {
 
 pub fn resolveApprovalFn(policy: ApprovalPolicy, ask_fn: ?ApprovalFn) ApprovalFn {
     return switch (policy) {
-        .auto_approve => autoApprove,
-        .auto_reject => autoReject,
-        .ask => ask_fn orelse autoReject,
+        .auto_approve => ApprovalFn.fromFn(autoApprove),
+        .auto_reject => ApprovalFn.fromFn(autoReject),
+        .ask => ask_fn orelse ApprovalFn.fromFn(autoReject),
     };
 }
 
@@ -150,12 +174,13 @@ pub fn runTurnWith(
                 });
                 if (outcome.ok and !options.replay_mode) {
                     if (options.approval_fn) |approve| {
-                        if (!try approve(prepared.edit.file)) {
+                        if (!try approve.call(prepared.edit.file)) {
                             try transcript.append(allocator, .{ .tool_result = .{
                                 .tool_use_id = "approval",
                                 .tool_name = "apply_edit",
                                 .ok = false,
-                                .body = "edit verified but not applied by user approval policy",
+                                .llm_text = "edit verified but not applied by user approval policy",
+                                .ui_payload = null,
                             } });
                             return .{ .final_state = .done, .attempt = machine.attempt, .usage = turn_usage };
                         }
@@ -182,7 +207,8 @@ pub fn runTurnWith(
                             .tool_use_id = call.id,
                             .tool_name = call.name,
                             .ok = false,
-                            .body = message,
+                            .llm_text = message,
+                            .ui_payload = null,
                         } });
                     }
                     next_event = .tool_batch_completed;
@@ -197,7 +223,8 @@ pub fn runTurnWith(
                         .tool_use_id = call.id,
                         .tool_name = call.name,
                         .ok = result.ok,
-                        .body = result.body,
+                        .llm_text = result.llm_text,
+                        .ui_payload = result.ui_payload,
                     } });
                 }
                 next_event = .tool_batch_completed;
@@ -207,7 +234,7 @@ pub fn runTurnWith(
                 return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
             .prompt_user => |question| {
-                try transcript.append(allocator, .{ .diagnostic_box = question });
+                try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = question } });
                 return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage };
             },
             .end_turn => return .{ .final_state = machine.state, .attempt = machine.attempt, .usage = turn_usage },
@@ -310,9 +337,15 @@ fn postApplyCheck(
             const note = try std.fmt.allocPrint(
                 allocator,
                 "post-apply regression: verify_paths found violations\n{s}",
-                .{vr.body},
+                .{vr.llm_text},
             );
-            try transcript.append(allocator, .{ .diagnostic_box = note });
+            try transcript.append(allocator, .{ .diagnostic_box = .{
+                .llm_text = note,
+                .ui_payload = if (vr.ui_payload) |payload|
+                    try payload.clone(allocator)
+                else
+                    null,
+            } });
         }
     }
 
@@ -328,9 +361,15 @@ fn postApplyCheck(
             const note = try std.fmt.allocPrint(
                 allocator,
                 "post-apply diff review: new violations found\n{s}",
-                .{rr.body},
+                .{rr.llm_text},
             );
-            try transcript.append(allocator, .{ .diagnostic_box = note });
+            try transcript.append(allocator, .{ .diagnostic_box = .{
+                .llm_text = note,
+                .ui_payload = if (rr.ui_payload) |payload|
+                    try payload.clone(allocator)
+                else
+                    null,
+            } });
         }
     }
 }
@@ -395,7 +434,7 @@ fn stubExecute(
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
     _ = args;
-    return .{ .ok = true, .body = try allocator.dupe(u8, "{\"stub\":\"ok\"}\n") };
+    return .{ .ok = true, .llm_text = try allocator.dupe(u8, "{\"stub\":\"ok\"}\n") };
 }
 
 fn stubDecodeJson(
@@ -480,7 +519,7 @@ test "clean edit path: veto passes and writes file" {
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
     switch (tr.at(tr.len() - 1).*) {
-        .proof_card => |body| try testing.expect(std.mem.indexOf(u8, body, "\"total\":0") != null),
+        .proof_card => |body| try testing.expect(std.mem.indexOf(u8, body.llm_text, "\"total\":0") != null),
         else => return error.TestFailed,
     }
     const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
@@ -517,7 +556,7 @@ test "broken edit path: veto fails with diagnostic box" {
 
     try testing.expectEqual(turn.TurnState.done, result.final_state);
     switch (tr.at(tr.len() - 1).*) {
-        .diagnostic_box => |body| try testing.expect(std.mem.indexOf(u8, body, "\"ZTS001\"") != null),
+        .diagnostic_box => |body| try testing.expect(std.mem.indexOf(u8, body.llm_text, "\"ZTS001\"") != null),
         else => return error.TestFailed,
     }
 }
@@ -615,12 +654,12 @@ test "approval callback can block an otherwise verified edit from being written"
         "add a GET route",
         .{
             .workspace_root = workspace_root,
-            .approval_fn = autoReject,
+            .approval_fn = ApprovalFn.fromFn(autoReject),
         },
     );
 
     switch (tr.at(tr.len() - 1).*) {
-        .tool_result => |result| try testing.expect(std.mem.indexOf(u8, result.body, "not applied") != null),
+        .tool_result => |result| try testing.expect(std.mem.indexOf(u8, result.llm_text, "not applied") != null),
         else => return error.TestFailed,
     }
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
@@ -722,7 +761,7 @@ test "replay_mode skips the approval callback" {
         "add a GET route",
         .{
             .workspace_root = workspace_root,
-            .approval_fn = autoReject,
+            .approval_fn = ApprovalFn.fromFn(autoReject),
             .replay_mode = true,
         },
     );

@@ -1,5 +1,6 @@
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
+const ui_payload = @import("../ui_payload.zig");
 const json_writer = @import("../providers/anthropic/json_writer.zig");
 
 pub const default_output_limit: usize = 256 * 1024;
@@ -121,9 +122,22 @@ pub fn commandOutcomeToToolResult(
     try w.writeAll("}\n");
 
     buf = aw.toArrayList();
+    const llm_text = try buf.toOwnedSlice(allocator);
+    errdefer allocator.free(llm_text);
+
+    const command = try std.mem.join(allocator, " ", argv);
+    errdefer allocator.free(command);
+
     return .{
         .ok = outcome.ok,
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = llm_text,
+        .ui_payload = .{ .command_outcome = .{
+            .title = try std.fmt.allocPrint(allocator, "{s}", .{argv[0]}),
+            .exit_code = outcome.exit_code,
+            .stdout = try allocator.dupe(u8, outcome.stdout),
+            .stderr = try allocator.dupe(u8, outcome.stderr),
+            .command = command,
+        } },
     };
 }
 

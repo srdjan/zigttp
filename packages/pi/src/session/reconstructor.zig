@@ -20,6 +20,7 @@ const zigts = @import("zigts");
 
 const transcript = @import("../transcript.zig");
 const events = @import("events.zig");
+const ui_payload = @import("../ui_payload.zig");
 
 pub const Diagnostic = struct {
     line_number: usize = 0,
@@ -95,9 +96,9 @@ fn appendFromLine(
     } else if (std.mem.eql(u8, kind, "model_text")) {
         try appendText(allocator, tr, payload, .model_text);
     } else if (std.mem.eql(u8, kind, "proof_card")) {
-        try appendText(allocator, tr, payload, .proof_card);
+        try appendDisplayMessage(allocator, tr, payload, .proof_card);
     } else if (std.mem.eql(u8, kind, "diagnostic_box")) {
-        try appendText(allocator, tr, payload, .diagnostic_box);
+        try appendDisplayMessage(allocator, tr, payload, .diagnostic_box);
     } else if (std.mem.eql(u8, kind, "tool_use")) {
         try appendToolUse(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "tool_result")) {
@@ -109,7 +110,7 @@ fn appendFromLine(
     }
 }
 
-const TextKind = enum { user_text, model_text, proof_card, diagnostic_box, system_note };
+const TextKind = enum { user_text, model_text, system_note };
 
 fn appendText(
     allocator: std.mem.Allocator,
@@ -124,11 +125,33 @@ fn appendText(
     const entry: transcript.OwnedEntry = switch (kind) {
         .user_text => .{ .user_text = body },
         .model_text => .{ .model_text = body },
-        .proof_card => .{ .proof_card = body },
-        .diagnostic_box => .{ .diagnostic_box = body },
         .system_note => .{ .system_note = body },
     };
     try tr.entries.append(allocator, entry);
+}
+
+const DisplayKind = enum { proof_card, diagnostic_box };
+
+fn appendDisplayMessage(
+    allocator: std.mem.Allocator,
+    tr: *transcript.Transcript,
+    payload: std.json.Value,
+    kind: DisplayKind,
+) !void {
+    const message = if (payload == .string)
+        blk: {
+            break :blk transcript.OwnedDisplayMessage{
+                .llm_text = try allocator.dupe(u8, payload.string),
+                .ui_payload = null,
+            };
+        }
+    else
+        try parseDisplayMessage(allocator, payload);
+
+    try tr.entries.append(allocator, switch (kind) {
+        .proof_card => .{ .proof_card = message },
+        .diagnostic_box => .{ .diagnostic_box = message },
+    });
 }
 
 fn appendToolUse(
@@ -171,8 +194,8 @@ fn appendToolResult(
     const tu_id_val = obj.get("tool_use_id") orelse return error.CorruptEventsLog;
     const tool_name_val = obj.get("tool_name") orelse return error.CorruptEventsLog;
     const ok_val = obj.get("ok") orelse return error.CorruptEventsLog;
-    const body_val = obj.get("body") orelse return error.CorruptEventsLog;
-    if (tu_id_val != .string or tool_name_val != .string or ok_val != .bool or body_val != .string) {
+    const llm_text_val = obj.get("llm_text") orelse obj.get("body") orelse return error.CorruptEventsLog;
+    if (tu_id_val != .string or tool_name_val != .string or ok_val != .bool or llm_text_val != .string) {
         return error.CorruptEventsLog;
     }
 
@@ -180,15 +203,40 @@ fn appendToolResult(
     errdefer allocator.free(tu_id_copy);
     const tool_name_copy = try allocator.dupe(u8, tool_name_val.string);
     errdefer allocator.free(tool_name_copy);
-    const body_copy = try allocator.dupe(u8, body_val.string);
-    errdefer allocator.free(body_copy);
+    const llm_text_copy = try allocator.dupe(u8, llm_text_val.string);
+    errdefer allocator.free(llm_text_copy);
+    var payload_copy = if (obj.get("ui_payload")) |payload_val|
+        try ui_payload.parse(allocator, payload_val)
+    else if (obj.get("llm_text") == null)
+        ui_payload.UiPayload{ .plain_text = try allocator.dupe(u8, llm_text_val.string) }
+    else
+        null;
+    errdefer if (payload_copy) |*copied_payload| copied_payload.deinit(allocator);
 
     try tr.entries.append(allocator, .{ .tool_result = .{
         .tool_use_id = tu_id_copy,
         .tool_name = tool_name_copy,
         .ok = ok_val.bool,
-        .body = body_copy,
+        .llm_text = llm_text_copy,
+        .ui_payload = payload_copy,
     } });
+}
+
+fn parseDisplayMessage(
+    allocator: std.mem.Allocator,
+    payload: std.json.Value,
+) !transcript.OwnedDisplayMessage {
+    if (payload != .object) return error.CorruptEventsLog;
+    const obj = payload.object;
+    const llm_text_val = obj.get("llm_text") orelse obj.get("body") orelse return error.CorruptEventsLog;
+    if (llm_text_val != .string) return error.CorruptEventsLog;
+    return .{
+        .llm_text = try allocator.dupe(u8, llm_text_val.string),
+        .ui_payload = if (obj.get("ui_payload")) |payload_val|
+            try ui_payload.parse(allocator, payload_val)
+        else
+            null,
+    };
 }
 
 // ===========================================================================
@@ -250,9 +298,9 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
         .tool_use_id = "toolu_1",
         .tool_name = "zigts_expert_meta",
         .ok = true,
-        .body = "{\"ok\":true}",
+        .llm_text = "{\"ok\":true}",
     } });
-    try events.appendEvent(allocator, path, .{ .proof_card = "contract ok" });
+    try events.appendEvent(allocator, path, .{ .proof_card = .{ .llm_text = "contract ok" } });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -281,12 +329,12 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
             try testing.expectEqualStrings("toolu_1", r.tool_use_id);
             try testing.expectEqualStrings("zigts_expert_meta", r.tool_name);
             try testing.expect(r.ok);
-            try testing.expectEqualStrings("{\"ok\":true}", r.body);
+            try testing.expectEqualStrings("{\"ok\":true}", r.llm_text);
         },
         else => return error.TestFailed,
     }
     switch (tr.at(4).*) {
-        .proof_card => |body| try testing.expectEqualStrings("contract ok", body),
+        .proof_card => |body| try testing.expectEqualStrings("contract ok", body.llm_text),
         else => return error.TestFailed,
     }
 }

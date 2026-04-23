@@ -504,8 +504,14 @@ fn handleToolsInvoke(
     const w = &aw.writer;
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (result.ok) "true" else "false");
+    try w.writeAll(",\"llm_text\":");
+    try json_writer.writeString(w, result.llm_text);
     try w.writeAll(",\"body\":");
-    try json_writer.writeString(w, result.body);
+    try json_writer.writeString(w, result.llm_text);
+    if (result.ui_payload) |payload| {
+        try w.writeAll(",\"ui_payload\":");
+        try @import("ui_payload.zig").writeJson(w, payload);
+    }
     try w.writeByte('}');
 
     buf = aw.toArrayList();
@@ -665,14 +671,21 @@ fn emitEntryNotification(
     const record: ?session_events.EventRecord = switch (entry.*) {
         .user_text => |b| .{ .user_text = b },
         .model_text => |b| .{ .model_text = b },
-        .proof_card => |b| .{ .proof_card = b },
-        .diagnostic_box => |b| .{ .diagnostic_box = b },
+        .proof_card => |b| .{ .proof_card = .{
+            .llm_text = b.llm_text,
+            .ui_payload = b.ui_payload,
+        } },
+        .diagnostic_box => |b| .{ .diagnostic_box = .{
+            .llm_text = b.llm_text,
+            .ui_payload = b.ui_payload,
+        } },
         .system_note => |b| .{ .system_note = b },
         .tool_result => |tr| .{ .tool_result = .{
             .tool_use_id = tr.tool_use_id,
             .tool_name = tr.tool_name,
             .ok = tr.ok,
-            .body = tr.body,
+            .llm_text = tr.llm_text,
+            .ui_payload = tr.ui_payload,
         } },
         .assistant_tool_use => null,
     };

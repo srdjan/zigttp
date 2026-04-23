@@ -32,7 +32,7 @@ fn execute(
     buf = aw.toArrayList();
     return .{
         .ok = true,
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = try buf.toOwnedSlice(allocator),
     };
 }
 
@@ -47,9 +47,9 @@ test "execute returns v1 meta envelope" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"compiler_version\":\"0.16.0\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"policy_version\":\"2026.04.2\"") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"mode\":\"embedded\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"compiler_version\":\"0.16.0\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_version\":\"2026.04.2\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"mode\":\"embedded\"") != null);
 }
 
 test "execute rejects unexpected arguments" {
@@ -57,7 +57,7 @@ test "execute rejects unexpected arguments" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "takes no arguments") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "takes no arguments") != null);
 }
 
 test "registry invokes the tool end-to-end" {
@@ -70,6 +70,6 @@ test "registry invokes the tool end-to-end" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"rule_count\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"categories\":{\"verifier\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"rule_count\":") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"categories\":{\"verifier\":") != null);
 }

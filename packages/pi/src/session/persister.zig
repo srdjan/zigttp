@@ -44,8 +44,14 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
     return switch (entry.*) {
         .user_text => |body| .{ .user_text = body },
         .model_text => |body| .{ .model_text = body },
-        .proof_card => |body| .{ .proof_card = body },
-        .diagnostic_box => |body| .{ .diagnostic_box = body },
+        .proof_card => |message| .{ .proof_card = .{
+            .llm_text = message.llm_text,
+            .ui_payload = message.ui_payload,
+        } },
+        .diagnostic_box => |message| .{ .diagnostic_box = .{
+            .llm_text = message.llm_text,
+            .ui_payload = message.ui_payload,
+        } },
         .system_note => |body| .{ .system_note = body },
         .assistant_tool_use => |calls| .{ .tool_use = .{
             .id = calls[0].id,
@@ -56,7 +62,8 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
             .tool_use_id = tr.tool_use_id,
             .tool_name = tr.tool_name,
             .ok = tr.ok,
-            .body = tr.body,
+            .llm_text = tr.llm_text,
+            .ui_payload = tr.ui_payload,
         } },
     };
 }
@@ -79,17 +86,18 @@ pub fn appendEntry(
     switch (entry.*) {
         .tool_result => |tr| {
             if (opts.no_persist_tool_output) return;
-            const over_cap = tr.body.len > opts.max_body;
+            const over_cap = tr.llm_text.len > opts.max_body;
             const body = if (over_cap)
-                try transcript.capToolResultBody(allocator, tr.body, opts.max_body)
+                try transcript.capToolResultBody(allocator, tr.llm_text, opts.max_body)
             else
-                tr.body;
+                tr.llm_text;
             defer if (over_cap) allocator.free(body);
             try events.appendEvent(allocator, events_path, .{ .tool_result = .{
                 .tool_use_id = tr.tool_use_id,
                 .tool_name = tr.tool_name,
                 .ok = tr.ok,
-                .body = body,
+                .llm_text = body,
+                .ui_payload = tr.ui_payload,
             } });
         },
         .assistant_tool_use => |calls| {
@@ -227,7 +235,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
         .tool_use_id = "toolu_1",
         .tool_name = "zigts_expert_meta",
         .ok = true,
-        .body = "{\"ok\":true}",
+        .llm_text = "{\"ok\":true}",
     } };
     try appendEntry(allocator, path, &entry, .{ .max_body = 1024 });
 
@@ -257,7 +265,7 @@ test "appendEntry on tool_result over cap writes a truncated body with dropped b
         .tool_use_id = "toolu_1",
         .tool_name = "workspace_read_file",
         .ok = true,
-        .body = &big,
+        .llm_text = &big,
     } };
     try appendEntry(allocator, path, &entry, .{ .max_body = 100 });
 
@@ -281,7 +289,7 @@ test "appendEntry on tool_result over cap writes a truncated body with dropped b
 
     // Input entry must not have been mutated.
     switch (entry) {
-        .tool_result => |tr| try testing.expectEqual(@as(usize, 1000), tr.body.len),
+        .tool_result => |tr| try testing.expectEqual(@as(usize, 1000), tr.llm_text.len),
         else => return error.TestFailed,
     }
 }
@@ -298,7 +306,7 @@ test "appendEntry with no_persist_tool_output skips tool_result entries" {
         .tool_use_id = "toolu_1",
         .tool_name = "workspace_read_file",
         .ok = true,
-        .body = "secret output",
+        .llm_text = "secret output",
     } };
     try appendEntry(allocator, path, &entry, .{ .no_persist_tool_output = true });
 
@@ -336,8 +344,8 @@ test "appendEntry on proof_card and diagnostic_box round-trip correctly" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    const proof: transcript.OwnedEntry = .{ .proof_card = "contract ok" };
-    const diag: transcript.OwnedEntry = .{ .diagnostic_box = "ZTS001 veto" };
+    const proof: transcript.OwnedEntry = .{ .proof_card = .{ .llm_text = "contract ok" } };
+    const diag: transcript.OwnedEntry = .{ .diagnostic_box = .{ .llm_text = "ZTS001 veto" } };
     try appendEntry(allocator, path, &proof, .{});
     try appendEntry(allocator, path, &diag, .{});
 
@@ -354,7 +362,7 @@ test "appendEntry on proof_card and diagnostic_box round-trip correctly" {
     defer p2.deinit();
 
     try testing.expectEqualStrings("proof_card", p1.value.object.get("k").?.string);
-    try testing.expectEqualStrings("contract ok", p1.value.object.get("d").?.string);
+    try testing.expectEqualStrings("contract ok", p1.value.object.get("d").?.object.get("llm_text").?.string);
     try testing.expectEqualStrings("diagnostic_box", p2.value.object.get("k").?.string);
-    try testing.expectEqualStrings("ZTS001 veto", p2.value.object.get("d").?.string);
+    try testing.expectEqualStrings("ZTS001 veto", p2.value.object.get("d").?.object.get("llm_text").?.string);
 }

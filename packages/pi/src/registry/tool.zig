@@ -8,68 +8,31 @@
 //! surface is fully structured and schema-driven.
 
 const std = @import("std");
+const ui_payload = @import("../ui_payload.zig");
 
-pub const SessionTreeNode = struct {
-    session_id: []u8,
-    parent_id: ?[]u8,
-    created_at_unix_ms: i64,
-    depth: usize,
-    is_current: bool,
-    is_orphan_root: bool,
+pub const SessionTreeNode = ui_payload.SessionTreeNode;
+pub const SessionTreePayload = ui_payload.SessionTreePayload;
+pub const UiPayload = ui_payload.UiPayload;
 
-    pub fn deinit(self: *SessionTreeNode, allocator: std.mem.Allocator) void {
-        allocator.free(self.session_id);
-        if (self.parent_id) |parent_id| allocator.free(parent_id);
-        self.* = .{
-            .session_id = &.{},
-            .parent_id = null,
-            .created_at_unix_ms = 0,
-            .depth = 0,
-            .is_current = false,
-            .is_orphan_root = false,
-        };
-    }
-};
-
-pub const SessionTreePayload = struct {
-    nodes: []SessionTreeNode,
-
-    pub fn deinit(self: *SessionTreePayload, allocator: std.mem.Allocator) void {
-        for (self.nodes) |*node| node.deinit(allocator);
-        allocator.free(self.nodes);
-        self.* = .{ .nodes = &.{} };
-    }
-};
-
-pub const UiPayload = union(enum) {
-    session_tree: SessionTreePayload,
-
-    pub fn deinit(self: *UiPayload, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .session_tree => |*payload| payload.deinit(allocator),
-        }
-    }
-};
-
-/// Execution outcome. Body is allocated with the same allocator passed to
-/// execute() and is owned by the caller; free it with deinit().
+/// Execution outcome. `llm_text` is the compact provider-facing payload that
+/// stays in the transcript. `ui_payload` is optional structured data for the
+/// TUI, session replay, RPC, and JSON mode.
 pub const ToolResult = struct {
     ok: bool,
-    body: []u8,
+    llm_text: []u8,
     ui_payload: ?UiPayload = null,
 
     pub fn deinit(self: *ToolResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.body);
+        allocator.free(self.llm_text);
         if (self.ui_payload) |*payload| payload.deinit(allocator);
-        self.body = &.{};
-        self.ui_payload = null;
+        self.* = .{ .ok = false, .llm_text = &.{}, .ui_payload = null };
     }
 
-    /// Build a not-ok result whose body is an owned copy of `msg`. Every
-    /// tool's argument-validation branch ends here.
     pub fn err(allocator: std.mem.Allocator, msg: []const u8) !ToolResult {
-        const owned = try allocator.dupe(u8, msg);
-        return .{ .ok = false, .body = owned };
+        return .{
+            .ok = false,
+            .llm_text = try allocator.dupe(u8, msg),
+        };
     }
 
     pub fn errFmt(
@@ -79,62 +42,47 @@ pub const ToolResult = struct {
     ) !ToolResult {
         return .{
             .ok = false,
-            .body = try std.fmt.allocPrint(allocator, fmt, args),
+            .llm_text = try std.fmt.allocPrint(allocator, fmt, args),
         };
+    }
+
+    pub fn withUiPayload(
+        allocator: std.mem.Allocator,
+        ok: bool,
+        llm_text: []const u8,
+        payload: UiPayload,
+    ) !ToolResult {
+        return .{
+            .ok = ok,
+            .llm_text = try allocator.dupe(u8, llm_text),
+            .ui_payload = try payload.clone(allocator),
+        };
+    }
+
+    pub fn withPlainText(
+        allocator: std.mem.Allocator,
+        ok: bool,
+        llm_text: []const u8,
+    ) !ToolResult {
+        return withUiPayload(allocator, ok, llm_text, .{
+            .plain_text = @constCast(llm_text),
+        });
     }
 
     pub fn withSessionTree(
         allocator: std.mem.Allocator,
         ok: bool,
-        body: []const u8,
+        llm_text: []const u8,
         nodes: []const SessionTreeNode,
     ) !ToolResult {
-        const owned_body = try allocator.dupe(u8, body);
-        errdefer allocator.free(owned_body);
-
-        const owned_nodes = try allocator.alloc(SessionTreeNode, nodes.len);
-        errdefer {
-            var i: usize = 0;
-            while (i < nodes.len) : (i += 1) {
-                owned_nodes[i].deinit(allocator);
-            }
-            allocator.free(owned_nodes);
-        }
-        for (owned_nodes) |*node| {
-            node.* = .{
-                .session_id = &.{},
-                .parent_id = null,
-                .created_at_unix_ms = 0,
-                .depth = 0,
-                .is_current = false,
-                .is_orphan_root = false,
-            };
-        }
-
-        for (nodes, 0..) |node, i| {
-            owned_nodes[i] = .{
-                .session_id = try allocator.dupe(u8, node.session_id),
-                .parent_id = if (node.parent_id) |parent_id|
-                    try allocator.dupe(u8, parent_id)
-                else
-                    null,
-                .created_at_unix_ms = node.created_at_unix_ms,
-                .depth = node.depth,
-                .is_current = node.is_current,
-                .is_orphan_root = node.is_orphan_root,
-            };
-        }
-
-        return .{
-            .ok = ok,
-            .body = owned_body,
-            .ui_payload = .{ .session_tree = .{ .nodes = owned_nodes } },
-        };
+        return withUiPayload(allocator, ok, llm_text, .{
+            .session_tree = .{ .nodes = @constCast(nodes) },
+        });
     }
 };
 
-/// Execute signature. Implementations must allocate `ToolResult.body` with the
-/// passed allocator; the caller owns it.
+/// Execute signature. Implementations must allocate `ToolResult.llm_text` with
+/// the passed allocator; the caller owns it.
 const ExecuteFn = *const fn (
     allocator: std.mem.Allocator,
     args: []const []const u8,
@@ -146,15 +94,10 @@ const DecodeJsonFn = *const fn (
 ) anyerror![]const []const u8;
 
 pub const ToolDef = struct {
-    /// Stable snake_case identifier. Matches the eventual LLM tool name.
     name: []const u8,
-    /// Short human label for rendering in a menu.
     label: []const u8,
-    /// One-line description; displayed inline with the label.
     description: []const u8,
-    /// Anthropic Messages API `input_schema` JSON literal.
     input_schema: []const u8,
-    /// Structured JSON decoder used by the model-facing registry surface.
     decode_json: DecodeJsonFn,
     execute: ExecuteFn,
 };
@@ -238,12 +181,10 @@ fn parseObject(
 
 const testing = std.testing;
 
-test "withSessionTree duplicates body and payload nodes" {
-    var root = [_]u8{ 'r', 'o', 'o', 't' };
-    var child = [_]u8{ 'c', 'h', 'i', 'l', 'd' };
+test "withSessionTree duplicates llm_text and payload nodes" {
     const nodes = [_]SessionTreeNode{
         .{
-            .session_id = root[0..],
+            .session_id = @constCast("root"),
             .parent_id = null,
             .created_at_unix_ms = 123,
             .depth = 0,
@@ -251,8 +192,8 @@ test "withSessionTree duplicates body and payload nodes" {
             .is_orphan_root = false,
         },
         .{
-            .session_id = child[0..],
-            .parent_id = root[0..],
+            .session_id = @constCast("child"),
+            .parent_id = @constCast("root"),
             .created_at_unix_ms = 456,
             .depth = 1,
             .is_current = true,
@@ -264,7 +205,7 @@ test "withSessionTree duplicates body and payload nodes" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expectEqualStrings("body\n", result.body);
+    try testing.expectEqualStrings("body\n", result.llm_text);
     try testing.expect(result.ui_payload != null);
     switch (result.ui_payload.?) {
         .session_tree => |payload| {
@@ -273,5 +214,6 @@ test "withSessionTree duplicates body and payload nodes" {
             try testing.expectEqualStrings("child", payload.nodes[1].session_id);
             try testing.expect(payload.nodes[1].is_current);
         },
+        else => return error.TestFailed,
     }
 }

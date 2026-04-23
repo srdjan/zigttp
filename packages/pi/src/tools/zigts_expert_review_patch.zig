@@ -8,6 +8,7 @@
 const std = @import("std");
 const edit_simulate = @import("zigts_cli").edit_simulate;
 const registry_mod = @import("../registry/registry.zig");
+const ui_payload = @import("../ui_payload.zig");
 
 const name = "zigts_expert_review_patch";
 
@@ -87,10 +88,65 @@ fn execute(
     try edit_simulate.writeResultJson(&aw.writer, &result);
 
     buf = aw.toArrayList();
+    const llm_text = try buf.toOwnedSlice(allocator);
+    errdefer allocator.free(llm_text);
     return .{
         .ok = result.new_count == 0,
-        .body = try buf.toOwnedSlice(allocator),
+        .llm_text = llm_text,
+        .ui_payload = try buildPayload(allocator, file_val.string, &result),
     };
+}
+
+fn buildPayload(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    result: *const edit_simulate.SimulateResult,
+) !ui_payload.UiPayload {
+    if (result.new_count == 0) {
+        return .{ .proof_card = .{
+            .title = try allocator.dupe(u8, "Patch review"),
+            .summary = try allocator.dupe(u8, "No new violations introduced."),
+            .stats = .{
+                .total = result.total,
+                .new = result.new_count,
+                .preexisting = result.preexisting_count,
+            },
+            .highlights = &.{},
+        } };
+    }
+
+    const items = try allocator.alloc(ui_payload.DiagnosticItem, result.violations.items.len);
+    errdefer allocator.free(items);
+    for (items) |*item| item.* = undefined;
+    var i: usize = 0;
+    errdefer {
+        while (i > 0) {
+            i -= 1;
+            items[i].deinit(allocator);
+        }
+        allocator.free(items);
+    }
+    while (i < result.violations.items.len) : (i += 1) {
+        const violation = result.violations.items[i];
+        items[i] = try ui_payload.DiagnosticItem.init(
+            allocator,
+            violation.code,
+            violation.severity,
+            path,
+            violation.line,
+            violation.column,
+            violation.message,
+            violation.introduced_by_patch,
+        );
+    }
+    return .{ .diagnostics = .{
+        .summary = try std.fmt.allocPrint(
+            allocator,
+            "{d} violation(s), {d} new, {d} preexisting",
+            .{ result.total, result.new_count, result.preexisting_count },
+        ),
+        .items = items,
+    } };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +160,7 @@ test "missing arg returns not-ok body" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "requires a JSON input") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "requires a JSON input") != null);
 }
 
 test "clean handler passes" {
@@ -115,7 +171,7 @@ test "clean handler passes" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"total\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"total\":0") != null);
 }
 
 test "diff_only filter drops preexisting violations from body and summary" {
@@ -129,8 +185,8 @@ test "diff_only filter drops preexisting violations from body and summary" {
     // strips it. With no new violations, the tool reports ok and an empty
     // violations array.
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"violations\":[]") != null);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"preexisting\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"violations\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"preexisting\":0") != null);
 }
 
 test "diff_only flag off keeps preexisting in body but still passes veto" {
@@ -141,5 +197,5 @@ test "diff_only flag off keeps preexisting in body but still passes veto" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.body, "\"introduced_by_patch\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"introduced_by_patch\":false") != null);
 }

@@ -142,7 +142,7 @@ fn writeBlock(writer: anytype, block: ContentBlock) !void {
             try writer.writeAll("{\"type\":\"tool_result\",\"tool_use_id\":");
             try json_writer.writeString(writer, result.tool_use_id);
             try writer.writeAll(",\"content\":");
-            try json_writer.writeString(writer, result.body);
+            try json_writer.writeString(writer, result.llm_text);
             try writer.writeAll(",\"is_error\":");
             try writer.writeAll(if (result.ok) "false" else "true");
             try writer.writeByte('}');
@@ -202,13 +202,13 @@ test "writeRequestBody: tool-use and tool-result transcript entries serialize st
         .tool_use_id = "toolu_meta",
         .tool_name = "zigts_expert_meta",
         .ok = true,
-        .body = "{\"ok\":true}",
+        .llm_text = "{\"ok\":true}",
     } });
     try transcript.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "toolu_search",
         .tool_name = "workspace_search_text",
         .ok = false,
-        .body = "{\"ok\":false}",
+        .llm_text = "{\"ok\":false}",
     } });
 
     const out = try serialize(testing.allocator, .{
